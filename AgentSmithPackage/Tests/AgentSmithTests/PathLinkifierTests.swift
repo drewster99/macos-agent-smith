@@ -23,59 +23,72 @@ struct PathLinkifierTests {
         try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
-    // MARK: - isStandaloneLinkable
+    // MARK: - standaloneLink(for:)
 
-    @Test("absolute path that exists on disk is linkable")
+    @Test("absolute path that exists on disk produces a file:// link")
     func standaloneAbsolutePathExists() throws {
         let file = try makeTempFile()
         defer { cleanup(file) }
-        #expect(PathLinkifier.isStandaloneLinkable(file.path) == true)
+        let urlString = URL(fileURLWithPath: file.path).absoluteString
+        #expect(PathLinkifier.standaloneLink(for: file.path) == "[\(file.path)](\(urlString))")
     }
 
-    @Test("absolute path that does NOT exist is not linkable")
+    @Test("absolute path that does NOT exist returns nil")
     func standaloneAbsolutePathMissing() {
         let bogus = "/tmp/agent-smith-this-path-does-not-exist-\(UUID().uuidString)/x.md"
-        #expect(PathLinkifier.isStandaloneLinkable(bogus) == false)
+        #expect(PathLinkifier.standaloneLink(for: bogus) == nil)
     }
 
-    @Test("https URL is linkable")
+    @Test("https URL is wrapped in a markdown link")
     func standaloneHttpsURL() {
-        #expect(PathLinkifier.isStandaloneLinkable("https://example.com") == true)
-        #expect(PathLinkifier.isStandaloneLinkable("https://example.com/path?q=1") == true)
+        #expect(PathLinkifier.standaloneLink(for: "https://example.com")
+                == "[https://example.com](https://example.com)")
+        #expect(PathLinkifier.standaloneLink(for: "https://example.com/path?q=1")
+                == "[https://example.com/path?q=1](https://example.com/path?q=1)")
     }
 
-    @Test("mailto URL is linkable")
+    @Test("mailto URL is wrapped as-is")
     func standaloneMailtoURL() {
-        #expect(PathLinkifier.isStandaloneLinkable("mailto:foo@bar.com") == true)
+        #expect(PathLinkifier.standaloneLink(for: "mailto:foo@bar.com")
+                == "[mailto:foo@bar.com](mailto:foo@bar.com)")
     }
 
-    @Test("plain email is linkable")
+    @Test("file URL is wrapped as-is")
+    func standaloneFileURL() {
+        #expect(PathLinkifier.standaloneLink(for: "file:///tmp/example.txt")
+                == "[file:///tmp/example.txt](file:///tmp/example.txt)")
+    }
+
+    @Test("plain email is wrapped with mailto: target")
     func standalonePlainEmail() {
-        #expect(PathLinkifier.isStandaloneLinkable("foo@bar.com") == true)
+        #expect(PathLinkifier.standaloneLink(for: "foo@bar.com")
+                == "[foo@bar.com](mailto:foo@bar.com)")
     }
 
     @Test("content with internal whitespace is rejected")
     func standaloneRejectsInternalWhitespace() {
-        #expect(PathLinkifier.isStandaloneLinkable("path: /tmp/foo") == false)
-        #expect(PathLinkifier.isStandaloneLinkable("see /tmp/foo") == false)
+        #expect(PathLinkifier.standaloneLink(for: "path: /tmp/foo") == nil)
+        #expect(PathLinkifier.standaloneLink(for: "see /tmp/foo") == nil)
     }
 
     @Test("empty / whitespace-only input is rejected")
     func standaloneRejectsEmpty() {
-        #expect(PathLinkifier.isStandaloneLinkable("") == false)
-        #expect(PathLinkifier.isStandaloneLinkable("   ") == false)
+        #expect(PathLinkifier.standaloneLink(for: "") == nil)
+        #expect(PathLinkifier.standaloneLink(for: "   ") == nil)
     }
 
     @Test("leading/trailing whitespace is trimmed before evaluation")
     func standaloneTrimsOuterWhitespace() throws {
         let file = try makeTempFile()
         defer { cleanup(file) }
-        #expect(PathLinkifier.isStandaloneLinkable("  \(file.path)  ") == true)
+        let urlString = URL(fileURLWithPath: file.path).absoluteString
+        #expect(PathLinkifier.standaloneLink(for: "  \(file.path)  ")
+                == "[\(file.path)](\(urlString))")
     }
 
-    @Test("relative path (no leading slash) is not linkable")
+    @Test("relative path (no leading slash) returns nil")
     func standaloneRejectsRelativePath() {
-        #expect(PathLinkifier.isStandaloneLinkable("foo/bar.md") == false)
+        #expect(PathLinkifier.standaloneLink(for: "foo/bar.md") == nil)
     }
 
     // MARK: - linkifyPaths

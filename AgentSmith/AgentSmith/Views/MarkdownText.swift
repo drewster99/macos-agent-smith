@@ -322,31 +322,36 @@ struct MarkdownText: View, Equatable {
 
         for segment in segments {
             // A backtick-wrapped segment whose entire content is a single path or URL
-            // is more useful as a clickable link than as colored inline code. Drop the
-            // code styling and run it through the linkifier instead.
-            let treatAsCode = segment.isCode && !PathLinkifier.isStandaloneLinkable(segment.text)
-            if treatAsCode {
+            // is more useful as a clickable link than as colored inline code. One
+            // `standaloneLink(for:)` call covers both the decision and the wrapping,
+            // so paths get exactly one `FileManager.fileExists` hit per render.
+            if segment.isCode, let linked = PathLinkifier.standaloneLink(for: segment.text) {
+                combined += parseMarkdown(linked, fallback: segment.text)
+            } else if segment.isCode {
                 var part = AttributedString(segment.text)
                 part.foregroundColor = AppColors.inlineCode
                 combined += part
             } else {
-                let linkified = PathLinkifier.linkify(segment.text)
-                // try? — AttributedString(markdown:) returns nil for malformed inline
-                // markdown (unbalanced `*`, stray brackets, etc.). The else branch
-                // falls through to plain text, which is the desired graceful behavior
-                // for user/agent-supplied content.
-                if let parsed = try? AttributedString(
-                    markdown: linkified,
-                    options: AttributedString.MarkdownParsingOptions(
-                        interpretedSyntax: .inlineOnlyPreservingWhitespace
-                    )
-                ) {
-                    combined += parsed
-                } else {
-                    combined += AttributedString(segment.text)
-                }
+                combined += parseMarkdown(PathLinkifier.linkify(segment.text), fallback: segment.text)
             }
         }
         return Text(combined).font(font)
+    }
+
+    /// Parses inline-only markdown into an `AttributedString`, falling back to plain text
+    /// when the parse fails. `try?` — `AttributedString(markdown:)` returns nil for
+    /// malformed inline markdown (unbalanced `*`, stray brackets, etc.); user/agent-supplied
+    /// content can hit that path, and silently degrading to plain text is the desired
+    /// behavior.
+    private func parseMarkdown(_ markdown: String, fallback: String) -> AttributedString {
+        if let parsed = try? AttributedString(
+            markdown: markdown,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace
+            )
+        ) {
+            return parsed
+        }
+        return AttributedString(fallback)
     }
 }

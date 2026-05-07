@@ -34,34 +34,39 @@ public enum PathLinkifier {
         pattern: #"(?<![\w/:\[(])(?:~/|/)[A-Za-z0-9._/~\-]+"#
     )
 
-    /// True when `text` (after trimming whitespace) is a single token that the
-    /// linkifier would turn into a real link: an existing absolute path, an
-    /// http(s)/file/mailto URL, or a bare email. Used by callers that need to decide
-    /// up front whether a backtick-wrapped span should be styled as inline code or
-    /// instead routed through `linkify` to become a clickable link.
-    public static func isStandaloneLinkable(_ text: String) -> Bool {
+    /// Returns the markdown-link-wrapped form of `text` if (after trimming) the entire
+    /// content is a single linkable token: an existing absolute path, an http(s)/file/
+    /// mailto URL, or a bare email. Returns nil otherwise. Performs at most one
+    /// `FileManager.fileExists` call (path branch only), so callers don't need to
+    /// re-check existence by also routing through `linkify`.
+    public static func standaloneLink(for text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              !trimmed.contains(where: { $0.isWhitespace }) else { return false }
+              !trimmed.contains(where: { $0.isWhitespace }) else { return nil }
 
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
             || trimmed.hasPrefix("file://") || trimmed.hasPrefix("mailto:") {
-            return URL(string: trimmed) != nil
+            guard URL(string: trimmed) != nil else { return nil }
+            return "[\(trimmed)](\(trimmed))"
         }
 
         if trimmed.hasPrefix("/") || trimmed.hasPrefix("~/") {
             let expanded = (trimmed as NSString).expandingTildeInPath
-            return FileManager.default.fileExists(atPath: expanded)
+            guard FileManager.default.fileExists(atPath: expanded) else { return nil }
+            // `URL(fileURLWithPath:)` handles percent-encoding; the link **text** keeps
+            // the original `~/...` form so users see what they typed.
+            let urlString = URL(fileURLWithPath: expanded).absoluteString
+            return "[\(trimmed)](\(urlString))"
         }
 
         if let regex = emailRegex {
             let nsRange = NSRange(location: 0, length: (trimmed as NSString).length)
             if let match = regex.firstMatch(in: trimmed, range: nsRange),
                match.range == nsRange {
-                return true
+                return "[\(trimmed)](mailto:\(trimmed))"
             }
         }
-        return false
+        return nil
     }
 
     /// Runs all inline linkification passes in the order that avoids collisions:
@@ -77,7 +82,7 @@ public enum PathLinkifier {
     /// `~/`-prefixed paths are expanded against the user's home directory for the existence
     /// check and the link URL, but the link **text** keeps the original `~/...` form so
     /// users see what they typed.
-    public static func linkifyPaths(_ text: String) -> String {
+    static func linkifyPaths(_ text: String) -> String {
         guard let regex = pathRegex else { return text }
 
         let fullRange = NSRange(location: 0, length: (text as NSString).length)
@@ -121,7 +126,7 @@ public enum PathLinkifier {
 
     /// Wraps bare `https?://` URLs (not already in markdown link syntax) with `[url](url)`
     /// so they parse as real markdown links via `AttributedString(markdown:)`.
-    public static func linkifyBareURLs(_ text: String) -> String {
+    static func linkifyBareURLs(_ text: String) -> String {
         guard let regex = bareURLRegex else { return text }
 
         let fullRange = NSRange(location: 0, length: (text as NSString).length)
@@ -144,7 +149,7 @@ public enum PathLinkifier {
     /// `mailto:` links via the AttributedString markdown parser. Unlike `LocalizedStringKey`,
     /// the AttributedString markdown parser does NOT auto-detect emails — explicit wrapping
     /// is required to make them clickable.
-    public static func linkifyEmails(_ text: String) -> String {
+    static func linkifyEmails(_ text: String) -> String {
         guard let regex = emailRegex else { return text }
 
         let fullRange = NSRange(location: 0, length: (text as NSString).length)
