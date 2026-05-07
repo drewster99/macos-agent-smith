@@ -31,17 +31,8 @@ struct TaskRelevantPriorTaskRow: View {
                     .textSelection(.enabled)
                     .lineLimit(isExpanded ? nil : 2)
                 if hasMoreContent {
-                    HStack {
-                        Spacer()
-                        Button {
-                            isExpanded.toggle()
-                        } label: {
-                            Text(isExpanded ? "(less)" : "(more)")
-                                .font(.caption)
-                                .foregroundStyle(AppColors.disclosureToggle)
-                        }
-                        .buttonStyle(.plain)
-                        .pointerStyle(.link)
+                    DisclosureMoreLessLink(isExpanded: isExpanded, font: .caption) {
+                        isExpanded.toggle()
                     }
                 }
             }
@@ -72,9 +63,11 @@ struct TaskRelevantPriorTaskRow: View {
     }
 
     /// True when the short-mode preview hides content the user could expand to see —
-    /// the summary either has multiple lines or runs longer than fits in 2 lines.
+    /// the summary either has multiple lines or runs longer than fits in 2 lines. The
+    /// 100-char threshold is the widest single-line wrap budget at `.callout` size on
+    /// this row's layout.
     private var hasMoreContent: Bool {
-        priorTask.summary.contains("\n") || priorTask.summary.count > 80
+        priorTask.summary.contains("\n") || priorTask.summary.count > 100
     }
 
     private static func format(_ date: Date) -> String {

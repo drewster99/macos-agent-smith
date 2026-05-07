@@ -24,19 +24,16 @@ struct TaskDetailWindow: View {
     /// because @State is reinitialized when SwiftUI recreates this view per `WindowGroup`
     /// instance.
     @State private var modeOverrides: [SectionKind: SectionMode] = [:]
-    /// Per-row expansion state for the Related Context memories list. Sized to match
-    /// the live memory count on first appear; the Related Context header chevron
-    /// mass-sets every entry in lockstep.
-    @State private var memoryExpansions: [Bool] = []
-    /// Per-row expansion state for the Related Context prior-tasks list — same shape
-    /// and same mass-toggle behavior as `memoryExpansions`.
-    @State private var priorTaskExpansions: [Bool] = []
-    @State private var didSizeRowExpansions = false
+    /// Identity-keyed expansion state for related-context rows. Survives memory-array
+    /// re-orderings and avoids the `id: \.offset` aliasing bug where per-index state
+    /// would silently bind to a different memory if the array ever changed shape.
+    @State private var expandedMemoryContents: Set<String> = []
+    @State private var expandedPriorTaskIDs: Set<UUID> = []
 
-    /// Live task looked up from the view model on each render, so updates are reflected.
-    private var task: AgentTask? {
-        viewModel.tasks.first { $0.id == taskID }
-    }
+    /// Local copy of the current task. Sync'd from `viewModel.tasks` via `.onChange` so
+    /// the body reads only @State and SwiftUI can short-circuit re-renders when this
+    /// specific task didn't change. `AgentTask` is `Equatable`, so the diff is cheap.
+    @State private var task: AgentTask?
 
     /// Whether the current task's description can be edited. Mirrors
     /// `AgentTask.Status.isDescriptionEditable` so completed/failed/scheduled tasks accept
@@ -44,6 +41,17 @@ struct TaskDetailWindow: View {
     private var isDescriptionEditable: Bool {
         guard let task else { return false }
         return task.status.isDescriptionEditable
+    }
+
+    /// Pulls the matching task out of `viewModel.tasks` and writes it to local @State.
+    /// Called from `.onAppear` and from `.onChange(of: viewModel.tasks)` — body reads
+    /// only the @State copy, so unrelated task mutations don't force this window to
+    /// re-render.
+    private func syncTask() {
+        let next = viewModel.tasks.first { $0.id == taskID }
+        if next != task {
+            task = next
+        }
     }
 
     /// Resolves an attachment's on-disk URL through this window's session-scoped
@@ -54,36 +62,24 @@ struct TaskDetailWindow: View {
     }
 
     var body: some View {
-        if let task {
-            taskContent(task)
-                .onAppear {
-                    sizeRowExpansionsIfNeeded(for: task)
-                }
-                .onChange(of: task.relevantMemories?.count ?? 0) { _, newCount in
-                    if memoryExpansions.count != newCount {
-                        memoryExpansions = Array(repeating: false, count: newCount)
-                    }
-                }
-                .onChange(of: task.relevantPriorTasks?.count ?? 0) { _, newCount in
-                    if priorTaskExpansions.count != newCount {
-                        priorTaskExpansions = Array(repeating: false, count: newCount)
-                    }
-                }
-        } else {
-            ContentUnavailableView(
-                "Task Not Found",
-                systemImage: "questionmark.circle",
-                description: Text("This task may have been deleted.")
-            )
-            .frame(minWidth: 600, minHeight: 400)
+        Group {
+            if let task {
+                taskContent(task)
+            } else {
+                ContentUnavailableView(
+                    "Task Not Found",
+                    systemImage: "questionmark.circle",
+                    description: Text("This task may have been deleted.")
+                )
+                .frame(minWidth: 600, minHeight: 400)
+            }
         }
-    }
-
-    private func sizeRowExpansionsIfNeeded(for task: AgentTask) {
-        guard !didSizeRowExpansions else { return }
-        memoryExpansions = Array(repeating: false, count: task.relevantMemories?.count ?? 0)
-        priorTaskExpansions = Array(repeating: false, count: task.relevantPriorTasks?.count ?? 0)
-        didSizeRowExpansions = true
+        .onAppear { syncTask() }
+        .onChange(of: viewModel.tasks) { _, _ in
+            // Per project rule: @State writes inside `.onChange` must be deferred to the
+            // next runloop tick to avoid "Modifying state during view update" warnings.
+            DispatchQueue.main.async { syncTask() }
+        }
     }
 
     // MARK: - Body
@@ -248,7 +244,7 @@ struct TaskDetailWindow: View {
                     .background(AppColors.summarySectionBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 if isExpandable {
-                    disclosureLink(isExpanded: mode == .expanded) {
+                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
                         toggleSection(.summary, for: task.status)
                     }
                 }
@@ -348,7 +344,7 @@ struct TaskDetailWindow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if isExpandable {
-                    disclosureLink(isExpanded: mode == .expanded) {
+                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
                         toggleSection(.updates, for: task.status)
                     }
                 }
@@ -426,7 +422,7 @@ struct TaskDetailWindow: View {
             }
 
             if isExpandable && !isEditingDescription {
-                disclosureLink(isExpanded: mode == .expanded) {
+                DisclosureMoreLessLink(isExpanded: mode == .expanded) {
                     toggleSection(.description, for: task.status)
                 }
             }
@@ -448,10 +444,13 @@ struct TaskDetailWindow: View {
                         .font(.headline)
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(memories.enumerated()), id: \.offset) { idx, memory in
+                        // `id: \.content` keeps expansion state pinned to the memory itself
+                        // even if the array is re-ordered. Two memories with identical content
+                        // would tie arbitrarily; in practice memories are unique by content.
+                        ForEach(memories, id: \.content) { memory in
                             TaskRelevantMemoryRow(
                                 memory: memory,
-                                isExpanded: memoryExpansionBinding(at: idx)
+                                isExpanded: memoryExpansionBinding(content: memory.content)
                             )
                         }
                     }
@@ -463,10 +462,10 @@ struct TaskDetailWindow: View {
                         .font(.headline)
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(priorTasks.enumerated()), id: \.offset) { idx, prior in
+                        ForEach(priorTasks, id: \.taskID) { prior in
                             TaskRelevantPriorTaskRow(
                                 priorTask: prior,
-                                isExpanded: priorTaskExpansionBinding(at: idx),
+                                isExpanded: priorTaskExpansionBinding(taskID: prior.taskID),
                                 onOpenTask: openPriorTask
                             )
                         }
@@ -490,28 +489,22 @@ struct TaskDetailWindow: View {
         )
     }
 
-    private func memoryExpansionBinding(at index: Int) -> Binding<Bool> {
+    private func memoryExpansionBinding(content: String) -> Binding<Bool> {
         Binding(
-            get: {
-                guard index < memoryExpansions.count else { return false }
-                return memoryExpansions[index]
-            },
+            get: { expandedMemoryContents.contains(content) },
             set: { newValue in
-                guard index < memoryExpansions.count else { return }
-                memoryExpansions[index] = newValue
+                if newValue { expandedMemoryContents.insert(content) }
+                else { expandedMemoryContents.remove(content) }
             }
         )
     }
 
-    private func priorTaskExpansionBinding(at index: Int) -> Binding<Bool> {
+    private func priorTaskExpansionBinding(taskID: UUID) -> Binding<Bool> {
         Binding(
-            get: {
-                guard index < priorTaskExpansions.count else { return false }
-                return priorTaskExpansions[index]
-            },
+            get: { expandedPriorTaskIDs.contains(taskID) },
             set: { newValue in
-                guard index < priorTaskExpansions.count else { return }
-                priorTaskExpansions[index] = newValue
+                if newValue { expandedPriorTaskIDs.insert(taskID) }
+                else { expandedPriorTaskIDs.remove(taskID) }
             }
         )
     }
@@ -540,26 +533,6 @@ struct TaskDetailWindow: View {
             if let copyText, !copyText.isEmpty {
                 copyButton(text: copyText, id: title)
             }
-        }
-    }
-
-    /// `(more)` / `(less)` link used in the lower-right of any expandable section or
-    /// row. Hidden when the section can't actually toggle (e.g. updates ≤ 5, text
-    /// already fits in its preview line cap), so the user is never offered a
-    /// no-op toggle.
-    private func disclosureLink(
-        isExpanded: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        HStack {
-            Spacer()
-            Button(action: action) {
-                Text(isExpanded ? "(less)" : "(more)")
-                    .font(.callout)
-                    .foregroundStyle(AppColors.disclosureToggle)
-            }
-            .buttonStyle(.plain)
-            .pointerStyle(.link)
         }
     }
 
@@ -754,8 +727,23 @@ struct TaskDetailWindow: View {
     /// Returns the first `lines` newline-separated lines of `text`, joined back. Used to
     /// build a preview for sections that wrap MarkdownText — `.lineLimit(N)` does not
     /// clip cleanly across MarkdownText's multi-block VStack, so we trim the source instead.
+    /// If the trimmed prefix opens a fenced code block but doesn't close it, a closing
+    /// fence is appended so the renderer doesn't bleed code styling into the rest of the
+    /// section.
     private func linePrefix(_ text: String, lines: Int) -> String {
-        text.components(separatedBy: "\n").prefix(lines).joined(separator: "\n")
+        let prefix = text.components(separatedBy: "\n").prefix(lines).joined(separator: "\n")
+        return Self.balancingCodeFences(prefix)
+    }
+
+    /// Appends a closing ``` ``` ``` or `~~~` fence when `text` contains an odd number
+    /// of fence markers, so a preview cut mid-code-block doesn't leave the markdown
+    /// renderer in code mode.
+    private static func balancingCodeFences(_ text: String) -> String {
+        let backticks = text.components(separatedBy: "```").count - 1
+        if backticks % 2 == 1 { return text + "\n```" }
+        let tildes = text.components(separatedBy: "~~~").count - 1
+        if tildes % 2 == 1 { return text + "\n~~~" }
+        return text
     }
 }
 

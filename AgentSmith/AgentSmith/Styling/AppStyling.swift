@@ -122,6 +122,10 @@ enum AppColors {
     static let scheduledPastDueAccent = Color.orange
     /// Header tint for the Error section on a failed task.
     static let errorSectionAccent = Color.red
+    /// Tint for the spelled-out `(more)` / `(less)` disclosure links used in
+    /// `TaskDetailWindow` sections and rows. Distinct from `disclosureToggle` so the
+    /// link reads as interactive without colliding with chevron-style toggles.
+    static let moreLessLink = Color.accentColor
     static let cyanBadgeForeground = Color.cyan
     static let cyanBadgeBackground = Color.cyan.opacity(0.15)
     static let toolChipForeground = Color.blue

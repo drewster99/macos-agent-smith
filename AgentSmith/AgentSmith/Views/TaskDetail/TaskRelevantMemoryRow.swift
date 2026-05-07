@@ -27,17 +27,8 @@ struct TaskRelevantMemoryRow: View {
                     .lineLimit(isExpanded ? nil : 2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if hasMoreContent {
-                    HStack {
-                        Spacer()
-                        Button {
-                            isExpanded.toggle()
-                        } label: {
-                            Text(isExpanded ? "(less)" : "(more)")
-                                .font(.caption)
-                                .foregroundStyle(AppColors.disclosureToggle)
-                        }
-                        .buttonStyle(.plain)
-                        .pointerStyle(.link)
+                    DisclosureMoreLessLink(isExpanded: isExpanded, font: .caption) {
+                        isExpanded.toggle()
                     }
                 }
             }
@@ -58,11 +49,15 @@ struct TaskRelevantMemoryRow: View {
     }
 
     /// True when the short-mode preview hides content the user could expand to see —
-    /// either the full memory has more paragraphs than the first or the first paragraph
-    /// runs longer than the 2-line clamp can show.
+    /// either there are paragraphs after the first `\n\n`, the first paragraph itself
+    /// is multi-line, or it's long enough to wrap past the 2-line clamp. The 100-char
+    /// threshold is the widest single-line wrap budget at `.callout` size on this row's
+    /// layout — anything longer almost always wraps past 2 lines.
     private var hasMoreContent: Bool {
         let first = Self.firstParagraph(of: memory.content)
-        return first != memory.content || first.count > 80
+        return first != memory.content
+            || first.contains("\n")
+            || first.count > 100
     }
 
     /// Returns text up to the first blank-line separator, or the full text if there
