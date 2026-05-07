@@ -78,6 +78,20 @@ final class AgentInspectorStore {
         evaluationRecords.append(record)
     }
 
+    /// Number of evaluations that ended in a non-cancelled denial — UNSAFE/ABORT
+    /// outright, plus WARN denials that were not subsequently auto-approved on
+    /// retry. These are the rows a user would care to look at; auto-approvals
+    /// after a WARN retry collapse to a single non-flagged record so the chip
+    /// doesn't misleadingly inflate.
+    var flaggedEvaluationCount: Int {
+        evaluationRecords.reduce(0) { count, record in
+            let d = record.disposition
+            if d.isCancelled { return count }
+            if d.isAutoApproval { return count }
+            return d.approved ? count : count + 1
+        }
+    }
+
     /// Clears all data for a specific agent role (e.g. when agent is replaced).
     func clear(for role: AgentRole) {
         turnsByRole[role] = nil
