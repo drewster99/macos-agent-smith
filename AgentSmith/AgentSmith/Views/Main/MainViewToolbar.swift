@@ -67,7 +67,7 @@ struct MainViewToolbar: ToolbarContent {
                 Button(action: { viewModel.showInspector = true }, label: {
                     Label(
                         safetyFlagged > 0 ? "\(safetyTotal) · \(safetyFlagged) flagged" : "\(safetyTotal)",
-                        systemImage: safetyFlagged > 0 ? "shield.lefthalf.filled.trianglebadge.exclamationmark" : "shield.lefthalf.filled"
+                        systemImage: safetyFlagged > 0 ? "exclamationmark.shield.fill" : "shield.lefthalf.filled"
                     )
                 })
                 .foregroundStyle(safetyFlagged > 0 ? .orange : .secondary)
