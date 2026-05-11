@@ -91,6 +91,15 @@ public actor AgentActor {
     private static let maxConsecutiveErrors = 50
     private static let maxBackoffSeconds: Double = 180
 
+    /// Wall-clock seconds before the per-turn stall watchdog logs a warning and posts
+    /// a system message. The watchdog itself doesn't unstick anything (per-tool timeouts
+    /// in `runToolWithTimeout` and URLSession's resource timeout do that) — it just makes
+    /// a stuck "Thinking" indicator observable from `log stream` and the channel.
+    /// Set well above any single legitimate LLM call + tool batch (gpt-5.5 with reasoning
+    /// can run a minute, large file_read fan-outs add a few more) but well below the point
+    /// at which a user would assume the agent is dead.
+    private static let stallWatchdogSeconds: Int = 600
+
     /// Tracks consecutive context overflow errors (separate from general errors).
     /// Context overflows trigger aggressive pruning instead of backoff.
     private var consecutiveContextOverflows = 0
@@ -747,7 +756,33 @@ public actor AgentActor {
                     .filter { $0.isAvailable(in: availabilityContext) }
                     .map { $0.definition(for: configuration.role) }
                 toolContext.onProcessingStateChange(true)
-                defer { toolContext.onProcessingStateChange(false) }
+                // Stall watchdog: if this turn (LLM call + tool execution) is still
+                // active after `Self.stallWatchdogSeconds`, log a warning and post a
+                // single system message. Doesn't unstick anything by itself — the
+                // per-tool timeout in `runToolWithTimeout` and URLSession's resource
+                // timeout handle that — but it makes the next stuck-Thinking incident
+                // observable from `log stream` and the channel without `sample`.
+                let watchdogContext = toolContext
+                let watchdogRoleRaw = configuration.role.rawValue
+                let watchdogRoleName = configuration.role.displayName
+                let watchdogAgentIDPrefix = String(id.uuidString.prefix(8))
+                let watchdogTask = Task.detached { [stallSeconds = Self.stallWatchdogSeconds] in
+                    do {
+                        try await Task.sleep(for: .seconds(stallSeconds))
+                    } catch {
+                        return  // cancelled by the defer below — normal completion path
+                    }
+                    AgentActor.stopLogger.error("AgentActor stall role=\(watchdogRoleRaw, privacy: .public) agent=\(watchdogAgentIDPrefix, privacy: .public) elapsed>=\(stallSeconds, privacy: .public)s — turn still in flight (LLM call or tool execution)")
+                    await watchdogContext.post(ChannelMessage(
+                        sender: .system,
+                        content: "Agent \(watchdogRoleName) has been in the current turn for \(stallSeconds / 60) minutes — unusually long. A legitimate long subprocess (large bash/gh) explains this; an agent stuck on a tool that doesn't honor cancellation does not. Check the agent inspector for the in-flight tool.",
+                        metadata: ["isWarning": .bool(true), "agentRole": .string(watchdogRoleRaw)]
+                    ))
+                }
+                defer {
+                    watchdogTask.cancel()
+                    toolContext.onProcessingStateChange(false)
+                }
 
                 let messagesForLLM = conversationHistory
 
@@ -1198,6 +1233,7 @@ public actor AgentActor {
                 let role = configuration.role
                 let roleName = configuration.role.displayName
                 let ctx = toolContext
+                let agentIDPrefix = String(id.uuidString.prefix(8))
 
                 let jonesActiveCount = OSAllocatedUnfairLock(initialState: 0)
                 let jonesCallback = ctx.onJonesProcessingStateChange
@@ -1240,28 +1276,19 @@ public actor AgentActor {
                     let result: String
                     var executionMs = 0
                     if disposition.approved {
-                        let executionStart = Date()
-                        let succeeded: Bool
-                        let toolName = entry.tool.name
-                        ctx.onToolExecutionStateChange(toolName, true)
-                        do {
-                            let args = try entry.call.parsedArguments()
-                            let outcome = try await entry.tool.execute(arguments: args, context: ctx)
-                            result = outcome.output
-                            succeeded = outcome.succeeded
-                        } catch {
-                            result = "Tool error: \(error.localizedDescription)"
-                            succeeded = false
+                        let outcome = await AgentActor.runToolWithTimeout(entry.call, tool: entry.tool, context: ctx) { name, seconds in
+                            AgentActor.stopLogger.warning("Tool '\(name, privacy: .public)' execution exceeded \(seconds, privacy: .public)s — cancelled (agent=\(agentIDPrefix, privacy: .public))")
                         }
-                        ctx.onToolExecutionStateChange(toolName, false)
-                        executionMs = Int(Date().timeIntervalSince(executionStart) * 1000)
+                        result = outcome.result
+                        executionMs = outcome.executionMs
                         // Mirror the sequential `directExecute` path: record the outcome on the
                         // shared tracker so Jones's recent-tool-calls context shows whether this
                         // approved call actually succeeded or failed. Without this, parallel
                         // batches of approval-needing calls (e.g., file_read fan-out) leave
                         // every entry tagged "[executed: not yet recorded]" and a legitimate
-                        // retry-after-failure looks like a duplicate operation.
-                        await ctx.setToolExecutionStatus(entry.call.id, succeeded)
+                        // retry-after-failure looks like a duplicate operation. A timeout-induced
+                        // cancellation is also recorded as a failure.
+                        await ctx.setToolExecutionStatus(entry.call.id, outcome.succeeded)
                         await AgentActor.postToolOutputToChannel(
                             result: result, call: entry.call, role: role, context: ctx
                         )
@@ -1496,28 +1523,77 @@ public actor AgentActor {
     }
 
     private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> String {
-        let start = Date()
-        let result: String
-        let executionSucceeded: Bool
-        let toolName = tool.name
-        toolContext.onToolExecutionStateChange(toolName, true)
-        do {
-            let args = try call.parsedArguments()
-            let outcome = try await tool.execute(arguments: args, context: toolContext)
-            result = outcome.output
-            executionSucceeded = outcome.succeeded
-        } catch {
-            result = "Tool error: \(error.localizedDescription)"
-            executionSucceeded = false
+        let agentIDPrefix = String(id.uuidString.prefix(8))
+        let outcome = await Self.runToolWithTimeout(call, tool: tool, context: toolContext) { name, seconds in
+            Self.stopLogger.warning("Tool '\(name, privacy: .public)' execution exceeded \(seconds, privacy: .public)s — cancelled (agent=\(agentIDPrefix, privacy: .public))")
         }
-        toolContext.onToolExecutionStateChange(toolName, false)
-        let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-        turnToolExecutionMs += elapsedMs
-        turnToolResultChars += result.count
+        turnToolExecutionMs += outcome.executionMs
+        turnToolResultChars += outcome.result.count
+        await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
+        return outcome.result
+    }
 
-        await toolContext.setToolExecutionStatus(call.id, executionSucceeded)
+    /// Wraps `tool.execute(...)` in a wall-clock timeout sourced from `tool.executionTimeout`.
+    /// Returns the produced output text, the domain success flag, and the elapsed milliseconds.
+    /// On timeout, the inner task is cancelled and a synthesized "Tool execution exceeded N s
+    /// — cancelled" message is returned with `succeeded == false`. Cancellation is cooperative —
+    /// tools that block in synchronous loops without `Task.checkCancellation()` keep running
+    /// in the background after the timeout fires; the agent loop continues regardless, which
+    /// is the property this helper exists to provide.
+    ///
+    /// `setToolExecutionStatus` is intentionally NOT called here — the parallel batch and
+    /// directExecute paths each handle the tracker update at their own seam.
+    /// `onToolExecutionStateChange(toolName, true/false)` IS handled here.
+    ///
+    /// `static` + parameterized so tests can exercise the timeout behavior without spinning
+    /// up a full `AgentActor`.
+    static func runToolWithTimeout(
+        _ call: LLMToolCall,
+        tool: any AgentTool,
+        context: ToolContext,
+        onTimeout: @Sendable (_ toolName: String, _ timeoutSeconds: Int) -> Void = { _, _ in }
+    ) async -> (result: String, succeeded: Bool, executionMs: Int) {
+        let timeout = tool.executionTimeout
+        let timeoutSeconds = Int(timeout.components.seconds)
+        let toolName = tool.name
+        let start = Date()
 
-        return result
+        context.onToolExecutionStateChange(toolName, true)
+        defer { context.onToolExecutionStateChange(toolName, false) }
+
+        let outcome: ToolExecutionResult?
+        do {
+            outcome = try await withThrowingTaskGroup(of: ToolExecutionResult?.self) { group in
+                group.addTask {
+                    let args = try call.parsedArguments()
+                    return try await tool.execute(arguments: args, context: context)
+                }
+                group.addTask {
+                    // `try?` swallows the CancellationError thrown when the racing tool
+                    // task wins; we never want the sleep itself to surface as a tool
+                    // error. Returning `nil` is the timeout sentinel.
+                    try? await Task.sleep(for: timeout)
+                    return nil
+                }
+                let first = (try await group.next()) ?? nil
+                group.cancelAll()
+                return first
+            }
+        } catch {
+            let executionMs = Int(Date().timeIntervalSince(start) * 1000)
+            return ("Tool error: \(error.localizedDescription)", false, executionMs)
+        }
+
+        let executionMs = Int(Date().timeIntervalSince(start) * 1000)
+        if let outcome {
+            return (outcome.output, outcome.succeeded, executionMs)
+        }
+        onTimeout(toolName, timeoutSeconds)
+        return (
+            "Tool execution exceeded \(timeoutSeconds)s — cancelled. The tool ran past its wall-clock budget; nothing was returned. Adjust arguments to bound the work (e.g. narrower scope) and retry, or skip and proceed.",
+            false,
+            executionMs
+        )
     }
 
     // MARK: - Channel posting helpers

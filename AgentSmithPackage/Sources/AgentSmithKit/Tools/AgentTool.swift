@@ -44,6 +44,15 @@ public protocol AgentTool: Sendable {
     /// Whether this tool should be included in the LLM's tool definitions for this turn.
     /// Default is `true`. Override to conditionally hide tools based on context.
     func isAvailable(in context: ToolAvailabilityContext) -> Bool
+
+    /// Maximum wall-clock time a single invocation of this tool may take. After this
+    /// the call is cancelled by `AgentActor`, a "Tool execution exceeded N s — cancelled"
+    /// result is synthesized for the LLM, and the agent loop continues. Default is 120 s.
+    /// Tools that legitimately need longer (e.g. a future `download_file`) should override.
+    /// Note: cancellation is cooperative — tools that block in synchronous loops without
+    /// `Task.checkCancellation()` will keep running in the background after the timeout
+    /// fires (the agent loop continues regardless).
+    var executionTimeout: Duration { get }
 }
 
 /// Contextual information for determining tool availability before an LLM call.
@@ -68,6 +77,11 @@ public struct ToolAvailabilityContext: Sendable {
 extension AgentTool {
     /// Default: tool is always available.
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool { true }
+
+    /// Default per-tool wall-clock cap. Picked so that the slowest legitimate in-process
+    /// tools (large `glob`, deep `grep`, schema introspection of a heavy app) finish
+    /// comfortably while a hung tool can no longer pin the agent loop indefinitely.
+    public var executionTimeout: Duration { .seconds(120) }
 
     /// One-line summary of what the tool does, suitable for inclusion in *another* agent's
     /// system prompt (notably Smith's "Brown's tools" manifest). Returns the first sentence

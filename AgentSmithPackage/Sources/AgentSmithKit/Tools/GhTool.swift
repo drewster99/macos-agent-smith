@@ -71,6 +71,12 @@ struct GhTool: AgentTool {
         self.authStatusSnapshot = authStatusSnapshot
     }
 
+    /// Same rationale as `BashTool.executionTimeout`: subprocess timeout is enforced inside
+    /// `ProcessRunner` from the user-supplied `timeout` arg (default 300 s, no upper cap).
+    /// This agent-level cap exists as a safety net for `gh` commands that legitimately run
+    /// long (large `gh repo clone`, `gh pr list --limit 1000`); 1 hour + slack covers them.
+    var executionTimeout: Duration { .seconds(3700) }
+
     var toolDescription: String {
         """
         Run a GitHub CLI command. THIS is the tool to use for `gh` — do NOT shell out to `gh` \

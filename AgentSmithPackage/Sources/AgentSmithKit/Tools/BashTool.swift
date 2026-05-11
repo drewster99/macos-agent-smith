@@ -41,6 +41,14 @@ struct BashTool: AgentTool {
         context.agentRole == .brown
     }
 
+    /// Subprocess timeout is enforced inside `ProcessRunner` based on the user-supplied
+    /// `timeout` argument (default 300 s, no upper cap in the tool schema). The agent-level
+    /// `executionTimeout` here is a safety net for the case where `ProcessRunner` itself
+    /// somehow fails to honor its own deadline; it must therefore comfortably exceed any
+    /// realistic user-supplied `timeout`. 1 hour + slack covers full builds and long
+    /// integration runs without cutting them off prematurely.
+    var executionTimeout: Duration { .seconds(3700) }
+
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         guard case .string(let command) = arguments["command"] else {
             throw ToolCallError.missingRequiredArgument("command")
