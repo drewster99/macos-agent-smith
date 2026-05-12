@@ -489,14 +489,16 @@ Two follow-on mechanisms worth implementing if soft-mode proves insufficient:
 
 **Synthetic update — runtime-generated task_update on the agent's behalf.** Instead of (or alongside) hard mode, the runtime could generate its own factual digest of Brown's recent activity and write it as a `task_update` directly to the TaskStore (skipping the channel) so Smith's `get_task_details` sees something fresh without a Brown round-trip. The body would be derived from Brown's recent tool calls + channel messages — same data source as Smith's 10-minute digest. Pros: zero extra latency, zero token cost, always up-to-date. Cons: can hallucinate intent ("Brown is investigating X" when Brown was actually about to abandon X), so the framing must be strictly factual ("Brown made N tool calls including file_read of /foo/bar.swift") rather than narrative. Probably safer to default to nudging Brown to speak for himself, with synthetic updates as a fallback when even hard mode fails.
 
-### Replace NLEmbedding with MLX Qwen3-Embedding-0.6B-4bit-DWQ
+### Replace NLEmbedding with MLX Qwen3-Embedding-0.6B-4bit-DWQ ✅
+**Shipped.** Embedding now runs through `SemanticSearch` (sibling package): `SemanticSearchEngine` + `MLXEmbedderBackend` load `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` via `MLXEmbedders`. `NLEmbedding`/NaturalLanguage is no longer used (survives only as a historical comment in `MemoryStore.swift`). Follow-ups in this entry are also done: the RRF blend in `MemoryStore` is now an equal-weight semantic+lexical fusion (the old 25%-weighted lexical channel is gone), and the noise floor was recalibrated for Qwen3's cosine distribution (`MemoryStore.defaultSearchThreshold = 0.10`). `MemoryStoreIntegrationTests` runs end-to-end against the real engine, gated behind `AGENT_SMITH_RUN_MLX_TESTS=1` + `xcodebuild` (plain `swift test` can't compile MLX's Metal shaders). Original design notes retained below for context.
+
 The current `EmbeddingService` uses Apple's `NLEmbedding.sentenceEmbedding(for: .english)` from the NaturalLanguage framework — a 512-dim sentence embedding model that runs locally with no API cost. It works, but it's an older model and we've observed weak retrieval on rare technical terms, code, identifiers, and topical paraphrasing. The 25% lexical overlap component in our RRF blend (`MemoryStore.searchAll`) was added partly to compensate for this.
 
 **Target model:** [`mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ`](https://huggingface.co/mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ) — a 4-bit DWQ-quantized variant of Alibaba's Qwen3 Embedding 0.6B, runnable on Apple Silicon via the MLX framework. Demonstrated in the [`mlx-swift-examples`](https://github.com/ml-explore/mlx-swift-examples) repo's `embedder-tool` example.
 
 **Why:** We compared this model against the current Apple NLEmbedding pipeline using a real corpus of our own task data (see methodology below) and got noticeably better results — top-K matches were more topically relevant and the model handled queries the Apple model would miss entirely (paraphrases, conceptual lookups, and queries about specific entities mentioned only briefly in long documents).
 
-**Open question:** speed and memory footprint on real workloads. The MLX inference path is fast on M-series Macs but it's a much larger model than `NLEmbedding`, so per-call latency, peak memory during embedding, and re-embed time on app start need to be measured before committing. The current corpus reembed pass on startup is essentially free (NLEmbedding is microseconds per sentence). Need to benchmark Qwen3 on a realistic corpus (hundreds to low thousands of memories + task summaries) before deciding whether to move to it directly, keep both and pick at runtime, or only use it for the search side and keep NLEmbedding for save-time embedding.
+**Open question (resolved):** speed and memory footprint were the gating concern — whether to move fully to Qwen3, keep both and pick at runtime, or use Qwen3 for search only. Resolved in favor of moving fully to Qwen3 for both save-time and search-time embedding; measured latency (see below) was acceptable. `NLEmbedding` was dropped entirely, not kept as a fallback.
 
 **Initial timing measurement (52-task corpus, M-series Mac, "how to send messages" query):**
 ```
@@ -543,18 +545,17 @@ Top 4 results were all genuinely relevant (contact-sending tasks like "Send iMes
 
    All three returned visibly more relevant top-K results than what `searchAll` produces with the current Apple model on the same corpus.
 
-**Implementation sketch:**
-- Add `mlx-swift` and `mlx-swift-examples` (or just the embedder helper) as Swift Package dependencies on `AgentSmithKit`.
-- Replace or wrap `EmbeddingService` so it loads `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` once at init and produces embeddings the same way (sentence-level if we keep multi-vector retrieval, or whole-document if we drop it). Vector dimension changes — Qwen3 embeddings are larger than 512 — so on-disk vectors need a re-embed pass.
-- The `reembedAllMemories` / `reembedTaskSummariesFromTasks` functions already exist for exactly this scenario; bumping a stored embedding model identifier and detecting mismatch on load is the standard migration path.
-- Decide on the lexical-overlap weight in RRF: with a stronger semantic channel, we may want to lower the lexical contribution (currently 25% via `searchAllNoiseFloor` filtering and joint RRF ranking).
-- Decide on the `searchAllNoiseFloor` value — Qwen3 cosines have a different distribution than NLEmbedding cosines, so the `0.55` floor will need recalibration.
+**Implementation (as built):**
+- The embedding stack moved into the `SemanticSearch` sibling package rather than adding MLX deps directly to `AgentSmithKit`: `SemanticSearchEngine` + `MLXEmbedderBackend` + `EmbeddingModel` wrap `MLXEmbedders` and load `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ`. `MemoryStore` talks to the engine; `EmbeddingService`/`NLEmbedding` is gone.
+- Vector dimension changed (Qwen3 > 512), so stored vectors needed a re-embed pass — handled via the existing `reembedAllMemories` / `reembedTaskSummariesFromTasks` mismatch-on-load migration path.
+- Lexical-overlap weight in RRF: the old 25%-weighted lexical channel was dropped; `MemoryStore.reciprocalRankFusion` now does an equal-weight semantic+lexical fusion (`1/(k+sRank) + 1/(k+lRank)`, k=60).
+- Noise floor recalibrated for Qwen3's cosine distribution: the old `0.55` gate is now `MemoryStore.defaultSearchThreshold = 0.10` (unrelated text scores sit well below 0.10; RRF does the real ordering).
 
-**Risks:**
-- Model weight download size (small, but adds a one-time cost).
-- Memory footprint during runtime (need to confirm 4-bit quantized 0.6B is comfortable in our process).
-- Per-embedding latency on save (every `save_memory` and `task_complete` triggers an embed; if it's >100ms it'll be noticeable).
-- Re-embed pass time on startup (currently instant; may grow to seconds for a corpus of a few hundred entries).
+**Risks (outcome):**
+- Model weight download — one-time cost on first run; acceptable.
+- Runtime memory — 4-bit quantized 0.6B is comfortable in-process.
+- Per-embedding latency on save — within tolerance per measurements; `save_memory` / `task_complete` embeds are not noticeably slow.
+- Re-embed pass on startup — no longer instant but acceptable at current corpus sizes; revisit if corpora grow into the thousands.
 
 ### SwiftUI review P3 — accessibility baseline pass
 From the 2026-04-27 SwiftUI review (P3 follow-ups). The app currently has zero `.accessibilityLabel`, `.accessibilityHint`, or `.accessibilityIdentifier` calls. VoiceOver auto-derives labels from string content, which works for `Text("Start")` but fails for icon-only buttons (e.g. `InspectorView`'s speech-mute and gear buttons render as silent icons under VoiceOver). UI tests have no stable hooks either.
