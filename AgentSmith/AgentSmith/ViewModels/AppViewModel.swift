@@ -694,51 +694,6 @@ final class AppViewModel {
         // After Smith starts the active-timers list may already contain restored wakes for
         // .scheduled tasks — refresh once so the View → Timers panel shows them.
         await refreshActiveTimers()
-
-        scheduleAutopilotMessageIfRequested()
-    }
-
-    /// Debug-only autopilot for headless integration testing of the LLM pipeline.
-    /// When the env var `AGENT_SMITH_AUTOPILOT_MSG` is set (or the same key in
-    /// UserDefaults), sends that text to Smith N seconds after start so a build/run/
-    /// inspect loop can run without UI clicking. Delay defaults to 10s; override via
-    /// `AGENT_SMITH_AUTOPILOT_DELAY` (seconds, fractional OK).
-    /// Both env-var and defaults paths are checked so the hook works either way the
-    /// app is launched (Xcode-mcp run, manual launch, etc.).
-    private func scheduleAutopilotMessageIfRequested() {
-        let env = ProcessInfo.processInfo.environment
-        let defaults = UserDefaults.standard
-        let envMsg = env["AGENT_SMITH_AUTOPILOT_MSG"]
-        let defaultsMsg = defaults.string(forKey: "AGENT_SMITH_AUTOPILOT_MSG")
-        // Also try a sentinel file as a sandbox-friendly fallback. The agent's
-        // sandbox container prefs path is per-container; writing to the global
-        // ~/.../com.nuclearcyborg.AgentSmith plist doesn't reach UserDefaults
-        // inside the sandbox. The file lives in a tmp dir we can both touch.
-        let sentinelPath = "/tmp/agent-smith-autopilot.txt"
-        var fileMsg: String?
-        if FileManager.default.fileExists(atPath: sentinelPath),
-           let data = try? Data(contentsOf: URL(fileURLWithPath: sentinelPath)),
-           let raw = String(data: data, encoding: .utf8) {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { fileMsg = trimmed }
-        }
-        let message = envMsg ?? defaultsMsg ?? fileMsg
-        let autopilotLogger = Logger(subsystem: "com.agentsmith", category: "autopilot")
-        autopilotLogger.notice("env=\(envMsg ?? "nil", privacy: .public) defaults=\(defaultsMsg ?? "nil", privacy: .public) file=\(fileMsg ?? "nil", privacy: .public) chosen=\(message ?? "nil", privacy: .public)")
-        guard let message, !message.isEmpty else { return }
-        let delaySeconds: Double = {
-            if let raw = env["AGENT_SMITH_AUTOPILOT_DELAY"], let parsed = Double(raw) { return parsed }
-            let dv = defaults.double(forKey: "AGENT_SMITH_AUTOPILOT_DELAY")
-            return dv > 0 ? dv : 10.0
-        }()
-        autopilotLogger.notice("scheduling fake user message in \(delaySeconds, privacy: .public)s: \(message, privacy: .public)")
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
-            guard let self else { return }
-            autopilotLogger.notice("sending fake user message: \(message, privacy: .public)")
-            self.inputText = message
-            await self.sendMessage()
-        }
     }
 
     /// Re-reads the currently-active wakes from Smith. Cheap; the agent stores the list
