@@ -143,16 +143,6 @@ actor SecurityEvaluator {
         return tool.definition(for: .jones)
     }()
 
-    /// Per-call output cap for Jones. A SAFE/WARN/UNSAFE/ABORT verdict line plus
-    /// terse reasoning fits comfortably under this. Capping prevents pathological
-    /// chain-of-thought preambles from chatty models (notably claude-haiku-4-5)
-    /// from running long and burning tokens on output the parser will discard.
-    /// Mutually exclusive with extended thinking — Anthropic requires
-    /// max_tokens > thinking_budget (>=1024), so enabling thinking on Jones's
-    /// configuration would force this cap to be lifted via the override clamp
-    /// in the provider.
-    private static let evaluationMaxOutputTokens = 200
-
     /// Evaluation history for inspector display.
     private var history: [EvaluationRecord] = []
     private static let maxHistory = 50
@@ -295,10 +285,15 @@ actor SecurityEvaluator {
             let callLatencyMs: Int
             do {
                 let callStart = Date()
+                // No max_tokens override — Jones uses whatever output cap its own
+                // model configuration specifies. An earlier hard 200-token cap here
+                // collided with extended thinking: the Anthropic provider has to
+                // raise max_tokens above the thinking budget (>=1024), so a 200 cap
+                // got clamped to budget+1, leaving ~1 token for the actual verdict
+                // and producing empty, unparseable responses.
                 response = try await provider.send(
                     messages: conversationMessages,
-                    tools: [Self.fileReadToolDef],
-                    maxOutputTokensOverride: Self.evaluationMaxOutputTokens
+                    tools: [Self.fileReadToolDef]
                 )
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {

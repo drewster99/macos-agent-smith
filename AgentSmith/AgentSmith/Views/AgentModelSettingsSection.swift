@@ -68,6 +68,21 @@ struct AgentModelSettingsSection: View {
         selectedAPIType == .anthropic && thinkingBudget > 0
     }
 
+    /// Warning text for the security gatekeeper when its output budget is too tight
+    /// to clear the thinking budget. With extended thinking enabled, Anthropic counts
+    /// thinking tokens against `max_tokens`, so Jones needs headroom above the thinking
+    /// budget to actually emit its SAFE/WARN/UNSAFE/ABORT verdict line — otherwise the
+    /// model spends the whole budget thinking and returns empty, unparseable text (the
+    /// "failed to parse security response" failure mode). Returns nil when this role
+    /// isn't Jones, thinking is off, or there's enough headroom.
+    private var jonesThinkingHeadroomWarning: String? {
+        guard role == .jones, thinkingBudget > 0 else { return nil }
+        let responseSlack = 250
+        let warningThreshold = thinkingBudget + responseSlack
+        guard maxOutputTokens < warningThreshold else { return nil }
+        return "Max Output Tokens (\(maxOutputTokens)) is too close to the thinking budget (\(thinkingBudget)). Extended thinking counts thinking tokens against the output budget, so Jones needs headroom to emit its verdict — set Max Output Tokens to at least \(warningThreshold). Otherwise evaluations fail with “failed to parse security response.”"
+    }
+
     private var anthropicCacheVisible: Bool {
         selectedAPIType == .anthropic || isOpenRouterAnthropicModel
     }
@@ -416,6 +431,14 @@ struct AgentModelSettingsSection: View {
                 Text("Extended thinking token budget. Set to 0 to disable.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            if let warning = jonesThinkingHeadroomWarning {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(warning)
+                }
+                .font(.caption)
+                .foregroundStyle(.red)
             }
         }
     }

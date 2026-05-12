@@ -256,13 +256,16 @@ struct SecurityEvaluatorTests {
         #expect(provider.callCount == 2)
     }
 
-    // MARK: - 200-token cap
+    // MARK: - Output token budget
 
-    @Test("evaluator passes the 200-token output cap to the provider")
-    func tokenCapPassedThrough() async {
+    @Test("evaluator does not override the provider's max-output-tokens")
+    func tokenCapNotOverridden() async {
+        // The evaluator must let Jones use its own configured output budget. A prior
+        // hard 200-token override collided with extended thinking (the provider has to
+        // raise max_tokens above the thinking budget), leaving no room for the verdict.
         let (evaluator, provider, _) = makeEvaluator(responses: [textResponse("SAFE ok")])
         _ = await evaluate(evaluator)
-        #expect(provider.receivedMaxTokenOverrides == [200])
+        #expect(provider.receivedMaxTokenOverrides == [nil])
     }
 
     // MARK: - Execution-outcome annotation (the new feature)
