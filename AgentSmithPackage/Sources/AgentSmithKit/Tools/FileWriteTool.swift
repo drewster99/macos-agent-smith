@@ -41,7 +41,7 @@ struct FileWriteTool: AgentTool {
         guard case .string(let rawPath) = arguments["path"] else {
             throw ToolCallError.missingRequiredArgument("path")
         }
-        let path = (rawPath as NSString).expandingTildeInPath
+        let path = PathNormalization.normalize(rawPath)
         guard case .string(let content) = arguments["content"] else {
             throw ToolCallError.missingRequiredArgument("content")
         }

@@ -55,7 +55,7 @@ struct FileEditTool: AgentTool {
         guard case .string(let rawFilePath) = arguments["file_path"] else {
             throw ToolCallError.missingRequiredArgument("file_path")
         }
-        let filePath = (rawFilePath as NSString).expandingTildeInPath
+        let filePath = PathNormalization.normalize(rawFilePath)
         guard case .string(let oldString) = arguments["old_string"] else {
             throw ToolCallError.missingRequiredArgument("old_string")
         }

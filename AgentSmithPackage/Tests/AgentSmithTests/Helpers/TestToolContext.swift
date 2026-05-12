@@ -26,12 +26,12 @@ enum TestToolContext {
 
         func record(_ path: String) {
             lock.lock(); defer { lock.unlock() }
-            paths.insert(path)
+            paths.insert(PathNormalization.normalize(path))
         }
 
         func has(_ path: String) -> Bool {
             lock.lock(); defer { lock.unlock() }
-            return paths.contains(path)
+            return paths.contains(PathNormalization.normalize(path))
         }
     }
 

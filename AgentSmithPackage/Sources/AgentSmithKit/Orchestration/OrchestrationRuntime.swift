@@ -1756,10 +1756,10 @@ public actor OrchestrationRuntime {
             },
             autoAdvanceEnabled: { [weak self] in await self?.autoAdvanceEnabled ?? false },
             recordFileRead: { path in
-                filesReadInSession?.record(path)
+                filesReadInSession?.record(PathNormalization.normalize(path))
             },
             hasFileBeenRead: { path in
-                filesReadInSession?.contains(path) ?? false
+                filesReadInSession?.contains(PathNormalization.normalize(path)) ?? false
             },
             setToolExecutionStatus: { [tracker] toolCallID, succeeded in
                 await tracker.recordExecutionStatus(toolCallID: toolCallID, succeeded: succeeded)

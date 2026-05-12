@@ -57,6 +57,29 @@ struct FileEditToolTests {
         #expect(written == "alpha BETA gamma\n")
     }
 
+    @Test("file_edit matches a prior file_read recorded under a file:// spelling")
+    func matchesNormalizedPriorRead() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let path = try dir.write("alpha beta gamma\n", to: "f.txt")
+
+        // The read tracker recorded the file under a `file://` URL spelling; an edit that
+        // passes the plain path must still satisfy the read-before-edit gate.
+        let tracker = TestToolContext.FileReadTrackerStub()
+        tracker.record("file://\(path)")
+        let result = try await FileEditTool().execute(
+            arguments: [
+                "file_path": .string(path),
+                "old_string": .string("beta"),
+                "new_string": .string("BETA")
+            ],
+            context: TestToolContext.make(agentRole: .brown, fileReadTracker: tracker)
+        )
+        #expect(result.succeeded)
+        let written = try String(contentsOf: URL(fileURLWithPath: path), encoding: .utf8)
+        #expect(written == "alpha BETA gamma\n")
+    }
+
     @Test("non-unique old_string without replace_all returns failure")
     func nonUniqueWithoutReplaceAllFails() async throws {
         let dir = TempDir()
