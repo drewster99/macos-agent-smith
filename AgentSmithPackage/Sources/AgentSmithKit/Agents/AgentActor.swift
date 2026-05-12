@@ -797,7 +797,15 @@ public actor AgentActor {
                 consecutiveErrors = 0
                 consecutiveContextOverflows = 0
                 lastUsageStale = false
-                let inputDelta = Array(conversationHistory[lastTurnMessageCount...])
+                // Defensive clamp: every site that reassigns `conversationHistory` resets
+                // `lastTurnMessageCount` synchronously, so today it can't exceed the count —
+                // but this actor is re-entrant, and a partial-range slice would trap. An
+                // empty `inputDelta` is harmless (the turn's inspector row just shows no
+                // incremental input) and self-corrects next turn.
+                let deltaStart = min(max(lastTurnMessageCount, 0), conversationHistory.count)
+                assert(deltaStart == lastTurnMessageCount,
+                       "lastTurnMessageCount (\(lastTurnMessageCount)) out of range for history count \(conversationHistory.count)")
+                let inputDelta = Array(conversationHistory[deltaStart...])
                 lastTurnMessageCount = conversationHistory.count
                 let turnRecord = LLMTurnRecord(
                     inputDelta: inputDelta,
