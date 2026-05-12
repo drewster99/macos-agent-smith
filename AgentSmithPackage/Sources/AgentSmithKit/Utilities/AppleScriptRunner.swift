@@ -383,8 +383,13 @@ private enum AppleScriptCoercer {
     /// if even the raw bytes aren't there.
     private static func coerce64BitInt(_ d: NSAppleEventDescriptor) -> JSONValue {
         let data = d.data
-        if data.count == 8 {
-            let value: Int64 = data.withUnsafeBytes { $0.load(as: Int64.self) }
+        if data.count >= 8 {
+            // `Data`'s backing store is not guaranteed to be 8-byte aligned, so a plain
+            // `load(as: Int64.self)` can hit a misalignment trap. `loadUnaligned` copies
+            // byte-wise. Bytes are host byte order (matching `int32Value` etc.).
+            let value = data.withUnsafeBytes { raw in
+                raw.loadUnaligned(fromByteOffset: 0, as: Int64.self)
+            }
             return .int(Int(value))
         }
         if let coerced = d.coerce(toDescriptorType: typeSInt32) {
