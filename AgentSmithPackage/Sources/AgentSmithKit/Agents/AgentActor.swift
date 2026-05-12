@@ -1535,11 +1535,17 @@ public actor AgentActor {
 
     /// Wraps `tool.execute(...)` in a wall-clock timeout sourced from `tool.executionTimeout`.
     /// Returns the produced output text, the domain success flag, and the elapsed milliseconds.
-    /// On timeout, the inner task is cancelled and a synthesized "Tool execution exceeded N s
-    /// — cancelled" message is returned with `succeeded == false`. Cancellation is cooperative —
-    /// tools that block in synchronous loops without `Task.checkCancellation()` keep running
-    /// in the background after the timeout fires; the agent loop continues regardless, which
-    /// is the property this helper exists to provide.
+    /// On timeout the tool's task is cancelled and a synthesized "Tool execution exceeded N s —
+    /// cancelled" message is returned with `succeeded == false`.
+    ///
+    /// Cancellation is cooperative, and this is a *structured* task group: when the body returns
+    /// after the timeout, the group implicitly awaits the cancelled tool task before this function
+    /// returns. So a tool that never checks `Task.isCancelled` (or never hits an `await` on a
+    /// cancellation-aware primitive) would still delay this call until it finishes on its own.
+    /// Every in-tree tool avoids that: `BashTool`/`GhTool` go through `ProcessRunner` (which honors
+    /// cancellation), and the in-process walkers (`glob`, `directory_tree`, `directory_listing`)
+    /// check `Task.isCancelled` / `Task.checkCancellation()` in their loops. New long-running tools
+    /// must do the same.
     ///
     /// `setToolExecutionStatus` is intentionally NOT called here — the parallel batch and
     /// directExecute paths each handle the tracker update at their own seam.

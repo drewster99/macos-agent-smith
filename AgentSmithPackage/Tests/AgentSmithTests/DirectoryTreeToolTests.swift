@@ -71,6 +71,27 @@ struct DirectoryTreeToolTests {
         #expect(!r.output.contains("some-pkg"))
     }
 
+    @Test("`.git` is surfaced (as pruned) and counted toward its parent's subdir count")
+    func gitDirSurfacedAndCounted() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        // `repo/` contains *only* `.git/` — nothing else. The hidden-skipping enumerator would
+        // otherwise see it as empty; `.git` must still be rendered (as pruned) and counted so the
+        // tree below a node matches that node's `(N subdirs)` annotation.
+        _ = try dir.write("ref", to: "repo/.git/HEAD")
+
+        let r = try await DirectoryTreeTool().execute(
+            arguments: ["path": .string(dir.path), "max_depth": .int(3)],
+            context: TestToolContext.make()
+        )
+        #expect(r.succeeded)
+        #expect(r.output.contains("repo/"))
+        #expect(r.output.contains(".git/"))
+        #expect(r.output.contains("(pruned"))
+        // `repo/` must not be reported as empty — it has `.git`.
+        #expect(!r.output.contains("repo/  (empty)"))
+    }
+
     @Test("system roots are rejected")
     func systemRootRejected() async throws {
         let r = try await DirectoryTreeTool().execute(

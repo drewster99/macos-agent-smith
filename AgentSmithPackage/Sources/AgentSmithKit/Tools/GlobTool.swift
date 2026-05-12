@@ -362,11 +362,11 @@ final class GlobTool: AgentTool {
         if let leaf = segments.last {
             switch leaf {
             case .literal(let lit):
-                nameQuery = #"kMDItemFSName == "\#(escapeQuotes(lit))""#
+                nameQuery = #"kMDItemFSName == "\#(strippingQuotes(lit))""#
             case .wildcard(let cg):
                 let alts = Self.expandBraces(cg.raw)
                     .map(Self.collapseWildcardRuns)
-                    .map(Self.escapeQuotes)
+                    .map(Self.strippingQuotes)
                 if alts.count == 1 {
                     nameQuery = #"kMDItemFSName == "\#(alts[0])""#
                 } else {
@@ -383,8 +383,11 @@ final class GlobTool: AgentTool {
     }
 
     /// Stat-validates one Spotlight candidate. Returns `nil` when the candidate is stale (gone or
-    /// no longer a regular file), escapes `resolvedBase` after symlink resolution, or fails the
-    /// post-filter regex against its base-relative path.
+    /// no longer a regular file), escapes `resolvedBase` after symlink resolution, lives under a
+    /// hidden (dot-prefixed) path component below the base — the structural walk skips those, so
+    /// the Spotlight path must too, or the same query gives different answers depending on whether
+    /// Spotlight happened to be available — or fails the post-filter regex against its base-relative
+    /// path.
     static func validatedSpotlightCandidate(path: String, resolvedBase: String, postFilter: NSRegularExpression) -> (rel: String, mtime: Date)? {
         let url = URL(fileURLWithPath: path)
         let resolved = url.resolvingSymlinksInPath().path
@@ -402,6 +405,7 @@ final class GlobTool: AgentTool {
         } else {
             return nil
         }
+        if rel.split(separator: "/").contains(where: { $0.hasPrefix(".") }) { return nil }
         let range = NSRange(rel.startIndex..<rel.endIndex, in: rel)
         guard postFilter.firstMatch(in: rel, range: range) != nil else { return nil }
         return (rel, values.contentModificationDate ?? Date.distantPast)
@@ -450,9 +454,11 @@ final class GlobTool: AgentTool {
         return out
     }
 
-    /// Escapes embedded double quotes in a value being inlined into an `mdfind` query string.
-    /// Defense in depth — glob segments containing `"` are extremely rare.
-    static func escapeQuotes(_ s: String) -> String {
+    /// Strips embedded double quotes from a value being inlined into an `mdfind` query string —
+    /// they can't be safely represented in the `kMDItemFSName == "..."` predicate we build, and a
+    /// stripped name is a *superset* of the real one (the post-filter regex re-narrows). Defense in
+    /// depth — glob segments containing `"` are extremely rare.
+    static func strippingQuotes(_ s: String) -> String {
         s.replacingOccurrences(of: "\"", with: "")
     }
 
@@ -568,12 +574,22 @@ final class GlobTool: AgentTool {
                 stop = .scanLimit
                 break
             }
-            if Date() >= deadline {
+            // Treat agent-level cancellation (the `executionTimeout` wrapper, or agent
+            // termination) the same as the caller timeout: stop now, leave a resume token.
+            if Date() >= deadline || Task.isCancelled {
                 stop = .timeLimit
                 break
             }
 
             let (dirPath, idx) = state.queue.removeFirst()
+
+            // A symlinked subdir can resolve to a path outside `resolvedBase` (`proj/x -> /etc`).
+            // Matches outside the base are already filtered by `baseRelativePath`, but without
+            // this we'd still *descend* the foreign tree and burn the whole budget there.
+            guard dirPath == state.resolvedBase || dirPath.hasPrefix(state.resolvedBase + "/") else {
+                continue outer
+            }
+
             let segments = state.segments
 
             // Single dedup gate for the whole walk: each (resolved-dir, segment-idx) is

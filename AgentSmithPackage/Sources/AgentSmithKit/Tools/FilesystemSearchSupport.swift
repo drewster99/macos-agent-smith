@@ -71,7 +71,7 @@ enum FilesystemSearch {
     /// One-line summary of pruning behavior, kept in sync with the constants above by
     /// construction. Suitable for inclusion in a tool description.
     static var pruneSummary: String {
-        "Walks skip VCS/build/dependency directories (.git, node_modules, build, .build, DerivedData, Pods, .swiftpm) and don't descend .xcodeproj/.xcworkspace/.playground or media-library packages (.photoslibrary, .musiclibrary, .tvlibrary). Walking $HOME directly also skips Library/Caches, Library/Containers, Library/Mobile Documents, Library/Group Containers, Library/Application Support/MobileSync, Library/Developer/Xcode/DerivedData, Library/Developer/CoreSimulator, Music/iTunes, Music/Music, Movies/TV, and .Trash; pass one of those explicitly as `path` to search inside it."
+        "Walks skip hidden (dot-prefixed) files and directories, VCS/build/dependency directories (.git, node_modules, build, .build, DerivedData, Pods, .swiftpm), and don't descend .xcodeproj/.xcworkspace/.playground or media-library packages (.photoslibrary, .musiclibrary, .tvlibrary). Walking $HOME directly also skips Library/Caches, Library/Containers, Library/Mobile Documents, Library/Group Containers, Library/Application Support/MobileSync, Library/Developer/Xcode/DerivedData, Library/Developer/CoreSimulator, Music/iTunes, Music/Music, Movies/TV, and .Trash; pass one of those explicitly as `path` to search inside it."
     }
 
     // MARK: - Pathological-root rejection

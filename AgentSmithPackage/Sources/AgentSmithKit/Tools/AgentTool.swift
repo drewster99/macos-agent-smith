@@ -46,12 +46,13 @@ public protocol AgentTool: Sendable {
     func isAvailable(in context: ToolAvailabilityContext) -> Bool
 
     /// Maximum wall-clock time a single invocation of this tool may take. After this
-    /// the call is cancelled by `AgentActor`, a "Tool execution exceeded N s — cancelled"
-    /// result is synthesized for the LLM, and the agent loop continues. Default is 120 s.
-    /// Tools that legitimately need longer (e.g. a future `download_file`) should override.
-    /// Note: cancellation is cooperative — tools that block in synchronous loops without
-    /// `Task.checkCancellation()` will keep running in the background after the timeout
-    /// fires (the agent loop continues regardless).
+    /// `AgentActor` cancels the tool's task and synthesizes a "Tool execution exceeded N s —
+    /// cancelled" result for the LLM. Default is 120 s. Tools that legitimately need longer
+    /// (e.g. a future `download_file`) should override.
+    /// Note: cancellation is cooperative *and* structured — `runToolWithTimeout` awaits the
+    /// cancelled task, so a tool that never checks `Task.isCancelled` / never hits a
+    /// cancellation-aware `await` will keep running and delay the agent loop until it finishes
+    /// on its own. A long-running tool must poll cancellation in its hot loop.
     var executionTimeout: Duration { get }
 }
 
@@ -80,7 +81,8 @@ extension AgentTool {
 
     /// Default per-tool wall-clock cap. Picked so that the slowest legitimate in-process
     /// tools (large `glob`, deep `grep`, schema introspection of a heavy app) finish
-    /// comfortably while a hung tool can no longer pin the agent loop indefinitely.
+    /// comfortably while a tool that overruns gets cancelled (and, if it polls cancellation,
+    /// actually stops) instead of pinning the agent loop on a stuck call.
     public var executionTimeout: Duration { .seconds(120) }
 
     /// One-line summary of what the tool does, suitable for inclusion in *another* agent's

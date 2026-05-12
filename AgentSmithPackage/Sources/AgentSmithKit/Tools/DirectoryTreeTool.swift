@@ -113,11 +113,13 @@ struct DirectoryTreeTool: AgentTool {
     private enum TruncationReason {
         case timeLimit
         case scanLimit
+        case cancelled
 
         var message: String {
             switch self {
             case .timeLimit: "exceeded \(Int(DirectoryTreeTool.walkDeadlineSeconds))s walk budget"
             case .scanLimit: "scan cap of \(DirectoryTreeTool.maxEntriesScanned) directory visits reached"
+            case .cancelled: "cancelled (agent-level timeout)"
             }
         }
     }
@@ -131,6 +133,7 @@ struct DirectoryTreeTool: AgentTool {
 
     private func checkBudget(scanned: Int, deadline: Date) -> TruncationReason? {
         if scanned > Self.maxEntriesScanned { return .scanLimit }
+        if Task.isCancelled { return .cancelled }
         if Date() >= deadline { return .timeLimit }
         return nil
     }
@@ -238,7 +241,10 @@ struct DirectoryTreeTool: AgentTool {
     }
 
     /// File/subdir counts in a single directory listing — cheap enough to call per displayed node.
-    /// Hidden dotfiles are *not* counted (`.skipsHiddenFiles`), matching the tree's enumeration.
+    /// Hidden dotfiles are *not* counted (`.skipsHiddenFiles`), matching the tree's enumeration —
+    /// except `.git`, which `subdirectories(of:)` re-includes as a (pruned) child, so it's counted
+    /// here too to keep a node's `(N subdirs)` annotation consistent with the children rendered
+    /// beneath it.
     private func directoryCounts(at dir: URL) -> (files: Int, subdirs: Int) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
@@ -259,6 +265,7 @@ struct DirectoryTreeTool: AgentTool {
                 subdirs += 1
             }
         }
+        if explicitGitURL(at: dir.path) != nil { subdirs += 1 }
         return (files, subdirs)
     }
 }

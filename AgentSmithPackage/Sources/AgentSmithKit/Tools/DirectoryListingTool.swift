@@ -62,6 +62,12 @@ struct DirectoryListingTool: AgentTool {
     private static let defaultLimit = 50
     private static let maxAllowedLimit = 200
 
+    /// Hard cap on how many directory entries we `stat` + sort. `executionTimeout` is the outer
+    /// guard, but `contentsOfDirectory` + a `resourceValues` per entry on a million-entry directory
+    /// would burn the whole budget; bound the work so a pathological directory degrades to a fast,
+    /// explicitly-incomplete answer instead of a 2-minute stall.
+    private static let maxEntriesScanned = 50_000
+
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         guard case .string(let rawPath) = arguments["path"] else {
             throw ToolCallError.missingRequiredArgument("path")
@@ -126,9 +132,13 @@ struct DirectoryListingTool: AgentTool {
             return .failure("Unable to read directory: \(expanded)")
         }
 
+        let scannedEntries = entries.prefix(Self.maxEntriesScanned)
+        let entriesCapped = entries.count > Self.maxEntriesScanned
+
         var rows: [EntryRow] = []
-        rows.reserveCapacity(entries.count)
-        for entry in entries {
+        rows.reserveCapacity(scannedEntries.count)
+        for (i, entry) in scannedEntries.enumerated() {
+            if i & 0x3FF == 0 { try Task.checkCancellation() }
             let name = entry.lastPathComponent
             if let filterRegex {
                 let r = NSRange(name.startIndex..<name.endIndex, in: name)
@@ -184,7 +194,11 @@ struct DirectoryListingTool: AgentTool {
         var lines: [String] = []
         let filterSuffix = filterGlob.map { " matching '\($0)'" } ?? ""
         let sortStr = (sortBy == .mtime) ? "mtime (newest first)" : "name"
-        lines.append("Contents of \(resolvedBase)/  —  \(total) \(total == 1 ? "entry" : "entries")\(filterSuffix) (\(dirsTotal) dirs, \(filesTotal) files), showing \(offset + 1)–\(upper), sorted by \(sortStr):")
+        let countPrefix = entriesCapped ? "first \(Self.maxEntriesScanned) entries scanned; " : ""
+        lines.append("Contents of \(resolvedBase)/  —  \(countPrefix)\(total) \(total == 1 ? "entry" : "entries")\(filterSuffix) (\(dirsTotal) dirs, \(filesTotal) files), showing \(offset + 1)–\(upper), sorted by \(sortStr):")
+        if entriesCapped {
+            lines.append("[This directory has more than \(Self.maxEntriesScanned) entries — only the first \(Self.maxEntriesScanned) were scanned, so counts and sort order cover that subset only. Pass a `filter` to narrow it.]")
+        }
         for row in page {
             lines.append("  " + formatRow(row))
         }
