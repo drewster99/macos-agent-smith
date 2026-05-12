@@ -92,7 +92,7 @@ struct DirectoryTreeTool: AgentTool {
             entriesScanned += 1
             let isLast = (i == topSubdirs.count - 1)
             renderSubtree(
-                dir: child, prefix: "", isLast: isLast, depth: 1, maxDepth: maxDepth,
+                dir: child, base: resolvedBase, prefix: "", isLast: isLast, depth: 1, maxDepth: maxDepth,
                 homePruneSet: homePruneSet, deadline: deadline,
                 entriesScanned: &entriesScanned, truncated: &truncated, lines: &lines
             )
@@ -139,7 +139,7 @@ struct DirectoryTreeTool: AgentTool {
     }
 
     private func renderSubtree(
-        dir: URL, prefix: String, isLast: Bool, depth: Int, maxDepth: Int,
+        dir: URL, base: String, prefix: String, isLast: Bool, depth: Int, maxDepth: Int,
         homePruneSet: Set<String>, deadline: Date,
         entriesScanned: inout Int, truncated: inout TruncationReason?, lines: inout [String]
     ) {
@@ -147,6 +147,14 @@ struct DirectoryTreeTool: AgentTool {
         let nextPrefix = prefix + (isLast ? "    " : "│   ")
         let name = dir.lastPathComponent
         let dirLineBase = prefix + connector + name + "/"
+
+        // Symlink-escape guard: if this entry resolves outside the tree root, don't
+        // descend into (or count) a foreign subtree.
+        let resolved = dir.resolvingSymlinksInPath().path
+        guard resolved == base || resolved.hasPrefix(base + "/") else {
+            lines.append(dirLineBase + "  (skipped — symlink outside the tree root)")
+            return
+        }
 
         // Pruned directory: render with `(pruned)` annotation, don't descend.
         let absPath = dir.path
@@ -191,7 +199,7 @@ struct DirectoryTreeTool: AgentTool {
             entriesScanned += 1
             let childIsLast = (i == subs.count - 1)
             renderSubtree(
-                dir: child, prefix: nextPrefix, isLast: childIsLast, depth: depth + 1, maxDepth: maxDepth,
+                dir: child, base: base, prefix: nextPrefix, isLast: childIsLast, depth: depth + 1, maxDepth: maxDepth,
                 homePruneSet: homePruneSet, deadline: deadline,
                 entriesScanned: &entriesScanned, truncated: &truncated, lines: &lines
             )
