@@ -16,6 +16,20 @@ final class AppViewModel {
     let shared: SharedAppState
 
     var messages: [ChannelMessage] = []
+
+    /// Derived channel-log lookups, rebuilt from `messages` on every channel-log mutation
+    /// (append, restore, clear). `ChannelLogView` reads these instead of re-scanning the
+    /// whole `messages` array inside `body`. See `rebuildChannelLogIndexes()`.
+    /// Set of requestIDs that have a corresponding `tool_request` message.
+    private(set) var toolRequestIDs: Set<String> = []
+    /// requestID → security-review message (last writer wins).
+    private(set) var securityReviewByRequestID: [String: ChannelMessage] = [:]
+    /// requestID → tool-output message (last writer wins).
+    private(set) var toolOutputByRequestID: [String: ChannelMessage] = [:]
+    /// taskIDs whose paired `timer_activity` "scheduled" row should be suppressed because a
+    /// `task_created` / `task_action_scheduled` banner already carries the schedule chip.
+    private(set) var taskIDsWithSchedulingBanner: Set<String> = []
+
     var tasks: [AgentTask] = [] {
         didSet { rebucketTasks() }
     }
@@ -117,6 +131,36 @@ final class AppViewModel {
         }
         pendingWakesByTaskID = grouped
     }
+
+    /// Rebuilds the derived channel-log lookups from `messages` in a single pass. Iterating
+    /// in array order means the *newest* message wins for the last-writer-wins dictionaries
+    /// (relevant after `restoreHistory()` prepends older messages). Call after any mutation
+    /// of `messages`.
+    private func rebuildChannelLogIndexes() {
+        func metaString(_ message: ChannelMessage, _ key: String) -> String? {
+            if case .string(let value) = message.metadata?[key] { return value }
+            return nil
+        }
+        var requestIDs = Set<String>()
+        var reviews: [String: ChannelMessage] = [:]
+        var outputs: [String: ChannelMessage] = [:]
+        var bannerTasks = Set<String>()
+        for message in messages {
+            let kind = metaString(message, "messageKind")
+            let requestID = metaString(message, "requestID")
+            if kind == "tool_request", let requestID { requestIDs.insert(requestID) }
+            if message.metadata?["securityDisposition"] != nil, let requestID { reviews[requestID] = message }
+            if kind == "tool_output", let requestID { outputs[requestID] = message }
+            if kind == "task_created" || kind == "task_action_scheduled", let taskID = metaString(message, "taskID") {
+                bannerTasks.insert(taskID)
+            }
+        }
+        toolRequestIDs = requestIDs
+        securityReviewByRequestID = reviews
+        toolOutputByRequestID = outputs
+        taskIDsWithSchedulingBanner = bannerTasks
+    }
+
     var isRunning = false
     var isAborted = false
     var abortReason = ""
@@ -578,6 +622,7 @@ final class AppViewModel {
             for await message in channel.stream() {
                 guard let self else { break }
                 self.messages.append(message)
+                self.rebuildChannelLogIndexes()
                 self.allPersistedMessages.append(message)
                 self.shared.speechController.handle(message)
                 self.persistMessages()
@@ -1074,6 +1119,7 @@ final class AppViewModel {
 
     func clearLog() {
         messages.removeAll()
+        rebuildChannelLogIndexes()
         inspectorStore.clearAll()
     }
 
@@ -1081,6 +1127,7 @@ final class AppViewModel {
         let currentIDs = Set(messages.map(\.id))
         let restoredHistory = allPersistedMessages.filter { !currentIDs.contains($0.id) }
         messages = restoredHistory + messages
+        rebuildChannelLogIndexes()
         hasRestoredHistory = true
     }
 
