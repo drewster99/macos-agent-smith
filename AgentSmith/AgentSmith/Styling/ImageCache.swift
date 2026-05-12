@@ -46,13 +46,14 @@ final class ImageCache {
     // MARK: - Init
 
     private init() {
-        guard let cachesDir = FileManager.default.urls(
-            for: .cachesDirectory,
-            in: .userDomainMask
-        ).first else {
-            preconditionFailure("Caches directory unavailable — this should never happen on macOS")
+        let baseDir: URL
+        if let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            baseDir = cachesDir
+        } else {
+            baseDir = FileManager.default.temporaryDirectory
+            imageCacheLogger.error("Caches directory unavailable; falling back to temporaryDirectory for the thumbnail cache")
         }
-        thumbnailDirectory = cachesDir
+        thumbnailDirectory = baseDir
             .appendingPathComponent("AgentSmith", isDirectory: true)
             .appendingPathComponent("thumbnails", isDirectory: true)
         do {
