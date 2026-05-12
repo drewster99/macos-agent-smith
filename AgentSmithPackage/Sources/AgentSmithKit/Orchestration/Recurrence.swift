@@ -23,60 +23,30 @@ public enum Recurrence: Sendable, Codable, Equatable {
     /// monthly with day < 1 or > 31, interval below the minimum) — callers should treat nil
     /// the same as "stop recurring."
     public func nextOccurrence(after: Date, calendar: Calendar = Calendar.current) -> Date? {
+        func nextMatch(_ components: DateComponents) -> Date? {
+            calendar.nextDate(
+                after: after,
+                matching: components,
+                matchingPolicy: .nextTime,
+                direction: .forward
+            )
+        }
         switch self {
         case .daily(let time):
-            return Self.nextMatch(after: after, calendar: calendar) { components in
-                components.hour == time.hour && components.minute == time.minute
-            }
+            return nextMatch(DateComponents(hour: time.hour, minute: time.minute))
         case .weekly(let time, let weekdays):
             guard !weekdays.isEmpty else { return nil }
-            let calendarDays = Set(weekdays.map { $0.calendarValue })
-            return Self.nextMatch(after: after, calendar: calendar) { components in
-                guard let weekday = components.weekday else { return false }
-                return calendarDays.contains(weekday)
-                    && components.hour == time.hour
-                    && components.minute == time.minute
+            let candidates = weekdays.compactMap { weekday in
+                nextMatch(DateComponents(hour: time.hour, minute: time.minute, weekday: weekday.calendarValue))
             }
+            return candidates.min()
         case .monthlyOnDay(let time, let day):
             guard day >= 1, day <= 31 else { return nil }
-            return Self.nextMatch(after: after, calendar: calendar) { components in
-                components.day == day
-                    && components.hour == time.hour
-                    && components.minute == time.minute
-            }
+            return nextMatch(DateComponents(day: day, hour: time.hour, minute: time.minute))
         case .interval(let seconds):
             guard seconds >= Self.minimumIntervalSeconds else { return nil }
             return after.addingTimeInterval(TimeInterval(seconds))
         }
-    }
-
-    /// Walks forward minute-by-minute from the boundary just after `after` (rounded to the
-    /// next minute) and returns the first instant whose calendar components satisfy `match`.
-    /// Bounded by 366 days so a malformed monthly (e.g. day 31 in a Feb-only calendar — won't
-    /// happen in Gregorian but defensive against edge cases) returns nil instead of looping.
-    private static func nextMatch(
-        after: Date,
-        calendar: Calendar,
-        match: (DateComponents) -> Bool
-    ) -> Date? {
-        let secondGranular = calendar.date(byAdding: .second, value: 1, to: after) ?? after
-        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: secondGranular)
-        components.second = 0
-        guard var probe = calendar.date(from: components) else { return nil }
-        if probe <= after {
-            probe = calendar.date(byAdding: .minute, value: 1, to: probe) ?? probe
-        }
-        let limit = after.addingTimeInterval(366 * 24 * 60 * 60)
-        while probe <= limit {
-            let probeComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .weekday], from: probe)
-            if match(probeComponents) {
-                return probe
-            }
-            // Coarse advance: jump by an hour while we're more than 90 minutes off the target hour-of-day,
-            // otherwise step minute-by-minute. The 90-minute buffer keeps us safe across DST jumps.
-            probe = calendar.date(byAdding: .minute, value: 1, to: probe) ?? probe
-        }
-        return nil
     }
 
     /// Human-readable form for display in the timers UI ("Daily at 21:00", "Mon/Wed/Fri at 15:00").
