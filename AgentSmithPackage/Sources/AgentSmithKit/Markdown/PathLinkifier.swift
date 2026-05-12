@@ -1,12 +1,13 @@
 import Foundation
 
 /// Wraps plain text with markdown link syntax (`[text](url)`) for URLs, emails, and
-/// absolute file paths that exist on disk. Designed to feed `AttributedString(markdown:)`
-/// so the resulting `Text` carries a real `.link` attribute (clickable, right-clickable,
-/// surviving `.textSelection(.enabled)`).
+/// absolute file paths. Designed to feed `AttributedString(markdown:)` so the resulting
+/// `Text` carries a real `.link` attribute (clickable, right-clickable, surviving
+/// `.textSelection(.enabled)`).
 ///
-/// All helpers are pure-Foundation and side-effect-free apart from `FileManager.fileExists`
-/// for path-validity checks.
+/// `standaloneLink(for:)` is pure / side-effect-free. `linkifyPaths(_:)` (the free-text
+/// scanner) does a `FileManager.fileExists` check per candidate so that rhetorical path
+/// mentions in prose aren't turned into links.
 public enum PathLinkifier {
 
     /// Compiled once and reused across all calls.
@@ -35,10 +36,10 @@ public enum PathLinkifier {
     )
 
     /// Returns the markdown-link-wrapped form of `text` if (after trimming) the entire
-    /// content is a single linkable token: an existing absolute path, an http(s)/file/
-    /// mailto URL, or a bare email. Returns nil otherwise. Performs at most one
-    /// `FileManager.fileExists` call (path branch only), so callers don't need to
-    /// re-check existence by also routing through `linkify`.
+    /// content is a single linkable token: an absolute path, an http(s)/file/mailto URL,
+    /// or a bare email. Returns nil otherwise. Path existence is **not** checked here —
+    /// a whole-token, whitespace-free path is almost always meant as a path, and the
+    /// click handler validates existence lazily when the link is actually opened.
     public static func standaloneLink(for text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -52,7 +53,6 @@ public enum PathLinkifier {
 
         if trimmed.hasPrefix("/") || trimmed.hasPrefix("~/") {
             let expanded = (trimmed as NSString).expandingTildeInPath
-            guard FileManager.default.fileExists(atPath: expanded) else { return nil }
             // `URL(fileURLWithPath:)` handles percent-encoding; the link **text** keeps
             // the original `~/...` form so users see what they typed.
             let urlString = URL(fileURLWithPath: expanded).absoluteString

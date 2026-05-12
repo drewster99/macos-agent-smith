@@ -33,10 +33,11 @@ struct PathLinkifierTests {
         #expect(PathLinkifier.standaloneLink(for: file.path) == "[\(file.path)](\(urlString))")
     }
 
-    @Test("absolute path that does NOT exist returns nil")
+    @Test("absolute path is wrapped even when it does not exist (existence is checked on click)")
     func standaloneAbsolutePathMissing() {
         let bogus = "/tmp/agent-smith-this-path-does-not-exist-\(UUID().uuidString)/x.md"
-        #expect(PathLinkifier.standaloneLink(for: bogus) == nil)
+        let urlString = URL(fileURLWithPath: bogus).absoluteString
+        #expect(PathLinkifier.standaloneLink(for: bogus) == "[\(bogus)](\(urlString))")
     }
 
     @Test("https URL is wrapped in a markdown link")
