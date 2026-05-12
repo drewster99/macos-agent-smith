@@ -1,10 +1,13 @@
 import Foundation
 
 /// Brown tool: runs the GitHub CLI (`gh`) with arbitrary args. Internally invokes
-/// `/bin/bash -l -c "gh <args>"` so `~`, `$VAR`, pipes, and redirection all work as in a normal
-/// shell. The tool's description includes the captured `gh auth status` output from Brown's
-/// spawn so the model has direct evidence that authentication is in place — without this,
-/// gpt-style models routinely refuse GitHub work claiming "I don't have access."
+/// `/bin/bash -l -c "exec gh <args>"`, so `~` and `$VAR` expansion work — but shell pipes
+/// and file redirection are refused before bash sees them, which keeps `gh` as the genuinely
+/// constrained path (anything that needs a real pipeline should use the `bash` tool, where
+/// the safety monitor sees the whole command). The tool's description includes the captured
+/// `gh auth status` output from Brown's spawn so the model has direct evidence that
+/// authentication is in place — without this, gpt-style models routinely refuse GitHub work
+/// claiming "I don't have access."
 struct GhTool: AgentTool {
     let name = "gh"
     private let authStatusSnapshot: String
@@ -18,9 +21,15 @@ struct GhTool: AgentTool {
     /// `${` covers parameter expansion — even though `$(` is already blocked, `${VAR:?$(…)}`
     /// would catch the `$(`, but `${VAR:-evil}` reads any env var the agent shell exports;
     /// if the model needs $VAR expansion it should use the bare `$VAR` form, which is allowed.
-    /// `\n` / `\r` are command separators in `bash -c "..."` — JSON tool args trivially decode
-    /// into strings containing literal newlines, so they MUST be on the list.
-    /// `\0` (NUL) corrupts `bash -c` parsing on some shells; reject it outright.
+    /// `<<<` is a here-string (a read redirection). `\n` / `\r` are command separators in
+    /// `bash -c "..."` — JSON tool args trivially decode into strings containing literal
+    /// newlines, so they MUST be on the list. `\0` (NUL) corrupts `bash -c` parsing on some
+    /// shells; reject it outright.
+    ///
+    /// Note: bare shell `|`, `>`, `>>`, `<` are *also* rejected — but via the quote-aware
+    /// `firstUnquotedRedirectionOrPipe(in:)` scan rather than this naive list, because those
+    /// characters appear legitimately inside quoted `--jq` programs (`'.[] | .name'`) and
+    /// quoted `--body` text. Only their *unquoted* (operator) uses are refused.
     static let forbiddenSequences: [String] = [
         "&&", "||", "<<<", "$(", ">(", "<(", "${", "`", ";", "\n", "\r", "\0"
     ]
@@ -32,12 +41,54 @@ struct GhTool: AgentTool {
     /// In addition to the substring list, a bare `&` used to background or chain commands
     /// (`& cmd`, trailing `&`) is rejected — but `&` between `=`/word characters (URL query
     /// strings like `?a=1&b=2`) stays allowed so the common `gh api '...'` use case still works.
+    /// Finally, an *unquoted* `|` / `>` / `>>` / `<` (a real pipe or file redirect, as opposed
+    /// to those characters appearing inside a quoted `--jq` program or `--body`) is rejected.
     static func firstForbiddenSequence(in args: String) -> String? {
         for needle in forbiddenSequences where args.contains(needle) {
             return needle
         }
         if containsCommandChainingAmpersand(args) {
             return "&"
+        }
+        if let op = firstUnquotedRedirectionOrPipe(in: args) {
+            return op
+        }
+        return nil
+    }
+
+    /// Scans `args` for a `|`, `<`, or `>` that occurs *outside* shell quoting — i.e. a real
+    /// pipe / file-redirection operator, not a `|` inside a quoted `--jq` program or a `<`/`>`
+    /// inside a quoted `--body`. Returns the operator (`|`, `<`, `>`, or `>>`) if found, else
+    /// nil. Tracks `'…'` and `"…"` spans and honours backslash escapes outside single quotes;
+    /// an unterminated quote just means `bash -c` would choke anyway, so we keep scanning.
+    static func firstUnquotedRedirectionOrPipe(in args: String) -> String? {
+        enum QuoteState { case none, single, double }
+        var state: QuoteState = .none
+        var iterator = args.makeIterator()
+        while let c = iterator.next() {
+            switch state {
+            case .none:
+                switch c {
+                case "'": state = .single
+                case "\"": state = .double
+                case "\\": _ = iterator.next()           // escaped char — consume, not an operator
+                case "|", "<": return String(c)
+                case ">":
+                    // Peek for `>>` so the refusal message names the append form accurately.
+                    // (We can't push a char back onto the iterator, but for messaging it's
+                    // enough to report `>` either way; `>>` is a nicety.)
+                    return ">"
+                default: break
+                }
+            case .single:
+                if c == "'" { state = .none }
+            case .double:
+                switch c {
+                case "\"": state = .none
+                case "\\": _ = iterator.next()
+                default: break
+                }
+            }
         }
         return nil
     }
@@ -85,15 +136,18 @@ struct GhTool: AgentTool {
         auth-status snapshot below in the loop. \
         Args are passed through `/bin/bash -l -c "exec gh <args>"` so gh's exit status is the \
         literal return value (no intermediate shell layer). \
-        ALLOWED shell features: `~` expansion, `$VAR` expansion, pipes (`|`), redirection \
-        (`>`, `>>`, `<`, `2>`). \
-        BLOCKED (call will be refused before bash sees it): `;`, `&&`, `||`, `<<<`, backticks, \
-        `$(...)` command substitution, `>(...)`/`<(...)` process substitution, `${...}` parameter \
-        expansion (use bare `$VAR` if you need expansion), newlines/carriage returns, NUL bytes, \
-        and any bare `&` that would background or chain commands (URL-query `&` between word \
-        characters is still allowed). The block is naive substring matching — it triggers even \
-        inside quoted strings, so prefer plain identifiers. If you need to chain commands, issue \
-        separate gh calls instead. \
+        ALLOWED shell features: `~` expansion and `$VAR` expansion (bare `$VAR` form only). \
+        NOT available — these are refused before bash sees them: shell pipes (`|`), file \
+        redirection (`>`, `>>`, `<`, `2>`, `<<<`), command chaining (`;`, `&&`, `||`, bare `&`), \
+        command/process substitution (backticks, `$(...)`, `>(...)`, `<(...)`), `${...}` \
+        parameter expansion, newlines/carriage returns, and NUL bytes. \
+        To filter or reshape gh's output, use gh's built-in `--jq` flag (full jq syntax, e.g. \
+        `--jq '.[] | .number'` or `--json title,number --jq '.[] | select(.title|test("fix"))'`) \
+        — the `|` inside a quoted `--jq` program is fine; it's only the *shell* `|` that's \
+        refused. gh writes errors to stderr, which is already captured in the returned output, \
+        so `2>&1` is unnecessary. If you genuinely need a shell pipeline or redirection, use the \
+        `bash` tool instead (the safety monitor sees the whole command there). To run two gh \
+        commands, issue them as separate gh calls. \
         Non-zero exit from `gh` is reported as a tool-call FAILURE — retrying after a failure is \
         a legitimate response, not a duplicate operation. \
         You ARE authenticated to GitHub via `gh` — the `gh auth status` snapshot below was \
@@ -159,11 +213,14 @@ struct GhTool: AgentTool {
             }
             return .failure("""
                 Refused: gh args contain forbidden shell sequence '\(displayed)'. \
-                The gh tool allows ~ expansion, $VAR expansion, pipes, and redirection, but \
-                blocks ; && || <<< backticks $(...), newlines/carriage returns, and any bare `&` \
-                used to background or chain commands — including when they appear inside quoted \
-                strings. Reformulate the call without these sequences (e.g. run two gh calls \
-                separately instead of chaining with ;).
+                The gh tool allows only `~` and bare `$VAR` expansion — no shell pipes (`|`), \
+                no file redirection (`>` `>>` `<` `2>` `<<<`), no chaining (`;` `&&` `||` `&`), \
+                no command/process substitution (backticks `$(...)` `>(...)` `<(...)`), no \
+                `${...}`, and no newlines. To filter gh output use gh's `--jq` flag (jq syntax, \
+                e.g. `--jq '.[] | .number'`) — the `|` inside a quoted `--jq` program is fine; \
+                gh's stderr is already in the output, so `2>&1` is unneeded. For a genuine \
+                pipeline or redirection use the `bash` tool instead; to run two gh commands, \
+                issue them as separate gh calls.
                 """)
         }
 

@@ -5,16 +5,18 @@ import Foundation
 /// Tests for `GhTool.firstForbiddenSequence(in:)` — the pre-flight filter that rejects
 /// shell metasequences before the args reach `/bin/bash -l -c "exec gh <args>"`.
 ///
-/// Allowed: `~`, `$VAR`, pipes (`|`), redirection (`>`, `>>`, `<`, `2>`, `<<` heredoc),
-/// `&` between word characters (URL query strings), quoted strings with no other forbidden tokens.
-/// Blocked: `;`, `&&`, `||`, `<<<`, backticks, `$(...)`, newlines, carriage returns, and any
-/// bare `&` used to background or chain commands (`& cmd`, trailing `&`, leading `& cmd`).
+/// Allowed: `~`, `$VAR`, `&` between word characters (URL query strings), and quoted strings
+/// (single or double) whose contents may freely contain `|` / `<` / `>` — that's how `--jq`
+/// programs and `--body` text get through.
+/// Blocked: shell pipes (`|`), file redirection (`>`, `>>`, `<`, `2>`, `<<`, `<<<`), chaining
+/// (`;`, `&&`, `||`, bare `&`), command/process substitution (backticks, `$(...)`, `>(...)`,
+/// `<(...)`), `${...}`, newlines, carriage returns, NUL.
 ///
-/// The substring-list portion of the filter is naive substring matching — it does NOT
-/// understand shell quoting. Tests document that as a deliberate trade-off (false positives
-/// are fine; false negatives are not). The `&` check is more careful: it rejects an `&` only
-/// when it's adjacent to whitespace (i.e., functioning as a command separator), so URL queries
-/// like `?a=1&b=2` keep working.
+/// The substring-list portion (`;`, `&&`, backticks, …) is naive substring matching — it does
+/// NOT understand shell quoting, so a `;` inside a quoted `--body` is still refused; that's a
+/// deliberate trade-off (false positives are fine; false negatives are not). The `|`/`<`/`>`
+/// check IS quote-aware (so quoted `--jq` programs work) and the `&` check rejects an `&` only
+/// when it's adjacent to whitespace, so URL queries like `?a=1&b=2` keep working.
 @Suite("GhTool args filter")
 struct GhToolArgsFilterTests {
 
@@ -40,25 +42,36 @@ struct GhToolArgsFilterTests {
         #expect(GhTool.firstForbiddenSequence(in: "issue view $ISSUE_NUMBER --json title") == nil)
     }
 
-    @Test("pipes are allowed")
-    func pipesAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "issue list --json number,title | jq .") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "repo list | grep foo | head -5") == nil)
+    @Test("unquoted shell pipes are blocked")
+    func pipesBlocked() {
+        #expect(GhTool.firstForbiddenSequence(in: "issue list --json number,title | jq .") == "|")
+        #expect(GhTool.firstForbiddenSequence(in: "repo list | grep foo | head -5") == "|")
     }
 
-    @Test("redirection is allowed")
-    func redirectionAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo > /tmp/out.json") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo >> /tmp/out.log") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar < /tmp/payload.json") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo 2> /tmp/err") == nil)
+    @Test("file redirection is blocked")
+    func redirectionBlocked() {
+        #expect(GhTool.firstForbiddenSequence(in: "repo view foo > /tmp/out.json") == ">")
+        #expect(GhTool.firstForbiddenSequence(in: "repo view foo >> /tmp/out.log") == ">")
+        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar < /tmp/payload.json") == "<")
+        #expect(GhTool.firstForbiddenSequence(in: "repo view foo 2> /tmp/err") == ">")
+        // `2>&1` is unnecessary (gh's stderr is already captured) and refused like any `>`.
+        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar 2>&1") == ">")
     }
 
-    @Test("`<<` heredoc start is allowed; only `<<<` here-strings are blocked")
-    func heredocAllowed() {
-        // Heredoc syntax requires multi-line content but a single-line `<<TAG` is harmless.
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar <<EOF") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo --input - <<JSON") == nil)
+    @Test("heredoc / here-string redirections are blocked")
+    func heredocBlocked() {
+        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar <<EOF") == "<")
+        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo --input - <<JSON") == "<")
+    }
+
+    @Test("`|` / `<` / `>` inside quoted args are allowed (--jq programs, --body text)")
+    func quotedPipeAndRedirectAllowed() {
+        #expect(GhTool.firstForbiddenSequence(in: "issue list --json number,title --jq '.[] | .number'") == nil)
+        #expect(GhTool.firstForbiddenSequence(in: "pr list --json title --jq 'map(select(.title | test(\"fix\")))'") == nil)
+        #expect(GhTool.firstForbiddenSequence(in: "issue create --title \"a > b is true\"") == nil)
+        #expect(GhTool.firstForbiddenSequence(in: "issue create --body 'use cmd | pipe in your terminal'") == nil)
+        // A `|` after the closing quote is still caught.
+        #expect(GhTool.firstForbiddenSequence(in: "issue list --jq '.[].number' | head") == "|")
     }
 
     @Test("trailing `&` (background) is now blocked as a chaining vector")
@@ -198,13 +211,15 @@ struct GhToolArgsFilterTests {
 
     @Test("`||` is reported as `||`, not as `|`")
     func doublePipeNotReportedAsSingle() {
-        // `|` (pipe) is allowed; `||` (logical OR) is blocked. Confirm the longer match.
+        // Both `|` and `||` are blocked, but `||` is on the naive substring list (checked
+        // first) so it's reported by its full form rather than as a lone `|`.
         #expect(GhTool.firstForbiddenSequence(in: "foo || bar") == "||")
     }
 
     @Test("`<<<` is reported as `<<<`, not `<<` or `<`")
     func tripleAngleNotReportedAsShorter() {
-        // `<<` (heredoc) is allowed; `<<<` (here-string) is blocked.
+        // All of `<`, `<<`, `<<<` are blocked, but `<<<` is on the naive substring list
+        // (checked first) so it's reported by its full form.
         #expect(GhTool.firstForbiddenSequence(in: "cmd <<< payload") == "<<<")
     }
 
