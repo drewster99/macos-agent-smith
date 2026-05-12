@@ -115,6 +115,15 @@ private struct TaskSectionHeader: View {
     }
 }
 
+/// Verb for the "run this task now" affordance — "Resume" reads better for a task that
+/// already started once (`paused` / `interrupted`); "Run" for one that never has.
+func runActionTitle(for status: AgentTask.Status) -> String {
+    switch status {
+    case .paused, .interrupted: return "Resume"
+    default: return "Run"
+    }
+}
+
 // MARK: - Timestamp helpers
 
 private func taskTimestamp(_ date: Date) -> String {
@@ -272,7 +281,20 @@ struct TaskRowButton: View {
         case .awaitingReview:
             EmptyView()
 
-        case .pending, .paused, .interrupted, .scheduled:
+        case .pending, .paused, .interrupted:
+            Button(action: { Task { await viewModel.startTask(task) } }, label: {
+                Label(runActionTitle(for: task.status), systemImage: "play.fill")
+            })
+            Divider()
+            Button(action: { Task { await viewModel.archiveTask(id: task.id) } }, label: {
+                Label("Archive", systemImage: "archivebox")
+            })
+            Divider()
+            Button(role: .destructive, action: { Task { await viewModel.deleteTask(id: task.id) } }, label: {
+                Label("Delete", systemImage: "trash")
+            })
+
+        case .scheduled:
             Button(action: { Task { await viewModel.archiveTask(id: task.id) } }, label: {
                 Label("Archive", systemImage: "archivebox")
             })
@@ -357,8 +379,21 @@ private struct TaskRow: View {
 
             if style == .active && task.status == .running {
                 runningInlineControls()
+            } else if style == .active && task.status.isRunnable {
+                runInlineControl()
             }
         }
+    }
+
+    @ViewBuilder
+    private func runInlineControl() -> some View {
+        Button(action: { Task { await viewModel.startTask(task) } }, label: {
+            Image(systemName: "play.fill")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+        })
+        .buttonStyle(.plain)
+        .help(runActionTitle(for: task.status))
     }
 
     /// Total attachments referenced anywhere on the task — description, every update,

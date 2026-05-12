@@ -1024,6 +1024,23 @@ final class AppViewModel {
         )
     }
 
+    /// Manually starts (or resumes) a pending / paused / interrupted task without waiting for
+    /// Smith to pick it up — drives the same `run_task` path the orchestrator uses. Refuses
+    /// when another task is mid-run or awaiting review, mirroring the `run_task` tool's guardrails.
+    func startTask(_ task: AgentTask) async {
+        guard task.status.isRunnable else {
+            taskActionError = "This task can't be run right now (status: \(task.status.rawValue))."
+            return
+        }
+        if let blocker = tasks.first(where: { $0.id != task.id && ($0.status == .running || $0.status == .awaitingReview) }) {
+            taskActionError = blocker.status == .running
+                ? "Task “\(blocker.title)” is still running. Stop it before starting another task."
+                : "Task “\(blocker.title)” is awaiting review. Resolve it before starting another task."
+            return
+        }
+        await runtime?.restartForNewTask(taskID: task.id)
+    }
+
     func updatePollInterval(for role: AgentRole, interval: TimeInterval) async {
         agentPollIntervals[role] = interval
         guard let runtime else { return }

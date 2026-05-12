@@ -9,7 +9,7 @@ import AgentSmithKit
 /// - `failed`: the error first, then optional summary, then result/commentary.
 struct TaskDetailWindow: View {
     let taskID: UUID
-    var viewModel: AppViewModel
+    @Bindable var viewModel: AppViewModel
     /// Used to resolve the owning session for a prior-task link so the new detail
     /// window opens scoped to that task's actual session, not this window's session.
     var sessionManager: SessionManager
@@ -80,6 +80,12 @@ struct TaskDetailWindow: View {
             // next runloop tick to avoid "Modifying state during view update" warnings.
             DispatchQueue.main.async { syncTask() }
         }
+        .alert(
+            "Cannot Run Task",
+            isPresented: $viewModel.hasTaskActionError,
+            actions: { Button("OK") { viewModel.taskActionError = nil } },
+            message: { Text(viewModel.taskActionError ?? "") }
+        )
     }
 
     // MARK: - Body
@@ -114,6 +120,15 @@ struct TaskDetailWindow: View {
                 .font(.title.bold())
                 .textSelection(.enabled)
             Spacer()
+            if task.status.isRunnable {
+                Button {
+                    Task { await viewModel.startTask(task) }
+                } label: {
+                    Label(runActionTitle(for: task.status), systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .help("Start this task now")
+            }
             Button("Done") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }
