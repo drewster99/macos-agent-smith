@@ -383,8 +383,11 @@ actor SecurityEvaluator {
             // Handle ABORT — trigger system-wide shutdown. Uses verdictSummary so
             // ABORT is detected even when the model prefixes the verdict with preamble.
             // Case-sensitive: ABORT must be ALL-CAPS to count.
-            if !disposition.approved, let msg = disposition.message,
+            if !disposition.approved,
                Self.verdictSummary(from: responseText).hasPrefix("ABORT") {
+                // A bare `ABORT` (no trailing reason) parses to a nil message, but it
+                // must still trigger the system-wide abort.
+                let msg = disposition.message ?? "(no reason given)"
                 await postToChannel(ChannelMessage(
                     sender: .system,
                     content: "Security review: ABORT — \(msg)",

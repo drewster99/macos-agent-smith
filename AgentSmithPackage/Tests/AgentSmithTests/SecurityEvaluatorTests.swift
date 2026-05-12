@@ -152,6 +152,25 @@ struct SecurityEvaluatorTests {
         #expect(calls.first?.role == .jones)
     }
 
+    @Test("bare ABORT with no reason still triggers the abort closure")
+    func bareAbortTriggersAbort() async {
+        let provider = MockLLMProvider(responses: [textResponse("ABORT")])
+        let channel = MessageChannel()
+        let abortInvocations = AbortRecorder()
+        let evaluator = SecurityEvaluator(
+            provider: provider,
+            systemPrompt: "test",
+            channel: channel,
+            abort: { reason, role in await abortInvocations.record(reason: reason, role: role) },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
+        )
+        _ = await evaluate(evaluator)
+        let calls = await abortInvocations.calls
+        #expect(calls.count == 1)
+        #expect(calls.first?.role == .jones)
+    }
+
     @Test("ABORT after preamble still triggers the abort closure")
     func abortWithPreambleTriggersAbort() async {
         let response = """
