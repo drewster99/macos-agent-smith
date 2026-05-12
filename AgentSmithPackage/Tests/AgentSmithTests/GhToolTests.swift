@@ -286,7 +286,10 @@ struct GhToolArgsFilterTests {
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
-            memoryStore: MemoryStore(engine: SemanticSearchEngine())
+            memoryStore: MemoryStore(engine: SemanticSearchEngine()),
+            setToolExecutionStatus: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
         )
     }
 }

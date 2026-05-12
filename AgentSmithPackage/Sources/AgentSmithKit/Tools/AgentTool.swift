@@ -273,18 +273,20 @@ public struct ToolContext: Sendable {
         autoAdvanceEnabled: @escaping @Sendable () async -> Bool = { true },
         recordFileRead: @escaping @Sendable (String) -> Void = { _ in },
         hasFileBeenRead: @escaping @Sendable (String) -> Bool = { _ in false },
-        // No silent no-op defaults: every production code path wires these through to the
-        // shared ToolExecutionTracker. A missing wiring is a programming error — surface
-        // it via fatalError so it can't pass tests with a no-op stub. Tests that exercise
-        // the tracker-aware code paths MUST pass real closures.
+        // Every production code path wires these through to the shared ToolExecutionTracker.
+        // A missing wiring is a programming error — `assertionFailure` surfaces it loudly in
+        // debug/tests, but a release build degrades (the boolean queries return `false`, the
+        // neutral "outcome not yet recorded" state) rather than crashing.
         setToolExecutionStatus: @escaping @Sendable (String, Bool) async -> Void = { _, _ in
-            fatalError("ToolContext.setToolExecutionStatus was not configured — wire it through to a ToolExecutionTracker.")
+            assertionFailure("ToolContext.setToolExecutionStatus was not configured — wire it through to a ToolExecutionTracker.")
         },
         hasToolSucceeded: @escaping @Sendable (String) async -> Bool = { _ in
-            fatalError("ToolContext.hasToolSucceeded was not configured — wire it through to a ToolExecutionTracker.")
+            assertionFailure("ToolContext.hasToolSucceeded was not configured — wire it through to a ToolExecutionTracker.")
+            return false
         },
         hasToolFailed: @escaping @Sendable (String) async -> Bool = { _ in
-            fatalError("ToolContext.hasToolFailed was not configured — wire it through to a ToolExecutionTracker.")
+            assertionFailure("ToolContext.hasToolFailed was not configured — wire it through to a ToolExecutionTracker.")
+            return false
         },
         resolveAttachments: @escaping @Sendable ([String]) async -> (resolved: [Attachment], rejected: [String]) = { _ in ([], []) },
         ingestAttachmentFile: @escaping @Sendable (String) async -> (attachment: Attachment?, error: String?) = { _ in

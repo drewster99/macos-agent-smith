@@ -413,7 +413,9 @@ struct SecurityEvaluatorTests {
             provider: provider,
             systemPrompt: "sys",
             channel: channel,
-            abort: { _, _ in }
+            abort: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
         )
 
         _ = await evaluator.evaluate(
@@ -464,7 +466,9 @@ struct SecurityEvaluatorTests {
             provider: provider,
             systemPrompt: "sys",
             channel: channel,
-            abort: { _, _ in }
+            abort: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
         )
 
         let params = """
@@ -502,7 +506,9 @@ struct SecurityEvaluatorTests {
             provider: provider,
             systemPrompt: "sys",
             channel: channel,
-            abort: { _, _ in }
+            abort: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
         )
 
         _ = await evaluator.evaluate(

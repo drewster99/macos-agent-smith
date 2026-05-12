@@ -39,9 +39,10 @@ enum TestToolContext {
     /// needs by passing a custom `taskStore`, `channel`, or `fileReadTracker`.
     ///
     /// Note: `setToolExecutionStatus`, `hasToolSucceeded`, and `hasToolFailed` are wired to
-    /// no-op stubs (returning `false` for the boolean queries) — the production defaults are
-    /// `fatalError(...)` to surface unwired callers, but tests of pure-logic tools don't
-    /// exercise that path. If you're testing a tool that does, supply real closures.
+    /// no-op stubs (returning `false` for the boolean queries) — the production defaults
+    /// `assertionFailure(...)` (then degrade to `false`) to surface unwired callers, but
+    /// tests of pure-logic tools don't exercise that path. If you're testing a tool that
+    /// does, supply real closures.
     static func make(
         agentID: UUID = UUID(),
         agentRole: AgentRole = .brown,

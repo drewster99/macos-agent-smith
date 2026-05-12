@@ -23,7 +23,10 @@ struct AgentActorTests {
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
-            memoryStore: MemoryStore(engine: Self.sharedEngine)
+            memoryStore: MemoryStore(engine: Self.sharedEngine),
+            setToolExecutionStatus: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
         )
     }
 

@@ -186,16 +186,18 @@ actor SecurityEvaluator {
         configuration: ModelConfiguration? = nil,
         providerType: String = "",
         sessionID: UUID? = nil,
-        // No silent no-op defaults: forgetting to wire these causes Jones to misclassify
-        // failed-then-retried calls as duplicates (the original 394bbbc bug). A fatalError
-        // default surfaces the wiring mistake immediately on first evaluation rather than
-        // producing wrong-but-plausible verdicts. Production callers (OrchestrationRuntime)
-        // and tests that exercise this code path MUST pass real closures.
+        // Forgetting to wire these causes Jones to misclassify failed-then-retried calls as
+        // duplicates (the original 394bbbc bug). `assertionFailure` surfaces the wiring
+        // mistake loudly in debug/tests; a release build degrades to `false` (the neutral
+        // "no recorded outcome" state) rather than crashing. Production callers
+        // (OrchestrationRuntime) and tests exercising this path MUST pass real closures.
         hasToolSucceeded: @escaping @Sendable (String) async -> Bool = { _ in
-            fatalError("SecurityEvaluator.hasToolSucceeded was not configured — wire it through to a ToolExecutionTracker before evaluating tools.")
+            assertionFailure("SecurityEvaluator.hasToolSucceeded was not configured — wire it through to a ToolExecutionTracker before evaluating tools.")
+            return false
         },
         hasToolFailed: @escaping @Sendable (String) async -> Bool = { _ in
-            fatalError("SecurityEvaluator.hasToolFailed was not configured — wire it through to a ToolExecutionTracker before evaluating tools.")
+            assertionFailure("SecurityEvaluator.hasToolFailed was not configured — wire it through to a ToolExecutionTracker before evaluating tools.")
+            return false
         }
     ) {
         self.provider = provider
