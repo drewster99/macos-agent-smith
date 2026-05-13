@@ -314,8 +314,9 @@ struct TaskRowButton: View {
 /// Composite key for the task-cost `.task(id:)` modifier. Re-firing must happen
 /// when either the task ID changes (different row) or the task transitions into
 /// `.completed` (so a task the user watched run to completion gets its cost loaded
-/// after status flips, not just on the initial appear).
-private struct TaskCostLoaderKey: Hashable {
+/// after status flips, not just on the initial appear). Shared by the sidebar row
+/// and the detail window so both surfaces pick up cost the moment a task finishes.
+struct TaskCostLoaderKey: Hashable {
     let taskID: UUID
     let isCompleted: Bool
 }
@@ -355,9 +356,14 @@ private struct TaskRow: View {
         // `.completed` — keying on `task.id` alone would only fire once on row
         // appear, before the task had reached completion, and the `.completed`
         // guard inside would short-circuit the load forever.
+        //
+        // `force: true` is required because the detail window may have already
+        // populated the cache with a partial value computed while the task was
+        // still running. Without an evict-and-reload, that partial value would
+        // stick on the list row even after the task finishes.
         .task(id: TaskCostLoaderKey(taskID: task.id, isCompleted: task.status == .completed)) {
-            if task.status == .completed, viewModel.cachedTaskCost(task.id) == nil {
-                await viewModel.loadTaskCost(task.id)
+            if task.status == .completed {
+                await viewModel.loadTaskCost(task.id, force: true)
             }
         }
     }

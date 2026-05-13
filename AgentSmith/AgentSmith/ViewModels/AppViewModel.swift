@@ -1408,8 +1408,16 @@ final class AppViewModel {
     /// Loads and caches the total estimated cost for a single task by aggregating
     /// its `UsageRecord`s from the shared `UsageStore`. Safe to call multiple
     /// times for the same ID — concurrent calls collapse to a single fetch.
-    func loadTaskCost(_ taskID: UUID) async {
-        if taskCostCache[taskID] != nil { return }
+    ///
+    /// Pass `force: true` to evict the existing cache entry before refetching.
+    /// Use that on the `.running → .completed` transition so the detail view
+    /// doesn't get stuck on a partial cost computed mid-run.
+    func loadTaskCost(_ taskID: UUID, force: Bool = false) async {
+        if force {
+            taskCostCache.removeValue(forKey: taskID)
+        } else if taskCostCache[taskID] != nil {
+            return
+        }
         if taskCostInFlight.contains(taskID) { return }
         taskCostInFlight.insert(taskID)
         let records = await shared.usageStore.records(for: taskID)
@@ -1443,8 +1451,14 @@ final class AppViewModel {
         taskTokenCache[taskID]
     }
 
-    func loadTaskTokens(_ taskID: UUID) async {
-        if taskTokenCache[taskID] != nil { return }
+    /// Same caching model as `loadTaskCost(_:force:)`. Pass `force: true` to
+    /// drop a stale partial computed while the task was still running.
+    func loadTaskTokens(_ taskID: UUID, force: Bool = false) async {
+        if force {
+            taskTokenCache.removeValue(forKey: taskID)
+        } else if taskTokenCache[taskID] != nil {
+            return
+        }
         let records = await shared.usageStore.records(for: taskID)
         var totals = TaskTokenTotals()
         for r in records {

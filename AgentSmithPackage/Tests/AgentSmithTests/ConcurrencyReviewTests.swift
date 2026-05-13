@@ -287,13 +287,23 @@ private actor AbortObserver {
 }
 
 private func makeRuntime() -> OrchestrationRuntime {
-    OrchestrationRuntime(
+    // Sandboxed PersistenceManager — `PersistenceManager()` resolves to
+    // `~/Library/Application Support/AgentSmith/`, and any code path that calls
+    // `usageStore.append` from within the runtime would schedule a flush that
+    // overwrites the user's real usage records. Today this test never appends,
+    // but routing through `init(testingRoot:)` keeps the failure mode closed if
+    // someone later adds a code path that does.
+    let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("agent-smith-concurrency-tests", isDirectory: true)
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+    return OrchestrationRuntime(
         providers: [:],
         configurations: [:],
         providerAPITypes: [:],
         agentTuning: [:],
         semanticSearchEngine: SemanticSearchEngine(),
-        usageStore: UsageStore(persistence: PersistenceManager()),
+        usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
         autoAdvanceEnabled: true,
         autoRunInterruptedTasks: false,
         memoryStore: nil

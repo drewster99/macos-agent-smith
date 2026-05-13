@@ -109,16 +109,13 @@ struct TaskDetailWindow: View {
         }
         .frame(minWidth: 600, minHeight: 400)
         .navigationTitle(task.title)
-        // One-shot load of this task's cost + token totals. The caches live on
-        // `AppViewModel` and are populated lazily — re-opening this window after
-        // the first load reads from cache without hitting the UsageStore.
-        .task(id: task.id) {
-            if viewModel.cachedTaskCost(task.id) == nil {
-                await viewModel.loadTaskCost(task.id)
-            }
-            if viewModel.cachedTaskTokens(task.id) == nil {
-                await viewModel.loadTaskTokens(task.id)
-            }
+        // Lazy-load this task's cost + token totals. The id includes
+        // `task.status == .completed` so the loader re-fires when a task we're
+        // watching transitions to completed. `force: true` evicts the in-progress
+        // partial values cached on first appear so the final cost replaces them.
+        .task(id: TaskCostLoaderKey(taskID: task.id, isCompleted: task.status == .completed)) {
+            await viewModel.loadTaskCost(task.id, force: true)
+            await viewModel.loadTaskTokens(task.id, force: true)
         }
     }
 
