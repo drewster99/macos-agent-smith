@@ -1094,7 +1094,7 @@ public actor AgentActor {
 
             // Text-only response — record and wait for new input
             if hasText, let text = response.text {
-                conversationHistory.append(LLMMessage(role: .assistant, text: text))
+                conversationHistory.append(LLMMessage(role: .assistant, text: text, reasoning: response.reasoning))
                 pushLiveContext()
 
                 if configuration.suppressesRawTextToChannel, !implicitMessageSent {
@@ -1154,11 +1154,15 @@ public actor AgentActor {
         }
 
         // Record the assistant message with only the calls we will execute, so that
-        // subsequent tool results have a matching request in history.
+        // subsequent tool results have a matching request in history. Preserve
+        // `response.reasoning` on the message — providers that require thinking-mode
+        // models to round-trip `reasoning_content` (DeepSeek V4 Pro) read it from
+        // the assistant message at encode time, gated on `replayReasoningContent`.
         if let text = response.text, !text.isEmpty {
             conversationHistory.append(LLMMessage(
                 role: .assistant,
-                content: .mixed(text: text, toolCalls: callsToExecute)
+                content: .mixed(text: text, toolCalls: callsToExecute),
+                reasoning: response.reasoning
             ))
             // Note: do NOT call appendDiscardedTextWarning() here. Inserting a user message
             // between the assistant tool_use and the tool_result messages breaks the Anthropic
@@ -1167,7 +1171,8 @@ public actor AgentActor {
         } else {
             conversationHistory.append(LLMMessage(
                 role: .assistant,
-                content: .toolCalls(callsToExecute)
+                content: .toolCalls(callsToExecute),
+                reasoning: response.reasoning
             ))
         }
 
