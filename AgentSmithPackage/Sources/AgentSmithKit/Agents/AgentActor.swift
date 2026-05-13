@@ -73,6 +73,16 @@ public actor AgentActor {
     private var consecutiveContextOverflows = 0
     private static let maxContextOverflowRetries = 3
 
+    /// Tracks consecutive prune-driven rebuilds without an intervening successful
+    /// LLM turn. The run loop calls `pruneHistoryIfNeeded` at the top of every
+    /// iteration; if the rebuilt context is still over the threshold, the next
+    /// iteration triggers another rebuild — without this guard a misconfigured
+    /// model or oversized task envelope put the loop in a tight cycle observed in
+    /// production posting roughly a thousand "Context rebuilt..." banners per
+    /// second. Reset on every successful LLM response.
+    private var consecutivePruneRebuilds = 0
+    private static let maxConsecutivePruneRebuilds = 3
+
     /// Tracks consecutive LLM responses that contain only text (no tool calls).
     /// When this exceeds the role-specific threshold, the agent is likely
     /// degenerate (e.g. repetition loop) and should be terminated.
@@ -720,6 +730,7 @@ public actor AgentActor {
 
                 consecutiveErrors = 0
                 consecutiveContextOverflows = 0
+                consecutivePruneRebuilds = 0
                 lastUsageStale = false
                 let inputDelta = Array(conversationHistory[lastTurnMessageCount...])
                 lastTurnMessageCount = conversationHistory.count
@@ -845,9 +856,31 @@ public actor AgentActor {
                     Self.maxBackoffSeconds
                 )
 
-                // Suppress early transient errors (e.g. 429 rate limits) from the channel.
-                // Only start showing errors after 5 consecutive failures.
-                if consecutiveErrors >= 5 {
+                // Surface persistent HTTP 4xx errors (anything in 4xx except 408 timeouts
+                // and 429 rate limits) on the first occurrence. These are config/payload
+                // problems that retrying won't fix — e.g. invalid API key, unsupported
+                // parameter for the model, DeepSeek demanding `reasoning_content` be
+                // replayed. Waiting for 5 consecutive failures means the user can sit
+                // through ~45 seconds of silent backoff before learning anything is
+                // wrong, while their bill ticks up on every attempt.
+                //
+                // Standard suppression (>=5 consecutive errors) still applies to
+                // genuinely transient classes (429, 408, 5xx, network) where the next
+                // attempt is reasonably expected to succeed.
+                let isPersistentClientError: Bool = {
+                    guard let providerError = error as? LLMProviderError,
+                          case .httpError(let statusCode, _, _) = providerError else {
+                        return false
+                    }
+                    return (400..<500).contains(statusCode)
+                        && statusCode != 429
+                        && statusCode != 408
+                }()
+
+                let shouldSurfaceNow = consecutiveErrors >= 5
+                    || (isPersistentClientError && consecutiveErrors == 1)
+
+                if shouldSurfaceNow {
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)",
@@ -2369,6 +2402,32 @@ public actor AgentActor {
     }
 
 
+    /// Estimated-token threshold above which `pruneHistoryIfNeeded` triggers a rebuild
+    /// or sliding-window prune. 80% of the input budget to leave headroom for estimator
+    /// inaccuracy.
+    ///
+    /// The output reservation is clamped to at most half the context window before
+    /// being subtracted. Some user-saved configs land in a malformed state (e.g. an
+    /// LM Studio config observed in production carried `maxOutputTokens=131072` with
+    /// `maxContextTokens=64000`); without the clamp, `contextLimit - maxTokens` goes
+    /// negative and the threshold collapses below the empty-conversation baseline,
+    /// putting the rebuild loop in a tight cycle.
+    private var pruneThresholdTokens: Int {
+        let contextLimit = configuration.llmConfig.contextWindowSize
+        let outputReservation = min(configuration.llmConfig.maxTokens, contextLimit / 2)
+        let inputBudget = contextLimit - outputReservation
+        return inputBudget * 4 / 5
+    }
+
+    /// Input-budget companion to `pruneThresholdTokens`. Used by the non-Brown
+    /// sliding-window prune which needs the full input budget (not just 80% of it)
+    /// to size its kept window.
+    private var inputBudgetTokens: Int {
+        let contextLimit = configuration.llmConfig.contextWindowSize
+        let outputReservation = min(configuration.llmConfig.maxTokens, contextLimit / 2)
+        return contextLimit - outputReservation
+    }
+
     /// Prunes conversation history when approaching the context window limit.
     ///
     /// The available input budget is `contextWindowSize - maxTokens` (the output reservation).
@@ -2411,16 +2470,7 @@ public actor AgentActor {
             } + apiOverheadChars) / 3
         }
 
-        // The input budget is the context window minus the output token reservation.
-        // Without this subtraction, pruning triggers far too late for models where
-        // maxTokens is a large fraction of contextWindowSize (e.g., deepseek-reasoner
-        // with 65K output in a 131K window).
-        let contextLimit = configuration.llmConfig.contextWindowSize
-        // Floor at 25% of context window to handle misconfigured maxTokens gracefully.
-        let inputBudget = max(contextLimit / 4, contextLimit - configuration.llmConfig.maxTokens)
-        let pruneThreshold = inputBudget * 4 / 5
-
-        guard estimatedTokens > pruneThreshold else { return }
+        guard estimatedTokens > pruneThresholdTokens else { return }
 
         // Capture last known input tokens before reset for analytics.
         pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
@@ -2431,12 +2481,29 @@ public actor AgentActor {
             if !rebuilt {
                 // No running task — fall back to aggressive prune as a last resort.
                 forceAggressivePrune()
+                return
+            }
+
+            // Rebuild-loop guard: increment the counter for every prune-driven rebuild
+            // and terminate if it exceeds the bound. The counter resets on a successful
+            // LLM turn — see the reset alongside `consecutiveErrors` /
+            // `consecutiveContextOverflows` in `runLoop`. Without this guard, a rebuilt
+            // context that still exceeds the threshold puts the loop in a tight cycle.
+            consecutivePruneRebuilds += 1
+            if consecutivePruneRebuilds >= Self.maxConsecutivePruneRebuilds {
+                let roleName = configuration.role.displayName
+                await toolContext.post(ChannelMessage(
+                    sender: .system,
+                    content: "Agent \(roleName) stopped: context still exceeds the prune threshold after \(Self.maxConsecutivePruneRebuilds) rebuild attempts. The model's context window is too small for this task envelope (system prompt + tool definitions + memories + prior tasks + progress). Switch Brown to a model with a larger context window or trim the task description.",
+                    metadata: ["isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                ))
+                isRunning = false
             }
             return
         }
 
         // Non-Brown sliding-window prune (Smith doesn't use tool calls the same way).
-        pruneNonBrownHistory(inputBudget: inputBudget)
+        pruneNonBrownHistory(inputBudget: inputBudgetTokens)
     }
 
     /// Sliding-window prune for non-Brown agents. Keeps ~35% of recent messages.
@@ -2656,15 +2723,11 @@ public actor AgentActor {
         // would still exceed the prune threshold, drop the exchange. The task's progress
         // updates already capture what was accomplished.
         if !lastExchange.isEmpty {
-            let contextLimit = configuration.llmConfig.contextWindowSize
-            let inputBudget = max(contextLimit / 4, contextLimit - configuration.llmConfig.maxTokens)
-            let pruneThreshold = inputBudget * 4 / 5
-
             let baseChars = conversationHistory.reduce(0) { $0 + $1.estimatedCharacterCount }
             let exchangeChars = lastExchange.reduce(0) { $0 + $1.estimatedCharacterCount }
             let estimatedTokens = (baseChars + exchangeChars + apiOverheadChars) / 3
 
-            if estimatedTokens <= pruneThreshold {
+            if estimatedTokens <= pruneThresholdTokens {
                 conversationHistory.append(contentsOf: lastExchange)
             }
         }
