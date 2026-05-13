@@ -9,6 +9,10 @@ struct ModelConfigurationEditorView: View {
     let onDismiss: () -> Void
 
     @State private var name: String = ""
+    /// The auto-suggested name we last applied. While `name == autoSuggestedName` the
+    /// name field is "tracking" the provider+model and refreshes when either changes.
+    /// As soon as the user types something else, tracking stops until they re-match.
+    @State private var autoSuggestedName: String? = nil
     @State private var selectedProviderID: String = ""
     @State private var selectedModelID: String = ""
     @State private var temperature: Double = 0.7
@@ -52,6 +56,12 @@ struct ModelConfigurationEditorView: View {
         .padding(20)
         .frame(minWidth: 600, minHeight: 450)
         .onAppear { populateFromExisting() }
+        .onChange(of: selectedProviderID) { _, _ in
+            DispatchQueue.main.async { refreshAutoNameIfTracking() }
+        }
+        .onChange(of: selectedModelID) { _, _ in
+            DispatchQueue.main.async { refreshAutoNameIfTracking() }
+        }
     }
 
     // MARK: - Sections
@@ -360,20 +370,30 @@ struct ModelConfigurationEditorView: View {
         if let maxIn = model.maxInputTokens {
             maxContextTokens = maxIn
         }
-        // Auto-suggest a name when creating a new config and the user hasn't typed one yet.
-        if existingConfig == nil && name.isEmpty {
-            name = suggestedName(provider: selectedProviderID, model: model)
-        }
+        // Name auto-update is handled by .onChange(of: selectedModelID) → refreshAutoNameIfTracking().
     }
 
-    /// Builds a suggested configuration name from the provider and model display name.
-    private func suggestedName(provider providerID: String, model: ModelInfo) -> String {
-        let providerName = llmKit.providers.first { $0.id == providerID }?.name
-        let modelName = model.displayName
+    /// Computes the auto-suggested name for the currently selected provider+model.
+    /// Returns nil when the model field is empty (nothing to suggest yet).
+    private func currentSuggestedName() -> String? {
+        let providerName = llmKit.providers.first { $0.id == selectedProviderID }?.name
+        let modelDisplay = selectedModelInfo?.displayName ?? selectedModelID
+        guard !modelDisplay.isEmpty else { return nil }
         if let providerName, !providerName.isEmpty {
-            return "\(providerName) — \(modelName)"
+            return "\(providerName) — \(modelDisplay)"
         }
-        return modelName
+        return modelDisplay
+    }
+
+    /// If the user hasn't customized the name (it matches the last auto-suggestion or is
+    /// empty), refresh it for the current provider+model. Always advances the tracker so
+    /// the user can resume tracking by typing a name back to the new suggestion.
+    private func refreshAutoNameIfTracking() {
+        guard let newSuggested = currentSuggestedName() else { return }
+        if name.isEmpty || name == autoSuggestedName {
+            name = newSuggested
+        }
+        autoSuggestedName = newSuggested
     }
 
     private func populateFromExisting() {
@@ -388,6 +408,12 @@ struct ModelConfigurationEditorView: View {
         extendedCacheTTL = config.extendedCacheTTL
         useDefaultTemperature = config.useDefaultTemperature
         streaming = false
+        // If the loaded name still matches what we'd auto-suggest for this provider+model,
+        // treat it as untouched and let it track future provider/model changes. If it
+        // differs, the user customized it — leave the tracker nil so we don't overwrite.
+        if let suggested = currentSuggestedName(), suggested == name {
+            autoSuggestedName = suggested
+        }
     }
 
 
