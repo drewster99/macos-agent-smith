@@ -258,6 +258,17 @@ final class AppViewModel {
     private let scheduledWakesWriter: SerialPersistenceWriter<[ScheduledWake]>
     private let sessionStateWriter: SerialPersistenceWriter<SessionState>
 
+    // MARK: - Cost caches
+
+    /// Cached per-task cost totals. Entries are added lazily by `loadTaskCost(_:)`
+    /// after the first fetch and live for the duration of the session — task
+    /// `UsageRecord`s are append-only and a completed task's records are immutable.
+    private var taskCostCache: [UUID: Double] = [:]
+    /// Set of task IDs with an in-flight `loadTaskCost(_:)` fetch — used to
+    /// suppress duplicate async queries when SwiftUI re-renders the same row
+    /// before the first fetch returns.
+    private var taskCostInFlight: Set<UUID> = []
+
     init(session: Session, shared: SharedAppState) {
         self.session = session
         self.shared = shared
@@ -579,6 +590,7 @@ final class AppViewModel {
                 self.toolExecutingByRole.removeAll()
                 self.agentToolNames.removeAll()
                 self.inspectorStore.clearAll()
+                self.clearCostCaches()
                 self.runtime = nil
             }
         }
@@ -1083,6 +1095,7 @@ final class AppViewModel {
         toolExecutingByRole.removeAll()
         agentToolNames.removeAll()
         inspectorStore.clearAll()
+        clearCostCaches()
         channelStreamTask?.cancel()
         channelStreamTask = nil
         self.runtime = nil
@@ -1138,6 +1151,7 @@ final class AppViewModel {
         messages.removeAll()
         rebuildChannelLogIndexes()
         inspectorStore.clearAll()
+        clearCostCaches()
     }
 
     func restoreHistory() {
@@ -1353,5 +1367,101 @@ final class AppViewModel {
             return utType.preferredMIMEType ?? "application/octet-stream"
         }
         return "application/octet-stream"
+    }
+
+    // MARK: - Cost helpers
+
+    /// Estimated cost in USD for `role` over the **current session** (since the
+    /// last `OrchestrationRuntime.start()`). Walks `inspectorStore.turnsByRole[role]`
+    /// summing per-turn costs via the shared pricing snapshot. Memoized by turn
+    /// count — subsequent reads return the cached value until a new turn arrives,
+    /// so this is safe to call from a SwiftUI `body`.
+    func sessionCost(for role: AgentRole) -> Double {
+        // Caching by `turnsByRole[role].count` is unsafe — `AgentInspectorStore`
+        // caps the array at 100 turns and drops the oldest when over, so a count
+        // that stays at 100 hides changing contents. SwiftUI already gates the
+        // surrounding card's body re-eval on `turnsByRole[role]` actually changing,
+        // so a 100-iteration walk per change is cheap and always correct.
+        let turns = inspectorStore.turnsByRole[role] ?? []
+        let lookup = shared.pricingLookup
+        var total: Double = 0
+        for turn in turns {
+            guard let usage = turn.usage else { continue }
+            guard let pricing = lookup(turn.providerID, turn.modelID) else { continue }
+            let rates = pricing.effectiveRates(totalInputTokens: usage.inputTokens)
+            let uncachedInput = max(0, usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens)
+            total += Double(uncachedInput) * (rates.input ?? 0)
+            total += Double(usage.outputTokens) * (rates.output ?? 0)
+            total += Double(usage.cacheReadTokens) * (rates.cacheRead ?? 0)
+            total += Double(usage.cacheWriteTokens) * (rates.cacheWrite ?? 0)
+        }
+        return total
+    }
+
+    /// Returns the cached per-task cost if one is present, or `nil` if not yet fetched.
+    /// SwiftUI rows call this synchronously to render their chip; if `nil`, they
+    /// schedule `loadTaskCost(_:)` once to populate the cache.
+    func cachedTaskCost(_ taskID: UUID) -> Double? {
+        taskCostCache[taskID]
+    }
+
+    /// Loads and caches the total estimated cost for a single task by aggregating
+    /// its `UsageRecord`s from the shared `UsageStore`. Safe to call multiple
+    /// times for the same ID — concurrent calls collapse to a single fetch.
+    func loadTaskCost(_ taskID: UUID) async {
+        if taskCostCache[taskID] != nil { return }
+        if taskCostInFlight.contains(taskID) { return }
+        taskCostInFlight.insert(taskID)
+        let records = await shared.usageStore.records(for: taskID)
+        let lookup = shared.pricingLookup
+        var total: Double = 0
+        for r in records {
+            guard let pricing = lookup(r.providerID, r.modelID) else { continue }
+            let rates = pricing.effectiveRates(totalInputTokens: r.inputTokens)
+            let uncachedInput = max(0, r.inputTokens - r.cacheReadTokens - r.cacheWriteTokens)
+            total += Double(uncachedInput) * (rates.input ?? 0)
+            total += Double(r.outputTokens) * (rates.output ?? 0)
+            total += Double(r.cacheReadTokens) * (rates.cacheRead ?? 0)
+            total += Double(r.cacheWriteTokens) * (rates.cacheWrite ?? 0)
+        }
+        taskCostCache[taskID] = total
+        taskCostInFlight.remove(taskID)
+    }
+
+    /// Returns cached total token counts (input / output / cacheRead / cacheWrite)
+    /// for a task — used by the task detail view alongside cost. Same caching
+    /// model as `cachedTaskCost(_:)`: populated by `loadTaskTokens(_:)`.
+    struct TaskTokenTotals: Equatable {
+        var input: Int = 0
+        var output: Int = 0
+        var cacheRead: Int = 0
+        var cacheWrite: Int = 0
+    }
+    private var taskTokenCache: [UUID: TaskTokenTotals] = [:]
+
+    func cachedTaskTokens(_ taskID: UUID) -> TaskTokenTotals? {
+        taskTokenCache[taskID]
+    }
+
+    func loadTaskTokens(_ taskID: UUID) async {
+        if taskTokenCache[taskID] != nil { return }
+        let records = await shared.usageStore.records(for: taskID)
+        var totals = TaskTokenTotals()
+        for r in records {
+            totals.input += r.inputTokens
+            totals.output += r.outputTokens
+            totals.cacheRead += r.cacheReadTokens
+            totals.cacheWrite += r.cacheWriteTokens
+        }
+        taskTokenCache[taskID] = totals
+    }
+
+    /// Clears the per-task cost / token caches. Called from the same reset paths
+    /// that clear `inspectorStore` (session stop, abort, clear-log) so a subsequent
+    /// open of the same task ID refetches from the (possibly cleared) `UsageStore`.
+    func clearCostCaches() {
+        taskCostCache.removeAll(keepingCapacity: true)
+        taskCostInFlight.removeAll(keepingCapacity: true)
+        taskTokenCache.removeAll(keepingCapacity: true)
     }
 }

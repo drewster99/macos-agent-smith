@@ -69,6 +69,18 @@ struct SummarizerCard: View {
                 onShowConfig: { showingConfig = true }
             )
 
+            HStack(spacing: 6) {
+                Text("Session")
+                Spacer()
+                Text(String(format: "$%.2f", viewModel.sessionCost(for: .summarizer)))
+                    .monospacedDigit()
+            }
+            .font(AppFonts.inspectorLabel)
+            .foregroundStyle(.tertiary)
+            .padding(.leading, 28)
+            .padding(.trailing, 12)
+            .padding(.bottom, 6)
+
             if expanded {
                 SummarizerCardExpandedSections(
                     summarizerMessages: summarizerMessages,

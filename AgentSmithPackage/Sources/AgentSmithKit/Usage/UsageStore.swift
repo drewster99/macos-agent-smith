@@ -12,9 +12,19 @@ public actor UsageStore {
     private let persistence: PersistenceManager
     private var isDirty = false
     private var flushTask: Task<Void, Never>?
+    /// Fired (fire-and-forget) on every `append`. Subscribers maintain their own
+    /// incremental aggregates without re-scanning `records`. Set via
+    /// `setOnInsert(_:)`; multiple subscribers should compose into one closure.
+    private var onInsert: (@Sendable (UsageRecord) async -> Void)?
 
     public init(persistence: PersistenceManager) {
         self.persistence = persistence
+    }
+
+    /// Registers a fire-and-forget callback invoked after each `append`. Passing `nil`
+    /// clears the previously-registered subscriber.
+    public func setOnInsert(_ handler: (@Sendable (UsageRecord) async -> Void)?) {
+        onInsert = handler
     }
 
     /// Loads records from disk. Call once at startup.
@@ -31,6 +41,9 @@ public actor UsageStore {
     public func append(_ record: UsageRecord) {
         records.append(record)
         scheduleFlush()
+        if let handler = onInsert {
+            Task { await handler(record) }
+        }
     }
 
     /// Forces an immediate save. Call on app quit.

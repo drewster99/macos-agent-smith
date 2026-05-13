@@ -826,6 +826,7 @@ public actor AgentActor {
                     latencyMs: llmLatencyMs,
                     modelID: configuration.llmConfig.model,
                     providerType: configuration.providerAPIType.rawValue,
+                    providerID: configuration.llmConfig.providerID,
                     temperature: configuration.llmConfig.temperature,
                     maxOutputTokens: configuration.llmConfig.maxTokens,
                     thinkingBudget: configuration.llmConfig.thinkingBudget,
@@ -1217,7 +1218,11 @@ public actor AgentActor {
                     guard isRunning else { break }
                     let result: String
                     if let tool = tools.first(where: { $0.name == call.name }) {
-                        result = await directExecute(call, tool: tool)
+                        if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
+                            result = rejection
+                        } else {
+                            result = await directExecute(call, tool: tool)
+                        }
                     } else {
                         result = "Unknown tool: \(call.name)"
                         await toolContext.setToolExecutionStatus(call.id, false)
@@ -1252,9 +1257,17 @@ public actor AgentActor {
                 let parallelCount = segment.calls.count
 
                 var entries: [ParallelEntry] = []
+                // Calls rejected before Jones evaluation (unavailable for role / unknown tool).
+                // Tracked alongside evaluated results so we can keep tool_result ordering aligned
+                // with the assistant message's tool_use ordering.
+                var preRejections: [(batchIndex: Int, callID: String, result: String)] = []
                 for (batchIndex, call) in segment.calls.enumerated() {
                     guard isRunning else { break }
                     guard let tool = tools.first(where: { $0.name == call.name }) else { continue }
+                    if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
+                        preRejections.append((batchIndex: batchIndex, callID: call.id, result: rejection))
+                        continue
+                    }
                     let siblings = approvalSummaries.enumerated()
                         .compactMap { $0.offset != batchIndex ? $0.element : nil }
                         .joined(separator: "\n")
@@ -1383,7 +1396,20 @@ public actor AgentActor {
                     return collected
                 }
 
-                for r in results.sorted(by: { $0.batchIndex < $1.batchIndex }) {
+                struct MergedEntry {
+                    let batchIndex: Int
+                    let callID: String
+                    let result: String
+                    let executionMs: Int
+                }
+                var merged: [MergedEntry] = []
+                for r in results {
+                    merged.append(MergedEntry(batchIndex: r.batchIndex, callID: r.callID, result: r.result, executionMs: r.executionMs))
+                }
+                for r in preRejections {
+                    merged.append(MergedEntry(batchIndex: r.batchIndex, callID: r.callID, result: r.result, executionMs: 0))
+                }
+                for r in merged.sorted(by: { $0.batchIndex < $1.batchIndex }) {
                     executedCallIDs.insert(r.callID)
                     turnToolExecutionMs += r.executionMs
                     turnToolResultChars += r.result.count
@@ -1403,7 +1429,9 @@ public actor AgentActor {
                     guard isRunning else { break }
                     let result: String
                     if let tool = tools.first(where: { $0.name == call.name }) {
-                        if configuration.requiresToolApproval {
+                        if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
+                            result = rejection
+                        } else if configuration.requiresToolApproval {
                             let siblings = segment.calls.count > 1
                                 ? approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil }
                                 : []
@@ -1577,6 +1605,33 @@ public actor AgentActor {
         turnToolResultChars += outcome.result.count
         await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
         return outcome.result
+    }
+
+    /// Rebuilds the per-turn `ToolAvailabilityContext` using current actor state.
+    /// Availability can flip mid-turn (e.g. `hasAwaitingReviewTasks` changes after
+    /// `task_complete` runs), so the dispatch-time check uses freshly read task state
+    /// rather than the context captured at filter time.
+    private func currentAvailabilityContext() async -> ToolAvailabilityContext {
+        let activeTasks = await toolContext.taskStore.allTasks().filter { $0.disposition == .active }
+        return ToolAvailabilityContext(
+            lastDirectUserMessageAt: lastDirectUserMessageAt,
+            agentRole: configuration.role,
+            hasRunnableTasks: activeTasks.contains { $0.status.isRunnable },
+            hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingReview }
+        )
+    }
+
+    /// Returns a rejection result string if `tool` is not currently available, or `nil`
+    /// to indicate the dispatch may proceed. Defense-in-depth against an LLM hallucinating
+    /// a call to a tool that was excluded from this turn's tool definitions. Records the
+    /// rejected call as a failure on the shared tracker so a retry isn't flagged as a
+    /// duplicate of a successful operation.
+    private func rejectionResultIfUnavailable(_ call: LLMToolCall, tool: any AgentTool) async -> String? {
+        let context = await currentAvailabilityContext()
+        if tool.isAvailable(in: context) { return nil }
+        Self.agentLogger.warning("Tool '\(call.name, privacy: .public)' rejected at execution time — not available for role \(self.configuration.role.rawValue, privacy: .public)")
+        await toolContext.setToolExecutionStatus(call.id, false)
+        return "Tool '\(call.name)' is not currently available."
     }
 
     /// Wraps `tool.execute(...)` in a wall-clock timeout sourced from `tool.executionTimeout`.

@@ -47,6 +47,8 @@ struct InspectorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            CostEstimateSection(snapshot: viewModel.shared.costBoardSnapshot)
+
             Text("Agents")
                 .font(AppFonts.sectionHeader)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -66,7 +68,15 @@ struct InspectorView: View {
             }
         }
         .inspectorColumnWidth(min: 280, ideal: 320, max: 460)
-        .task { rebucket() }
+        .task {
+            rebucket()
+            // Refresh boundaries on every view appear so an app that was idle past
+            // local midnight rolls today → prior immediately when the inspector becomes
+            // visible, rather than waiting up to a minute for the watcher timer.
+            if let board = viewModel.shared.costBoard {
+                await board.refreshIfBoundariesElapsed()
+            }
+        }
         .onChange(of: viewModel.messages) { _, _ in rebucket() }
     }
 
@@ -463,8 +473,23 @@ private struct AgentCard: View {
                 AgentCardModelInfoLine(modelConfig: config, llmTurns: llmTurns, role: role)
                     .padding(.leading, 28) // 12 (container) + 8 (dot) + 8 (spacing)
                     .padding(.trailing, 12)
-                    .padding(.bottom, 6)
+                    .padding(.bottom, 2)
             }
+
+            // Estimated cost spent by this agent in the current session. Recomputed
+            // when `inspectorStore.turnsByRole[role]` changes — SwiftUI's per-card
+            // narrowing already gates body re-eval to this role's slice changing.
+            HStack(spacing: 6) {
+                Text("Session")
+                Spacer()
+                Text(String(format: "$%.2f", viewModel.sessionCost(for: role)))
+                    .monospacedDigit()
+            }
+            .font(AppFonts.inspectorLabel)
+            .foregroundStyle(.tertiary)
+            .padding(.leading, 28)
+            .padding(.trailing, 12)
+            .padding(.bottom, 6)
 
             if expanded && !opensInWindow {
                 AgentCardExpandedSections(

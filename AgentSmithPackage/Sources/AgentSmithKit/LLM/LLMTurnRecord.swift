@@ -20,8 +20,14 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
 
     /// The model ID used for this turn (e.g. "claude-sonnet-4-20250514", "gpt-4o").
     public let modelID: String
-    /// The provider type name (e.g. "anthropic", "openAICompatible", "ollama").
+    /// The provider type name (e.g. "anthropic", "openAICompatible", "ollama") — wire
+    /// protocol family.
     public let providerType: String
+    /// Stable provider identifier (e.g. "anthropic", "openrouter") — needed for
+    /// pricing lookup since `providerType` alone can't disambiguate Anthropic-direct
+    /// from OpenRouter-via-Anthropic-protocol. Optional only for records constructed
+    /// in older test fixtures that pre-date this field.
+    public let providerID: String?
     /// Temperature setting used for this turn.
     public let temperature: Double
     /// Max output tokens configured for this turn.
@@ -41,6 +47,7 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         latencyMs: Int = 0,
         modelID: String = "",
         providerType: String = "",
+        providerID: String? = nil,
         temperature: Double = 0,
         maxOutputTokens: Int = 0,
         thinkingBudget: Int? = nil,
@@ -55,6 +62,7 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         self.latencyMs = latencyMs
         self.modelID = modelID
         self.providerType = providerType
+        self.providerID = providerID
         self.temperature = temperature
         self.maxOutputTokens = maxOutputTokens
         self.thinkingBudget = thinkingBudget

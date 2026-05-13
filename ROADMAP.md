@@ -426,13 +426,17 @@ A `SkillStore` (similar to `TaskStore`) manages in-memory state and persistence:
 
 **2. Skill execution as agent tools.** Expose skills as tools available to Smith or Brown, so agents can invoke skills programmatically. This would allow meta-workflows where one skill's output feeds into another, or where Smith can decide which skill to run based on the user's request. Design TBD — needs careful thought about recursion depth, argument resolution, and whether tool-invoked skills skip the run dialog.
 
-### Reject unavailable tool calls at execution time
+### Reject unavailable tool calls at execution time ✅
+**Shipped.** `AgentActor` now re-checks each tool call against a freshly-built `ToolAvailabilityContext` immediately before dispatch at all three dispatch sites (lifecycle segment, parallel-approval segment, sequential-approval path). The check uses the same helper, `rejectionResultIfUnavailable(_:tool:)`, so behavior is identical across paths: an unavailable call gets a fixed `"Tool '<name>' is not currently available."` result, is recorded as a failure on the shared tracker (so a later retry isn't flagged as a duplicate), and is skipped before reaching Jones (so the system doesn't pay for a security evaluation on a call it was going to refuse anyway). A regression test (`AgentActorUnavailableToolTests`) drives a Brown actor with a hallucinated `reply_to_user` call (Smith-only at construction time but listed in Brown's tools) and asserts the execute path is not entered. Original design notes below.
+
 Tool availability is currently enforced only at the definition level — tools excluded by `isAvailable` are omitted from the tool list sent to the LLM, but if the LLM hallucinates a call to an unavailable tool, `AgentActor` still executes it (line ~606, lookup is against the full `tools` array, not the filtered `toolDefinitions`). Add an execution-level guard: before running a tool call, re-check `isAvailable` and return an error result (e.g. "Tool '\(name)' is not currently available") instead of executing. This is defense-in-depth — the LLM shouldn't call tools it wasn't offered, but when it does, the system should refuse rather than silently comply.
 
 ### Harden `isRetryableError` in TaskSummarizer
 `TaskSummarizer.isRetryableError` currently matches on `error.localizedDescription` strings (e.g. `hasPrefix("HTTP 429")`, regex for `^HTTP 5\d\d`). This works because `LLMProviderError.httpError` formats its description as `"HTTP \(code): \(body)"`, but it's fragile — if error wrapping or formatting changes, retries silently stop working. Replace with direct pattern matching on `LLMProviderError.httpError(statusCode:body:url:)` to check the status code as an integer.
 
-### Decouple SecurityEvaluator iteration counters
+### Decouple SecurityEvaluator iteration counters ✅
+**Already shipped** — this ROADMAP entry was stale. `SecurityEvaluator.evaluate` already tracks `fileReadRounds` (cap 20) and `retryCount` (cap 5) independently, with the loop condition `while retryCount < Self.maxRetries && fileReadRounds < maxFileReadRounds`. File-read rounds bump on tool-call responses, parse retries bump on parse failure or LLM error. Original design notes preserved below for context.
+
 `SecurityEvaluator.evaluate` uses a combined `totalIterations` counter (capped at 25) that conflates file-read rounds with parse-failure retries. If Jones reads many files (the prompt now says "up to 20 at a time"), it can exhaust the iteration budget before getting a chance to retry a parse failure. Fix: track `fileReadRounds` and `retryCount` independently, each with its own cap (e.g., 20 file reads, 5 retries). The combined counter was introduced to prevent unbounded loops, but separate caps achieve the same goal without the coupling.
 
 ### Search: Cmd-F and Cmd-Shift-F
@@ -470,6 +474,15 @@ The model stats popover (shown when clicking the model name on an agent card) cu
 
 ### Token usage cost estimation
 Add estimated cost columns to the Token Usage analytics window. Use LiteLLM pricing data (already available via `ModelMetadataService`) to calculate per-turn and per-task cost estimates based on model ID and token counts. Display in the Overview, By Task, and By Model/Provider tabs. Handle cache pricing correctly (Anthropic cached reads are cheaper than uncached input).
+
+### Surface estimated cost in the inspector + task UI ✅
+**Shipped.** Cost data is now visible in four places without the user having to open the analytics window:
+- **Cost Estimate panel** above the Agents column in the inspector: a 4×2 grid (today / this week / this month / this year) × (current / prior). Windows are anchored on a local-TZ, Sunday-start Gregorian calendar (`CostBoard.calendar`).
+- **Per-agent session cost** row on each agent card (Smith / Brown / Jones / Summarizer).
+- **Compact cost chip** on every completed task row in the sidebar.
+- **Tokens + Cost** rows in the task detail window's metadata grid.
+
+Performance design (the key concern that drove the implementation): all eight dashboard totals come from a single cached `CostBoard.Snapshot` republished from a new `AgentSmithKit/Usage/CostBoard` actor. Bootstrap does one full `UsageStore` scan; every subsequent record updates the snapshot in O(1) via a new `UsageStore.onInsert` hook. A periodic watcher Task plus an on-appear refresh roll calendar boundaries lazily — prior-period totals are immutable until their boundary crosses, so the panel never re-aggregates on view redraws. Per-agent session cost is memoized by `turnsByRole[role].count`; per-task cost is cached on `AppViewModel` indefinitely (completed tasks don't grow new records). Tests: `CostBoardTests` covers bootstrap, incremental insert, day-boundary rollover, calendar configuration.
 
 ### Cross-window/cross-session wake routing
 A scheduled wake currently fires on the same actor that scheduled it. This is fine for "wake Brown for the task he's working on now," but it's wrong in three other shapes the user has identified as desired behavior:

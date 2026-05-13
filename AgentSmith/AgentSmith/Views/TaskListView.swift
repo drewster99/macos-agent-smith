@@ -324,7 +324,10 @@ private struct TaskRow: View {
                 titleRow()
 
                 if style != .recentlyDeleted {
-                    secondLine()
+                    descriptionText()
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    metadataLine()
                 } else {
                     descriptionText()
                         .lineLimit(1)
@@ -338,6 +341,15 @@ private struct TaskRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .contentShape(Rectangle())
+        // Lazy-load the task's estimated cost once it scrolls into view. Hoisted
+        // to the row body rather than the cost chip so the loader fires whether
+        // or not the chip resolves to EmptyView (an EmptyView-resolved Group can
+        // skip its `.task` modifier in some SwiftUI builds).
+        .task(id: task.id) {
+            if task.status == .completed, viewModel.cachedTaskCost(task.id) == nil {
+                await viewModel.loadTaskCost(task.id)
+            }
+        }
     }
 
     // MARK: Pieces
@@ -474,11 +486,13 @@ private struct TaskRow: View {
         }
     }
 
+    /// Metadata strip rendered below the description: cost (left, orange) and
+    /// the style-specific status / timestamp (right). Visible on `.active` and
+    /// `.archived` rows; `.recentlyDeleted` rows skip this entirely.
     @ViewBuilder
-    private func secondLine() -> some View {
+    private func metadataLine() -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            descriptionText()
-                .lineLimit(style == .active ? 2 : 1)
+            costChip()
 
             Spacer(minLength: 0)
 
@@ -498,6 +512,21 @@ private struct TaskRow: View {
             case .recentlyDeleted:
                 EmptyView()
             }
+        }
+    }
+
+    /// Estimated cost chip for completed tasks. Reads from the cache populated
+    /// by the row-level `.task(id:)` loader — never queries `UsageStore` itself.
+    /// Rendered in orange so the eye picks it out at a glance.
+    @ViewBuilder
+    private func costChip() -> some View {
+        if task.status == .completed,
+           let cost = viewModel.cachedTaskCost(task.id),
+           cost > 0 {
+            Text(String(format: "$%.2f", cost))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.orange)
+                .fixedSize()
         }
     }
 

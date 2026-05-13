@@ -127,6 +127,32 @@ final class SharedAppState {
     /// Persistent token usage analytics store (app-global billing rollup).
     private(set) var usageStore: UsageStore
 
+    /// Cached, incrementally-updated cost rollup over today / this week / this
+    /// month / this year + the matching prior periods. Drives the inspector's
+    /// Cost Estimate panel. Built once per app launch in `performLoadPersistedState`.
+    private(set) var costBoard: CostBoard?
+
+    /// Mirror of `costBoard.snapshot` republished to the main thread via the
+    /// `setOnUpdate` callback. SwiftUI views observe this property and never
+    /// touch the actor directly.
+    private(set) var costBoardSnapshot: CostBoard.Snapshot = .empty
+
+    /// Snapshot of LiteLLM pricing keyed by `"providerID/modelID"`. Built once
+    /// after the model catalog refresh completes. Handed to `CostBoard` and to
+    /// any per-session cost helpers via the `pricingLookup` closure.
+    private(set) var pricingSnapshot: [String: ModelPricing] = [:]
+
+    /// `(providerID, modelID) -> ModelPricing?` resolver derived from
+    /// `pricingSnapshot`. Stable closure suitable for handing to `UsageAggregator`
+    /// without crossing the main-actor boundary on the hot path.
+    var pricingLookup: @Sendable (String?, String) -> ModelPricing? {
+        let snapshot = pricingSnapshot
+        return { providerID, modelID in
+            guard let providerID else { return nil }
+            return snapshot["\(providerID)/\(modelID)"]
+        }
+    }
+
     /// Semantic search engine, lazily created on first `start()` by any session and reused
     /// thereafter so the MLX model isn't reloaded on every Run/Stop cycle or per-session.
     private(set) var semanticSearchEngine: SemanticSearchEngine?
@@ -321,6 +347,27 @@ final class SharedAppState {
         // Refresh model catalog (YYYYMMDD-gated).
         await llmKit.refreshIfNeeded()
         llmKit.validateConfigurations()
+
+        // Build the LiteLLM pricing snapshot once the catalog is current. Keyed by
+        // "providerID/modelID" — same shape `UsageAggregator` expects. Models whose
+        // id has an empty providerID or modelID component are skipped so we never
+        // emit lookup keys like "providerID/" or "/modelID".
+        var pricing: [String: ModelPricing] = [:]
+        for model in llmKit.models {
+            guard let p = model.pricing else { continue }
+            guard !model.id.hasSuffix("/"), !model.id.hasPrefix("/") else { continue }
+            pricing[model.id] = p
+        }
+        pricingSnapshot = pricing
+
+        // Bootstrap the cost rollup actor. `pricingLookup` captures the just-built
+        // snapshot — stable for the life of this `CostBoard` instance.
+        let board = CostBoard(usageStore: usageStore, pricingLookup: pricingLookup)
+        await board.setOnUpdate { [weak self] snapshot in
+            await MainActor.run { self?.costBoardSnapshot = snapshot }
+        }
+        await board.bootstrap()
+        costBoard = board
 
         hasLoadedPersistedState = true
     }
