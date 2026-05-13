@@ -20,6 +20,12 @@ public actor PersistenceManager {
     private let sessionDirectory: URL
     private let attachmentsDirectory: URL
 
+    /// Real-data init. Resolves to `~/Library/Application Support/AgentSmith/` —
+    /// the user's actual data path. **Tests MUST NOT use this init**; use
+    /// `init(testingRoot:)` instead. Any test that wires this manager into a
+    /// `UsageStore` and calls `append(...)` will overwrite the user's real
+    /// `usage_records.json` when `scheduleFlush`'s timer fires. A source-level
+    /// guard in `PersistenceManagerTestUsageGuardTests` catches such regressions.
     public init() {
         let appSupport = Self.appSupportURL()
         baseDirectory = appSupport.appendingPathComponent("AgentSmith", isDirectory: true)
@@ -27,6 +33,9 @@ public actor PersistenceManager {
         attachmentsDirectory = baseDirectory.appendingPathComponent("attachments", isDirectory: true)
     }
 
+    /// Real-data session-scoped init. Same data-loss caveat as `init()` — see
+    /// that doc comment. Tests targeting per-session data should use
+    /// `init(testingRoot:)` and operate inside that sandbox.
     public init(sessionID: UUID) {
         let appSupport = Self.appSupportURL()
         baseDirectory = appSupport.appendingPathComponent("AgentSmith", isDirectory: true)
