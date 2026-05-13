@@ -115,6 +115,15 @@ private struct TaskSectionHeader: View {
     }
 }
 
+/// Verb for the "run this task now" affordance — "Resume" reads better for a task that
+/// already started once (`paused` / `interrupted`); "Run" for one that never has.
+func runActionTitle(for status: AgentTask.Status) -> String {
+    switch status {
+    case .paused, .interrupted: return "Resume"
+    default: return "Run"
+    }
+}
+
 // MARK: - Timestamp helpers
 
 private func taskTimestamp(_ date: Date) -> String {
@@ -272,7 +281,20 @@ struct TaskRowButton: View {
         case .awaitingReview:
             EmptyView()
 
-        case .pending, .paused, .interrupted, .scheduled:
+        case .pending, .paused, .interrupted:
+            Button(action: { Task { await viewModel.startTask(task) } }, label: {
+                Label(runActionTitle(for: task.status), systemImage: "play.fill")
+            })
+            Divider()
+            Button(action: { Task { await viewModel.archiveTask(id: task.id) } }, label: {
+                Label("Archive", systemImage: "archivebox")
+            })
+            Divider()
+            Button(role: .destructive, action: { Task { await viewModel.deleteTask(id: task.id) } }, label: {
+                Label("Delete", systemImage: "trash")
+            })
+
+        case .scheduled:
             Button(action: { Task { await viewModel.archiveTask(id: task.id) } }, label: {
                 Label("Archive", systemImage: "archivebox")
             })
@@ -351,10 +373,47 @@ private struct TaskRow: View {
             titleText()
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            if attachmentCount > 0 {
+                attachmentPip()
+            }
+
             if style == .active && task.status == .running {
                 runningInlineControls()
+            } else if style == .active && task.status.isRunnable {
+                runInlineControl()
             }
         }
+    }
+
+    @ViewBuilder
+    private func runInlineControl() -> some View {
+        Button(action: { Task { await viewModel.startTask(task) } }, label: {
+            Image(systemName: "play.fill")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+        })
+        .buttonStyle(.plain)
+        .help(runActionTitle(for: task.status))
+    }
+
+    /// Total attachments referenced anywhere on the task — description, every update,
+    /// and the result. Used by the sidebar pip to indicate "this task carries files."
+    private var attachmentCount: Int {
+        task.descriptionAttachments.count
+            + task.updates.reduce(0) { $0 + $1.attachments.count }
+            + task.resultAttachments.count
+    }
+
+    @ViewBuilder
+    private func attachmentPip() -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: "paperclip")
+                .imageScale(.small)
+            Text("\(attachmentCount)")
+                .font(.caption2.monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .help("\(attachmentCount) attachment\(attachmentCount == 1 ? "" : "s")")
     }
 
     @ViewBuilder

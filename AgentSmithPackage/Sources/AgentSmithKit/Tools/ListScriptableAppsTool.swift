@@ -5,10 +5,10 @@ import Foundation
 /// (name, bundle ID, version, suite names) — NOT the full schema. Use
 /// `get_app_scripting_schema` to fetch a single app's schema before
 /// trying to script it.
-public struct ListScriptableAppsTool: AgentTool {
-    public let name = "list_scriptable_apps"
+struct ListScriptableAppsTool: AgentTool {
+    let name = "list_scriptable_apps"
 
-    public let toolDescription = """
+    let toolDescription = """
         List applications installed on this Mac. Returns a compact summary per app: \
         name, bundle ID, version, and (if the app supports AppleScript) the names of its scripting suites. \
         Does NOT return the full scripting schema — call `get_app_scripting_schema` for that, once you've \
@@ -36,7 +36,7 @@ public struct ListScriptableAppsTool: AgentTool {
         }
     }
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "query": .dictionary([

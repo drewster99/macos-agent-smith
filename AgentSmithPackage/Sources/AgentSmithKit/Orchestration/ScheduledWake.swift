@@ -97,7 +97,7 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
 }
 
 /// Result of a `scheduleWake` request.
-public enum ScheduleWakeOutcome: Sendable {
+enum ScheduleWakeOutcome: Sendable {
     case scheduled(ScheduledWake)
     /// The request was rejected (validation error, etc.).
     case error(String)

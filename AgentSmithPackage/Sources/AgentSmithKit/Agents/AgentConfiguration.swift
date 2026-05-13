@@ -1,33 +1,33 @@
 import Foundation
 
 /// Full configuration for a single agent instance.
-public struct AgentConfiguration: Sendable {
+struct AgentConfiguration: Sendable {
     /// The agent's role in the system (smith, brown, jones, or summarizer).
-    public var role: AgentRole
+    private(set) var role: AgentRole
     /// LLM provider and model parameters for this agent's API calls.
-    public var llmConfig: ModelConfiguration
+    private(set) var llmConfig: ModelConfiguration
     /// The API type of the provider (for turn record observability).
-    public var providerAPIType: ProviderAPIType
+    private(set) var providerAPIType: ProviderAPIType
     /// The full system prompt injected at the start of every LLM conversation.
-    public var systemPrompt: String
+    private(set) var systemPrompt: String
     /// Names of tools this agent is allowed to call.
-    public var toolNames: [String]
+    private(set) var toolNames: [String]
     /// When `true`, all tool calls except messaging and task-lifecycle tools are held for Jones' approval before execution.
-    public var requiresToolApproval: Bool
+    private(set) var requiresToolApproval: Bool
     /// When `true`, raw LLM text responses are not posted to the channel.
     /// The text is still stored in the agent's conversation history and visible in the inspector.
-    public var suppressesRawTextToChannel: Bool
+    private(set) var suppressesRawTextToChannel: Bool
     /// How long the agent's idle loop waits before draining pending messages and querying the LLM.
     /// A longer interval causes the agent to batch accumulated messages into a single context update.
-    public var pollInterval: TimeInterval
+    private(set) var pollInterval: TimeInterval
     /// Seconds of channel silence required after a new message before the agent acts.
-    public var messageDebounceInterval: TimeInterval
+    private(set) var messageDebounceInterval: TimeInterval
     /// Optional additional filter applied after all routing rules. Return `false` to drop a message
     /// entirely — it will not be added to the agent's pending queue and will not trigger a wake.
-    public var messageAcceptFilter: (@Sendable (ChannelMessage) -> Bool)?
+    private(set) var messageAcceptFilter: (@Sendable (ChannelMessage) -> Bool)?
     /// Maximum number of tool calls executed per LLM response. Extra calls are dropped with a
     /// channel notice. Exists to prevent runaway tool loops.
-    public var maxToolCallsPerIteration: Int
+    private(set) var maxToolCallsPerIteration: Int
 
     public init(
         role: AgentRole,

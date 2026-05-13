@@ -4,16 +4,16 @@ import Foundation
 ///
 /// Available to both Smith and Brown. Returns matching memories (prioritized) and
 /// relevant prior task summaries, ranked by semantic similarity.
-public struct SearchMemoryTool: AgentTool {
-    public let name = "search_memory"
-    public let toolDescription = """
+struct SearchMemoryTool: AgentTool {
+    let name = "search_memory"
+    let toolDescription = """
         Search long-term memory and prior task history using natural language. \
         Returns relevant memories (saved insights) and summaries of similar past tasks, \
         ranked by semantic similarity. Use this when approaching a task that might relate \
         to past work, or when looking for previously saved knowledge.
         """
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "query": .dictionary([

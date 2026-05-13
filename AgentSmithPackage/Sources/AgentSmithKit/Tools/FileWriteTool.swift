@@ -1,9 +1,9 @@
 import Foundation
 
 /// Writes content to a file. Blocks writes to sensitive system and credential paths.
-public struct FileWriteTool: AgentTool {
-    public let name = "file_write"
-    public let toolDescription = "Write content to a file at the given absolute path. Creates new files freely. To overwrite an existing file, you must have read it first with file_read. Requires absolute paths (starting with / or ~/). Blocks writes to sensitive system paths and hard-linked files."
+struct FileWriteTool: AgentTool {
+    let name = "file_write"
+    let toolDescription = "Write content to a file at the given absolute path. Creates new files freely. To overwrite an existing file, you must have read it first with file_read. Requires absolute paths (starting with / or ~/). Blocks writes to sensitive system paths and hard-linked files."
 
     public func description(for role: AgentRole) -> String {
         switch role {
@@ -16,7 +16,7 @@ public struct FileWriteTool: AgentTool {
         }
     }
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "path": .dictionary([
@@ -41,7 +41,7 @@ public struct FileWriteTool: AgentTool {
         guard case .string(let rawPath) = arguments["path"] else {
             throw ToolCallError.missingRequiredArgument("path")
         }
-        let path = (rawPath as NSString).expandingTildeInPath
+        let path = PathNormalization.normalize(rawPath)
         guard case .string(let content) = arguments["content"] else {
             throw ToolCallError.missingRequiredArgument("content")
         }

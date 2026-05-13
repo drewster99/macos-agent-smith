@@ -1,11 +1,11 @@
 import Foundation
 
 /// Emergency abort: stops all agents immediately. Requires user interaction to restart.
-public struct AbortTool: AgentTool {
-    public let name = "abort"
-    public let toolDescription = "Emergency abort: immediately stops ALL agents. The system cannot be restarted without user interaction. Use only for serious safety concerns / violations."
+struct AbortTool: AgentTool {
+    let name = "abort"
+    let toolDescription = "Emergency abort: immediately stops ALL agents. The system cannot be restarted without user interaction. Use only for serious safety concerns / violations."
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "reason": .dictionary([

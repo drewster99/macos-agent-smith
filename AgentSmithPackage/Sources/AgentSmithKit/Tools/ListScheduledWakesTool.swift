@@ -2,16 +2,16 @@ import Foundation
 
 /// Smith tool: lists all currently-scheduled wakes (id, time, instructions, task association).
 /// Use before scheduling a new timer to check for duplicates and resolve conflicts.
-public struct ListScheduledWakesTool: AgentTool {
-    public let name = "list_scheduled_wakes"
-    public let toolDescription = """
+struct ListScheduledWakesTool: AgentTool {
+    let name = "list_scheduled_wakes"
+    let toolDescription = """
         List every scheduled timer currently registered (id, fire time, instructions, optional \
         task_id, recurrence). Call this before `schedule_task_action` (or `create_task` with a \
         `scheduled_run_at`) to check for duplicates, or to find an existing timer's id when the \
         user asks to cancel or change one. Read-only.
         """
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([:]),
         "required": .array([])

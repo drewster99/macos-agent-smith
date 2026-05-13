@@ -1,9 +1,9 @@
 import Foundation
 
 /// Executes bash commands. Security evaluation is handled by Jones (SecurityEvaluator).
-public struct BashTool: AgentTool {
-    public let name = "bash"
-    public let toolDescription = "Execute a command in the \"bash\" shell and return its output. Every `bash` tool call is run in a separate shell. Do not submit dangerous or excessively complex commands. Default timeout is 300 seconds — pass a higher `timeout` for long-running commands. Make parallel tool calls whenever possible: Before calling, consider if you have multiple bash commands you may wish to run that at not dependent upon each other's results. If so, send up to 20 `bash` tool calls in a single response. NEVER use `bash` to force push. NEVER use `bash` to invoke the GitHub CLI (`gh`) — call the dedicated `gh` tool instead, which carries the verified auth-status snapshot and a GitHub-specific argument filter."
+struct BashTool: AgentTool {
+    let name = "bash"
+    let toolDescription = "Execute a command in the \"bash\" shell and return its output. Every `bash` tool call is run in a separate shell. Do not submit dangerous or excessively complex commands. Default timeout is 300 seconds — pass a higher `timeout` for long-running commands. Make parallel tool calls whenever possible: Before calling, consider if you have multiple bash commands you may wish to run that at not dependent upon each other's results. If so, send up to 20 `bash` tool calls in a single response. NEVER use `bash` to force push. NEVER use `bash` to invoke the GitHub CLI (`gh`) — call the dedicated `gh` tool instead, which carries the verified auth-status snapshot and a GitHub-specific argument filter."
 
     public func description(for role: AgentRole) -> String {
         switch role {
@@ -16,7 +16,7 @@ public struct BashTool: AgentTool {
         }
     }
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "command": .dictionary([
@@ -40,6 +40,14 @@ public struct BashTool: AgentTool {
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
         context.agentRole == .brown
     }
+
+    /// Subprocess timeout is enforced inside `ProcessRunner` based on the user-supplied
+    /// `timeout` argument (default 300 s, no upper cap in the tool schema). The agent-level
+    /// `executionTimeout` here is a safety net for the case where `ProcessRunner` itself
+    /// somehow fails to honor its own deadline; it must therefore comfortably exceed any
+    /// realistic user-supplied `timeout`. 1 hour + slack covers full builds and long
+    /// integration runs without cutting them off prematurely.
+    var executionTimeout: Duration { .seconds(3700) }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         guard case .string(let command) = arguments["command"] else {

@@ -134,4 +134,90 @@ struct FileReadToolTests {
             #expect(name == "path")
         }
     }
+
+    // MARK: - normalizePath
+
+    @Test("normalizePath leaves a clean absolute path alone")
+    func normalizeCleanPath() {
+        let raw = "/tmp/foo/bar.txt"
+        #expect(FileReadTool.normalizePath(raw) == raw)
+    }
+
+    @Test("normalizePath strips file:// scheme")
+    func normalizeFileScheme() {
+        let raw = "file:///tmp/foo/bar.txt"
+        #expect(FileReadTool.normalizePath(raw) == "/tmp/foo/bar.txt")
+    }
+
+    @Test("normalizePath percent-decodes spaces in file:// URLs")
+    func normalizePercentDecode() {
+        let raw = "file:///tmp/Foo%20Bar/baz%20qux.png"
+        #expect(FileReadTool.normalizePath(raw) == "/tmp/Foo Bar/baz qux.png")
+    }
+
+    @Test("normalizePath un-shell-escapes spaces")
+    func normalizeShellSpaces() {
+        let raw = "/tmp/Foo\\ Bar/baz\\ qux.png"
+        #expect(FileReadTool.normalizePath(raw) == "/tmp/Foo Bar/baz qux.png")
+    }
+
+    @Test("normalizePath handles parens and ampersand escapes")
+    func normalizeShellSpecials() {
+        let raw = "/tmp/foo\\(1\\)\\&bar"
+        #expect(FileReadTool.normalizePath(raw) == "/tmp/foo(1)&bar")
+    }
+
+    @Test("normalizePath expands tilde")
+    func normalizeTilde() {
+        let raw = "~/foo.txt"
+        let normalized = FileReadTool.normalizePath(raw)
+        #expect(normalized.hasSuffix("/foo.txt"))
+        #expect(!normalized.hasPrefix("~"))
+    }
+
+    @Test("normalizePath preserves backslash + non-special character")
+    func normalizePreserveOtherEscapes() {
+        // \n in a path is unusual but we shouldn't unescape it (newlines aren't valid
+        // in macOS filenames anyway, but the principle is to only unescape known shell
+        // specials).
+        let raw = "/tmp/foo\\nbar"
+        #expect(FileReadTool.normalizePath(raw) == "/tmp/foo\\nbar")
+    }
+
+    @Test("normalizePath handles file:// + percent-encoded + tilde combo")
+    func normalizeCombo() {
+        // Edge case: file:// scheme with percent-encoding. (We don't combine with
+        // shell-escapes — no LLM produces both at once.)
+        let raw = "file:///tmp/Application%20Support/foo%20bar.png"
+        #expect(FileReadTool.normalizePath(raw) == "/tmp/Application Support/foo bar.png")
+    }
+
+    @Test("file_read accepts a file:// URL with percent-encoded spaces")
+    func fileReadAcceptsFileURL() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let path = try dir.write("hello", to: "Foo Bar.txt")
+        let fileURL = URL(fileURLWithPath: path).absoluteString  // file:///…/Foo%20Bar.txt
+        let result = try await FileReadTool().execute(
+            arguments: ["path": .string(fileURL)],
+            context: TestToolContext.make()
+        )
+        #expect(result.succeeded)
+        #expect(result.output.contains("hello"))
+    }
+
+    @Test("file_read accepts a shell-escaped path with literal backslash-space")
+    func fileReadAcceptsShellEscapes() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let path = try dir.write("hello", to: "Foo Bar.txt")
+        // Build the shell-escaped version: replace " " with "\\ "
+        let shellEscaped = path.replacingOccurrences(of: " ", with: "\\ ")
+        let result = try await FileReadTool().execute(
+            arguments: ["path": .string(shellEscaped)],
+            context: TestToolContext.make()
+        )
+        #expect(result.succeeded)
+        #expect(result.output.contains("hello"))
+    }
 }

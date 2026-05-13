@@ -5,11 +5,11 @@ import Foundation
 /// Amendments are appended to the task description with a clear label, so both
 /// Brown (via `message_brown`) and Jones (who reads `taskDescription` on every
 /// tool-approval request) see the updated intent.
-public struct AmendTaskTool: AgentTool {
-    public let name = "amend_task"
-    public let toolDescription = "Add a clarification or updated instruction to a task's description. Use this when the user provides new context, corrections, or additional requirements for an in-progress task. The amendment is visible to Jones (security) and should also be relayed to Brown via `message_brown`."
+struct AmendTaskTool: AgentTool {
+    let name = "amend_task"
+    let toolDescription = "Add a clarification or updated instruction to a task's description. Use this when the user provides new context, corrections, or additional requirements for an in-progress task. The amendment is visible to Jones (security) and should also be relayed to Brown via `message_brown`. Optionally attach files via `attachment_ids` — they're appended to the task's description attachments and re-injected into Brown's briefing on the next respawn (the LIVE Brown won't see them automatically; relay via `message_brown(attachment_ids: [...])`)."
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "task_id": .dictionary([
@@ -19,6 +19,11 @@ public struct AmendTaskTool: AgentTool {
             "amendment": .dictionary([
                 "type": .string("string"),
                 "description": .string("The clarification or updated instruction to append to the task description.")
+            ]),
+            "attachment_ids": .dictionary([
+                "type": .string("array"),
+                "items": .dictionary(["type": .string("string")]),
+                "description": .string("Optional UUID strings of existing attachments to add to the task's description attachments. Forward EXACT id values from `[filename](file://…) … id=<UUID>` markdown links you've seen.")
             ])
         ]),
         "required": .array([.string("task_id"), .string("amendment")])
@@ -49,7 +54,17 @@ public struct AmendTaskTool: AgentTool {
             return .failure("Task not found: \(taskIDString)")
         }
 
-        await context.taskStore.amendDescription(id: taskID, amendment: trimmed)
-        return .success("Task \(taskIDString) amended. Immediately use the `message_brown` tool to relay this change to Brown.")
+        let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context)
+        if let failureMessage = resolution.failure {
+            return .failure(failureMessage)
+        }
+        let attachments = resolution.attachments
+
+        await context.taskStore.amendDescription(id: taskID, amendment: trimmed, attachments: attachments)
+        if attachments.isEmpty {
+            return .success("Task \(taskIDString) amended. Immediately use the `message_brown` tool to relay this change to Brown.")
+        }
+        let names = attachments.map { $0.filename }.joined(separator: ", ")
+        return .success("Task \(taskIDString) amended with \(attachments.count) attachment(s): \(names). Immediately use `message_brown(attachment_ids: [...])` to deliver them to the LIVE Brown — the amendment alone only updates the task store for future respawns.")
     }
 }

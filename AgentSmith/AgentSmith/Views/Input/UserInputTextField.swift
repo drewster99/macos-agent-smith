@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 struct UserInputTextField: View {
     @Binding var text: String
     let isRunning: Bool
-    let hasContent: Bool
+    let pendingAttachmentCount: Int
     let onSend: () -> Void
     let onHistoryUp: () -> Bool
     let onHistoryDown: () -> Bool
@@ -18,6 +18,9 @@ struct UserInputTextField: View {
     private let lineHeight: CGFloat = 18
     /// Vertical padding inside the TextEditor (top + bottom).
     private let verticalPadding: CGFloat = 12
+    private var hasContent: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pendingAttachmentCount > 0
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {

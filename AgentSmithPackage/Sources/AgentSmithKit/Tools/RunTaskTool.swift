@@ -8,11 +8,11 @@ nonisolated private let runTaskLogger = Logger(subsystem: "com.agentsmith", cate
 /// state is reset (result, commentary, and completedAt are cleared and status returns to
 /// `.pending`) before the run begins — the user said "try again" / "redo that" / "reopen
 /// that" means "rerun on the same task ID", not "create a new one."
-public struct RunTaskTool: AgentTool {
-    public let name = "run_task"
-    public let toolDescription = "Run an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context and auto-spawns Brown+Jones. Failed and completed tasks are auto-reset (prior result/commentary cleared, status flipped back to pending) before running — this is how you reopen a completed task without creating a duplicate. The `instructions` field is REQUIRED — include any updates, permissions, scope changes, or clarifications from the user. These are appended to the task description and survive the restart.\nIMPORTANT: Only one task can run at a time. Calling `run_task` will STOP any currently executing task."
+struct RunTaskTool: AgentTool {
+    let name = "run_task"
+    let toolDescription = "Run an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context and auto-spawns Brown+Jones. Failed and completed tasks are auto-reset (prior result/commentary cleared, status flipped back to pending) before running — this is how you reopen a completed task without creating a duplicate. The `instructions` field is REQUIRED — include any updates, permissions, scope changes, or clarifications from the user. These are appended to the task description and survive the restart.\nIMPORTANT: Only one task can run at a time. Calling `run_task` will STOP any currently executing task."
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "task_id": .dictionary([

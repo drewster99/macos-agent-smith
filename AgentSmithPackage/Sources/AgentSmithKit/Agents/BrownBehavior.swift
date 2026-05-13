@@ -1,7 +1,7 @@
 import Foundation
 
 /// Defines Brown's tool set and system prompt.
-public enum BrownBehavior {
+enum BrownBehavior {
     // MARK: - Shared tool description helpers
 
     /// Returns the standard approval-gate suffix for Brown-facing tool descriptions.
@@ -30,9 +30,12 @@ public enum BrownBehavior {
             BashTool(),
             GhTool(authStatusSnapshot: ghAuthStatusSnapshot ?? "(auth status was not captured for this spawn)"),
             FileReadTool(),
+            ViewAttachmentTool(),
             FileWriteTool(),
             FileEditTool(),
             GlobTool(),
+            DirectoryTreeTool(),
+            DirectoryListingTool(),
             GrepTool(),
             SaveMemoryTool(),
             SearchMemoryTool(),
@@ -46,7 +49,7 @@ public enum BrownBehavior {
 
     /// Tool names for configuration. Auth-status snapshot is irrelevant for names, so the
     /// default is fine here.
-    public static var toolNames: [String] {
+    static var toolNames: [String] {
         tools().map(\.name)
     }
 
@@ -62,7 +65,7 @@ public enum BrownBehavior {
     }
 
     /// System prompt for Brown agents.
-    public static var systemPrompt: String {
+    static var systemPrompt: String {
         """
         \(AgentRole.brown.baseSystemPrompt)
         You are Agent Brown, efficient task executor. You carry out specific assignments \
@@ -89,7 +92,9 @@ public enum BrownBehavior {
         
         ## Prefer tools over bash commands
         Whenever possible, use available tools instead of calling to to bash to run a shell command
-        - `glob` tool instead of running "find" with the `bash` tool. Also consider running "mdfind" with the `bash` tool
+        - `glob` tool instead of running "find" / "mdfind" with the `bash` tool. `glob` is Spotlight-first internally — almost every search returns in milliseconds. Use `bash mdfind` only for genuine machine-wide lookups when `glob` refuses your path (e.g. you actually need to search `/` or `$HOME`).
+        - `directory_tree` tool to see the *shape* of a directory (folders only) before picking a search scope — avoids globbing too broadly.
+        - `directory_listing` tool to see what's in a single directory (files + folders, mtime, size, filtered/sorted) — instead of `ls`/`ls -la`/`ls -lt` via `bash`.
         - `grep` tool intead of "grep" with the `bash` tool
         - `file_read` tool instead of "cat", "sed", "tail", etc with `bash` tool
         - `file_edit` tool instead of "sed", "awk", or other tools via `bash`
@@ -113,7 +118,7 @@ public enum BrownBehavior {
 
         ### Search strategy
         - **Internet/GitHub tasks**: When the task mentions finding something on GitHub, the web, or any online resource, use `curl` to search the web or GitHub API **first**. Do NOT search the local filesystem for things that live on the internet.
-        - **Local file search on macOS**: Try `glob` tool first. Then try using "mdfind" via `bash` tool. Exhaust these before using "find" via the `bash` tool. "mdfind" via `bash` queries the Spotlight index and returns results instantly. Example: Call `bash` tool with: mdfind -onlyin /Users "reddit AND mcp"`. Use "find" via `bash` tool only if "mdfind" via `bash` tool returns nothing relevant.
+        - **Local file search on macOS**: Use the `glob` tool — it's Spotlight-first internally, so almost every filename search returns in milliseconds. The result is a JSON object: read `matches` (paths relative to `search_root`), `total_matched`, `stop_reason`, and `resume_token` (only set when a walk paused with more to find — pass it back in `resume` to continue). If you don't know what to search, use `directory_tree` first to see the layout, or `directory_listing` to inspect one directory. Use `bash` with `mdfind`/`find` only for searches `glob` refuses (e.g. you literally need to search `/` or the bare home dir, which `glob` blocks as too broad).
         - **Avoid long-running `find` commands**: `find /` or `find /Users` can take minutes. Always scope `find` to the narrowest directory possible, use `-maxdepth`, and pipe through `head`. Never search `/` or broad system directories.
         - **GitHub API**: To search repos: `curl -s "https://api.github.com/search/repositories?q=QUERY" | head -100`. To read a README: `curl -s "https://raw.githubusercontent.com/OWNER/REPO/main/README.md"`.
 

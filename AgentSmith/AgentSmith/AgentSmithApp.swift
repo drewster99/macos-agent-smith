@@ -125,7 +125,7 @@ struct AgentSmithApp: App {
 
         WindowGroup("Task Detail", for: TaskDetailTarget.self) { $target in
             if let target, let vm = sessionManager.viewModel(for: target.sessionID) {
-                TaskDetailWindow(taskID: target.taskID, viewModel: vm)
+                TaskDetailWindow(taskID: target.taskID, viewModel: vm, sessionManager: sessionManager)
                     .background(TaskDetailWindowTagger(target: target))
             } else {
                 ContentUnavailableView(
@@ -285,6 +285,10 @@ struct SessionScene: View {
             } else if let id = resolvedID, let vm = sessionManager.viewModel(for: id) {
                 MainView(viewModel: vm, sessionManager: sessionManager)
                     .navigationTitle(vm.session.name)
+                    // Inject the session's attachment-bytes loader so AttachmentView /
+                    // ImageLightbox / TaskAttachmentList can lazy-load bytes for
+                    // session-restored attachments via @Environment(\.attachmentBytesLoader).
+                    .environment(\.attachmentBytesLoader, vm.attachmentBytesLoader)
             } else {
                 ContentUnavailableView {
                     Label("No Session", systemImage: "rectangle.stack.badge.plus")

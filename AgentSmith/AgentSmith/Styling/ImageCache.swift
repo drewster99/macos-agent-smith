@@ -46,13 +46,14 @@ final class ImageCache {
     // MARK: - Init
 
     private init() {
-        guard let cachesDir = FileManager.default.urls(
-            for: .cachesDirectory,
-            in: .userDomainMask
-        ).first else {
-            preconditionFailure("Caches directory unavailable — this should never happen on macOS")
+        let baseDir: URL
+        if let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            baseDir = cachesDir
+        } else {
+            baseDir = FileManager.default.temporaryDirectory
+            imageCacheLogger.error("Caches directory unavailable; falling back to temporaryDirectory for the thumbnail cache")
         }
-        thumbnailDirectory = cachesDir
+        thumbnailDirectory = baseDir
             .appendingPathComponent("AgentSmith", isDirectory: true)
             .appendingPathComponent("thumbnails", isDirectory: true)
         do {
@@ -75,7 +76,18 @@ final class ImageCache {
     /// Returns an image for the given attachment and tier.
     /// Checks the RAM cache synchronously first; on miss, loads from disk or
     /// generates a thumbnail off the main thread.
-    func image(for attachment: Attachment, tier: Tier) async -> NSImage? {
+    ///
+    /// `bytesLoader` is a closure that resolves the attachment's bytes from disk when the
+    /// in-memory `Attachment.data` is nil. Production callers wire this to the session's
+    /// `PersistenceManager.loadAttachmentData(id:filename:)`. When omitted, only attachments
+    /// with eagerly-loaded `.data` are renderable — the session-restored case (where the
+    /// metadata is in memory but the bytes are on disk) returns nil. UI callers should
+    /// prefer the loader form so missing bytes don't silently render as blank space.
+    func image(
+        for attachment: Attachment,
+        tier: Tier,
+        bytesLoader: (@Sendable (UUID, String) async -> Data?)? = nil
+    ) async -> NSImage? {
         let cacheKey = NSString(string: "\(attachment.id.uuidString)-\(tier.rawValue)")
 
         // 1. RAM cache hit (synchronous, no I/O)
@@ -83,28 +95,41 @@ final class ImageCache {
             return cached
         }
 
-        // 2. Heavy work off main actor: disk lookup, source read, thumbnail gen
+        // 2. Heavy work off main actor: disk lookup, source read, thumbnail gen.
+        // Captured locals (Sendable) so the detached task isn't bridged to MainActor.
         let maxDimension = tier.maxPixelDimension
         let diskURL = (tier == .chip || tier == .small)
             ? diskCacheURL(attachmentID: attachment.id, tier: tier)
             : nil
         let attachmentData = attachment.data
+        let isFull = tier == .full
         let attachmentID = attachment.id
         let attachmentFilename = attachment.filename
-        let isFull = tier == .full
 
         let result: NSImage? = await Task.detached(priority: .userInitiated) {
-            // Disk cache hit (chip and small only)
+            // Disk cache hit (chip and small only) short-circuits before any source-byte
+            // load — important because chip/small are the hot path in the channel
+            // transcript and reloading 200KB images on every scroll is wasteful.
             if let url = diskURL,
                FileManager.default.fileExists(atPath: url.path),
                let diskImage = NSImage(contentsOf: url) {
                 return diskImage
             }
 
-            // Load source data
-            guard let sourceData = attachmentData
-                    ?? Attachment.loadPersistedData(id: attachmentID, filename: attachmentFilename)
-            else {
+            // Source bytes: in-memory first, then via the session-aware loader. The
+            // loader is @Sendable + async; PersistenceManager is an actor so its own
+            // isolation handles thread-safety.
+            let sourceData: Data?
+            if let attachmentData {
+                sourceData = attachmentData
+            } else if let bytesLoader {
+                sourceData = await bytesLoader(attachmentID, attachmentFilename)
+            } else {
+                sourceData = nil
+            }
+
+            guard let sourceData else {
+                imageCacheLogger.error("ImageCache: attachment \(attachmentID.uuidString, privacy: .public) bytes unavailable (filename=\(attachmentFilename, privacy: .public)) — UI will render placeholder")
                 return nil
             }
 

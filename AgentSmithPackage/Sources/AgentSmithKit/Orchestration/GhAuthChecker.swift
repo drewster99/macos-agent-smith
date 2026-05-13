@@ -16,14 +16,14 @@ import Foundation
 /// 30s upper-bound latency of `gh auth status`. The default TTL is four hours — long enough
 /// to amortize the cost across a typical work session, short enough that auth changes are
 /// reflected within the same day. Callers can force a refresh via `invalidate()`.
-public actor GhAuthChecker {
+actor GhAuthChecker {
     /// How long a cached snapshot is considered fresh. Four hours covers a typical
     /// session of back-to-back tasks while keeping auth state from going stale across days.
-    public static let cacheTTL: TimeInterval = 4 * 60 * 60
+    private static let cacheTTL: TimeInterval = 4 * 60 * 60
 
     /// Process-wide shared instance. Constructed lazily; the actor isolation makes the
     /// shared cache safe to read/write from concurrent Brown spawns.
-    public static let shared = GhAuthChecker()
+    static let shared = GhAuthChecker()
 
     private var cachedSnapshot: String?
     private var cachedAt: Date?

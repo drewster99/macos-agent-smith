@@ -44,6 +44,16 @@ public protocol AgentTool: Sendable {
     /// Whether this tool should be included in the LLM's tool definitions for this turn.
     /// Default is `true`. Override to conditionally hide tools based on context.
     func isAvailable(in context: ToolAvailabilityContext) -> Bool
+
+    /// Maximum wall-clock time a single invocation of this tool may take. After this
+    /// `AgentActor` cancels the tool's task and synthesizes a "Tool execution exceeded N s —
+    /// cancelled" result for the LLM. Default is 120 s. Tools that legitimately need longer
+    /// (e.g. a future `download_file`) should override.
+    /// Note: cancellation is cooperative *and* structured — `runToolWithTimeout` awaits the
+    /// cancelled task, so a tool that never checks `Task.isCancelled` / never hits a
+    /// cancellation-aware `await` will keep running and delay the agent loop until it finishes
+    /// on its own. A long-running tool must poll cancellation in its hot loop.
+    var executionTimeout: Duration { get }
 }
 
 /// Contextual information for determining tool availability before an LLM call.
@@ -68,6 +78,12 @@ public struct ToolAvailabilityContext: Sendable {
 extension AgentTool {
     /// Default: tool is always available.
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool { true }
+
+    /// Default per-tool wall-clock cap. Picked so that the slowest legitimate in-process
+    /// tools (large `glob`, deep `grep`, schema introspection of a heavy app) finish
+    /// comfortably while a tool that overruns gets cancelled (and, if it polls cancellation,
+    /// actually stops) instead of pinning the agent loop on a stuck call.
+    public var executionTimeout: Duration { .seconds(120) }
 
     /// One-line summary of what the tool does, suitable for inclusion in *another* agent's
     /// system prompt (notably Smith's "Brown's tools" manifest). Returns the first sentence
@@ -164,7 +180,7 @@ public struct ToolContext: Sendable {
     /// whose intent is to act on a task whose previous run has already terminated (e.g.
     /// `run_task`, `summarize`) — otherwise the first run's completion will wipe every
     /// queued future wake against the same task.
-    public let scheduleWake: @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome
+    let scheduleWake: @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome
     /// Returns all currently-scheduled wakes for the calling agent (sorted by `wakeAt`).
     public let listScheduledWakes: @Sendable () async -> [ScheduledWake]
     /// Cancels a single wake by id. Returns true on success.
@@ -208,8 +224,29 @@ public struct ToolContext: Sendable {
     /// produced during the task. Returns the new `Attachment` on success; on failure
     /// returns nil with a human-readable error string.
     public let ingestAttachmentFile: @Sendable (String) async -> (attachment: Attachment?, error: String?)
+    /// Synchronous resolver for the on-disk URL of an attachment by `(id, filename)`.
+    /// Used by sync-only paths in `AgentActor` (e.g. `drainPendingMessages`) to produce
+    /// `file://` markdown links without an actor hop. Returns nil when no per-session
+    /// path is wired (tests, in-memory contexts). The URL is purely informational —
+    /// callers MUST NOT assume the file exists; bytes still go through the registry.
+    public let attachmentURLProvider: @Sendable (UUID, String) -> URL?
+    /// Stages attachments into the calling agent's next user turn. The runtime drains
+    /// these into the assembled LLM message — image attachments become content blocks at
+    /// the requested detail tier; non-image attachments become markdown reference lines.
+    /// Used by the `view_attachment` tool so an agent can pull a previously-known
+    /// attachment into its visual context on demand. The string parameter is the
+    /// detail tier ("thumbnail" / "standard" / "full"); unknown values fall back to
+    /// "standard".
+    public let stageAttachmentsForNextTurn: @Sendable ([Attachment], String) async -> Void
+    /// Per-message aggregate attachment cap in bytes. Tool resolvers sum
+    /// `Attachment.byteCount` across the resolved set and reject when the total exceeds
+    /// this cap. Sourced from `OrchestrationRuntime.maxAttachmentBytesPerMessage`, which
+    /// the app layer drives from `SharedAppState.maxAttachmentBytesPerMessage`. The
+    /// tool-side check is independent of the per-file cap enforced by the registry's
+    /// `ingestFile`.
+    public let maxAttachmentBytesPerMessage: @Sendable () async -> Int
 
-    public init(
+    init(
         agentID: UUID,
         agentRole: AgentRole,
         channel: MessageChannel,
@@ -236,23 +273,28 @@ public struct ToolContext: Sendable {
         autoAdvanceEnabled: @escaping @Sendable () async -> Bool = { true },
         recordFileRead: @escaping @Sendable (String) -> Void = { _ in },
         hasFileBeenRead: @escaping @Sendable (String) -> Bool = { _ in false },
-        // No silent no-op defaults: every production code path wires these through to the
-        // shared ToolExecutionTracker. A missing wiring is a programming error — surface
-        // it via fatalError so it can't pass tests with a no-op stub. Tests that exercise
-        // the tracker-aware code paths MUST pass real closures.
+        // Every production code path wires these through to the shared ToolExecutionTracker.
+        // A missing wiring is a programming error — `assertionFailure` surfaces it loudly in
+        // debug/tests, but a release build degrades (the boolean queries return `false`, the
+        // neutral "outcome not yet recorded" state) rather than crashing.
         setToolExecutionStatus: @escaping @Sendable (String, Bool) async -> Void = { _, _ in
-            fatalError("ToolContext.setToolExecutionStatus was not configured — wire it through to a ToolExecutionTracker.")
+            assertionFailure("ToolContext.setToolExecutionStatus was not configured — wire it through to a ToolExecutionTracker.")
         },
         hasToolSucceeded: @escaping @Sendable (String) async -> Bool = { _ in
-            fatalError("ToolContext.hasToolSucceeded was not configured — wire it through to a ToolExecutionTracker.")
+            assertionFailure("ToolContext.hasToolSucceeded was not configured — wire it through to a ToolExecutionTracker.")
+            return false
         },
         hasToolFailed: @escaping @Sendable (String) async -> Bool = { _ in
-            fatalError("ToolContext.hasToolFailed was not configured — wire it through to a ToolExecutionTracker.")
+            assertionFailure("ToolContext.hasToolFailed was not configured — wire it through to a ToolExecutionTracker.")
+            return false
         },
         resolveAttachments: @escaping @Sendable ([String]) async -> (resolved: [Attachment], rejected: [String]) = { _ in ([], []) },
         ingestAttachmentFile: @escaping @Sendable (String) async -> (attachment: Attachment?, error: String?) = { _ in
             (nil, "ToolContext.ingestAttachmentFile was not configured.")
-        }
+        },
+        attachmentURLProvider: @escaping @Sendable (UUID, String) -> URL? = { _, _ in nil },
+        stageAttachmentsForNextTurn: @escaping @Sendable ([Attachment], String) async -> Void = { _, _ in },
+        maxAttachmentBytesPerMessage: @escaping @Sendable () async -> Int = { 50 * 1024 * 1024 }
     ) {
         self.agentID = agentID
         self.agentRole = agentRole
@@ -285,6 +327,9 @@ public struct ToolContext: Sendable {
         self.hasToolFailed = hasToolFailed
         self.resolveAttachments = resolveAttachments
         self.ingestAttachmentFile = ingestAttachmentFile
+        self.attachmentURLProvider = attachmentURLProvider
+        self.stageAttachmentsForNextTurn = stageAttachmentsForNextTurn
+        self.maxAttachmentBytesPerMessage = maxAttachmentBytesPerMessage
     }
 
     /// Posts a message to the channel, auto-stamping it with the owning agent's

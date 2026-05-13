@@ -1,10 +1,13 @@
 import Foundation
-import os
-
-private let attachmentLogger = Logger(subsystem: "com.agentsmith", category: "Attachment")
 
 /// A file attachment on a channel message. Supports any media type.
 /// File data is stored separately on disk; only metadata is persisted in the message JSON.
+///
+/// Bytes live in the per-session attachments directory managed by `PersistenceManager`.
+/// Use `AttachmentRegistry.resolve(_:)` to look up an attachment by ID and lazy-load its
+/// bytes — that's the only correct path. The previous static `loadPersistedData(id:filename:)`
+/// helper was removed because it pointed at a legacy global directory that no longer
+/// receives writes (per-session migration retired the global path).
 public struct Attachment: Identifiable, Codable, Sendable, Equatable {
     public var id: UUID
     public var filename: String
@@ -40,33 +43,6 @@ public struct Attachment: Identifiable, Codable, Sendable, Equatable {
     /// Whether the LLM can process this as a PDF document.
     public var isPDF: Bool {
         mimeType == "application/pdf"
-    }
-
-    /// Loads data from Application Support if not already in memory.
-    public mutating func loadDataIfNeeded() {
-        guard data == nil else { return }
-        data = Self.loadPersistedData(id: id, filename: filename)
-    }
-
-    /// Loads attachment file data from the persistence directory.
-    public static func loadPersistedData(id: UUID, filename: String) -> Data? {
-        guard let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else { return nil }
-
-        let safeName = PersistenceManager.sanitizeFilename(filename)
-        let url = appSupport
-            .appendingPathComponent("AgentSmith", isDirectory: true)
-            .appendingPathComponent("attachments", isDirectory: true)
-            .appendingPathComponent("\(id.uuidString)_\(safeName)")
-
-        do {
-            return try Data(contentsOf: url)
-        } catch {
-            attachmentLogger.error("Failed to load persisted data for attachment \(id.uuidString): \(error.localizedDescription)")
-            return nil
-        }
     }
 
     /// Human-readable file size.

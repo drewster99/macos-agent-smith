@@ -4,10 +4,10 @@ import Foundation
 /// as compact, parseable text. Read this BEFORE writing any AppleScript for
 /// the app — it lists every command, class, property, element, parameter, and
 /// enumerator the app exposes.
-public struct GetAppScriptingSchemaTool: AgentTool {
-    public let name = "get_app_scripting_schema"
+struct GetAppScriptingSchemaTool: AgentTool {
+    let name = "get_app_scripting_schema"
 
-    public let toolDescription = """
+    let toolDescription = """
         Return the AppleScript scripting schema for one installed app, rendered as compact text. \
         Always read this BEFORE writing AppleScript for an app you haven't scripted before — it tells \
         you exactly which commands, classes, properties, elements, and enumerators the app exposes, \
@@ -38,7 +38,7 @@ public struct GetAppScriptingSchemaTool: AgentTool {
         }
     }
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "bundle_id": .dictionary([

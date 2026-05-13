@@ -90,6 +90,10 @@ public struct TaskUpdateTool: AgentTool {
     /// into a single `[Attachment]` list. On any resolution failure (unknown ID,
     /// file-not-found, too-large) returns a tool failure message rather than silently
     /// dropping attachments — Brown should retry with a corrected list.
+    ///
+    /// Enforces the runtime's per-message aggregate cap by summing `byteCount` across
+    /// the resolved set. The check runs after both id-resolution and path-ingestion so
+    /// the LLM gets a single accurate "too big" message rather than a partial-then-fail.
     fileprivate static func collectAttachments(
         arguments: [String: AnyCodable],
         context: ToolContext
@@ -104,7 +108,7 @@ public struct TaskUpdateTool: AgentTool {
             if !idStrings.isEmpty {
                 let outcome = await context.resolveAttachments(idStrings)
                 if !outcome.rejected.isEmpty {
-                    return (collected, "Unknown attachment_ids: \(outcome.rejected.joined(separator: ", ")). The IDs must come from a `[Attached: id=...]` reference Smith or Brown previously saw — do not invent them.")
+                    return (collected, "Unknown attachment_ids: \(outcome.rejected.joined(separator: ", ")). The IDs must come from a `[filename](file://…) … id=<UUID>` markdown link Smith or Brown previously saw — do not invent them.")
                 }
                 collected.append(contentsOf: outcome.resolved)
             }
@@ -123,6 +127,20 @@ public struct TaskUpdateTool: AgentTool {
                     return (collected, outcome.error ?? "Failed to ingest attachment at path: \(path)")
                 }
             }
+        }
+
+        // Aggregate-size guard: reject the call if the resolved set exceeds the
+        // runtime's per-message cap. Applies across both `attachment_ids` and
+        // `attachment_paths` because the LLM doesn't necessarily know individual sizes.
+        let cap = await context.maxAttachmentBytesPerMessage()
+        let total = collected.reduce(0) { $0 + $1.byteCount }
+        if cap > 0, total > cap {
+            let totalMB = Double(total) / 1_048_576.0
+            let capMB = Double(cap) / 1_048_576.0
+            return (collected, String(
+                format: "Attachments exceed the per-message size cap: %.1f MB total, %.1f MB cap. Reduce the number of files or use smaller variants. Configurable in Settings → Attachments.",
+                totalMB, capMB
+            ))
         }
 
         return (collected, nil)

@@ -1,20 +1,48 @@
 import SwiftUI
 import AgentSmithKit
 
+/// SwiftUI environment key carrying the per-session attachment-bytes loader. The view
+/// hierarchy reads it via `@Environment(\.attachmentBytesLoader)` so views that can't
+/// own a closure (e.g. `MessageRow`, which is `Equatable`) still get session-aware
+/// loading without modifying their public surface. Set at the root of each session
+/// scene with `.environment(\.attachmentBytesLoader, viewModel.attachmentBytesLoader)`.
+struct AttachmentBytesLoaderKey: EnvironmentKey {
+    static let defaultValue: (@Sendable (UUID, String) async -> Data?)? = nil
+}
+
+extension EnvironmentValues {
+    var attachmentBytesLoader: (@Sendable (UUID, String) async -> Data?)? {
+        get { self[AttachmentBytesLoaderKey.self] }
+        set { self[AttachmentBytesLoaderKey.self] = newValue }
+    }
+}
+
 /// Displays an attachment inline: images as cached thumbnails, other files as badges.
 /// Uses `ImageCache` for efficient tiered rendering. Tapping an image invokes `onTapImage`.
+///
+/// Reads the per-session bytes loader from the environment so session-restored
+/// attachments (where `Attachment.data` is nil and bytes live on disk) still render.
 struct AttachmentView: View {
     let attachment: Attachment
     let tier: ImageCache.Tier
     var onTapImage: (() -> Void)?
 
+    @Environment(\.attachmentBytesLoader) private var bytesLoader
     @State private var loadedImage: NSImage?
+    @State private var isLoadingImage = false
 
     var body: some View {
         if attachment.isImage {
             imageView()
-                .task(id: attachment.id) {
-                    loadedImage = await ImageCache.shared.image(for: attachment, tier: tier)
+                .task(id: imageLoadID) {
+                    if let cached = ImageCache.shared.cachedImage(for: attachment, tier: tier) {
+                        setLoadedImage(cached, isLoading: false)
+                        return
+                    }
+                    setLoadedImage(nil, isLoading: true)
+                    let image = await ImageCache.shared.image(for: attachment, tier: tier, bytesLoader: bytesLoader)
+                    guard !Task.isCancelled else { return }
+                    setLoadedImage(image, isLoading: false)
                 }
         } else {
             fileBadge()
@@ -24,8 +52,7 @@ struct AttachmentView: View {
     @ViewBuilder
     private func imageView() -> some View {
         Group {
-            if let nsImage = loadedImage
-                ?? ImageCache.shared.cachedImage(for: attachment, tier: tier) {
+            if let nsImage = loadedImage {
                 Button(action: { onTapImage?() }, label: {
                     Image(nsImage: nsImage)
                         .resizable()
@@ -40,10 +67,25 @@ struct AttachmentView: View {
                     if hovering { NSCursor.pointingHand.set() }
                     else { NSCursor.arrow.set() }
                 }
-            } else {
+            } else if isLoadingImage {
                 ProgressView()
                     .frame(width: 60, height: 60)
+            } else {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 60, height: 60)
             }
+        }
+    }
+
+    private var imageLoadID: String {
+        "\(attachment.id.uuidString)-\(tier.rawValue)"
+    }
+
+    private func setLoadedImage(_ image: NSImage?, isLoading: Bool) {
+        DispatchQueue.main.async {
+            loadedImage = image
+            isLoadingImage = isLoading
         }
     }
 
@@ -83,6 +125,7 @@ struct ImageLightbox: View {
     let attachment: Attachment
     let onDismiss: () -> Void
 
+    @Environment(\.attachmentBytesLoader) private var bytesLoader
     @State private var fullImage: NSImage?
     @State private var loadFailed = false
 
@@ -135,7 +178,7 @@ struct ImageLightbox: View {
         }
         .transition(.opacity)
         .task {
-            let image = await ImageCache.shared.image(for: attachment, tier: .full)
+            let image = await ImageCache.shared.image(for: attachment, tier: .full, bytesLoader: bytesLoader)
             if let image {
                 fullImage = image
             } else {
@@ -245,7 +288,7 @@ struct FileWritePathView: View {
 
 /// A lightweight tooltip that appears immediately on hover, positioned above the anchor view.
 /// Avoids the long delay of the system `.help()` modifier.
-struct HoverTooltip: ViewModifier {
+private struct HoverTooltip: ViewModifier {
     let text: String
 
     @State private var isHovering = false

@@ -4,10 +4,10 @@ import Foundation
 /// On success, both a recursively-coerced JSON value and a plain-text coercion
 /// are returned. On failure, a structured error tagged as compile / runtime /
 /// targetApp / unknown — with line, column, and source snippet when available.
-public struct RunAppleScriptTool: AgentTool {
-    public let name = "run_applescript"
+struct RunAppleScriptTool: AgentTool {
+    let name = "run_applescript"
 
-    public let toolDescription = """
+    let toolDescription = """
         Control apps on this device by running an AppleScript via NSAppleScript and return its result as structured JSON. \
         Use this to drive other Mac apps that support scripting (Mail, Messages (iMessage), Calendar, Music, Finder, Xcode, \
         Safari, Photos, etc.). For any non-trivial app, call `get_app_scripting_schema` first to confirm \
@@ -65,7 +65,7 @@ public struct RunAppleScriptTool: AgentTool {
         }
     }
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "script": .dictionary([

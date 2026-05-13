@@ -1,9 +1,9 @@
 import Foundation
 
 /// Allows Smith to terminate a Brown agent by ID.
-public struct TerminateAgentTool: AgentTool {
-    public let name = "terminate_agent"
-    public let toolDescription = "Terminate a running agent by its ID."
+struct TerminateAgentTool: AgentTool {
+    let name = "terminate_agent"
+    let toolDescription = "Terminate a running agent by its ID."
 
     public func description(for role: AgentRole) -> String {
         switch role {
@@ -14,7 +14,7 @@ public struct TerminateAgentTool: AgentTool {
         }
     }
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "agent_id": .dictionary([

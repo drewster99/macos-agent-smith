@@ -32,7 +32,7 @@ public struct TaskSummarySearchResult: Sendable {
 
 /// Errors thrown by `MemoryStore` when the embedding backend returns something we
 /// can't safely store or compare.
-public enum MemoryStoreError: Error, CustomStringConvertible {
+private enum MemoryStoreError: Error, CustomStringConvertible {
     /// The embedding backend returned an empty vector. Storing it would silently
     /// disable semantic search for the entry.
     case emptyEmbedding
@@ -40,7 +40,7 @@ public enum MemoryStoreError: Error, CustomStringConvertible {
     /// math would propagate non-finite values through scoring and break sort order.
     case nonFiniteEmbedding
 
-    public var description: String {
+    var description: String {
         switch self {
         case .emptyEmbedding: return "Embedding backend returned an empty vector"
         case .nonFiniteEmbedding: return "Embedding backend returned a non-finite vector (NaN/inf)"
@@ -62,11 +62,25 @@ public struct RelevantMemory: Codable, Sendable, Equatable {
     public let content: String
     public let tags: [String]
     public let similarity: Double
+    /// When the source `MemoryEntry` was originally saved. Optional so older tasks on
+    /// disk (saved before this field existed) decode without falling over.
+    public let createdAt: Date?
+    /// When the source `MemoryEntry` was last edited, if ever. Optional for the same
+    /// legacy-decode reason. UI prefers this over `createdAt` when present.
+    public let lastUpdatedAt: Date?
 
-    public init(content: String, tags: [String], similarity: Double) {
+    public init(
+        content: String,
+        tags: [String],
+        similarity: Double,
+        createdAt: Date? = nil,
+        lastUpdatedAt: Date? = nil
+    ) {
         self.content = content
         self.tags = tags
         self.similarity = similarity
+        self.createdAt = createdAt
+        self.lastUpdatedAt = lastUpdatedAt
     }
 }
 
@@ -76,12 +90,22 @@ public struct RelevantPriorTask: Codable, Sendable, Equatable {
     public let title: String
     public let summary: String
     public let similarity: Double
+    /// Latest known timestamp on the prior task (typically the summary-generation time,
+    /// which is post-completion). Optional so legacy tasks decode without failing.
+    public let latestDate: Date?
 
-    public init(taskID: UUID, title: String, summary: String, similarity: Double) {
+    public init(
+        taskID: UUID,
+        title: String,
+        summary: String,
+        similarity: Double,
+        latestDate: Date? = nil
+    ) {
         self.taskID = taskID
         self.title = title
         self.summary = summary
         self.similarity = similarity
+        self.latestDate = latestDate
     }
 
     /// Decodes a `RelevantPriorTask`, falling back to a random UUID for `taskID`
@@ -92,6 +116,7 @@ public struct RelevantPriorTask: Codable, Sendable, Equatable {
         title = try c.decode(String.self, forKey: .title)
         summary = try c.decode(String.self, forKey: .summary)
         similarity = try c.decode(Double.self, forKey: .similarity)
+        latestDate = try c.decodeIfPresent(Date.self, forKey: .latestDate)
     }
 }
 
@@ -144,7 +169,8 @@ public actor MemoryStore {
 
     /// Updates an existing memory's content and/or tags. Records who performed the edit
     /// in the entry's `lastUpdatedAt` / `lastUpdatedBy` fields. Re-embeds when the content
-    /// changed. Returns the updated entry, or nil if the ID wasn't found.
+    /// changed. Returns the updated entry, or nil if the ID wasn't found (or was deleted
+    /// concurrently while embedding).
     @discardableResult
     public func update(
         id: UUID,
@@ -152,26 +178,32 @@ public actor MemoryStore {
         tags: [String]? = nil,
         updatedBy: MemoryEntry.UpdateSource
     ) async throws -> MemoryEntry? {
-        guard let existing = memories[id] else { return nil }
-        let newContent = content ?? existing.content
-        let newTags = tags ?? existing.tags
+        guard let preEmbed = memories[id] else { return nil }
+        let newContent = content ?? preEmbed.content
+        let newTags = tags ?? preEmbed.tags
         let newEmbedding: [Float]
-        if content != nil && content != existing.content {
+        if content != nil && content != preEmbed.content {
             newEmbedding = try await engine.embed(newContent)
             try Self.validate(embedding: newEmbedding)
         } else {
-            newEmbedding = existing.embedding
+            newEmbedding = preEmbed.embedding
         }
+        // Re-read after the (possible) embed suspension. Actor methods are reentrant,
+        // so a delete or another update or a `searchAll` retrieval-count bump could
+        // have landed while we awaited. Use the fresh entry for invariant fields
+        // (createdAt, retrievalCount, lastRetrievedAt, source) so we don't clobber
+        // them with stale snapshot values from before the suspend.
+        guard let current = memories[id] else { return nil }
         let updated = MemoryEntry(
-            id: existing.id,
+            id: current.id,
             content: newContent,
             embedding: newEmbedding,
-            source: existing.source,
+            source: current.source,
             tags: newTags,
-            sourceTaskID: existing.sourceTaskID,
-            createdAt: existing.createdAt,
-            lastRetrievedAt: existing.lastRetrievedAt,
-            retrievalCount: existing.retrievalCount,
+            sourceTaskID: current.sourceTaskID,
+            createdAt: current.createdAt,
+            lastRetrievedAt: current.lastRetrievedAt,
+            retrievalCount: current.retrievalCount,
             lastUpdatedAt: Date(),
             lastUpdatedBy: updatedBy
         )

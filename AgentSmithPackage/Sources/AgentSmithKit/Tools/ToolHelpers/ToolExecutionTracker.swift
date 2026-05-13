@@ -7,7 +7,7 @@ import Foundation
 /// cap so Smith's tracker (which nobody currently reads) can't grow unbounded
 /// across a long session, and so Brown's `maxRecentToolRequests = 10`
 /// consultation window always finds the entries it needs.
-public actor ToolExecutionTracker: Sendable {
+actor ToolExecutionTracker: Sendable {
     /// Maximum number of `(toolCallID, succeeded)` entries kept. Once exceeded, the
     /// oldest entry is evicted on each new write. 20 comfortably exceeds the security
     /// evaluator's lookback (`SecurityEvaluator.maxRecentToolRequests = 10`) so a

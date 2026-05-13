@@ -1,7 +1,7 @@
 import Foundation
 
 /// Periodically posts task status summaries to the channel for Smith to review.
-public actor MonitoringTimer {
+actor MonitoringTimer {
     private let interval: TimeInterval
     private let channel: MessageChannel
     private let taskStore: TaskStore

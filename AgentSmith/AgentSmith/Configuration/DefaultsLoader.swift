@@ -2,7 +2,7 @@ import Foundation
 import AgentSmithKit
 
 /// Errors that can occur when loading bundled defaults.
-enum DefaultsLoaderError: Error, LocalizedError {
+private enum DefaultsLoaderError: Error, LocalizedError {
     case missingBundledFile
 
     var errorDescription: String? {

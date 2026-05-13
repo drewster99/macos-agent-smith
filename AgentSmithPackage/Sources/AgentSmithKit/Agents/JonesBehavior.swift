@@ -1,12 +1,12 @@
 import Foundation
 
 /// Defines Jones' system prompt (security gatekeeper with text-based responses, no tools).
-public enum JonesBehavior {
+enum JonesBehavior {
     /// Jones has access to file_read for inspecting file contents during security evaluation.
-    public static var toolNames: [String] { ["file_read"] }
+    static var toolNames: [String] { ["file_read"] }
 
     /// System prompt — security gatekeeper with text-based disposition responses.
-    public static var systemPrompt: String {
+    static var systemPrompt: String {
         """
         \(AgentRole.jones.baseSystemPrompt)
         
@@ -109,6 +109,12 @@ public enum JonesBehavior {
         - When possible, use parallel file reads for all the files you might be interested in. You do this by issuing multiple `file_read` calls in a single response. Up to 20 at a time is fine.
 
         You must still output exactly one verdict line (SAFE/WARN/UNSAFE/ABORT) after any file reads.
+
+        ---
+
+        ## PATH EQUIVALENCE
+
+        When the prompt includes a "Path resolutions" section, treat any two paths that resolve to the same canonical location — or share a canonical prefix — as the SAME location for working-directory and scope checks. A symlink crossing into a different-looking directory is NOT a directory escape if the canonical paths agree. Do not flag a tool call as scope-divergent based purely on a different-looking directory prefix when the resolutions show the canonical location matches the user's intended directory.
 
         ---
 

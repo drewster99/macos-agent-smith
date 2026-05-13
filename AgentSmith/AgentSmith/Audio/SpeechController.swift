@@ -37,11 +37,11 @@ final class SpeechController {
     var agentEnabled: [AgentRole: Bool] = [:]
     var agentVoiceIdentifier: [AgentRole: String] = [:]
 
-    var agentToUser: [AgentRole: SoundConfig] = [:]
-    var agentToAgent: [AgentRole: SoundConfig] = [:]
-    var publicMessage: [AgentRole: SoundConfig] = [:]
-    var toolActivity: [AgentRole: SoundConfig] = [:]
-    var agentError: [AgentRole: SoundConfig] = [:]
+    private var agentToUser: [AgentRole: SoundConfig] = [:]
+    private var agentToAgent: [AgentRole: SoundConfig] = [:]
+    private var publicMessage: [AgentRole: SoundConfig] = [:]
+    private var toolActivity: [AgentRole: SoundConfig] = [:]
+    private var agentError: [AgentRole: SoundConfig] = [:]
 
     // MARK: - User config
 

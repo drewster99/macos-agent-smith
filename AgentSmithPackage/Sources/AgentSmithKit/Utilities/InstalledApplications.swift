@@ -1,17 +1,17 @@
 import Foundation
 
 /// AppleScript / Apple-Event scripting metadata extracted from an app's `.sdef`.
-public struct ScriptingDefinition: Sendable, Hashable {
+struct ScriptingDefinition: Sendable, Hashable {
     /// Path to the `.sdef` file inside the app bundle.
-    public let url: URL
+    let url: URL
     /// Suite names declared in the sdef.
-    public let suiteNames: [String]
+    let suiteNames: [String]
     /// `true` when the app declares any suite whose code is not the Standard
     /// Suite sentinel (`????`) — i.e. exposes app-specific scripting beyond
     /// open/close/quit/count/etc.
-    public let exposesNonStandardSuite: Bool
+    let exposesNonStandardSuite: Bool
     /// Compact, human-readable rendering of the schema (see `SdefRenderer`).
-    public let renderedSchema: String
+    let renderedSchema: String
 
     public init(url: URL, suiteNames: [String], exposesNonStandardSuite: Bool, renderedSchema: String) {
         self.url = url
@@ -22,17 +22,17 @@ public struct ScriptingDefinition: Sendable, Hashable {
 }
 
 /// Metadata for a single installed application discovered on disk.
-public struct InstalledApplication: Sendable, Hashable {
+struct InstalledApplication: Sendable, Hashable {
     /// File URL of the `.app` bundle.
-    public let url: URL
+    let url: URL
     /// `CFBundleShortVersionString`, falling back to `CFBundleVersion`. `nil` when the
     /// bundle exposes neither (rare — usually a malformed or partially-installed app).
-    public let version: String?
+    let version: String?
     /// Bundle identifier from `Info.plist`, when present.
-    public let bundleIdentifier: String?
+    let bundleIdentifier: String?
     /// Scripting metadata, when the app ships an `.sdef` file. `nil` for apps
     /// that aren't AppleScript-scriptable.
-    public let scripting: ScriptingDefinition?
+    let scripting: ScriptingDefinition?
 
     public init(
         url: URL,
@@ -50,8 +50,8 @@ public struct InstalledApplication: Sendable, Hashable {
 /// Process-wide cache of the installed-application scan. Built lazily on first
 /// access so multiple tools share a single scan instead of each triggering a
 /// fresh disk walk.
-public actor InstalledApplicationsRegistry {
-    public static let shared = InstalledApplicationsRegistry()
+actor InstalledApplicationsRegistry {
+    static let shared = InstalledApplicationsRegistry()
 
     private let scanner = InstalledApplicationsScanner()
     private var cached: [InstalledApplication]?
@@ -118,7 +118,7 @@ public actor InstalledApplicationsRegistry {
 ///
 /// Filesystem and XML I/O are hopped to a background `DispatchQueue` so the
 /// actor's executor isn't blocked while scanning.
-public actor InstalledApplicationsScanner {
+actor InstalledApplicationsScanner {
 
     public init() {}
 
@@ -250,7 +250,7 @@ private enum SdefLocator {
 /// what we want to expose to LLM tool callers (suites, classes, properties,
 /// elements, commands, enums) and discards the Cocoa keys, documentation
 /// HTML, access groups, etc.
-public struct SdefSchema: Sendable, Hashable {
+private struct SdefSchema: Sendable, Hashable {
     public struct Suite: Sendable, Hashable {
         public let name: String
         public let code: String
@@ -294,13 +294,13 @@ public struct SdefSchema: Sendable, Hashable {
         public let description: String?
     }
 
-    public let suites: [Suite]
+    let suites: [Suite]
 }
 
 private enum SdefParser {
     /// Standard Suite always carries this code; suites with any other code
     /// expose app-specific scripting.
-    static let standardSuiteCode = "????"
+    private static let standardSuiteCode = "????"
 
     static func parse(at url: URL) -> ScriptingDefinition? {
         guard let data = try? Data(contentsOf: url) else { return nil }
@@ -471,7 +471,7 @@ private enum SdefParser {
 }
 
 /// Compact text rendering of an `SdefSchema`, optimized for prompt-stuffing.
-public enum SdefRenderer {
+private enum SdefRenderer {
     public static func render(_ schema: SdefSchema) -> String {
         var lines: [String] = []
         for suite in schema.suites {

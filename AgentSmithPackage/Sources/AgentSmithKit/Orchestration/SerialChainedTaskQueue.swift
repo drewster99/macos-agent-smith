@@ -11,7 +11,7 @@ import Synchronization
 /// chains. Without this, the second restart's `start()` could hit
 /// `OrchestrationRuntime.start`'s `guard smith == nil` check while the first
 /// restart was still mid-setup, silently dropping the second taskID.
-public final class SerialChainedTaskQueue: Sendable {
+final class SerialChainedTaskQueue: Sendable {
     private let lock = Mutex<Task<Void, Never>?>(nil)
 
     public init() {}

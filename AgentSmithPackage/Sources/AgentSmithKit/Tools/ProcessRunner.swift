@@ -39,6 +39,20 @@ enum ProcessRunner {
             case completed
         }
         let stateBox = OSAllocatedUnfairLock<State>(initialState: .pending)
+        // Whether `setpgid` succeeded. When it does, kill the whole process group (`-pid`)
+        // so backgrounded descendants die too; when it doesn't (it appears to fail
+        // consistently in this sandbox — the child has already exec'd by the time the parent
+        // calls it), fall back to killing just the direct child (`pid`). Either way the
+        // child itself is reaped on timeout/cancel.
+        let ownsProcessGroup = OSAllocatedUnfairLock(initialState: false)
+
+        @Sendable func terminate(_ pid: pid_t) {
+            let target = ownsProcessGroup.withLock { $0 } ? -pid : pid
+            kill(target, SIGTERM)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                kill(target, SIGKILL)
+            }
+        }
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Result, Error>) in
@@ -120,11 +134,14 @@ enum ProcessRunner {
                         return
                     }
 
-                    // Put the process in its own group so the timeout/cancel can kill all children.
-                    let pgidResult = setpgid(process.processIdentifier, process.processIdentifier)
-                    if pgidResult == -1 {
+                    // Put the process in its own group so the timeout/cancel can kill all
+                    // children. If this fails, `terminate(_:)` falls back to a single-pid kill.
+                    let pgidOK = setpgid(process.processIdentifier, process.processIdentifier) == 0
+                    let pgidErrno = errno
+                    ownsProcessGroup.withLock { $0 = pgidOK }
+                    if !pgidOK {
                         let logger = Logger(subsystem: "AgentSmith", category: "ProcessRunner")
-                        logger.debug("setpgid failed for pid \(process.processIdentifier): \(String(cString: strerror(errno)))")
+                        logger.debug("setpgid failed for pid \(process.processIdentifier): \(String(cString: strerror(pgidErrno))) — timeout/cancel will signal only the direct child")
                     }
 
                     // Publish the pid so the cancellation handler can reach it, but also
@@ -142,19 +159,14 @@ enum ProcessRunner {
                         }
                     }
                     if shouldKillNow {
-                        kill(-pid, SIGTERM)
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                            kill(-pid, SIGKILL)
-                        }
+                        terminate(pid)
                     }
 
-                    // Schedule timeout — kills the entire process group.
+                    // Schedule timeout — kills the process group (or the direct child if
+                    // setpgid failed).
                     let timeoutItem = DispatchWorkItem {
                         didTimeout.withLock { $0 = true }
-                        kill(-pid, SIGTERM)
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                            kill(-pid, SIGKILL)
-                        }
+                        terminate(pid)
                     }
                     DispatchQueue.global().asyncAfter(
                         deadline: .now() + timeout,
@@ -194,10 +206,10 @@ enum ProcessRunner {
                 }
             }
         } onCancel: {
-            // Snapshot-and-transition the shared state. If a process is running,
-            // send SIGTERM (then SIGKILL after a grace period) to the whole group.
-            // If we're still pending, record cancellation so the dispatch block
-            // bails out before launching.
+            // Snapshot-and-transition the shared state. If a process is running, send
+            // SIGTERM (then SIGKILL after a grace period) — to the whole group if we have
+            // one, otherwise to the direct child. If we're still pending, record
+            // cancellation so the dispatch block bails out before launching.
             let pidToKill: pid_t? = stateBox.withLock { state in
                 switch state {
                 case .pending:
@@ -211,10 +223,7 @@ enum ProcessRunner {
                 }
             }
             if let pid = pidToKill {
-                kill(-pid, SIGTERM)
-                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                    kill(-pid, SIGKILL)
-                }
+                terminate(pid)
             }
         }
     }

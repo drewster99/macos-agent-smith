@@ -2,9 +2,9 @@ import Foundation
 
 /// Allows Smith to list tasks across active, archived, and recently-deleted buckets,
 /// with optional status filtering and pagination.
-public struct ListTasksTool: AgentTool {
-    public let name = "list_tasks"
-    public let toolDescription = """
+struct ListTasksTool: AgentTool {
+    let name = "list_tasks"
+    let toolDescription = """
         List tasks across active, archived (inactive), or all buckets, with their current status, \
         title, and description. Defaults to active tasks only. Supports pagination via `limit` and `offset` \
         for browsing large historical lists.
@@ -15,7 +15,7 @@ public struct ListTasksTool: AgentTool {
     /// Maximum page size the caller can request.
     private static let maxLimit = 100
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "disposition_filter": .dictionary([

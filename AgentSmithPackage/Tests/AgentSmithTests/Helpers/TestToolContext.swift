@@ -26,12 +26,12 @@ enum TestToolContext {
 
         func record(_ path: String) {
             lock.lock(); defer { lock.unlock() }
-            paths.insert(path)
+            paths.insert(PathNormalization.normalize(path))
         }
 
         func has(_ path: String) -> Bool {
             lock.lock(); defer { lock.unlock() }
-            return paths.contains(path)
+            return paths.contains(PathNormalization.normalize(path))
         }
     }
 
@@ -39,9 +39,10 @@ enum TestToolContext {
     /// needs by passing a custom `taskStore`, `channel`, or `fileReadTracker`.
     ///
     /// Note: `setToolExecutionStatus`, `hasToolSucceeded`, and `hasToolFailed` are wired to
-    /// no-op stubs (returning `false` for the boolean queries) — the production defaults are
-    /// `fatalError(...)` to surface unwired callers, but tests of pure-logic tools don't
-    /// exercise that path. If you're testing a tool that does, supply real closures.
+    /// no-op stubs (returning `false` for the boolean queries) — the production defaults
+    /// `assertionFailure(...)` (then degrade to `false`) to surface unwired callers, but
+    /// tests of pure-logic tools don't exercise that path. If you're testing a tool that
+    /// does, supply real closures.
     static func make(
         agentID: UUID = UUID(),
         agentRole: AgentRole = .brown,
@@ -50,7 +51,11 @@ enum TestToolContext {
         currentConfiguration: ModelConfiguration? = nil,
         currentProviderType: String? = nil,
         fileReadTracker: FileReadTrackerStub = FileReadTrackerStub(),
-        memoryStore: MemoryStore = MemoryStore(engine: SemanticSearchEngine())
+        memoryStore: MemoryStore = MemoryStore(engine: SemanticSearchEngine()),
+        attachmentResolver: @escaping @Sendable ([String]) async -> (resolved: [Attachment], rejected: [String]) = { ids in ([], ids) },
+        attachmentIngestor: @escaping @Sendable (String) async -> (attachment: Attachment?, error: String?) = { _ in (nil, "ingest not configured in test") },
+        stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
+        maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024
     ) -> ToolContext {
         ToolContext(
             agentID: agentID,
@@ -68,8 +73,30 @@ enum TestToolContext {
             hasFileBeenRead: { path in fileReadTracker.has(path) },
             setToolExecutionStatus: { _, _ in },
             hasToolSucceeded: { _ in false },
-            hasToolFailed: { _ in false }
+            hasToolFailed: { _ in false },
+            resolveAttachments: attachmentResolver,
+            ingestAttachmentFile: attachmentIngestor,
+            stageAttachmentsForNextTurn: { attachments, detail in
+                await stagedAttachmentRecorder.record(attachments: attachments, detail: detail)
+            },
+            maxAttachmentBytesPerMessage: { maxAttachmentBytesPerMessage }
         )
+    }
+
+    /// Captures `view_attachment`'s staging requests so tests can assert on them.
+    final class StagedAttachmentRecorder: Sendable {
+        private let lock = NSLock()
+        nonisolated(unsafe) private var entries: [(attachments: [Attachment], detail: String)] = []
+
+        func record(attachments: [Attachment], detail: String) {
+            lock.lock(); defer { lock.unlock() }
+            entries.append((attachments, detail))
+        }
+
+        func all() -> [(attachments: [Attachment], detail: String)] {
+            lock.lock(); defer { lock.unlock() }
+            return entries
+        }
     }
 }
 

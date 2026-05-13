@@ -5,9 +5,9 @@ import Foundation
 /// prompt (the prompt only carries static locale/timezone info to keep the prompt cache
 /// stable). Call this whenever you need to resolve the user's local "now" for relative-time
 /// math like "in 30 minutes" or "before tonight".
-public struct CurrentTimeTool: AgentTool {
-    public let name = "get_current_time"
-    public let toolDescription = """
+struct CurrentTimeTool: AgentTool {
+    let name = "get_current_time"
+    let toolDescription = """
         Get the current date and time in the user's local timezone. Returns ISO-8601 with the \
         user's UTC offset, the timezone identifier and abbreviation, the user's locale, and a \
         human-readable form. \
@@ -19,7 +19,7 @@ public struct CurrentTimeTool: AgentTool {
         No arguments.
         """
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([:])
     ]

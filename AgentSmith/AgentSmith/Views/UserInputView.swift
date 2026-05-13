@@ -18,6 +18,8 @@ struct UserInputView: View {
     @State private var showingExpandedEditor = false
 
     var body: some View {
+        let hasComposedContent = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
+
         VStack(spacing: 0) {
             if !pendingAttachments.isEmpty {
                 PendingAttachmentBar(
@@ -37,7 +39,7 @@ struct UserInputView: View {
                 UserInputTextField(
                     text: $text,
                     isRunning: isRunning,
-                    hasContent: hasContent,
+                    pendingAttachmentCount: pendingAttachments.count,
                     onSend: onSend,
                     onHistoryUp: onHistoryUp,
                     onHistoryDown: onHistoryDown,
@@ -49,8 +51,8 @@ struct UserInputView: View {
                         .imageScale(.large)
                 })
                 .buttonStyle(.borderedProminent)
-                .disabled(!hasContent || !isRunning)
-                .opacity(hasContent && isRunning ? 1.0 : 0.4)
+                .disabled(!hasComposedContent || !isRunning)
+                .opacity(hasComposedContent && isRunning ? 1.0 : 0.4)
                 .keyboardShortcut(.return, modifiers: .command)
             }
             .padding(8)
@@ -67,10 +69,6 @@ struct UserInputView: View {
         .sheet(isPresented: $showingExpandedEditor) {
             ExpandedEditorSheet(text: $text)
         }
-    }
-
-    private var hasContent: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
     }
 }
 
@@ -103,20 +101,24 @@ private struct PendingAttachmentChip: View {
     let onRemove: () -> Void
 
     @State private var chipImage: NSImage?
+    @State private var isLoadingImage = false
 
     var body: some View {
         HStack(spacing: 4) {
-            if attachment.isImage, let nsImage = chipImage
-                ?? ImageCache.shared.cachedImage(for: attachment, tier: .chip) {
+            if attachment.isImage, let nsImage = chipImage {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 28, height: 28)
                     .background(RoundedRectangle(cornerRadius: 4).fill(.quaternary))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-            } else if attachment.isImage {
+            } else if attachment.isImage && isLoadingImage {
                 ProgressView()
                     .controlSize(.small)
+                    .frame(width: 28, height: 28)
+            } else if attachment.isImage {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)
             } else {
                 Image(systemName: iconName)
@@ -139,8 +141,25 @@ private struct PendingAttachmentChip: View {
         .background(.quaternary)
         .clipShape(Capsule())
         .task(id: attachment.id) {
-            guard attachment.isImage else { return }
-            chipImage = await ImageCache.shared.image(for: attachment, tier: .chip)
+            guard attachment.isImage else {
+                setChipImage(nil, isLoading: false)
+                return
+            }
+            if let cached = ImageCache.shared.cachedImage(for: attachment, tier: .chip) {
+                setChipImage(cached, isLoading: false)
+                return
+            }
+            setChipImage(nil, isLoading: true)
+            let loadedImage = await ImageCache.shared.image(for: attachment, tier: .chip)
+            guard !Task.isCancelled else { return }
+            setChipImage(loadedImage, isLoading: false)
+        }
+    }
+
+    private func setChipImage(_ image: NSImage?, isLoading: Bool) {
+        DispatchQueue.main.async {
+            chipImage = image
+            isLoadingImage = isLoading
         }
     }
 

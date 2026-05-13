@@ -16,6 +16,20 @@ final class AppViewModel {
     let shared: SharedAppState
 
     var messages: [ChannelMessage] = []
+
+    /// Derived channel-log lookups, rebuilt from `messages` on every channel-log mutation
+    /// (append, restore, clear). `ChannelLogView` reads these instead of re-scanning the
+    /// whole `messages` array inside `body`. See `rebuildChannelLogIndexes()`.
+    /// Set of requestIDs that have a corresponding `tool_request` message.
+    private(set) var toolRequestIDs: Set<String> = []
+    /// requestID → security-review message (last writer wins).
+    private(set) var securityReviewByRequestID: [String: ChannelMessage] = [:]
+    /// requestID → tool-output message (last writer wins).
+    private(set) var toolOutputByRequestID: [String: ChannelMessage] = [:]
+    /// taskIDs whose paired `timer_activity` "scheduled" row should be suppressed because a
+    /// `task_created` / `task_action_scheduled` banner already carries the schedule chip.
+    private(set) var taskIDsWithSchedulingBanner: Set<String> = []
+
     var tasks: [AgentTask] = [] {
         didSet { rebucketTasks() }
     }
@@ -117,6 +131,36 @@ final class AppViewModel {
         }
         pendingWakesByTaskID = grouped
     }
+
+    /// Rebuilds the derived channel-log lookups from `messages` in a single pass. Iterating
+    /// in array order means the *newest* message wins for the last-writer-wins dictionaries
+    /// (relevant after `restoreHistory()` prepends older messages). Call after any mutation
+    /// of `messages`.
+    private func rebuildChannelLogIndexes() {
+        func metaString(_ message: ChannelMessage, _ key: String) -> String? {
+            if case .string(let value) = message.metadata?[key] { return value }
+            return nil
+        }
+        var requestIDs = Set<String>()
+        var reviews: [String: ChannelMessage] = [:]
+        var outputs: [String: ChannelMessage] = [:]
+        var bannerTasks = Set<String>()
+        for message in messages {
+            let kind = metaString(message, "messageKind")
+            let requestID = metaString(message, "requestID")
+            if kind == "tool_request", let requestID { requestIDs.insert(requestID) }
+            if message.metadata?["securityDisposition"] != nil, let requestID { reviews[requestID] = message }
+            if kind == "tool_output", let requestID { outputs[requestID] = message }
+            if kind == "task_created" || kind == "task_action_scheduled", let taskID = metaString(message, "taskID") {
+                bannerTasks.insert(taskID)
+            }
+        }
+        toolRequestIDs = requestIDs
+        securityReviewByRequestID = reviews
+        toolOutputByRequestID = outputs
+        taskIDsWithSchedulingBanner = bannerTasks
+    }
+
     var isRunning = false
     var isAborted = false
     var abortReason = ""
@@ -178,6 +222,17 @@ final class AppViewModel {
     private var taskStore: TaskStore?
     private var channelStreamTask: Task<Void, Never>?
     let persistenceManager: PersistenceManager
+
+    /// Closure that resolves an attachment's bytes from the per-session attachments
+    /// directory. Used by `ImageCache` so attachment views can render thumbnails for
+    /// session-restored attachments where `Attachment.data` is nil. The closure is
+    /// `@Sendable` and crosses task boundaries; capturing `persistenceManager` (an
+    /// actor) is fine because the actor methods are themselves `@Sendable`-callable.
+    var attachmentBytesLoader: @Sendable (UUID, String) async -> Data? {
+        let pm = persistenceManager
+        return { id, filename in await pm.loadAttachmentData(id: id, filename: filename) }
+    }
+
     /// Full message history — a superset of `messages`. Never cleared; always written to disk.
     private var allPersistedMessages: [ChannelMessage] = []
 
@@ -496,8 +551,16 @@ final class AppViewModel {
         let pm = persistenceManager
         await newRuntime.setAttachmentPersistence(
             loader: { id, filename in await pm.loadAttachmentData(id: id, filename: filename) },
-            saver: { attachment in try await pm.saveAttachment(attachment) }
+            saver: { attachment in try await pm.saveAttachment(attachment) },
+            urlProvider: { id, filename in pm.attachmentURL(id: id, filename: filename) },
+            syncURLProvider: { id, filename in pm.attachmentURL(id: id, filename: filename) }
         )
+        // Push the current attachment-size caps from SharedAppState into the runtime so
+        // the registry's per-file cap and the per-message aggregate cap match the user's
+        // configured limits. Caps apply at session start; Settings UI can prompt Restart
+        // if a cap is changed mid-session.
+        await newRuntime.setMaxAttachmentBytesPerFile(shared.maxAttachmentBytesPerFile)
+        await newRuntime.setMaxAttachmentBytesPerMessage(shared.maxAttachmentBytesPerMessage)
         runtime = newRuntime
         isRunning = true
 
@@ -559,6 +622,7 @@ final class AppViewModel {
             for await message in channel.stream() {
                 guard let self else { break }
                 self.messages.append(message)
+                self.rebuildChannelLogIndexes()
                 self.allPersistedMessages.append(message)
                 self.shared.speechController.handle(message)
                 self.persistMessages()
@@ -675,51 +739,6 @@ final class AppViewModel {
         // After Smith starts the active-timers list may already contain restored wakes for
         // .scheduled tasks — refresh once so the View → Timers panel shows them.
         await refreshActiveTimers()
-
-        scheduleAutopilotMessageIfRequested()
-    }
-
-    /// Debug-only autopilot for headless integration testing of the LLM pipeline.
-    /// When the env var `AGENT_SMITH_AUTOPILOT_MSG` is set (or the same key in
-    /// UserDefaults), sends that text to Smith N seconds after start so a build/run/
-    /// inspect loop can run without UI clicking. Delay defaults to 10s; override via
-    /// `AGENT_SMITH_AUTOPILOT_DELAY` (seconds, fractional OK).
-    /// Both env-var and defaults paths are checked so the hook works either way the
-    /// app is launched (Xcode-mcp run, manual launch, etc.).
-    private func scheduleAutopilotMessageIfRequested() {
-        let env = ProcessInfo.processInfo.environment
-        let defaults = UserDefaults.standard
-        let envMsg = env["AGENT_SMITH_AUTOPILOT_MSG"]
-        let defaultsMsg = defaults.string(forKey: "AGENT_SMITH_AUTOPILOT_MSG")
-        // Also try a sentinel file as a sandbox-friendly fallback. The agent's
-        // sandbox container prefs path is per-container; writing to the global
-        // ~/.../com.nuclearcyborg.AgentSmith plist doesn't reach UserDefaults
-        // inside the sandbox. The file lives in a tmp dir we can both touch.
-        let sentinelPath = "/tmp/agent-smith-autopilot.txt"
-        var fileMsg: String?
-        if FileManager.default.fileExists(atPath: sentinelPath),
-           let data = try? Data(contentsOf: URL(fileURLWithPath: sentinelPath)),
-           let raw = String(data: data, encoding: .utf8) {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { fileMsg = trimmed }
-        }
-        let message = envMsg ?? defaultsMsg ?? fileMsg
-        let autopilotLogger = Logger(subsystem: "com.agentsmith", category: "autopilot")
-        autopilotLogger.notice("env=\(envMsg ?? "nil", privacy: .public) defaults=\(defaultsMsg ?? "nil", privacy: .public) file=\(fileMsg ?? "nil", privacy: .public) chosen=\(message ?? "nil", privacy: .public)")
-        guard let message, !message.isEmpty else { return }
-        let delaySeconds: Double = {
-            if let raw = env["AGENT_SMITH_AUTOPILOT_DELAY"], let parsed = Double(raw) { return parsed }
-            let dv = defaults.double(forKey: "AGENT_SMITH_AUTOPILOT_DELAY")
-            return dv > 0 ? dv : 10.0
-        }()
-        autopilotLogger.notice("scheduling fake user message in \(delaySeconds, privacy: .public)s: \(message, privacy: .public)")
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
-            guard let self else { return }
-            autopilotLogger.notice("sending fake user message: \(message, privacy: .public)")
-            self.inputText = message
-            await self.sendMessage()
-        }
     }
 
     /// Re-reads the currently-active wakes from Smith. Cheap; the agent stores the list
@@ -1005,6 +1024,23 @@ final class AppViewModel {
         )
     }
 
+    /// Manually starts (or resumes) a pending / paused / interrupted task without waiting for
+    /// Smith to pick it up — drives the same `run_task` path the orchestrator uses. Refuses
+    /// when another task is mid-run or awaiting review, mirroring the `run_task` tool's guardrails.
+    func startTask(_ task: AgentTask) async {
+        guard task.status.isRunnable else {
+            taskActionError = "This task can't be run right now (status: \(task.status.rawValue))."
+            return
+        }
+        if let blocker = tasks.first(where: { $0.id != task.id && ($0.status == .running || $0.status == .awaitingReview) }) {
+            taskActionError = blocker.status == .running
+                ? "Task “\(blocker.title)” is still running. Stop it before starting another task."
+                : "Task “\(blocker.title)” is awaiting review. Resolve it before starting another task."
+            return
+        }
+        await runtime?.restartForNewTask(taskID: task.id)
+    }
+
     func updatePollInterval(for role: AgentRole, interval: TimeInterval) async {
         agentPollIntervals[role] = interval
         guard let runtime else { return }
@@ -1100,6 +1136,7 @@ final class AppViewModel {
 
     func clearLog() {
         messages.removeAll()
+        rebuildChannelLogIndexes()
         inspectorStore.clearAll()
     }
 
@@ -1107,6 +1144,7 @@ final class AppViewModel {
         let currentIDs = Set(messages.map(\.id))
         let restoredHistory = allPersistedMessages.filter { !currentIDs.contains($0.id) }
         messages = restoredHistory + messages
+        rebuildChannelLogIndexes()
         hasRestoredHistory = true
     }
 

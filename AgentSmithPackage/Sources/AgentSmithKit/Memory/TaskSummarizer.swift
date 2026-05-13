@@ -6,7 +6,7 @@ import SwiftLLMKit
 /// Follows the `SecurityEvaluator` pattern: standalone actor with its own `LLMProvider`,
 /// focused prompt, and no tools. Each summary captures the problem, outcome, and approach
 /// for semantic search retrieval.
-public actor TaskSummarizer {
+actor TaskSummarizer {
     private let provider: any LLMProvider
     private let memoryStore: MemoryStore
     private let channel: MessageChannel

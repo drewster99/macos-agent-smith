@@ -5,9 +5,9 @@ import Foundation
 /// Internally uses `scheduleWake` with `replacesID`, so the timer-event log records a single
 /// `.cancelled(replaced)` + `.scheduled` pair the transcript renders as `rescheduled` —
 /// instead of an unrelated-looking cancel and a new schedule.
-public struct RescheduleWakeTool: AgentTool {
-    public let name = "reschedule_wake"
-    public let toolDescription = """
+struct RescheduleWakeTool: AgentTool {
+    let name = "reschedule_wake"
+    let toolDescription = """
         Reschedule an existing wake to a new fire time. Preserves the wake's instructions and \
         any task linkage. Use this whenever the user asks to move/postpone/bring-forward a \
         scheduled task action — do NOT call `cancel_wake` followed by `schedule_task_action`, \
@@ -23,7 +23,7 @@ public struct RescheduleWakeTool: AgentTool {
     private static let minDelaySeconds: Double = 5
     private static let maxDelaySeconds: Double = 365 * 24 * 60 * 60
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "wake_id": .dictionary([

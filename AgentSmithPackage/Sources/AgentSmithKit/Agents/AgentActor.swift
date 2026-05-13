@@ -4,8 +4,8 @@ import os
 /// Core agent actor: owns an LLM session, subscribes to the channel,
 /// runs an async loop of receive -> LLM -> act -> report.
 public actor AgentActor {
-    public let id: UUID
-    public let configuration: AgentConfiguration
+    let id: UUID
+    let configuration: AgentConfiguration
     private let provider: any LLMProvider
     private let tools: [any AgentTool]
     private let toolContext: ToolContext
@@ -39,6 +39,29 @@ public actor AgentActor {
     /// Messages from the channel that arrived while waiting for the LLM.
     private var pendingChannelMessages: [ChannelMessage] = []
 
+    /// Attachments staged by `view_attachment` for injection into the next user turn.
+    /// Drained by `drainPendingMessages` — image bytes (downscaled) become content blocks
+    /// in the assembled LLM message; text/document refs are appended to the message body.
+    /// Cleared after each drain so a stage that doesn't get a turn (rare) doesn't leak
+    /// across runs.
+    private var pendingStagedAttachments: [(attachment: Attachment, detail: AttachmentDetail)] = []
+
+    /// Detail tier requested by `view_attachment`. Controls which downscale variant gets
+    /// staged for injection. Mirrors the tool's `detail` parameter.
+    enum AttachmentDetail: Sendable {
+        case thumbnail  // 512px long edge
+        case standard   // 1024px long edge (default)
+        case full       // original bytes, no resize
+
+        var maxLongEdge: Int? {
+            switch self {
+            case .thumbnail: return 512
+            case .standard: return 1024
+            case .full: return nil
+            }
+        }
+    }
+
     /// Whether the agent has unprocessed input that requires an LLM call.
     /// Prevents re-querying the LLM with identical context after a text-only response.
     private var hasUnprocessedInput = false
@@ -67,6 +90,15 @@ public actor AgentActor {
     private var consecutiveErrors = 0
     private static let maxConsecutiveErrors = 50
     private static let maxBackoffSeconds: Double = 180
+
+    /// Wall-clock seconds before the per-turn stall watchdog logs a warning and posts
+    /// a system message. The watchdog itself doesn't unstick anything (per-tool timeouts
+    /// in `runToolWithTimeout` and URLSession's resource timeout do that) — it just makes
+    /// a stuck "Thinking" indicator observable from `log stream` and the channel.
+    /// Set well above any single legitimate LLM call + tool batch (gpt-5.5 with reasoning
+    /// can run a minute, large file_read fan-outs add a few more) but well below the point
+    /// at which a user would assume the agent is dead.
+    private static let stallWatchdogSeconds: Int = 600
 
     /// Tracks consecutive context overflow errors (separate from general errors).
     /// Context overflows trigger aggressive pruning instead of backoff.
@@ -212,7 +244,7 @@ public actor AgentActor {
     /// Fires when the conversation history changes, pushing a live snapshot to the UI layer.
     private var onContextChanged: (@Sendable ([LLMMessage]) -> Void)?
 
-    public init(
+    init(
         id: UUID = UUID(),
         configuration: AgentConfiguration,
         provider: any LLMProvider,
@@ -241,7 +273,7 @@ public actor AgentActor {
     }
 
     /// Injects the security evaluator used for Brown's tool approval flow.
-    public func setSecurityEvaluator(_ evaluator: SecurityEvaluator) {
+    func setSecurityEvaluator(_ evaluator: SecurityEvaluator) {
         securityEvaluator = evaluator
     }
 
@@ -287,9 +319,21 @@ public actor AgentActor {
 
     /// Same as `appendUserMessage(_:)` but also injects image attachments as inline
     /// image content for the LLM. Non-image attachments should already be referenced in
-    /// the text body via `[Attached: id=... filename=...]` lines so the agent can refer
-    /// to them by ID downstream. Used by the seed-Brown briefing path so a task created
-    /// with attached files reaches Brown's first LLM turn with the bytes intact.
+    /// the text body via `[filename](file://…) … id=<UUID>` markdown lines so the agent
+    /// can quote the id forward downstream. Used by the seed-Brown briefing path so a
+    /// task created with attached files reaches Brown's first LLM turn with the bytes intact.
+    /// Stages attachments for injection into the next user turn. Called by the
+    /// `view_attachment` tool so Brown can pull a previously-known attachment into his
+    /// visual context on demand. Multiple calls before a single LLM turn accumulate;
+    /// duplicates (same `id` and `detail`) are deduped on drain.
+    ///
+    /// Internal because `AttachmentDetail` is internal — the only caller is the
+    /// `OrchestrationRuntime`-supplied closure on `ToolContext`, which is in-package.
+    func stageAttachments(_ items: [(attachment: Attachment, detail: AttachmentDetail)]) {
+        pendingStagedAttachments.append(contentsOf: items)
+        hasUnprocessedInput = true
+    }
+
     public func appendUserMessage(_ text: String, attachments: [Attachment]) {
         if attachments.isEmpty {
             appendUserMessage(text)
@@ -298,7 +342,13 @@ public actor AgentActor {
         var images: [LLMImageContent] = []
         for attachment in attachments where attachment.isImage {
             guard let data = attachment.data else { continue }
-            images.append(LLMImageContent(data: data, mimeType: attachment.mimeType))
+            // Same downscale as the channel-message path. Briefing-time injection is the
+            // most context-expensive moment in Brown's lifetime — every reset re-pays the
+            // image cost, so doing it at full resolution by default would compound badly
+            // across long-running tasks.
+            let resized = ImageDownscaler.downscale(data, sourceMimeType: attachment.mimeType)
+            guard ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) else { continue }
+            images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
         }
         let llmImages: [LLMImageContent]? = images.isEmpty ? nil : images
         conversationHistory.append(LLMMessage(role: .user, text: text, images: llmImages))
@@ -350,7 +400,7 @@ public actor AgentActor {
     /// validation failures. If `replacesID` is supplied, that wake is cancelled before
     /// scheduling the new one. Multiple wakes can share a wake time without conflict —
     /// callers that genuinely want a single replacement should pass `replacesID`.
-    public func scheduleWake(
+    func scheduleWake(
         wakeAt: Date,
         instructions: String,
         taskID: UUID? = nil,
@@ -716,7 +766,33 @@ public actor AgentActor {
                     .filter { $0.isAvailable(in: availabilityContext) }
                     .map { $0.definition(for: configuration.role) }
                 toolContext.onProcessingStateChange(true)
-                defer { toolContext.onProcessingStateChange(false) }
+                // Stall watchdog: if this turn (LLM call + tool execution) is still
+                // active after `Self.stallWatchdogSeconds`, log a warning and post a
+                // single system message. Doesn't unstick anything by itself — the
+                // per-tool timeout in `runToolWithTimeout` and URLSession's resource
+                // timeout handle that — but it makes the next stuck-Thinking incident
+                // observable from `log stream` and the channel without `sample`.
+                let watchdogContext = toolContext
+                let watchdogRoleRaw = configuration.role.rawValue
+                let watchdogRoleName = configuration.role.displayName
+                let watchdogAgentIDPrefix = String(id.uuidString.prefix(8))
+                let watchdogTask = Task.detached { [stallSeconds = Self.stallWatchdogSeconds] in
+                    do {
+                        try await Task.sleep(for: .seconds(stallSeconds))
+                    } catch {
+                        return  // cancelled by the defer below — normal completion path
+                    }
+                    AgentActor.stopLogger.error("AgentActor stall role=\(watchdogRoleRaw, privacy: .public) agent=\(watchdogAgentIDPrefix, privacy: .public) elapsed>=\(stallSeconds, privacy: .public)s — turn still in flight (LLM call or tool execution)")
+                    await watchdogContext.post(ChannelMessage(
+                        sender: .system,
+                        content: "Agent \(watchdogRoleName) has been in the current turn for \(stallSeconds / 60) minutes — unusually long. A legitimate long subprocess (large bash/gh) explains this; an agent stuck on a tool that doesn't honor cancellation does not. Check the agent inspector for the in-flight tool.",
+                        metadata: ["isWarning": .bool(true), "agentRole": .string(watchdogRoleRaw)]
+                    ))
+                }
+                defer {
+                    watchdogTask.cancel()
+                    toolContext.onProcessingStateChange(false)
+                }
 
                 let messagesForLLM = conversationHistory
 
@@ -732,7 +808,15 @@ public actor AgentActor {
                 consecutiveContextOverflows = 0
                 consecutivePruneRebuilds = 0
                 lastUsageStale = false
-                let inputDelta = Array(conversationHistory[lastTurnMessageCount...])
+                // Defensive clamp: every site that reassigns `conversationHistory` resets
+                // `lastTurnMessageCount` synchronously, so today it can't exceed the count —
+                // but this actor is re-entrant, and a partial-range slice would trap. An
+                // empty `inputDelta` is harmless (the turn's inspector row just shows no
+                // incremental input) and self-corrects next turn.
+                let deltaStart = min(max(lastTurnMessageCount, 0), conversationHistory.count)
+                assert(deltaStart == lastTurnMessageCount,
+                       "lastTurnMessageCount (\(lastTurnMessageCount)) out of range for history count \(conversationHistory.count)")
+                let inputDelta = Array(conversationHistory[deltaStart...])
                 lastTurnMessageCount = conversationHistory.count
                 let turnRecord = LLMTurnRecord(
                     inputDelta: inputDelta,
@@ -1190,6 +1274,7 @@ public actor AgentActor {
                 let role = configuration.role
                 let roleName = configuration.role.displayName
                 let ctx = toolContext
+                let agentIDPrefix = String(id.uuidString.prefix(8))
 
                 let jonesActiveCount = OSAllocatedUnfairLock(initialState: 0)
                 let jonesCallback = ctx.onJonesProcessingStateChange
@@ -1232,28 +1317,19 @@ public actor AgentActor {
                     let result: String
                     var executionMs = 0
                     if disposition.approved {
-                        let executionStart = Date()
-                        let succeeded: Bool
-                        let toolName = entry.tool.name
-                        ctx.onToolExecutionStateChange(toolName, true)
-                        do {
-                            let args = try entry.call.parsedArguments()
-                            let outcome = try await entry.tool.execute(arguments: args, context: ctx)
-                            result = outcome.output
-                            succeeded = outcome.succeeded
-                        } catch {
-                            result = "Tool error: \(error.localizedDescription)"
-                            succeeded = false
+                        let outcome = await AgentActor.runToolWithTimeout(entry.call, tool: entry.tool, context: ctx) { name, seconds in
+                            AgentActor.stopLogger.warning("Tool '\(name, privacy: .public)' execution exceeded \(seconds, privacy: .public)s — cancelled (agent=\(agentIDPrefix, privacy: .public))")
                         }
-                        ctx.onToolExecutionStateChange(toolName, false)
-                        executionMs = Int(Date().timeIntervalSince(executionStart) * 1000)
+                        result = outcome.result
+                        executionMs = outcome.executionMs
                         // Mirror the sequential `directExecute` path: record the outcome on the
                         // shared tracker so Jones's recent-tool-calls context shows whether this
                         // approved call actually succeeded or failed. Without this, parallel
                         // batches of approval-needing calls (e.g., file_read fan-out) leave
                         // every entry tagged "[executed: not yet recorded]" and a legitimate
-                        // retry-after-failure looks like a duplicate operation.
-                        await ctx.setToolExecutionStatus(entry.call.id, succeeded)
+                        // retry-after-failure looks like a duplicate operation. A timeout-induced
+                        // cancellation is also recorded as a failure.
+                        await ctx.setToolExecutionStatus(entry.call.id, outcome.succeeded)
                         await AgentActor.postToolOutputToChannel(
                             result: result, call: entry.call, role: role, context: ctx
                         )
@@ -1488,28 +1564,83 @@ public actor AgentActor {
     }
 
     private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> String {
-        let start = Date()
-        let result: String
-        let executionSucceeded: Bool
-        let toolName = tool.name
-        toolContext.onToolExecutionStateChange(toolName, true)
-        do {
-            let args = try call.parsedArguments()
-            let outcome = try await tool.execute(arguments: args, context: toolContext)
-            result = outcome.output
-            executionSucceeded = outcome.succeeded
-        } catch {
-            result = "Tool error: \(error.localizedDescription)"
-            executionSucceeded = false
+        let agentIDPrefix = String(id.uuidString.prefix(8))
+        let outcome = await Self.runToolWithTimeout(call, tool: tool, context: toolContext) { name, seconds in
+            Self.stopLogger.warning("Tool '\(name, privacy: .public)' execution exceeded \(seconds, privacy: .public)s — cancelled (agent=\(agentIDPrefix, privacy: .public))")
         }
-        toolContext.onToolExecutionStateChange(toolName, false)
-        let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-        turnToolExecutionMs += elapsedMs
-        turnToolResultChars += result.count
+        turnToolExecutionMs += outcome.executionMs
+        turnToolResultChars += outcome.result.count
+        await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
+        return outcome.result
+    }
 
-        await toolContext.setToolExecutionStatus(call.id, executionSucceeded)
+    /// Wraps `tool.execute(...)` in a wall-clock timeout sourced from `tool.executionTimeout`.
+    /// Returns the produced output text, the domain success flag, and the elapsed milliseconds.
+    /// On timeout the tool's task is cancelled and a synthesized "Tool execution exceeded N s —
+    /// cancelled" message is returned with `succeeded == false`.
+    ///
+    /// Cancellation is cooperative, and this is a *structured* task group: when the body returns
+    /// after the timeout, the group implicitly awaits the cancelled tool task before this function
+    /// returns. So a tool that never checks `Task.isCancelled` (or never hits an `await` on a
+    /// cancellation-aware primitive) would still delay this call until it finishes on its own.
+    /// Every in-tree tool avoids that: `BashTool`/`GhTool` go through `ProcessRunner` (which honors
+    /// cancellation), and the in-process walkers (`glob`, `directory_tree`, `directory_listing`)
+    /// check `Task.isCancelled` / `Task.checkCancellation()` in their loops. New long-running tools
+    /// must do the same.
+    ///
+    /// `setToolExecutionStatus` is intentionally NOT called here — the parallel batch and
+    /// directExecute paths each handle the tracker update at their own seam.
+    /// `onToolExecutionStateChange(toolName, true/false)` IS handled here.
+    ///
+    /// `static` + parameterized so tests can exercise the timeout behavior without spinning
+    /// up a full `AgentActor`.
+    static func runToolWithTimeout(
+        _ call: LLMToolCall,
+        tool: any AgentTool,
+        context: ToolContext,
+        onTimeout: @Sendable (_ toolName: String, _ timeoutSeconds: Int) -> Void = { _, _ in }
+    ) async -> (result: String, succeeded: Bool, executionMs: Int) {
+        let timeout = tool.executionTimeout
+        let timeoutSeconds = Int(timeout.components.seconds)
+        let toolName = tool.name
+        let start = Date()
 
-        return result
+        context.onToolExecutionStateChange(toolName, true)
+        defer { context.onToolExecutionStateChange(toolName, false) }
+
+        let outcome: ToolExecutionResult?
+        do {
+            outcome = try await withThrowingTaskGroup(of: ToolExecutionResult?.self) { group in
+                group.addTask {
+                    let args = try call.parsedArguments()
+                    return try await tool.execute(arguments: args, context: context)
+                }
+                group.addTask {
+                    // `try?` swallows the CancellationError thrown when the racing tool
+                    // task wins; we never want the sleep itself to surface as a tool
+                    // error. Returning `nil` is the timeout sentinel.
+                    try? await Task.sleep(for: timeout)
+                    return nil
+                }
+                let first = (try await group.next()) ?? nil
+                group.cancelAll()
+                return first
+            }
+        } catch {
+            let executionMs = Int(Date().timeIntervalSince(start) * 1000)
+            return ("Tool error: \(error.localizedDescription)", false, executionMs)
+        }
+
+        let executionMs = Int(Date().timeIntervalSince(start) * 1000)
+        if let outcome {
+            return (outcome.output, outcome.succeeded, executionMs)
+        }
+        onTimeout(toolName, timeoutSeconds)
+        return (
+            "Tool execution exceeded \(timeoutSeconds)s — cancelled. The tool ran past its wall-clock budget; nothing was returned. Adjust arguments to bound the work (e.g. narrower scope) and retry, or skip and proceed.",
+            false,
+            executionMs
+        )
     }
 
     // MARK: - Channel posting helpers
@@ -2072,7 +2203,10 @@ public actor AgentActor {
     }
 
     private func drainPendingMessages() {
-        guard !pendingChannelMessages.isEmpty else { return }
+        // Drain when there's anything to drain — pending channel messages OR attachments
+        // staged via `view_attachment` (which arrive with no associated channel message
+        // but still need to land in the conversation history for the next LLM turn).
+        guard !pendingChannelMessages.isEmpty || !pendingStagedAttachments.isEmpty else { return }
 
         // When awaiting task review, only wake if a private message addressed to this
         // agent arrived (Smith sending revision feedback). Other messages (system banners,
@@ -2144,21 +2278,69 @@ public actor AgentActor {
             let imageAttachments = message.attachments.filter(\.isImage)
             for attachment in imageAttachments {
                 guard let data = attachment.data else { continue }
-                allImages.append(LLMImageContent(data: data, mimeType: attachment.mimeType))
+                // Downscale to a 1024px long-edge JPEG/PNG before injection. Saves vision
+                // tokens significantly for phone screenshots / camera photos without losing
+                // enough detail to answer typical "what's in this image" questions. The
+                // downscaler returns the original bytes when the image is already smaller
+                // and in a provider-friendly format, so cheap inputs stay cheap.
+                let resized = ImageDownscaler.downscale(data, sourceMimeType: attachment.mimeType)
+                // Skip injection for formats no provider accepts (e.g. image/svg+xml,
+                // unrecognized formats where decode failed and the fallback returned
+                // source bytes). The agent still sees the file path and id via the
+                // markdown reference line below; for SVG specifically Brown can call
+                // file_read which returns the SVG XML content as text.
+                guard ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) else { continue }
+                allImages.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
             }
 
             var textParts = [formatted]
-            // Surface BOTH image and non-image attachment IDs so the agent can reference
-            // them in tool-call arguments (e.g. `create_task` with `attachment_ids`).
-            // Image content is also injected directly above; this line gives the LLM the
-            // identifier it needs to forward the same image into a downstream tool call.
+            // Surface every attachment as a markdown reference so the agent can quote the
+            // `id=<UUID>` into a downstream tool call (`create_task`, `task_update`,
+            // `task_complete`, etc.). Image content is also injected as image blocks above
+            // — the markdown line is a forwarding handle and a `file://` link Brown can
+            // pass to `file_read` for non-image content. The URL provider is sync so this
+            // path stays sync; when no provider is wired (tests), the link is degraded to
+            // a `#` anchor and the agent still has the `id=` substring to forward.
             for attachment in message.attachments {
-                textParts.append("[Attached: id=\(attachment.id.uuidString) filename=\(attachment.filename) (\(attachment.mimeType), \(attachment.formattedSize))]")
+                let url = toolContext.attachmentURLProvider(attachment.id, attachment.filename)
+                let urlString = url.map { "file://" + $0.path(percentEncoded: false) } ?? "#"
+                textParts.append("[\(attachment.filename)](\(urlString)) \(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)")
             }
 
             allTextParts.append(textParts.joined(separator: "\n"))
         }
         pendingChannelMessages.removeAll()
+
+        // Drain any attachments staged via `view_attachment`. Image attachments at the
+        // requested detail tier go in as image content blocks; non-image attachments
+        // become markdown reference lines. Dedupe by (id, detail) so a model that calls
+        // view_attachment twice in a row doesn't double-inject. Stage list is cleared
+        // unconditionally — leaving entries across drains creates leaks under retries.
+        if !pendingStagedAttachments.isEmpty {
+            var seen: Set<String> = []
+            var stagedTextParts: [String] = ["[Staged for this turn via view_attachment]"]
+            for entry in pendingStagedAttachments {
+                let key = "\(entry.attachment.id.uuidString)|\(String(describing: entry.detail))"
+                guard !seen.contains(key) else { continue }
+                seen.insert(key)
+                let attachment = entry.attachment
+                if attachment.isImage, let data = attachment.data {
+                    let resized = ImageDownscaler.downscale(
+                        data,
+                        maxLongEdge: entry.detail.maxLongEdge,
+                        sourceMimeType: attachment.mimeType
+                    )
+                    if ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) {
+                        allImages.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
+                    }
+                }
+                let url = toolContext.attachmentURLProvider(attachment.id, attachment.filename)
+                let urlString = url.map { "file://" + $0.path(percentEncoded: false) } ?? "#"
+                stagedTextParts.append("[\(attachment.filename)](\(urlString)) \(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)")
+            }
+            allTextParts.append(stagedTextParts.joined(separator: "\n"))
+            pendingStagedAttachments.removeAll()
+        }
 
         let combinedText = allTextParts.joined(separator: "\n\n")
         let images: [LLMImageContent]? = allImages.isEmpty ? nil : allImages

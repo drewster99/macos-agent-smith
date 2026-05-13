@@ -356,7 +356,7 @@ private struct BuiltInProviderRow: View {
 
 // MARK: - Editor State (for custom providers)
 
-struct ProviderEditorState: Identifiable {
+private struct ProviderEditorState: Identifiable {
     enum Mode { case add, edit }
     let mode: Mode
     var id: String

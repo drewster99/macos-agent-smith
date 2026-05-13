@@ -1,9 +1,9 @@
 import Foundation
 
 /// Allows agents to fetch full details of one or more tasks by ID.
-public struct GetTaskDetailsTool: AgentTool {
-    public let name = "get_task_details"
-    public let toolDescription = """
+struct GetTaskDetailsTool: AgentTool {
+    let name = "get_task_details"
+    let toolDescription = """
         Fetch the full details of one or more tasks by their IDs, including title, description, \
         commentary, progress updates, result, and summary. Pass an array of task IDs (max 10) \
         to retrieve several tasks in a single call.
@@ -12,7 +12,7 @@ public struct GetTaskDetailsTool: AgentTool {
     /// Maximum number of task IDs accepted in a single call.
     private static let maxTaskIDs = 10
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "task_ids": .dictionary([

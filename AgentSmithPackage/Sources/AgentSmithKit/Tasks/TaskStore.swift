@@ -273,11 +273,18 @@ public actor TaskStore {
         return true
     }
 
-    /// Appends a clearly-labeled amendment to a task's description.
-    /// Used by Smith to relay user clarifications so that Brown and Jones see the updated context.
-    public func amendDescription(id: UUID, amendment: String) {
+    /// Appends a clearly-labeled amendment to a task's description, optionally adding
+    /// attachments to the task's `descriptionAttachments`. Used by Smith to relay user
+    /// clarifications so that Brown and Jones see the updated context. Attachments
+    /// appended here will be re-injected into Brown's briefing on the next respawn,
+    /// but the LIVE Brown won't automatically see them — Smith should follow with
+    /// `message_brown` to deliver them to the running agent.
+    public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) {
         guard var task = tasks[id] else { return }
         task.description += "\n\n[Amendment]: \(amendment)"
+        if !attachments.isEmpty {
+            task.descriptionAttachments.append(contentsOf: attachments)
+        }
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()

@@ -9,9 +9,9 @@ import Foundation
 ///
 /// Use this whenever the user says "do X to task Y at time T" — e.g. "run task <id> at 9pm",
 /// "stop the build task in 30 minutes", "summarize the migration task tomorrow morning."
-public struct ScheduleTaskActionTool: AgentTool {
-    public let name = "schedule_task_action"
-    public let toolDescription = """
+struct ScheduleTaskActionTool: AgentTool {
+    let name = "schedule_task_action"
+    let toolDescription = """
         Schedule a future imperative to perform an action on an existing task. When the timer \
         fires you'll receive instructions like "Call run_task on <id>" — execute them. \
         \
@@ -42,7 +42,7 @@ public struct ScheduleTaskActionTool: AgentTool {
     private static let minDelaySeconds: Double = 5
     private static let maxDelaySeconds: Double = 365 * 24 * 60 * 60
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "task_id": .dictionary([

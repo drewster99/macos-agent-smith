@@ -4,9 +4,9 @@ import Foundation
 ///
 /// Supports glob-based file filtering and two output modes:
 /// matching file paths only, or matching lines with file:line_number:content format.
-public struct GrepTool: AgentTool {
-    public let name = "grep"
-    public let toolDescription = "Search file contents for lines matching a regex `pattern`. `path` may be a directory (searched recursively) OR a single file. Returns matching file paths by default, or matching lines in file:line:content format. Supports glob-based file filtering when searching a directory. Use instead of grep or rg bash commands for content search."
+struct GrepTool: AgentTool {
+    let name = "grep"
+    let toolDescription = "Search file contents for lines matching a regex `pattern`. `path` may be a directory (searched recursively) OR a single file. Returns matching file paths by default, or matching lines in file:line:content format. Supports glob-based file filtering when searching a directory. Use instead of grep or rg bash commands for content search."
 
     public func description(for role: AgentRole) -> String {
         switch role {
@@ -18,7 +18,7 @@ public struct GrepTool: AgentTool {
         }
     }
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "pattern": .dictionary([

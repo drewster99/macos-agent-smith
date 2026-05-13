@@ -1,15 +1,15 @@
 import Foundation
 
 /// Allows Smith to archive, soft-delete, unarchive, or undelete tasks.
-public struct ManageTaskDispositionTool: AgentTool {
-    public let name = "manage_task_disposition"
-    public let toolDescription = """
+struct ManageTaskDispositionTool: AgentTool {
+    let name = "manage_task_disposition"
+    let toolDescription = """
         Move a task between active, archived, and recently-deleted buckets. \
         Tasks must be completed or failed before they can be archived or deleted. \
         Use unarchive or undelete to restore tasks back to the active list.
         """
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "task_id": .dictionary([

@@ -28,6 +28,10 @@ struct MainViewDetailColumn: View {
 
             ChannelLogView(
                 messages: viewModel.messages,
+                toolRequestIDs: viewModel.toolRequestIDs,
+                securityReviewByRequestID: viewModel.securityReviewByRequestID,
+                toolOutputByRequestID: viewModel.toolOutputByRequestID,
+                taskIDsWithSchedulingBanner: viewModel.taskIDsWithSchedulingBanner,
                 persistedHistoryCount: viewModel.persistedHistoryCount,
                 hasRestoredHistory: viewModel.hasRestoredHistory,
                 onRestoreHistory: { viewModel.restoreHistory() },

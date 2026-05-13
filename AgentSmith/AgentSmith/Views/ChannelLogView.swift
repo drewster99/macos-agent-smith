@@ -120,7 +120,7 @@ struct ChannelTimestamp: View {
 /// ladder. Adding a new banner kind now means adding a case here AND a switch arm in
 /// `bannerView(for:in:)` — both fail at compile time if forgotten, instead of silently
 /// falling through to a generic `MessageRow`.
-enum ChannelBannerKind: String {
+private enum ChannelBannerKind: String {
     /// Internal coordination row — not rendered.
     case agentOnline = "agent_online"
     /// Lifecycle chrome — gated by the user's "Show agent restart chrome" preference.
@@ -145,6 +145,14 @@ enum ChannelBannerKind: String {
 /// Color-coded scrolling message stream with attachment display.
 struct ChannelLogView: View, Equatable {
     var messages: [ChannelMessage]
+    /// Derived lookups maintained by `AppViewModel` (rebuilt on every channel-log mutation)
+    /// so this view doesn't re-scan `messages` inside `body`. They are a pure function of
+    /// `messages`, so `==` below intentionally does not compare them — count + last.id of
+    /// `messages` already implies they're current.
+    var toolRequestIDs: Set<String>
+    var securityReviewByRequestID: [String: ChannelMessage]
+    var toolOutputByRequestID: [String: ChannelMessage]
+    var taskIDsWithSchedulingBanner: Set<String>
     var persistedHistoryCount: Int
     var hasRestoredHistory: Bool
     var onRestoreHistory: () -> Void
@@ -181,67 +189,6 @@ struct ChannelLogView: View, Equatable {
         var contentHeight: CGFloat
     }
 
-    // The four lookups below are computed properties that scan the entire `messages`
-    // array. Because `==` above shortcuts body re-evaluation unless count or last.id
-    // changes, in practice these run *once per appended message* — not once per row.
-    // Cumulative cost over a session is O(N²) in message count, which is acceptable
-    // for the typical N (hundreds). Push toward incremental maintenance on
-    // `AppViewModel.messages.append` only if profiling identifies this as hot.
-
-    /// Set of requestIDs that have a corresponding `tool_request` message.
-    /// Pre-computed once per body evaluation to avoid O(N) scans per row.
-    private var toolRequestIDs: Set<String> {
-        var ids = Set<String>()
-        for msg in messages {
-            if msg.stringMetadata("messageKind") == "tool_request",
-               let reqID = msg.stringMetadata("requestID") {
-                ids.insert(reqID)
-            }
-        }
-        return ids
-    }
-
-    /// Maps requestID to security review messages for O(1) lookup by MessageRow.
-    private var securityReviewByRequestID: [String: ChannelMessage] {
-        var dict: [String: ChannelMessage] = [:]
-        for msg in messages {
-            if msg.metadata?["securityDisposition"] != nil,
-               let reqID = msg.stringMetadata("requestID") {
-                dict[reqID] = msg
-            }
-        }
-        return dict
-    }
-
-    /// Maps requestID to tool output messages for O(1) lookup by MessageRow.
-    private var toolOutputByRequestID: [String: ChannelMessage] {
-        var dict: [String: ChannelMessage] = [:]
-        for msg in messages {
-            if msg.stringMetadata("messageKind") == "tool_output",
-               let reqID = msg.stringMetadata("requestID") {
-                dict[reqID] = msg
-            }
-        }
-        return dict
-    }
-
-    /// Set of taskIDs whose paired `timer_activity` "scheduled" row should be suppressed —
-    /// either the task has a `task_created` banner (carrying the Scheduled chip) or a
-    /// `task_action_scheduled` banner (carrying the action + Fires-at chip). Match-by-taskID
-    /// is intentional: rescheduling the same task right after creation is rare and benign
-    /// to suppress; scheduled rows for ad-hoc wakes (no task linkage) still render normally.
-    private var taskIDsWithSchedulingBanner: Set<String> {
-        var ids = Set<String>()
-        for msg in messages {
-            let kind = msg.stringMetadata("messageKind")
-            guard kind == "task_created" || kind == "task_action_scheduled" else { continue }
-            if let taskID = msg.stringMetadata("taskID") {
-                ids.insert(taskID)
-            }
-        }
-        return ids
-    }
-
     var body: some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
@@ -254,18 +201,13 @@ struct ChannelLogView: View, Equatable {
                             )
                         }
 
-                        let requestIDs = toolRequestIDs
-                        let reviewLookup = securityReviewByRequestID
-                        let outputLookup = toolOutputByRequestID
-                        let scheduledTaskBannerIDs = taskIDsWithSchedulingBanner
-
                         ForEach(messages) { message in
-                            if !shouldSuppress(message, toolRequestIDs: requestIDs) {
+                            if !shouldSuppress(message, toolRequestIDs: toolRequestIDs) {
                                 bannerView(
                                     for: message,
-                                    reviewLookup: reviewLookup,
-                                    outputLookup: outputLookup,
-                                    scheduledTaskBannerIDs: scheduledTaskBannerIDs
+                                    reviewLookup: securityReviewByRequestID,
+                                    outputLookup: toolOutputByRequestID,
+                                    scheduledTaskBannerIDs: taskIDsWithSchedulingBanner
                                 )
                                 .id(message.id)
                             }

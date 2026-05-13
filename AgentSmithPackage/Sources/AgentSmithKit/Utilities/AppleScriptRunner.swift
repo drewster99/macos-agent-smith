@@ -4,7 +4,7 @@ import Foundation
 
 /// Recursive JSON value used to represent AppleScript results structurally.
 /// Round-trips through `JSONSerialization` and `Codable`.
-public enum JSONValue: Sendable, Hashable, Codable {
+enum JSONValue: Sendable, Hashable, Codable {
     case null
     case bool(Bool)
     case int(Int)
@@ -39,7 +39,7 @@ public enum JSONValue: Sendable, Hashable, Codable {
     }
 
     /// Convert to a Foundation JSON object suitable for `JSONSerialization`.
-    public var foundationValue: Any {
+    private var foundationValue: Any {
         switch self {
         case .null: return NSNull()
         case .bool(let v): return v
@@ -53,16 +53,16 @@ public enum JSONValue: Sendable, Hashable, Codable {
 }
 
 /// Result of `AppleScriptRunner.run(_:timeout:)`.
-public struct AppleScriptResult: Sendable, Codable {
-    public let success: Bool
+struct AppleScriptResult: Sendable, Codable {
+    let success: Bool
     /// Recursively coerced descriptor as permissive-tagged JSON. `nil` on failure.
-    public let result: JSONValue?
+    let result: JSONValue?
     /// Plain-text coercion of the descriptor (`coerce(toDescriptorType: typeUnicodeText)`),
     /// always populated on success even when `result` is structured. `nil` on failure.
-    public let resultText: String?
+    let resultText: String?
     /// Four-character descriptor type code (e.g. `"utxt"`, `"list"`, `"reco"`). `nil` on failure.
-    public let descriptorType: String?
-    public let error: ScriptError?
+    let descriptorType: String?
+    let error: ScriptError?
 
     public init(success: Bool, result: JSONValue?, resultText: String?, descriptorType: String?, error: ScriptError?) {
         self.success = success
@@ -74,7 +74,7 @@ public struct AppleScriptResult: Sendable, Codable {
 }
 
 /// Structured AppleScript error suitable for an LLM to read and respond to.
-public struct ScriptError: Sendable, Codable {
+struct ScriptError: Sendable, Codable {
     public enum Kind: String, Sendable, Codable {
         /// Failed to parse the script.
         case compile
@@ -87,12 +87,12 @@ public struct ScriptError: Sendable, Codable {
         case unknown
     }
 
-    public let kind: Kind
-    public let number: Int
-    public let message: String
+    let kind: Kind
+    let number: Int
+    let message: String
     /// Set when the error originated inside a `tell application "X"` block.
-    public let appName: String?
-    public let location: SourceLocation?
+    private let appName: String?
+    let location: SourceLocation?
 
     public init(kind: Kind, number: Int, message: String, appName: String?, location: SourceLocation?) {
         self.kind = kind
@@ -104,11 +104,11 @@ public struct ScriptError: Sendable, Codable {
 }
 
 /// Line/column + short snippet of the source the error refers to.
-public struct SourceLocation: Sendable, Codable {
-    public let line: Int
-    public let column: Int
+struct SourceLocation: Sendable, Codable {
+    let line: Int
+    private let column: Int
     /// Source text the range covered, possibly with a few characters of context on either side.
-    public let snippet: String
+    private let snippet: String
 
     public init(line: Int, column: Int, snippet: String) {
         self.line = line
@@ -138,18 +138,27 @@ public struct SourceLocation: Sendable, Codable {
 /// As belt-and-suspenders, every script we execute is wrapped in a
 /// `with timeout of N seconds ... end timeout` block so a non-responding
 /// target raises -1712 instead of hanging until the default 120s elapses.
-public actor AppleScriptRunner {
-    public static let shared = AppleScriptRunner()
+actor AppleScriptRunner {
+    static let shared = AppleScriptRunner()
 
     /// Default wall-clock cap for any single AppleScript run. 30s is generous
     /// for normal automation but short enough to keep Brown's loop alive when
     /// a target app stalls. Callers can override per-call via `run(_:timeout:)`.
-    public static let defaultTimeoutSeconds: Int = 30
+    private static let defaultTimeoutSeconds: Int = 30
 
     /// Dedicated serial queue for NSAppleScript invocations. Avoids re-using
     /// arbitrary cooperative threads (NSAppleScript is sensitive to thread
-    /// identity) while keeping the UI free.
-    private static let scriptQueue = DispatchQueue(label: "agent-smith.applescript.runner")
+    /// identity) while keeping the UI free. QoS is `.userInitiated` to match
+    /// the calling actor's typical priority — without this, a Brown turn (which
+    /// runs at user-initiated) suspending on a default-QoS queue triggers
+    /// runtime priority-inversion warnings ("Thread running at User-initiated
+    /// QoS class waiting on a lower QoS thread"). NSAppleScript dispatch is
+    /// short-lived and CPU-bound; promoting the queue to userInitiated has no
+    /// throughput downside and silences the warning.
+    private static let scriptQueue = DispatchQueue(
+        label: "agent-smith.applescript.runner",
+        qos: .userInitiated
+    )
 
     public init() {}
 
@@ -282,7 +291,7 @@ public actor AppleScriptRunner {
 
 // MARK: - Coercion
 
-enum AppleScriptCoercer {
+private enum AppleScriptCoercer {
 
     /// Recursively coerce an AppleEvent descriptor to permissive-tagged JSON.
     /// Primitives become bare JSON values; types with no JSON equivalent (date,
@@ -374,8 +383,13 @@ enum AppleScriptCoercer {
     /// if even the raw bytes aren't there.
     private static func coerce64BitInt(_ d: NSAppleEventDescriptor) -> JSONValue {
         let data = d.data
-        if data.count == 8 {
-            let value: Int64 = data.withUnsafeBytes { $0.load(as: Int64.self) }
+        if data.count >= 8 {
+            // `Data`'s backing store is not guaranteed to be 8-byte aligned, so a plain
+            // `load(as: Int64.self)` can hit a misalignment trap. `loadUnaligned` copies
+            // byte-wise. Bytes are host byte order (matching `int32Value` etc.).
+            let value = data.withUnsafeBytes { raw in
+                raw.loadUnaligned(fromByteOffset: 0, as: Int64.self)
+            }
             return .int(Int(value))
         }
         if let coerced = d.coerce(toDescriptorType: typeSInt32) {

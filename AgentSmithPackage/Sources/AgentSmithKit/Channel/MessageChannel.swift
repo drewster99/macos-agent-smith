@@ -102,7 +102,7 @@ public actor MessageChannel {
     ///   across ``post(_:)`` calls that may trigger a trim — the cached index may
     ///   reference a different message or be out of bounds.
     public func messages(since index: Int) -> [ChannelMessage] {
-        guard index < messages.count else { return [] }
+        guard index >= 0, index < messages.count else { return [] }
         return Array(messages[index...])
     }
 

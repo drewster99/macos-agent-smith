@@ -288,6 +288,23 @@ public actor PersistenceManager {
         }
     }
 
+    /// Returns the on-disk URL where an attachment is (or would be) stored. Does NOT
+    /// check that the file exists — the URL is computed deterministically from the
+    /// per-session attachments directory and the sanitized filename. Callers that want
+    /// to load bytes should use `loadAttachmentData(id:filename:)` and check for nil;
+    /// callers that just want a stable `file://` reference for LLM-facing text (e.g.
+    /// the briefing builder) can pass this URL straight into a markdown link.
+    ///
+    /// `nonisolated` because it does no I/O — pure path construction, suitable for
+    /// synchronous code paths inside `AgentActor.drainPendingMessages` that need a
+    /// `file://` URL without an actor hop.
+    public nonisolated func attachmentURL(id: UUID, filename: String) -> URL {
+        let safeName = Self.sanitizeFilename(filename)
+        return attachmentsDirectory.appendingPathComponent(
+            "\(id.uuidString)_\(safeName)"
+        )
+    }
+
     /// Strips path components from a filename to prevent directory traversal.
     static func sanitizeFilename(_ filename: String) -> String {
         let stripped = (filename as NSString).lastPathComponent

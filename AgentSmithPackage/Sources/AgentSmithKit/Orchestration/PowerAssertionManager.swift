@@ -6,7 +6,7 @@ import Foundation
 /// The assertion is acquired when activity occurs and released only when both:
 /// 1. No active tasks exist in the task store
 /// 2. No LLM calls or user messages have occurred for 15 minutes
-public actor PowerAssertionManager {
+actor PowerAssertionManager {
     private let taskStore: TaskStore
     private var assertionID: IOPMAssertionID = IOPMAssertionID(kIOPMNullAssertionID)
     private var isHoldingAssertion = false

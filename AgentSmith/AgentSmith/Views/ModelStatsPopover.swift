@@ -6,7 +6,7 @@ import AgentSmithKit
 // MARK: - Model Stats Popover
 
 /// Aggregated stats computed from LLM turn records for a given agent role.
-struct ModelStats {
+private struct ModelStats {
     let totalCalls: Int
     let totalInputTokens: Int
     let totalOutputTokens: Int

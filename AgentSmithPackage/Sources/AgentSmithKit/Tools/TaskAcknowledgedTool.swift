@@ -1,11 +1,11 @@
 import Foundation
 
 /// Brown tool: acknowledges receipt of the assigned task, transitioning it to running.
-public struct TaskAcknowledgedTool: AgentTool {
-    public let name = "task_acknowledged"
-    public let toolDescription = "Acknowledge your assigned task. Call this when you begin working on the task."
+struct TaskAcknowledgedTool: AgentTool {
+    let name = "task_acknowledged"
+    let toolDescription = "Acknowledge your assigned task — call this EXACTLY ONCE when you begin working on the task."
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([:]),
         "required": .array([])

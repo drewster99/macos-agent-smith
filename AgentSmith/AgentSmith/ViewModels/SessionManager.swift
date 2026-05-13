@@ -178,6 +178,21 @@ final class SessionManager {
         viewModels.values.contains(where: \.isRunning)
     }
 
+    /// Returns the session ID that owns `taskID`, scanning every session whose view model
+    /// has been loaded. Used by the prior-task link in `TaskDetailWindow` so a referenced
+    /// task from another tab opens in a fresh detail window scoped to its own session.
+    /// Returns nil if no loaded view model contains the task — the caller can fall back
+    /// to the current session, which will surface the "Task Not Found" placeholder if it
+    /// also doesn't have it.
+    func resolveSessionID(forTaskID taskID: UUID) -> UUID? {
+        for (sid, vm) in viewModels {
+            if vm.tasks.contains(where: { $0.id == taskID }) {
+                return sid
+            }
+        }
+        return nil
+    }
+
     /// Deletes a configuration from the shared LLM catalog AND clears any per-session
     /// assignments that reference it.
     func deleteConfiguration(id: UUID) {

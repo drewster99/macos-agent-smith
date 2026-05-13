@@ -111,6 +111,50 @@ struct SettingsView: View {
             Text("Timestamps and elapsed time are display-only — they don't change what gets sent to agents. \"Restart chrome\" controls whether transient lifecycle rows (agents stopping / coming online) appear in the transcript. Apply across all sessions and windows.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Divider()
+
+            Text("Attachments")
+                .font(AppFonts.sectionHeader)
+
+            attachmentSizeRow(
+                label: "Max size per attachment",
+                bytesBinding: $shared.maxAttachmentBytesPerFile,
+                helpText: "Files larger than this are rejected at ingestion. Phone-camera photos are typically 3–8 MB; PDFs vary widely."
+            )
+
+            attachmentSizeRow(
+                label: "Max total per message",
+                bytesBinding: $shared.maxAttachmentBytesPerMessage,
+                helpText: "Aggregate cap for all attachments on a single message or tool call. Protects context cost from unbounded fan-out."
+            )
+
+            Text("Caps apply when a session starts. Changing them mid-session takes effect after the next agent restart.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Slider + label row for an attachment-size setting (megabytes-resolution).
+    @ViewBuilder
+    private func attachmentSizeRow(label: String, bytesBinding: Binding<Int>, helpText: String) -> some View {
+        let mb = Binding<Double>(
+            get: { Double(bytesBinding.wrappedValue) / 1_048_576.0 },
+            set: { bytesBinding.wrappedValue = Int($0 * 1_048_576) }
+        )
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                Spacer()
+                Text(String(format: "%.0f MB", mb.wrappedValue))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: mb, in: 1...500, step: 1)
+                .frame(maxWidth: 400)
+            Text(helpText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

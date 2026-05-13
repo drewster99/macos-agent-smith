@@ -5,9 +5,9 @@ import Foundation
 /// Available to both Smith and Brown. The calling agent's role determines the memory source.
 /// Automatically checks for semantically similar existing memories and consolidates
 /// via LLM merge when a close match is found.
-public struct SaveMemoryTool: AgentTool {
-    public let name = "save_memory"
-    public let toolDescription = """
+struct SaveMemoryTool: AgentTool {
+    let name = "save_memory"
+    let toolDescription = """
         Save a piece of information to long-term memory for future retrieval. \
         Saved memories are surfaced automatically by semantic search on future tasks, \
         so future agents avoid redoing the discovery you just did. \
@@ -25,7 +25,7 @@ public struct SaveMemoryTool: AgentTool {
         If a closely related memory already exists, it will be automatically consolidated.
         """
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "content": .dictionary([

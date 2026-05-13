@@ -29,8 +29,9 @@ public actor OrchestrationRuntime {
     public let taskStore: TaskStore
     public let memoryStore: MemoryStore
 
-    /// Fixed UUID representing the human user for private Smith→User messages.
-    public static let userID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    /// Fixed UUID representing the human user for private Smith→User messages
+    /// (`00000000-0000-0000-0000-000000000001`).
+    public static let userID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
 
     private var smith: AgentActor?
     private var smithID: UUID?
@@ -143,6 +144,19 @@ public actor OrchestrationRuntime {
     /// runtime itself doesn't carry). When unset, attachment-aware tools degrade to
     /// "no attachments resolved" — they still post text-only versions of the tool action.
     private var attachmentRegistry: AttachmentRegistry?
+
+    /// Per-message aggregate attachment cap (bytes). Tools that resolve `attachment_ids`
+    /// or `attachment_paths` enforce this against the sum of `byteCount` for the
+    /// resolved set, rejecting before the channel post if exceeded. Defaults to a
+    /// generous 50 MB; the app layer overrides via `setMaxAttachmentBytesPerMessage(_:)`
+    /// from `SharedAppState.maxAttachmentBytesPerMessage`.
+    private var maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024
+
+    /// Synchronous URL resolver matching the registry's async `urlFor(_:)`. Stored so
+    /// `makeToolContext` can pass a sync closure into `ToolContext.attachmentURLProvider`,
+    /// which is consumed by `AgentActor.drainPendingMessages` (sync path) when building
+    /// `file://` markdown links from incoming channel-message attachments.
+    private var attachmentURLProviderClosure: (@Sendable (UUID, String) -> URL?)?
 
     /// FIFO queue used to serialize `restartForNewTask` requests. Without this,
     /// two near-concurrent restart calls would each fire their own
@@ -320,25 +334,44 @@ public actor OrchestrationRuntime {
     }
 
     /// Builds the user-role message that seeds Brown's conversation history at task spawn.
-    /// Mechanically `task.title + task.description` plus optional Prior Progress / Last
-    /// Working State on resume — verbatim copies of fields the task store already owns,
-    /// no transformation. Used by both the run_task path and the autoRunInterruptedTasks
-    /// cold-launch path; previously posted as a Smith → Brown channel message which
+    /// Used by both the run_task path and the autoRunInterruptedTasks cold-launch path.
+    ///
+    /// Output is markdown:
+    /// - `task.title` and `task.description` verbatim.
+    /// - Description / per-update / result attachments rendered as
+    ///   `[filename](file:///abs/path) mime · size · id=<UUID>` markdown links so Brown can
+    ///   `file_read` non-image content and quote the `id=<UUID>` into downstream tool calls.
+    /// - Optional Prior Progress (from `task.updates`) and Last Working State (from
+    ///   `task.lastBrownContext`).
+    ///
+    /// Async because the attachment-line builder resolves a stable `file://` URL via the
+    /// per-session registry; markdown-link syntax was chosen over an ad-hoc text marker
+    /// because it tends to round-trip through summarizer prompts more reliably.
+    ///
+    /// Replaces the prior "post a Smith → Brown channel message" approach, which
     /// duplicated the New Task banner's description in the user-facing transcript.
-    static func composeBrownTaskBriefing(for task: AgentTask) -> String {
+    func composeBrownTaskBriefing(for task: AgentTask) async -> String {
         var parts: [String] = []
         parts.append("Task: \"\(task.title)\" (ID: \(task.id.uuidString))\n\n\(task.description)")
         if !task.descriptionAttachments.isEmpty {
-            let lines = task.descriptionAttachments.map(Self.attachmentRefLine)
+            var lines: [String] = []
+            for attachment in task.descriptionAttachments {
+                lines.append(await attachmentMarkdownLine(attachment))
+            }
             parts.append("## Attachments\n\(lines.joined(separator: "\n"))")
         }
         if !task.updates.isEmpty {
-            let updateLines: [String] = task.updates.map { update in
+            var updateLines: [String] = []
+            for update in task.updates {
                 if update.attachments.isEmpty {
-                    return "- \(update.message)"
+                    updateLines.append("- \(update.message)")
+                } else {
+                    var refs: [String] = []
+                    for attachment in update.attachments {
+                        refs.append(await attachmentMarkdownLine(attachment))
+                    }
+                    updateLines.append("- \(update.message)\n  \(refs.joined(separator: "\n  "))")
                 }
-                let attachmentRefs = update.attachments.map(Self.attachmentRefLine).joined(separator: "\n  ")
-                return "- \(update.message)\n  \(attachmentRefs)"
             }
             parts.append("## Prior Progress\n\(updateLines.joined(separator: "\n"))")
         }
@@ -348,23 +381,76 @@ public actor OrchestrationRuntime {
         return parts.joined(separator: "\n\n")
     }
 
-    /// Single-line attachment reference suitable for inclusion in any LLM-facing text.
-    /// Mirrors the format used by `AgentActor` when surfacing message-attached files so
-    /// the LLM can forward the same `id=...` value into a downstream tool call.
-    private static func attachmentRefLine(_ attachment: Attachment) -> String {
-        "[Attached: id=\(attachment.id.uuidString) filename=\(attachment.filename) (\(attachment.mimeType), \(attachment.formattedSize))]"
+    /// Markdown-link representation of an attachment, with a stable `file://` URL when
+    /// the per-session registry has one. Format:
+    /// `[filename](file:///abs/path) mime · size · id=<UUID>`
+    /// When the file isn't reachable (no registry, no on-disk file), appends a clear
+    /// `· UNLOADABLE` marker so Brown sees that the reference exists but the bytes don't.
+    ///
+    /// The URL is built via `Self.fileURLString(_:)` which uses `URL.path(percentEncoded:
+    /// false)` — `URL.absoluteString` percent-encodes spaces (`Foo Bar.png` → `Foo%20Bar.png`)
+    /// and the LLM consuming the link tends to either (a) pass the percent-encoded string
+    /// to `file_read` which fails because the on-disk filename has literal spaces, or (b)
+    /// shell-escape the spaces to `Foo\ Bar.png` because Brown reflexively shell-escapes
+    /// paths it sees as filesystem-y, which also fails. Emitting raw-space `file://` URLs
+    /// matches what macOS Finder produces when copying a path and what Brown can paste
+    /// verbatim into `file_read` (which now also normalizes file:// + percent-encoding +
+    /// shell-escapes for resilience).
+    func attachmentMarkdownLine(_ attachment: Attachment) async -> String {
+        let label = attachment.filename
+        let meta = "\(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)"
+        guard let url = await attachmentRegistry?.urlFor(attachment) else {
+            return "[\(label)](#) \(meta) · UNLOADABLE"
+        }
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        let urlString = Self.fileURLString(url)
+        if exists {
+            return "[\(label)](\(urlString)) \(meta)"
+        } else {
+            return "[\(label)](\(urlString)) \(meta) · UNLOADABLE: file missing on disk"
+        }
     }
 
-    /// Returns the union of all attachments referenced by a task — its description, the
-    /// in-progress updates, and the final result. Used when seeding Brown's briefing so
-    /// every persisted attachment is presented as both a text ref and (for images) inline
-    /// LLM image content. Lazy-loads bytes via the registry where the in-memory record is
-    /// metadata-only (e.g. a task restored from disk after restart).
+    /// Builds a `file://` URL string from a file URL using a raw (non-percent-encoded)
+    /// path component. Foundation's `URL.absoluteString` percent-encodes spaces and other
+    /// reserved characters, producing strings like `file:///foo/Foo%20Bar.png` — that's
+    /// RFC 3986-correct but trips LLMs that paste the URL into `file_read` without
+    /// decoding. `URL.path(percentEncoded: false)` returns the raw filesystem path which
+    /// we prepend `file://` to; it's the format macOS Finder produces when copying a
+    /// path and the format `file_read` accepts directly. (file_read also normalizes the
+    /// percent-encoded form for resilience, but emitting clean URLs avoids the
+    /// LLM-confusion path entirely.)
+    static func fileURLString(_ url: URL) -> String {
+        "file://" + url.path(percentEncoded: false)
+    }
+
+    /// Maximum number of MOST-RECENT updates whose attachments get rehydrated into Brown's
+    /// briefing on a respawn. Older updates' attachment refs still appear in the markdown
+    /// briefing text (so Brown knows they existed and can `view_attachment` them by id),
+    /// but their image bytes are NOT eagerly re-injected into the conversation history.
+    /// Without this cap, every Brown respawn re-pays the full image-cost of the entire
+    /// task, compounding badly across long-running multi-update tasks.
+    static let briefingUpdateAttachmentBudget = 3
+
+    /// Returns the attachments that should be eagerly rehydrated into Brown's briefing
+    /// (i.e. injected as image content blocks where applicable). Selection rules:
+    /// - **Description attachments**: ALL included. The user attached these to *ask about
+    ///   them*; Brown's first turn needs to see them.
+    /// - **Update attachments**: only the most-recent `briefingUpdateAttachmentBudget`
+    ///   updates' attachments are eagerly loaded. Older updates' refs appear as markdown
+    ///   links in the briefing text (Brown can call `view_attachment(ids:)` to load them).
+    /// - **Result attachments**: NEVER eagerly loaded on a respawn. The result is the
+    ///   *output* of the task, not Brown's input — re-seating Brown to "redo" or "revise"
+    ///   doesn't require him to look at his own previous output's attached files. If
+    ///   needed, Brown can `view_attachment` them.
+    ///
+    /// Lazy-loads bytes via the registry where the in-memory record is metadata-only
+    /// (e.g. a task restored from disk after restart).
     func collectTaskAttachments(_ task: AgentTask) async -> [Attachment] {
         var collected: [Attachment] = []
-        let candidates = task.descriptionAttachments
-            + task.updates.flatMap { $0.attachments }
-            + task.resultAttachments
+        var candidates: [Attachment] = task.descriptionAttachments
+        let recentUpdates = task.updates.suffix(Self.briefingUpdateAttachmentBudget)
+        candidates.append(contentsOf: recentUpdates.flatMap { $0.attachments })
         for candidate in candidates {
             if candidate.data != nil {
                 collected.append(candidate)
@@ -464,9 +550,12 @@ public actor OrchestrationRuntime {
     /// files Brown produces.
     public func setAttachmentPersistence(
         loader: @escaping @Sendable (UUID, String) async -> Data?,
-        saver: @escaping @Sendable (Attachment) async throws -> Void
+        saver: @escaping @Sendable (Attachment) async throws -> Void,
+        urlProvider: (@Sendable (UUID, String) async -> URL?)? = nil,
+        syncURLProvider: (@Sendable (UUID, String) -> URL?)? = nil
     ) {
-        attachmentRegistry = AttachmentRegistry(loader: loader, saver: saver)
+        attachmentRegistry = AttachmentRegistry(loader: loader, saver: saver, urlProvider: urlProvider)
+        attachmentURLProviderClosure = syncURLProvider
     }
 
     /// Pre-registers a list of attachments in the per-session registry. Used during
@@ -483,6 +572,23 @@ public actor OrchestrationRuntime {
         guard let registry = attachmentRegistry else { return nil }
         return await registry.resolve(id)
     }
+
+    /// Sets the per-file ingest cap on the active registry. App-layer Settings calls this
+    /// when the user changes `SharedAppState.maxAttachmentBytesPerFile`.
+    public func setMaxAttachmentBytesPerFile(_ bytes: Int) async {
+        guard let registry = attachmentRegistry else { return }
+        await registry.setMaxIngestBytes(bytes)
+    }
+
+    /// Sets the per-message aggregate cap. Enforced by tool-side resolvers via
+    /// `currentMaxAttachmentBytesPerMessage()`.
+    public func setMaxAttachmentBytesPerMessage(_ bytes: Int) {
+        maxAttachmentBytesPerMessage = max(0, bytes)
+    }
+
+    /// Returns the active per-message cap. Used by tool-side resolvers to short-circuit
+    /// before posting the channel message.
+    public func currentMaxAttachmentBytesPerMessage() -> Int { maxAttachmentBytesPerMessage }
 
     /// Registers a callback fired when an agent comes online, with its role and tool names.
     public func setOnAgentStarted(_ handler: @escaping @Sendable (AgentRole, [String]) -> Void) {
@@ -852,7 +958,7 @@ public actor OrchestrationRuntime {
                     // context — all already in the task store; Brown is the only consumer
                     // (Jones reads task.description directly). Direct seeding keeps the
                     // data flow clean and stays symmetric with `rebuildContextFromTask`.
-                    let briefing = Self.composeBrownTaskBriefing(for: resumingTask)
+                    let briefing = await composeBrownTaskBriefing(for: resumingTask)
                     let attachmentsForBrown = await collectTaskAttachments(resumingTask)
                     if let brownAgent = agents[brownID] {
                         // Synthetic ack runs BEFORE any LLM call on Brown's first run-loop
@@ -948,7 +1054,7 @@ public actor OrchestrationRuntime {
                     await taskStore.updateStatus(id: task.id, status: .running)
                     await taskStore.assignAgent(taskID: task.id, agentID: brownID)
 
-                    let briefing = Self.composeBrownTaskBriefing(for: task)
+                    let briefing = await composeBrownTaskBriefing(for: task)
                     let attachmentsForBrown = await collectTaskAttachments(task)
                     if let brownAgent = agents[brownID] {
                         await brownAgent.setSyntheticFirstToolCall("task_acknowledged")
@@ -1651,10 +1757,10 @@ public actor OrchestrationRuntime {
             },
             autoAdvanceEnabled: { [weak self] in await self?.autoAdvanceEnabled ?? false },
             recordFileRead: { path in
-                filesReadInSession?.record(path)
+                filesReadInSession?.record(PathNormalization.normalize(path))
             },
             hasFileBeenRead: { path in
-                filesReadInSession?.contains(path) ?? false
+                filesReadInSession?.contains(PathNormalization.normalize(path)) ?? false
             },
             setToolExecutionStatus: { [tracker] toolCallID, succeeded in
                 await tracker.recordExecutionStatus(toolCallID: toolCallID, succeeded: succeeded)
@@ -1681,6 +1787,23 @@ public actor OrchestrationRuntime {
                 case .failure(let err):
                     return (nil, err.description)
                 }
+            },
+            attachmentURLProvider: attachmentURLProviderClosure ?? { _, _ in nil },
+            stageAttachmentsForNextTurn: { [weak self] attachments, detailString in
+                guard let self else { return }
+                guard let agent = await self.agents[agentID] else { return }
+                let detail: AgentActor.AttachmentDetail
+                switch detailString.lowercased() {
+                case "thumbnail": detail = .thumbnail
+                case "full": detail = .full
+                default: detail = .standard
+                }
+                let entries = attachments.map { (attachment: $0, detail: detail) }
+                await agent.stageAttachments(entries)
+            },
+            maxAttachmentBytesPerMessage: { [weak self] in
+                guard let self else { return 50 * 1024 * 1024 }
+                return await self.maxAttachmentBytesPerMessage
             }
         )
     }

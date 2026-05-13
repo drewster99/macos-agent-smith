@@ -3,23 +3,23 @@ import SwiftLLMKit
 
 /// Metadata the caller provides to describe the context of an LLM call.
 /// Separates "what the caller knows" from "what the response contains."
-public struct LLMCallContext: Sendable {
-    public let agentRole: AgentRole
-    public let taskID: UUID?
-    public let modelID: String
-    public let providerType: String
-    public let providerID: String?
+struct LLMCallContext: Sendable {
+    let agentRole: AgentRole
+    let taskID: UUID?
+    let modelID: String
+    let providerType: String
+    let providerID: String?
     /// Full snapshot of the ModelConfiguration used for this call. Captured here
     /// rather than just its ID so historical records remain accurate even if the
     /// source config is later deleted or edited.
-    public let configuration: ModelConfiguration?
-    public let sessionID: UUID?
-    public let preResetInputTokens: Int?
+    let configuration: ModelConfiguration?
+    let sessionID: UUID?
+    let preResetInputTokens: Int?
     /// Wall-clock milliseconds spent executing tools this turn's response requested.
     /// Zero when the response had no tool calls or when the caller doesn't run tools.
-    public let totalToolExecutionMs: Int
+    let totalToolExecutionMs: Int
     /// Total characters across all tool result strings returned from this turn's tool calls.
-    public let totalToolResultChars: Int
+    let totalToolResultChars: Int
 
     public init(
         agentRole: AgentRole,
@@ -50,7 +50,7 @@ public struct LLMCallContext: Sendable {
 ///
 /// All LLM callers should use this after every `provider.send()` call to ensure
 /// consistent usage tracking across the entire app.
-public enum UsageRecorder {
+enum UsageRecorder {
     /// Records usage from an LLM response, if token usage data is present.
     ///
     /// No-op if `response.usage` is nil (e.g. local models that don't report tokens).

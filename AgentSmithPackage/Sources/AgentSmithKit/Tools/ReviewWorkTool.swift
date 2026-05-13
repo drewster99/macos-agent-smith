@@ -2,9 +2,9 @@ import Foundation
 
 /// Smith tool: reviews Brown's submitted work, either accepting or requesting changes.
 /// Merges AcceptWorkTool and RequestChangesTool into a single decision point.
-public struct ReviewWorkTool: AgentTool {
-    public let name = "review_work"
-    public let toolDescription = """
+struct ReviewWorkTool: AgentTool {
+    let name = "review_work"
+    let toolDescription = """
         Review Brown's submitted work on a task (must be in awaitingReview status). \
         Set `accepted` to `true` to mark the task completed and terminate Brown + Jones. \
         Set `accepted` to `false` to return the task to running and send feedback to Brown. \
@@ -19,7 +19,7 @@ public struct ReviewWorkTool: AgentTool {
         5. If there are ANY identified deficiencies OR any unaddressed questions OR any concerns, then you MUST REJECT the work, by calling `review_work` with `accepted` = `false`. Include your complete and detailed feedback in the `feedback` field. The feedback must include ALL items identified in any of the steps above, including any outstanding issues from prior rejections you may have sent.
         """
 
-    public let parameters: [String: AnyCodable] = [
+    let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
             "task_id": .dictionary([

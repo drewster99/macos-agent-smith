@@ -2,17 +2,94 @@
 
 ## Planned
 
-### Per-tool wall-clock timeouts
-Tool calls today run with no enforced wall-clock cap. A pathological invocation — e.g. a `run_applescript` that walks every Contacts entry and shells out per phone — can pin the agent for minutes. Worse, in a parallel batch the slowest leg blocks every other result from being delivered to the LLM (Anthropic's API requires all `tool_use` blocks in an assistant turn to have matching `tool_result` blocks before the next user turn). One slow tool ⇒ the whole turn stalls.
+### Attachments — v2 follow-ups
 
-We need a per-tool wall-clock timeout that races `tool.execute(...)` against `Task.sleep` and, on expiry, returns a structured failure result so the agent can recover (retry with a narrower query, abandon, or report). Fixed numbers don't fit — different tools have legitimately different cost shapes — so the default should be configurable via the `AgentTool` protocol with a sensible fallback. Starting proposal:
+A cluster of deferred items from the v1 attachment work (committed in `a150dae`,
+`081bcd7`, `3cf96d2`, `ed7316f`, `7256b22`, `fb44815`, `92e4513`):
 
-- `run_applescript`: 90s (long enough for a multi-app query, short enough that a runaway script gets reaped)
-- `bash`: 300s (build commands, test runs, package installs are real)
-- network/file/grep tools: 60s
-- LLM-driven sub-tools (Jones evaluations, summarizer): inherit their own LLM-side timeout; no wrapper
+**Briefing budget — time-aware, not just last-N count.** The current `collectTaskAttachments`
+caps eagerly-loaded image bytes to the last 3 updates' attachments. That's order-based —
+if updates 1-2 happened today and updates 3-N are months old, recent attachments still
+get culled in favor of the chronological tail. Switch to a hybrid that prefers (a)
+recency by wall-clock time and (b) aggregate-bytes budget. `view_attachment(ids:)`
+remains the on-demand fallback for older attachments.
 
-These are starting numbers — tune by watching real usage. The user may also want to override per-call (`with timeout of N seconds` for AppleScript already exists script-side; similar overrides per tool would be nice). Identified 2026-04-29 from the "brown stopped" diagnostic where a Contacts AppleScript ran 2m 21s before returning, blocking a parallel Messages result and making Brown look frozen.
+**Per-task aggregate cap.** v1 ships per-file (default 25 MB) and per-message
+(default 50 MB) caps; per-task aggregate (e.g. "no task may carry more than 200 MB
+of attachments cumulatively across description / updates / result") was scoped out
+because LLM cost is per-message. Add later if disk usage becomes a complaint.
+
+**Settings caps live without restart.** Currently caps apply at session start;
+mid-session changes need an agent restart. Wire the runtime to observe
+`SharedAppState` mutations (Combine or `@Observable` change publisher) and push
+them down. Settings UI text already documents the restart requirement.
+
+**Format converters at ingestion.** SVG → PNG (qlmanage subprocess), DOCX/RTF/Pages
+→ PDF (textutil + PDFKit chain), XLSX → CSV, HEIC → JPEG at ingestion (so storage
+is JPEG, not HEIC — currently converted only at LLM-injection time via
+ImageDownscaler). Each is a few-dozen-line function but needs subprocess management
+and per-format error handling. v1 sidestepped via the mime-allowlist filter on
+image injection (`ImageDownscaler.isProviderInjectable`); SVG specifically is still
+useful via `file_read` (which maps `.svg` to text and returns the XML body).
+
+**Folder drag-and-drop.** Reference-vs-bulk-ingest UX needs a real product call:
+- Reference (default for ≥10 files or any single ≥5 MB): manifest-only, points at
+  the original folder path. Brown reads via `bash` / `file_read`.
+- Bulk-ingest (default for small folders): each file becomes its own `Attachment`
+  with a synthetic group ID. Brown can iterate via `view_attachment(group:)`.
+Settings should let the user override per-session ("reference / bulk / always ask").
+
+**Per-model `ModelAttachmentCapabilities`.** Currently the image-injection filter is
+a static set of provider-common mimes (jpg/png/gif/webp). A capability record per
+model — in SwiftLLMKit's `ModelConfiguration` — would let us inject WebP only for
+providers that accept it, fall back to JPEG for those that don't, declare PDF
+support per provider for native document-block injection, etc. Required before we
+can push image content through OpenAI Responses API or Gemini's
+`functionResponse.parts` shape.
+
+**Anthropic-style image content in tool results.** `view_attachment` currently uses
+the universal user-message-injection path (works on every vision-capable provider).
+For tools that produce images (`generate_image`, `take_screenshot`, `render_chart`),
+returning the bytes directly in the tool result saves a round-trip when the
+provider supports it (Anthropic, Gemini 3, OpenAI Responses, GLM-4.6V). Layer this
+as an optimization on top of the JSON-handle pattern after `ModelAttachmentCapabilities`
+lands.
+
+**Jones evaluating `view_attachment` content.** `view_attachment` is currently
+gated by Brown's normal Jones approval, but Jones evaluates only the tool args
+(ids + detail), not the image bytes about to be loaded. A malicious image with
+prompt injection in the visual or metadata payload could still reach Brown's
+context. Jones doesn't have `view_attachment` in his tool list (text-only). Future
+work: a Jones-side "viewing" path so the security agent can see the same bytes
+before approving.
+
+**OpenAI Responses API support in SwiftLLMKit.** Big task; mentioned earlier in
+the attachment design discussion. Required before any OpenAI model can consume
+images returned from a tool's `tool_result` (Chat Completions can't carry image
+content in the `role: "tool"` message). Provides reasoning persistence for o-series
+and GPT-5 as a side benefit.
+
+**End-to-end attachment forwarding tests.** v1 ships unit tests for
+`ImageDownscaler`, `AttachmentRegistry`, and `ViewAttachmentTool` in isolation. A
+test that spins up `OrchestrationRuntime`, sends a user message with an image
+attachment, watches Smith forward via `create_task(attachment_ids:)`, and verifies
+Brown's seed briefing carries the image content — that's a real fixture investment
+worth doing once the attachment surface stabilizes.
+
+### Per-tool wall-clock timeouts ✅
+Tool calls used to run with no enforced wall-clock cap. A pathological invocation — e.g. a `run_applescript` that walks every Contacts entry and shells out per phone — could pin the agent for minutes; in a parallel batch the slowest leg blocked every other result from being delivered to the LLM. Originally identified 2026-04-29 from the "brown stopped" diagnostic where a Contacts AppleScript ran 2m21s before returning.
+
+**Implemented:** `AgentTool.executionTimeout` (default 120s) is now part of the protocol; `AgentActor.runToolWithTimeout` races `tool.execute(...)` against `Task.sleep(timeout)` in a `withThrowingTaskGroup`, cancels the tool on expiry, and synthesizes a `"Tool execution exceeded N s — cancelled"` failure result so the agent loop continues. Every tool-execution path (sequential `directExecute` and the parallel-batch leg) routes through it. Per-tool overrides: `bash` / `gh` 3700s (their `ProcessRunner` already enforces a user-supplied timeout — agent cap is the safety net); `glob` ~140s (covers its own `timeout` arg up to 120s); others inherit 120s. Plus a per-turn 10-minute stall watchdog logs an `os_log` error and posts a single channel warning so a stuck "Thinking" indicator is observable from `log stream`.
+
+### File-discovery toolset: Spotlight-first `glob` + `directory_tree` + `directory_listing` ✅
+`GlobTool` used to enumerate the entire subtree and flatten the whole pattern into one regex for the LLM to fish through — O(files) `stat`s + regex per call, slow on big trees, and an LLM that picked a pathological `path` like `~` or `/` could pin the agent indefinitely. There was also no cheap way for the LLM to *see* a directory's shape before choosing a scope.
+
+**Implemented:** Three-tool rework. `glob` is now Spotlight-first (via `mdfind` through `ProcessRunner`, with `stat`-validation of every hit since the index can be stale) with a structural (pattern-directed) bounded walk as fallback — the walk's "frontier work-queue" only touches the dirs the pattern actually structures into, so `proj/src/**/*.swift` no longer descends `proj/other/`. Returns a JSON object: `search_root` + `matches` (relative paths) + `source` (`"spotlight_index"` | `"filesystem_walk"`) + `stop_reason` + `total_matched` + `more_available` + `resume_token` + `message`. Caller-settable `limit` (default 100, max 1000) and `timeout` (default 30, max 120). The walk fallback is **resumable across calls** via an opaque token backed by a live in-memory frontier (no rescan), so a needle-in-a-huge-unindexed-tree search isn't doomed by the timeout. Pathological roots (`/`, `/System`, `/usr`, …, `/Users`, `$HOME`/`~`) are refused with `stop_reason: too_broad`.
+
+Two new tools land alongside: `directory_tree` (box-drawing dir-only tree to `max_depth` 3 by default with per-leaf annotations — depth-frontier / pruned / `(N files)`) and `directory_listing` (single-dir listing with `filter`/`sort`/`limit`/`offset` paging + `show_hidden_files`). All three share a `FilesystemSearchSupport` helper carrying the prune-list (VCS/build/dependency dirs + `.xcodeproj`/`.xcworkspace`/Photos/Music/TV libraries + the home-only opaque trees) and the root blocklist.
+
+### .gitignore-aware `glob` — follow-up
+The fixed prune-list already eats the big offenders (`node_modules`, `build`, `.build`, `DerivedData`, `Pods`, `.git`). For real `.gitignore` awareness, plan: add a `respect_gitignore: bool = true` arg. When the search base sits inside a git repo, find the root with `git -C <searchBase> rev-parse --show-toplevel` (non-zero exit ⇒ no-op), then run the match set through `git -C <repoRoot> check-ignore --stdin -z` and drop the ignored paths. Let *git* parse `.gitignore` / `.git/info/exclude` / `core.excludesFile` — don't reimplement it. Applies to both Spotlight and walk results. Graceful no-op when there's no repo or git isn't installed.
 
 ### Investigate `SessionManager.viewModel(for:)` load-state coupling
 `SessionManager.viewModel(for:)` lazily creates an `AppViewModel` and fires `Task { await vm.loadPersistedState() }` without awaiting. Callers receive a VM that may not have loaded its disk state yet. Today this is fine because every consumer guards on `vm.hasLoadedPersistedState` — and the only consumer that matters (the UI) renders empty state until that flag flips. But the contract is fragile: a future caller assuming "I got a VM, I can read its tasks" will silently see empty arrays for one tick.
@@ -157,8 +234,10 @@ Ripgrep-based content search tool for Agent Brown. Parameters: `pattern` (requir
 ### Task-scoped working directory for relative paths
 Currently all tools (except `file_read`) require absolute paths. Relative paths would save significant tokens — paths like `~/projects/agent-smith/AgentSmithPackage/Sources/AgentSmithKit/Tools/GrepTool.swift` are 100+ characters each, repeated across many tool calls per task. The approach: `CreateTaskTool` accepts an optional `working_directory` parameter. When set, all tools resolve relative paths against it. The working directory is immutable for the task's lifetime (no races). Tool output (glob/grep results) returns relative paths when a working directory is set, further reducing token usage. Full design documented in project memory.
 
-### Manually start pending tasks from the UI
+### Manually start pending tasks from the UI ✅
 Add a "Start" or "Run" button to pending tasks, accessible from both the task list (e.g., a play icon on the task row) and the task detail window. Clicking it should call `run_task` via the orchestration runtime, equivalent to Smith picking up the task. This lets the user manually kick off queued work without waiting for Smith or typing a command — especially useful when `autoRunNextTask` is disabled.
+
+**Implemented:** `AppViewModel.startTask(_:)` drives `OrchestrationRuntime.restartForNewTask(taskID:)` — the same path the `run_task` tool uses. Eligible statuses are the runnable set (`.pending` / `.paused` / `.interrupted`); the verb is status-aware ("Resume" for paused/interrupted, "Run" otherwise — `runActionTitle(for:)` in `TaskListView.swift`). It refuses (surfacing `taskActionError` via an alert) when another task is `.running` or `.awaitingReview`, mirroring `RunTaskTool`'s guardrails. Surfaces: inline `play.fill` button on the sidebar row (alongside the existing running pause/stop inline controls), a context-menu item in the pending/paused/interrupted branch (`.scheduled` was split into its own case, unchanged — it already has a wake-driven "run now"), and a prominent Run/Resume button in `TaskDetailWindow`'s header (the window's `viewModel` became `@Bindable` for the alert binding). `.scheduled` tasks are intentionally excluded — `run_task` excludes them too.
 
 ### Streamline model configuration UI
 The current Settings flow requires managing configurations as separate objects, then assigning them to agent roles across two different tabs. Redesign the UI to feel agent-centric — each agent/role has its own settings panel showing provider, model, temperature, max tokens, etc. directly. The underlying `ModelConfiguration` concept stays in the data model for reuse and persistence, but the UI abstracts it away so it feels like "adjusting Smith's settings" rather than "creating a configuration and assigning it." Goal: the user should essentially never have to manually create a model configuration.
@@ -412,14 +491,16 @@ Two follow-on mechanisms worth implementing if soft-mode proves insufficient:
 
 **Synthetic update — runtime-generated task_update on the agent's behalf.** Instead of (or alongside) hard mode, the runtime could generate its own factual digest of Brown's recent activity and write it as a `task_update` directly to the TaskStore (skipping the channel) so Smith's `get_task_details` sees something fresh without a Brown round-trip. The body would be derived from Brown's recent tool calls + channel messages — same data source as Smith's 10-minute digest. Pros: zero extra latency, zero token cost, always up-to-date. Cons: can hallucinate intent ("Brown is investigating X" when Brown was actually about to abandon X), so the framing must be strictly factual ("Brown made N tool calls including file_read of /foo/bar.swift") rather than narrative. Probably safer to default to nudging Brown to speak for himself, with synthetic updates as a fallback when even hard mode fails.
 
-### Replace NLEmbedding with MLX Qwen3-Embedding-0.6B-4bit-DWQ
+### Replace NLEmbedding with MLX Qwen3-Embedding-0.6B-4bit-DWQ ✅
+**Shipped.** Embedding now runs through `SemanticSearch` (sibling package): `SemanticSearchEngine` + `MLXEmbedderBackend` load `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` via `MLXEmbedders`. `NLEmbedding`/NaturalLanguage is no longer used (survives only as a historical comment in `MemoryStore.swift`). Follow-ups in this entry are also done: the RRF blend in `MemoryStore` is now an equal-weight semantic+lexical fusion (the old 25%-weighted lexical channel is gone), and the noise floor was recalibrated for Qwen3's cosine distribution (`MemoryStore.defaultSearchThreshold = 0.10`). `MemoryStoreIntegrationTests` runs end-to-end against the real engine, gated behind `AGENT_SMITH_RUN_MLX_TESTS=1` + `xcodebuild` (plain `swift test` can't compile MLX's Metal shaders). Original design notes retained below for context.
+
 The current `EmbeddingService` uses Apple's `NLEmbedding.sentenceEmbedding(for: .english)` from the NaturalLanguage framework — a 512-dim sentence embedding model that runs locally with no API cost. It works, but it's an older model and we've observed weak retrieval on rare technical terms, code, identifiers, and topical paraphrasing. The 25% lexical overlap component in our RRF blend (`MemoryStore.searchAll`) was added partly to compensate for this.
 
 **Target model:** [`mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ`](https://huggingface.co/mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ) — a 4-bit DWQ-quantized variant of Alibaba's Qwen3 Embedding 0.6B, runnable on Apple Silicon via the MLX framework. Demonstrated in the [`mlx-swift-examples`](https://github.com/ml-explore/mlx-swift-examples) repo's `embedder-tool` example.
 
 **Why:** We compared this model against the current Apple NLEmbedding pipeline using a real corpus of our own task data (see methodology below) and got noticeably better results — top-K matches were more topically relevant and the model handled queries the Apple model would miss entirely (paraphrases, conceptual lookups, and queries about specific entities mentioned only briefly in long documents).
 
-**Open question:** speed and memory footprint on real workloads. The MLX inference path is fast on M-series Macs but it's a much larger model than `NLEmbedding`, so per-call latency, peak memory during embedding, and re-embed time on app start need to be measured before committing. The current corpus reembed pass on startup is essentially free (NLEmbedding is microseconds per sentence). Need to benchmark Qwen3 on a realistic corpus (hundreds to low thousands of memories + task summaries) before deciding whether to move to it directly, keep both and pick at runtime, or only use it for the search side and keep NLEmbedding for save-time embedding.
+**Open question (resolved):** speed and memory footprint were the gating concern — whether to move fully to Qwen3, keep both and pick at runtime, or use Qwen3 for search only. Resolved in favor of moving fully to Qwen3 for both save-time and search-time embedding; measured latency (see below) was acceptable. `NLEmbedding` was dropped entirely, not kept as a fallback.
 
 **Initial timing measurement (52-task corpus, M-series Mac, "how to send messages" query):**
 ```
@@ -466,18 +547,17 @@ Top 4 results were all genuinely relevant (contact-sending tasks like "Send iMes
 
    All three returned visibly more relevant top-K results than what `searchAll` produces with the current Apple model on the same corpus.
 
-**Implementation sketch:**
-- Add `mlx-swift` and `mlx-swift-examples` (or just the embedder helper) as Swift Package dependencies on `AgentSmithKit`.
-- Replace or wrap `EmbeddingService` so it loads `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` once at init and produces embeddings the same way (sentence-level if we keep multi-vector retrieval, or whole-document if we drop it). Vector dimension changes — Qwen3 embeddings are larger than 512 — so on-disk vectors need a re-embed pass.
-- The `reembedAllMemories` / `reembedTaskSummariesFromTasks` functions already exist for exactly this scenario; bumping a stored embedding model identifier and detecting mismatch on load is the standard migration path.
-- Decide on the lexical-overlap weight in RRF: with a stronger semantic channel, we may want to lower the lexical contribution (currently 25% via `searchAllNoiseFloor` filtering and joint RRF ranking).
-- Decide on the `searchAllNoiseFloor` value — Qwen3 cosines have a different distribution than NLEmbedding cosines, so the `0.55` floor will need recalibration.
+**Implementation (as built):**
+- The embedding stack moved into the `SemanticSearch` sibling package rather than adding MLX deps directly to `AgentSmithKit`: `SemanticSearchEngine` + `MLXEmbedderBackend` + `EmbeddingModel` wrap `MLXEmbedders` and load `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ`. `MemoryStore` talks to the engine; `EmbeddingService`/`NLEmbedding` is gone.
+- Vector dimension changed (Qwen3 > 512), so stored vectors needed a re-embed pass — handled via the existing `reembedAllMemories` / `reembedTaskSummariesFromTasks` mismatch-on-load migration path.
+- Lexical-overlap weight in RRF: the old 25%-weighted lexical channel was dropped; `MemoryStore.reciprocalRankFusion` now does an equal-weight semantic+lexical fusion (`1/(k+sRank) + 1/(k+lRank)`, k=60).
+- Noise floor recalibrated for Qwen3's cosine distribution: the old `0.55` gate is now `MemoryStore.defaultSearchThreshold = 0.10` (unrelated text scores sit well below 0.10; RRF does the real ordering).
 
-**Risks:**
-- Model weight download size (small, but adds a one-time cost).
-- Memory footprint during runtime (need to confirm 4-bit quantized 0.6B is comfortable in our process).
-- Per-embedding latency on save (every `save_memory` and `task_complete` triggers an embed; if it's >100ms it'll be noticeable).
-- Re-embed pass time on startup (currently instant; may grow to seconds for a corpus of a few hundred entries).
+**Risks (outcome):**
+- Model weight download — one-time cost on first run; acceptable.
+- Runtime memory — 4-bit quantized 0.6B is comfortable in-process.
+- Per-embedding latency on save — within tolerance per measurements; `save_memory` / `task_complete` embeds are not noticeably slow.
+- Re-embed pass on startup — no longer instant but acceptable at current corpus sizes; revisit if corpora grow into the thousands.
 
 ### SwiftUI review P3 — accessibility baseline pass
 From the 2026-04-27 SwiftUI review (P3 follow-ups). The app currently has zero `.accessibilityLabel`, `.accessibilityHint`, or `.accessibilityIdentifier` calls. VoiceOver auto-derives labels from string content, which works for `Text("Start")` but fails for icon-only buttons (e.g. `InspectorView`'s speech-mute and gear buttons render as silent icons under VoiceOver). UI tests have no stable hooks either.

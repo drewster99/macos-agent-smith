@@ -5,13 +5,24 @@ import AgentSmithKit
 /// per ForEach iteration — keeps the loop body free of nested layout primitives.
 struct TaskUpdateRow: View {
     let update: AgentTask.TaskUpdate
+    let attachmentURLResolver: (Attachment) -> URL?
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(update.date.formatted(date: .omitted, time: .standard))
-                .font(.caption.monospaced())
-                .foregroundStyle(.tertiary)
-            MarkdownText(content: update.message, baseFont: .callout)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(update.date.formatted(date: .omitted, time: .standard))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+                MarkdownText(content: update.message, baseFont: .callout)
+            }
+            if !update.attachments.isEmpty {
+                TaskAttachmentList(
+                    attachments: update.attachments,
+                    compact: true,
+                    urlResolver: attachmentURLResolver
+                )
+                .padding(.leading, 70)
+            }
         }
     }
 }
