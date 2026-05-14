@@ -109,6 +109,14 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             self == .running || self == .paused || self == .awaitingReview
         }
 
+        /// Whether this status is a terminal outcome — the task's `UsageRecord`s
+        /// won't grow further. Used by the inspector cost-load path to decide
+        /// when to refresh a task's cached cost (terminal tasks only need one
+        /// final read; non-terminal tasks may still accrue records).
+        public var isTerminal: Bool {
+            self == .completed || self == .failed
+        }
+
         /// Whether this status allows `run_task` to start execution. `.scheduled` is
         /// deliberately excluded — calling `run_task` on a scheduled task before its fire
         /// time should be an explicit override, not a silent advance.

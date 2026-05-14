@@ -109,11 +109,12 @@ struct TaskDetailWindow: View {
         }
         .frame(minWidth: 600, minHeight: 400)
         .navigationTitle(task.title)
-        // Lazy-load this task's cost + token totals. The id includes
-        // `task.status == .completed` so the loader re-fires when a task we're
-        // watching transitions to completed. `force: true` evicts the in-progress
-        // partial values cached on first appear so the final cost replaces them.
-        .task(id: TaskCostLoaderKey(taskID: task.id, isCompleted: task.status == .completed)) {
+        // Lazy-load this task's cost + token totals. The id includes whether
+        // the task is in a terminal status so the loader re-fires when a task
+        // we're watching reaches `.completed` or `.failed`. `force: true`
+        // evicts the in-progress partial values cached on first appear so the
+        // final values replace them.
+        .task(id: TaskCostLoaderKey(taskID: task.id, isTerminal: task.status.isTerminal)) {
             await viewModel.loadTaskCost(task.id, force: true)
             await viewModel.loadTaskTokens(task.id, force: true)
         }

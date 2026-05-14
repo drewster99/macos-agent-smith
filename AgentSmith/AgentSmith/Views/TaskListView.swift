@@ -312,13 +312,13 @@ struct TaskRowButton: View {
 /// diff at the ForEach boundary skips unchanged rows when only one task in the array
 /// mutates.
 /// Composite key for the task-cost `.task(id:)` modifier. Re-firing must happen
-/// when either the task ID changes (different row) or the task transitions into
-/// `.completed` (so a task the user watched run to completion gets its cost loaded
-/// after status flips, not just on the initial appear). Shared by the sidebar row
-/// and the detail window so both surfaces pick up cost the moment a task finishes.
+/// when either the task ID changes (different row) or the task reaches a terminal
+/// status (`.completed` or `.failed`) — that's when the underlying records stop
+/// growing and a fresh cache fetch is worthwhile. Shared by the sidebar row and
+/// the detail window so both surfaces pick up cost the moment a task finishes.
 struct TaskCostLoaderKey: Hashable {
     let taskID: UUID
-    let isCompleted: Bool
+    let isTerminal: Bool
 }
 
 private struct TaskRow: View {
@@ -351,20 +351,16 @@ private struct TaskRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .contentShape(Rectangle())
-        // Lazy-load the task's estimated cost. The id includes `task.status` so
-        // the modifier re-fires when a task we're watching transitions into
-        // `.completed` — keying on `task.id` alone would only fire once on row
-        // appear, before the task had reached completion, and the `.completed`
-        // guard inside would short-circuit the load forever.
+        // Lazy-load the task's estimated cost. The id includes whether the task
+        // has reached a terminal state (completed OR failed) so the loader
+        // re-fires when a task we're watching transitions out of `.running` —
+        // keying on `task.id` alone would only fire once on row appear and miss
+        // the post-completion records.
         //
-        // `force: true` is required because the detail window may have already
-        // populated the cache with a partial value computed while the task was
-        // still running. Without an evict-and-reload, that partial value would
-        // stick on the list row even after the task finishes.
-        .task(id: TaskCostLoaderKey(taskID: task.id, isCompleted: task.status == .completed)) {
-            if task.status == .completed {
-                await viewModel.loadTaskCost(task.id, force: true)
-            }
+        // `force: true` evicts any partial value cached by the detail window
+        // while the task was still running, so the list row picks up final cost.
+        .task(id: TaskCostLoaderKey(taskID: task.id, isTerminal: task.status.isTerminal)) {
+            await viewModel.loadTaskCost(task.id, force: true)
         }
     }
 
@@ -531,14 +527,14 @@ private struct TaskRow: View {
         }
     }
 
-    /// Estimated cost chip for completed tasks. Reads from the cache populated
-    /// by the row-level `.task(id:)` loader — never queries `UsageStore` itself.
-    /// Rendered in orange so the eye picks it out at a glance.
+    /// Estimated cost chip. Reads from the cache populated by the row-level
+    /// `.task(id:)` loader — never queries `UsageStore` itself. Rendered in
+    /// orange so the eye picks it out at a glance. Shows for any task with
+    /// non-zero accrued cost, regardless of status — a failed task that burned
+    /// real money is information the user needs.
     @ViewBuilder
     private func costChip() -> some View {
-        if task.status == .completed,
-           let cost = viewModel.cachedTaskCost(task.id),
-           cost > 0 {
+        if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
             Text(String(format: "$%.2f", cost))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.orange)

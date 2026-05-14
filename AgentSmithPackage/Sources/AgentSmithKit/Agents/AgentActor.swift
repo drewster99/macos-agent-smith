@@ -762,9 +762,20 @@ public actor AgentActor {
                     hasRunnableTasks: hasRunnableTasks,
                     hasAwaitingReviewTasks: hasAwaitingReview
                 )
-                let toolDefinitions = tools
-                    .filter { $0.isAvailable(in: availabilityContext) }
-                    .map { $0.definition(for: configuration.role) }
+                // Defense-in-depth: while Brown is awaiting review, hand him an empty
+                // tool list regardless of per-tool `isAvailable`. The `drainPendingMessages`
+                // gate and the silence-nudge guard above should prevent us from reaching
+                // this point with `awaitingTaskReview == true`, but if any other wake
+                // source slips through (a stray scheduled wake, a future feature, a bug),
+                // Brown's LLM turn produces nothing he can act on.
+                let toolDefinitions: [LLMToolDefinition]
+                if configuration.role == .brown && awaitingTaskReview {
+                    toolDefinitions = []
+                } else {
+                    toolDefinitions = tools
+                        .filter { $0.isAvailable(in: availabilityContext) }
+                        .map { $0.definition(for: configuration.role) }
+                }
                 toolContext.onProcessingStateChange(true)
                 // Stall watchdog: if this turn (LLM call + tool execution) is still
                 // active after `Self.stallWatchdogSeconds`, log a warning and post a
@@ -1022,6 +1033,31 @@ public actor AgentActor {
                 content: text
             ))
             implicitMessageSent = true
+
+            // Action-claim guard: when Smith's text-only response asserts an action
+            // was performed (terminated, paused, marked failed, etc.) but no tool
+            // call accompanied the response, append a [System] correction to his
+            // history so the next turn reminds him that text is not action.
+            // Observed in session BB94BA9C: user asked "terminate him", Smith
+            // replied "Done. Brown has been terminated" without ever calling
+            // `terminate_agent`. Brown kept running for two more minutes.
+            if let phrase = Self.detectActionClaimWithoutToolCall(text: text) {
+                conversationHistory.append(LLMMessage(
+                    role: .user,
+                    text: """
+                        [System] Your previous message said "\(phrase)" but you made no tool call. \
+                        The action was NOT performed — your text reaches the user as if it were \
+                        message_user, but text alone cannot terminate an agent, fail a task, or \
+                        message Brown. If you intended to act:
+                        - Terminate an agent → call `terminate_agent`
+                        - Mark a task failed / archived / completed → call `update_task` (status) or `manage_task_disposition`
+                        - Send Brown instructions → call `message_brown`
+                        - Schedule something → call `schedule_task_action`
+                        Reply now with the correct tool call. Do not just claim it again.
+                        """
+                ))
+                hasUnprocessedInput = true
+            }
         }
 
         let toolCalls = response.toolCalls
@@ -1534,6 +1570,44 @@ public actor AgentActor {
         ))
     }
 
+    /// Detects the specific failure mode where Smith's text-only response asserts an
+    /// action was performed (terminated, paused, marked failed, etc.) but no tool call
+    /// accompanies the response. Returns the matched phrase for inclusion in the
+    /// `[System]` correction, or `nil` if no claim is detected.
+    ///
+    /// Intentionally narrow — we'd rather miss some phrasings than spam Smith with
+    /// false-positive corrections every time he says "stopped" in another context.
+    /// Pairs with the prompt rule (item 37 in `SmithBehavior.swift`'s scoring section);
+    /// the runtime detector is the safety net when the model doesn't follow the prompt.
+    nonisolated static func detectActionClaimWithoutToolCall(text: String) -> String? {
+        // Patterns: an action verb in past tense followed (within ~80 chars) by an
+        // agent or task target. Matches things like "Brown has been terminated",
+        // "I've terminated Brown", "task is now marked failed", "Brown stopped",
+        // "I paused him". Case-insensitive.
+        let patterns: [String] = [
+            // Verb-then-target ("I've paused him", "terminated Brown", "stopped the agent")
+            #"(?i)\b(terminated|killed|paused|stopped|cancelled)\b[^.]{0,80}\b(brown|agent|him|her|them)\b"#,
+            // Target-then-verb ("Brown has been terminated", "him paused")
+            #"(?i)\b(brown|agent|him|her|them)\b[^.]{0,80}\b(terminated|killed|stopped|paused|cancelled)\b"#,
+            // Task disposition phrasings ("marked the task failed", "set it failed")
+            #"(?i)\b(marked|set|moved)\b[^.]{0,40}\b(task|it)\b[^.]{0,40}\b(failed|completed|cancelled|archived)\b"#,
+            // Passive task-marked phrasings ("task is now marked failed")
+            #"(?i)\b(task)\b[^.]{0,40}\bis\s+(?:now\s+)?marked\s+(?:as\s+)?(failed|completed|cancelled|archived)\b"#,
+            // "Done." / "Done!" preamble plus an action verb in the same sentence
+            #"(?i)\bdone\b[^.]{0,80}\b(terminated|killed|stopped|paused|marked|cancelled|archived)\b"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            if let match = regex.firstMatch(in: text, options: [], range: range),
+               let r = Range(match.range, in: text) {
+                let phrase = String(text[r])
+                return phrase.count > 100 ? String(phrase.prefix(100)) + "…" : phrase
+            }
+        }
+        return nil
+    }
+
     /// Evaluates a tool call via SecurityEvaluator, posts channel messages, executes if approved.
     /// Used for sequential tool calls that require approval.
     private func executeWithApproval(_ call: LLMToolCall, tool: any AgentTool, parallelIndex: Int = 0, parallelCount: Int = 1, siblingCallSummaries: [String] = []) async -> String {
@@ -1627,6 +1701,16 @@ public actor AgentActor {
     /// rejected call as a failure on the shared tracker so a retry isn't flagged as a
     /// duplicate of a successful operation.
     private func rejectionResultIfUnavailable(_ call: LLMToolCall, tool: any AgentTool) async -> String? {
+        // Mirror the awaitingTaskReview override at the toolDefinitions filter site:
+        // while Brown is awaiting review, no tool may execute, regardless of per-tool
+        // `isAvailable`. Without this branch, a stale tool call enqueued before the
+        // state flipped — or a future code path that hands Brown a tool list anyway —
+        // could still reach `directExecute`.
+        if configuration.role == .brown && awaitingTaskReview {
+            Self.agentLogger.warning("Tool '\(call.name, privacy: .public)' rejected at execution time — Brown is awaitingTaskReview")
+            await toolContext.setToolExecutionStatus(call.id, false)
+            return "Tool '\(call.name)' is not available — task is awaiting review."
+        }
         let context = await currentAvailabilityContext()
         if tool.isAvailable(in: context) { return nil }
         Self.agentLogger.warning("Tool '\(call.name, privacy: .public)' rejected at execution time — not available for role \(self.configuration.role.rawValue, privacy: .public)")
@@ -1876,6 +1960,14 @@ public actor AgentActor {
     /// silence period (re-armed when Brown actually communicates).
     private func checkBrownSilenceNudge() {
         guard configuration.role == .brown, brownSilenceNudgeArmed else { return }
+        // Don't nudge while Brown is awaiting review. The whole point of that state is
+        // that Brown should be idle until Smith responds; the nudge would otherwise
+        // bypass the `drainPendingMessages` awaiting-review gate by setting
+        // `hasUnprocessedInput = true` directly, waking Brown to resume work he's
+        // already submitted for review (observed in session BB94BA9C — Brown's
+        // 15-minute hard-ceiling nudge fired at 19:08 and he started running
+        // xcodebuild + file reads despite already being in awaitingTaskReview).
+        guard !awaitingTaskReview else { return }
         guard let last = lastTaskCommunicationAt else { return }
         let elapsed = Date().timeIntervalSince(last)
         let drifting = elapsed >= Self.brownSilenceNudgeMinSeconds
