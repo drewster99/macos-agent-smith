@@ -232,11 +232,20 @@ struct ReasoningContentRoundTripTests {
         #expect(assistant?.continuation?.anthropicThinkingBlocks == blocks)
     }
 
-    @Test("tool-call response carries Gemini thoughtSignatures into history")
+    @Test("tool-call response carries Gemini response parts into history (0.0.26)")
     func geminiContinuationToolCalls() async throws {
         let channel = MessageChannel()
         let taskStore = TaskStore()
-        let sigs = ["0": "sig-zero", "1": "sig-one"]
+        let parts = [
+            GeminiResponsePart(
+                functionCall: GeminiFunctionCall(name: "tool_a", argsJSON: "{}"),
+                thoughtSignature: "sig-zero"
+            ),
+            GeminiResponsePart(
+                functionCall: GeminiFunctionCall(name: "tool_b", argsJSON: "{}"),
+                thoughtSignature: "sig-one"
+            )
+        ]
         let provider = CannedResponseProvider(LLMResponse(
             text: nil,
             toolCalls: [
@@ -245,7 +254,7 @@ struct ReasoningContentRoundTripTests {
             ],
             reasoning: nil,
             usage: nil,
-            continuation: ProviderContinuation(geminiThoughtSignatures: sigs)
+            continuation: ProviderContinuation(geminiResponseParts: parts)
         ))
         let (agent, _) = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
         await agent.start(initialInstruction: "do both")
@@ -253,7 +262,7 @@ struct ReasoningContentRoundTripTests {
         let assistant = await Self.waitForAssistantMessage(agent)
         await agent.stop()
 
-        #expect(assistant?.continuation?.geminiThoughtSignatures == sigs)
+        #expect(assistant?.continuation?.geminiResponseParts == parts)
     }
 
     @Test("mixed text+tool-call response carries thinking continuation")
