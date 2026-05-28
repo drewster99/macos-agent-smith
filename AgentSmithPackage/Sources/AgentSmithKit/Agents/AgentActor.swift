@@ -312,7 +312,7 @@ public actor AgentActor {
     /// transcript row, and stays symmetric with `rebuildContextFromTask` (which already
     /// seeds Brown's history from the task store on the rebuild path).
     public func appendUserMessage(_ text: String) {
-        conversationHistory.append(LLMMessage(role: .user, text: text))
+        conversationHistory.append(.user(text))
         hasUnprocessedInput = true
         pushLiveContext()
     }
@@ -350,8 +350,11 @@ public actor AgentActor {
             guard ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) else { continue }
             images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
         }
-        let llmImages: [LLMImageContent]? = images.isEmpty ? nil : images
-        conversationHistory.append(LLMMessage(role: .user, text: text, images: llmImages))
+        if images.isEmpty {
+            conversationHistory.append(.user(text))
+        } else {
+            conversationHistory.append(.user(text, images: images))
+        }
         hasUnprocessedInput = true
         pushLiveContext()
     }
@@ -364,7 +367,7 @@ public actor AgentActor {
     /// Replaces the system prompt in the agent's conversation history.
     public func updateSystemPrompt(_ prompt: String) {
         guard !conversationHistory.isEmpty else { return }
-        conversationHistory[0] = LLMMessage(role: .system, text: prompt)
+        conversationHistory[0] = .system(prompt)
         pushLiveContext()
     }
 
@@ -516,7 +519,7 @@ public actor AgentActor {
         }
 
         if let instruction = initialInstruction {
-            conversationHistory.append(LLMMessage(role: .user, text: instruction))
+            conversationHistory.append(.user(instruction))
             hasUnprocessedInput = true
             pushLiveContext()
         }
@@ -838,7 +841,7 @@ public actor AgentActor {
                     modelID: configuration.llmConfig.model,
                     providerType: configuration.providerAPIType.rawValue,
                     providerID: configuration.llmConfig.providerID,
-                    temperature: configuration.llmConfig.temperature,
+                    temperature: configuration.llmConfig.temperature ?? 0,
                     maxOutputTokens: configuration.llmConfig.maxTokens,
                     thinkingBudget: configuration.llmConfig.thinkingBudget,
                     usage: response.usage
@@ -1110,9 +1113,14 @@ public actor AgentActor {
                 consecutiveEmptyResponses = 0
             }
 
-            // Text-only response — record and wait for new input
-            if hasText, let text = response.text {
-                conversationHistory.append(LLMMessage(role: .assistant, text: text, reasoning: response.reasoning))
+            // Text-only response — record and wait for new input.
+            // Use `.assistant(from:)` so the response's `continuation`
+            // (Anthropic thinking signatures / Gemini thoughtSignatures)
+            // survives into the next turn. Manual construction silently
+            // broke multi-turn thinking on Anthropic (thinkingBudget > 0)
+            // and Gemini 2.5 (thinking on by default in Pro).
+            if hasText, response.text != nil {
+                conversationHistory.append(.assistant(from: response))
                 pushLiveContext()
 
                 if configuration.suppressesRawTextToChannel, !implicitMessageSent {
@@ -1127,20 +1135,17 @@ public actor AgentActor {
                 // replied "Done. Brown has been terminated" without ever calling
                 // `terminate_agent`. Brown kept running for two more minutes.
                 if let phrase = smithActionClaimPhrase {
-                    conversationHistory.append(LLMMessage(
-                        role: .user,
-                        text: """
-                            [System] Your previous message said "\(phrase)" but you made no tool call. \
-                            The action was NOT performed — your text reaches the user as if it were \
-                            message_user, but text alone cannot terminate an agent, fail a task, or \
-                            message Brown. If you intended to act:
-                            - Terminate an agent → call `terminate_agent`
-                            - Mark a task failed / archived / completed → call `update_task` (status) or `manage_task_disposition`
-                            - Send Brown instructions → call `message_brown`
-                            - Schedule something → call `schedule_task_action`
-                            Reply now with the correct tool call. Do not just claim it again.
-                            """
-                    ))
+                    conversationHistory.append(.user("""
+                        [System] Your previous message said "\(phrase)" but you made no tool call. \
+                        The action was NOT performed — your text reaches the user as if it were \
+                        message_user, but text alone cannot terminate an agent, fail a task, or \
+                        message Brown. If you intended to act:
+                        - Terminate an agent → call `terminate_agent`
+                        - Mark a task failed / archived / completed → call `update_task` (status) or `manage_task_disposition`
+                        - Send Brown instructions → call `message_brown`
+                        - Schedule something → call `schedule_task_action`
+                        Reply now with the correct tool call. Do not just claim it again.
+                        """))
                     hasUnprocessedInput = true
                 }
             } else if configuration.role != .brown {
@@ -1150,7 +1155,7 @@ public actor AgentActor {
                 // provider re-feeds the stale prompt back to the model — exactly how three of
                 // four task-scoped wakes silently dropped on 2026-04-25. Append a synthetic
                 // marker so each new injection starts a fresh turn.
-                conversationHistory.append(LLMMessage(role: .assistant, text: "(no response)"))
+                conversationHistory.append(.assistant(text: "(no response)"))
                 pushLiveContext()
                 Self.agentLogger.debug(
                     "Agent \(self.configuration.role.displayName, privacy: .public) returned an empty response; closing turn with synthetic marker."
@@ -1176,7 +1181,7 @@ public actor AgentActor {
             // tool calls means the model is thinking aloud — inject a continuation prompt
             // so it keeps working.
             if configuration.role == .brown && hasText {
-                conversationHistory.append(LLMMessage(role: .user, text: "Continue. Use your tools to make progress on the task."))
+                conversationHistory.append(.user("Continue. Use your tools to make progress on the task."))
             } else {
                 hasUnprocessedInput = false
             }
@@ -3052,7 +3057,7 @@ public actor AgentActor {
 
         conversationHistory = [
             conversationHistory[0],  // System prompt
-            LLMMessage(role: .user, text: instruction)
+            .user(instruction)
         ]
 
         // Append the last complete tool exchange so Brown has immediate continuity

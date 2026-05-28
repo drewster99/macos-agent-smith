@@ -277,15 +277,8 @@ struct FullContextSheet: View {
     /// Converts the LLM response into an LLMMessage for display in the context view.
     private var responseAsMessage: LLMMessage? {
         let response = turn.response
-        if !response.toolCalls.isEmpty {
-            if let text = response.text, !text.isEmpty {
-                return LLMMessage(role: .assistant, content: .mixed(text: text, toolCalls: response.toolCalls))
-            }
-            return LLMMessage(role: .assistant, content: .toolCalls(response.toolCalls))
-        } else if let text = response.text, !text.isEmpty {
-            return LLMMessage(role: .assistant, text: text)
-        }
-        return nil
+        guard !response.toolCalls.isEmpty || !(response.text ?? "").isEmpty else { return nil }
+        return .assistant(from: response)
     }
 
     @ViewBuilder

@@ -264,9 +264,9 @@ actor SecurityEvaluator {
             siblingCalls: siblingCalls
         )
 
-        var conversationMessages = [
-            LLMMessage(role: .system, text: systemPrompt),
-            LLMMessage(role: .user, text: evalPrompt)
+        var conversationMessages: [LLMMessage] = [
+            .system(systemPrompt),
+            .user(evalPrompt)
         ]
 
         let startTime = Date()
@@ -313,12 +313,12 @@ actor SecurityEvaluator {
             var turnToolResultChars = 0
             if !response.toolCalls.isEmpty {
                 fileReadRounds += 1
-                // Append assistant message with the tool calls (and any accompanying text).
-                if let text = response.text, !text.isEmpty {
-                    conversationMessages.append(LLMMessage(role: .assistant, content: .mixed(text: text, toolCalls: response.toolCalls)))
-                } else {
-                    conversationMessages.append(LLMMessage(role: .assistant, content: .toolCalls(response.toolCalls)))
-                }
+                // `.assistant(from:)` preserves reasoning + provider
+                // continuation (Anthropic thinking signatures / Gemini
+                // thoughtSignatures) so Jones's multi-turn file-read loop
+                // keeps thinking continuity. Manual construction silently
+                // broke thinkingBudget > 0 runs and Gemini 2.5.
+                conversationMessages.append(.assistant(from: response))
                 // Execute each file_read and append tool results, timing each one.
                 for call in response.toolCalls {
                     await postJonesFileReadToChannel(call)
@@ -326,7 +326,7 @@ actor SecurityEvaluator {
                     let result = executeJonesFileRead(call)
                     turnToolExecutionMs += Int(Date().timeIntervalSince(execStart) * 1000)
                     turnToolResultChars += result.count
-                    conversationMessages.append(LLMMessage(role: .tool, content: .toolResult(toolCallID: call.id, content: result)))
+                    conversationMessages.append(.toolResult(result, callID: call.id))
                 }
             }
 

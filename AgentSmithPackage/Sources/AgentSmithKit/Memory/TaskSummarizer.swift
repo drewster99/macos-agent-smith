@@ -169,9 +169,9 @@ actor TaskSummarizer {
 
         let userPrompt = "Existing memory:\n\(cappedExisting)\n\nNew memory:\n\(cappedNew)"
 
-        let messages = [
-            LLMMessage(role: .system, text: systemPrompt),
-            LLMMessage(role: .user, text: userPrompt)
+        let messages: [LLMMessage] = [
+            .system(systemPrompt),
+            .user(userPrompt)
         ]
 
         var lastError: Error?
@@ -226,9 +226,9 @@ actor TaskSummarizer {
     private func generateSummary(for task: AgentTask) async throws -> String {
         let userPrompt = buildUserPrompt(for: task)
 
-        let messages = [
-            LLMMessage(role: .system, text: Self.systemPrompt),
-            LLMMessage(role: .user, text: userPrompt)
+        let messages: [LLMMessage] = [
+            .system(Self.systemPrompt),
+            .user(userPrompt)
         ]
 
         let callStart = Date()
