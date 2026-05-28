@@ -194,4 +194,111 @@ struct ReasoningContentRoundTripTests {
 
         #expect(assistant?.reasoning == nil)
     }
+
+    // MARK: - Continuation round-trip (swift-llm-kit 0.0.24+)
+    //
+    // The 0.0.24 work added `LLMResponse.continuation` carrying provider-
+    // specific multi-turn "thinking continuity" blobs (Anthropic thinking-
+    // block signatures, Gemini per-part thoughtSignatures). AgentActor must
+    // preserve these onto the recorded assistant message so the next turn
+    // can replay them — otherwise Anthropic with thinkingBudget > 0 and any
+    // Gemini 2.5 model silently lose thinking continuity across the agent
+    // loop. The pre-0.0.24 manual `LLMMessage(role: .assistant, ...)`
+    // construction had no slot for continuation; the .assistant(from:)
+    // factory fixes that. These tests lock the wiring so a future
+    // refactor cannot regress it.
+
+    @Test("text-only response carries Anthropic thinking continuation into history")
+    func anthropicContinuationTextOnly() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let blocks = [
+            AnthropicThinkingBlock(thinking: "step 1", signature: "sig-A"),
+            AnthropicThinkingBlock(thinking: "step 2", signature: "sig-B")
+        ]
+        let provider = CannedResponseProvider(LLMResponse(
+            text: "Here is my answer.",
+            toolCalls: [],
+            reasoning: "step 2",
+            usage: nil,
+            continuation: ProviderContinuation(anthropicThinkingBlocks: blocks)
+        ))
+        let (agent, _) = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
+        await agent.start(initialInstruction: "hello")
+
+        let assistant = await Self.waitForAssistantMessage(agent)
+        await agent.stop()
+
+        #expect(assistant?.continuation?.anthropicThinkingBlocks == blocks)
+    }
+
+    @Test("tool-call response carries Gemini thoughtSignatures into history")
+    func geminiContinuationToolCalls() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let sigs = ["0": "sig-zero", "1": "sig-one"]
+        let provider = CannedResponseProvider(LLMResponse(
+            text: nil,
+            toolCalls: [
+                LLMToolCall(id: "id-A", name: "tool_a", arguments: "{}"),
+                LLMToolCall(id: "id-B", name: "tool_b", arguments: "{}")
+            ],
+            reasoning: nil,
+            usage: nil,
+            continuation: ProviderContinuation(geminiThoughtSignatures: sigs)
+        ))
+        let (agent, _) = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
+        await agent.start(initialInstruction: "do both")
+
+        let assistant = await Self.waitForAssistantMessage(agent)
+        await agent.stop()
+
+        #expect(assistant?.continuation?.geminiThoughtSignatures == sigs)
+    }
+
+    @Test("mixed text+tool-call response carries thinking continuation")
+    func mixedContinuation() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let blocks = [AnthropicThinkingBlock(thinking: "thought", signature: "sig-X")]
+        let provider = CannedResponseProvider(LLMResponse(
+            text: "Calling now.",
+            toolCalls: [LLMToolCall(id: "abc", name: "noop", arguments: "{}")],
+            reasoning: "thought",
+            usage: nil,
+            continuation: ProviderContinuation(anthropicThinkingBlocks: blocks)
+        ))
+        let (agent, _) = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
+        await agent.start(initialInstruction: "go")
+
+        let assistant = await Self.waitForAssistantMessage(agent)
+        await agent.stop()
+
+        #expect(assistant?.continuation?.anthropicThinkingBlocks == blocks)
+        if case .mixed = assistant?.content {
+            // expected
+        } else {
+            Issue.record("expected .mixed content, got \(String(describing: assistant?.content))")
+        }
+    }
+
+    @Test("response without continuation leaves message continuation nil")
+    func absentContinuationStaysNil() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let provider = CannedResponseProvider(LLMResponse(
+            text: "ok",
+            toolCalls: [],
+            reasoning: nil,
+            usage: nil
+            // continuation defaults to nil
+        ))
+        let (agent, _) = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
+        await agent.start(initialInstruction: "hi")
+
+        let assistant = await Self.waitForAssistantMessage(agent)
+        await agent.stop()
+
+        #expect(assistant?.continuation == nil)
+    }
 }
