@@ -520,7 +520,7 @@ struct AgentModelSettingsSection: View {
         }
         providerID = config.providerID
         modelID = config.modelID
-        temperature = config.temperature
+        temperature = config.temperature ?? 0.7
         maxOutputTokens = config.maxOutputTokens
         maxContextTokens = config.maxContextTokens
         thinkingBudget = config.thinkingBudget ?? 0

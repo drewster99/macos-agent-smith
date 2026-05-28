@@ -401,7 +401,7 @@ struct ModelConfigurationEditorView: View {
         name = config.name
         selectedProviderID = config.providerID
         selectedModelID = config.modelID
-        temperature = config.temperature
+        temperature = config.temperature ?? 0.7
         maxOutputTokens = config.maxOutputTokens
         maxContextTokens = config.maxContextTokens
         thinkingBudget = config.thinkingBudget ?? 0
@@ -420,17 +420,19 @@ struct ModelConfigurationEditorView: View {
     private func save() {
         let supportsThinking = selectedProviderAPIType == .anthropic || selectedProviderAPIType == .alibabaCloud
         let effectiveThinkingBudget: Int? = (supportsThinking && thinkingBudget > 0) ? thinkingBudget : nil
+        // useDefaultTemperature == true means "omit temperature from the
+        // request entirely" — encoded in 0.0.21+ as `temperature = nil`. The
+        // `useDefaultTemperature` init parameter no longer exists.
         let config = ModelConfiguration(
             id: existingConfig?.id ?? UUID(),
             name: name,
             providerID: selectedProviderID,
             modelID: selectedModelID,
-            temperature: temperature,
+            temperature: useDefaultTemperature ? nil : temperature,
             maxOutputTokens: maxOutputTokens,
             maxContextTokens: maxContextTokens,
             thinkingBudget: effectiveThinkingBudget,
             extendedCacheTTL: isAnthropicLineage && extendedCacheTTL,
-            useDefaultTemperature: useDefaultTemperature,
             streaming: streaming
         )
         onSave(config)

@@ -702,6 +702,7 @@ struct ContextMessageRow: View {
         case .user: return "U"
         case .assistant: return "A"
         case .tool: return "T"
+        case .developer: return "D"
         }
     }
 
@@ -711,6 +712,7 @@ struct ContextMessageRow: View {
         case .user: return "U = User input — messages from the orchestrator, channel, or injected context"
         case .assistant: return "A = Assistant — the LLM's response (text and/or tool calls)"
         case .tool: return "T = Tool result — output returned by a tool call execution"
+        case .developer: return "D = Developer prompt (OpenAI o-series/GPT-5; falls back to system on other providers)"
         }
     }
 
@@ -720,6 +722,7 @@ struct ContextMessageRow: View {
         case .user: return .blue
         case .assistant: return .green
         case .tool: return .orange
+        case .developer: return .secondary
         }
     }
 

@@ -223,7 +223,7 @@ struct TaskCostDetailSheet: View {
             card(title: "Configuration") {
                 HStack(spacing: 24) {
                     miniStat(label: "Model", value: primaryConfig.model)
-                    miniStat(label: "Temperature", value: primaryConfig.useDefaultTemperature ? "default" : String(format: "%.1f", primaryConfig.temperature))
+                    miniStat(label: "Temperature", value: primaryConfig.temperature.map { String(format: "%.1f", $0) } ?? "default")
                     miniStat(label: "Max Output", value: formatTokenCount(primaryConfig.maxTokens))
                     miniStat(label: "Context Window", value: formatTokenCount(primaryConfig.contextWindowSize))
                     if configs.count > 1 {

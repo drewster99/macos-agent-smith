@@ -288,7 +288,7 @@ struct SettingsView: View {
                         Text(config.modelID)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("temp \(String(format: "%.1f", config.temperature))")
+                        Text(config.temperature.map { "temp \(String(format: "%.1f", $0))" } ?? "temp (default)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text("max \(formatTokenCount(config.maxOutputTokens))")

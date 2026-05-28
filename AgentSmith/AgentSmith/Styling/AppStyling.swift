@@ -152,6 +152,7 @@ enum AppColors {
         case .user: return Color.blue.opacity(0.05)
         case .assistant: return Color.green.opacity(0.05)
         case .tool: return Color.orange.opacity(0.05)
+        case .developer: return Color.secondary.opacity(0.05)
         }
     }
 }
