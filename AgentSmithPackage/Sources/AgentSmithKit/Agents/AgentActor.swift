@@ -266,10 +266,7 @@ public actor AgentActor {
         }
         self.apiOverheadChars = toolChars
 
-        conversationHistory.append(LLMMessage(
-            role: .system,
-            text: configuration.systemPrompt
-        ))
+        conversationHistory.append(.system(configuration.systemPrompt))
     }
 
     /// Injects the security evaluator used for Brown's tool approval flow.
@@ -736,15 +733,9 @@ public actor AgentActor {
                         name: toolName,
                         arguments: "{}"
                     )
-                    conversationHistory.append(LLMMessage(
-                        role: .assistant,
-                        content: .toolCalls([syntheticCall])
-                    ))
+                    conversationHistory.append(.assistant(toolCalls: [syntheticCall]))
                     let result = await directExecute(syntheticCall, tool: tool)
-                    conversationHistory.append(LLMMessage(
-                        role: .tool,
-                        content: .toolResult(toolCallID: syntheticCall.id, content: Self.capToolResult(result))
-                    ))
+                    conversationHistory.append(.toolResult(Self.capToolResult(result), callID: syntheticCall.id))
                     if configuration.role == .brown && toolName == "task_acknowledged" {
                         lastTaskCommunicationAt = Date()
                         toolCallsSinceTaskCommunication = 0
@@ -1097,10 +1088,7 @@ public actor AgentActor {
                             content: "\(roleName) returned an empty response (no text, no tool calls). Injecting continuation prompt.",
                             metadata: ["isWarning": .bool(true), "agentRole": .string(configuration.role.rawValue)]
                         ))
-                        conversationHistory.append(LLMMessage(
-                            role: .user,
-                            text: "You returned an empty response with no text and no tool calls. This is not acceptable — you must make progress on the task. Use your tools to continue working."
-                        ))
+                        conversationHistory.append(.user("You returned an empty response with no text and no tool calls. This is not acceptable — you must make progress on the task. Use your tools to continue working."))
                         hasUnprocessedInput = true
                         return
                     }
@@ -1202,27 +1190,25 @@ public actor AgentActor {
         }
 
         // Record the assistant message with only the calls we will execute, so that
-        // subsequent tool results have a matching request in history. Preserve
-        // `response.reasoning` on the message — providers that require thinking-mode
-        // models to round-trip `reasoning_content` (DeepSeek V4 Pro) read it from
-        // the assistant message at encode time, gated on `replayReasoningContent`.
-        if let text = response.text, !text.isEmpty {
-            conversationHistory.append(LLMMessage(
-                role: .assistant,
-                content: .mixed(text: text, toolCalls: callsToExecute),
-                reasoning: response.reasoning
-            ))
-            // Note: do NOT call appendDiscardedTextWarning() here. Inserting a user message
-            // between the assistant tool_use and the tool_result messages breaks the Anthropic
-            // API requirement that tool_results immediately follow their tool_use. Mixed text
-            // alongside tool calls is intentional narration, not a problem to warn about.
-        } else {
-            conversationHistory.append(LLMMessage(
-                role: .assistant,
-                content: .toolCalls(callsToExecute),
-                reasoning: response.reasoning
-            ))
+        // subsequent tool results have a matching request in history. Build from
+        // `response` via `.assistant(from:)` so reasoning AND provider continuation
+        // (Anthropic thinking signatures, Gemini thoughtSignatures) flow through;
+        // when the rate-limit prefix differs from the full response toolCalls,
+        // rewrite the content to the executed subset (the message keeps its
+        // reasoning + continuation).
+        var assistantTurn = LLMMessage.assistant(from: response)
+        if callsToExecute.count < response.toolCalls.count {
+            if let text = response.text, !text.isEmpty {
+                assistantTurn.content = .mixed(text: text, toolCalls: callsToExecute)
+            } else {
+                assistantTurn.content = .toolCalls(callsToExecute)
+            }
         }
+        conversationHistory.append(assistantTurn)
+        // Note: do NOT call appendDiscardedTextWarning() here. Inserting a user message
+        // between the assistant tool_use and the tool_result messages breaks the Anthropic
+        // API requirement that tool_results immediately follow their tool_use. Mixed text
+        // alongside tool calls is intentional narration, not a problem to warn about.
 
         var sentMessage = false
         var calledTaskComplete = false
@@ -1276,10 +1262,7 @@ public actor AgentActor {
                     }
                     executedCallIDs.insert(call.id)
                     updatePostCallFlags(call: call, result: result, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
-                    conversationHistory.append(LLMMessage(
-                        role: .tool,
-                        content: .toolResult(toolCallID: call.id, content: Self.capToolResult(result))
-                    ))
+                    conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                 }
             } else if segment.calls.count > 1 && configuration.requiresToolApproval,
@@ -1460,10 +1443,7 @@ public actor AgentActor {
                     executedCallIDs.insert(r.callID)
                     turnToolExecutionMs += r.executionMs
                     turnToolResultChars += r.result.count
-                    conversationHistory.append(LLMMessage(
-                        role: .tool,
-                        content: .toolResult(toolCallID: r.callID, content: Self.capToolResult(r.result))
-                    ))
+                    conversationHistory.append(.toolResult(Self.capToolResult(r.result), callID: r.callID))
                 }
                 pushLiveContext()
             } else {
@@ -1492,10 +1472,7 @@ public actor AgentActor {
                     }
                     executedCallIDs.insert(call.id)
                     updatePostCallFlags(call: call, result: result, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
-                    conversationHistory.append(LLMMessage(
-                        role: .tool,
-                        content: .toolResult(toolCallID: call.id, content: Self.capToolResult(result))
-                    ))
+                    conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                 }
             }
@@ -1505,10 +1482,7 @@ public actor AgentActor {
         // results for remaining tool_calls to maintain the API invariant.
         var appendedPlaceholders = false
         for call in callsToExecute where !executedCallIDs.contains(call.id) {
-            conversationHistory.append(LLMMessage(
-                role: .tool,
-                content: .toolResult(toolCallID: call.id, content: "Tool execution cancelled (agent stopped)")
-            ))
+            conversationHistory.append(.toolResult("Tool execution cancelled (agent stopped)", callID: call.id))
             await toolContext.setToolExecutionStatus(call.id, false)
             appendedPlaceholders = true
         }
@@ -1574,10 +1548,9 @@ public actor AgentActor {
     /// Appends a warning to conversation history when an agent with suppressed text output
     /// returns non-empty text that was discarded. Nudges the LLM to use structured tools instead.
     private func appendDiscardedTextWarning() {
-        conversationHistory.append(LLMMessage(
-            role: .user,
-            text: "[System] Your text output was discarded — it is not visible to anyone. " +
-                  "Use task_update to communicate progress, or task_complete to deliver results."
+        conversationHistory.append(.user(
+            "[System] Your text output was discarded — it is not visible to anyone. " +
+            "Use task_update to communicate progress, or task_complete to deliver results."
         ))
     }
 
@@ -1987,18 +1960,15 @@ public actor AgentActor {
         guard drifting || hardCeiling else { return }
 
         let minutes = Int(elapsed / 60)
-        conversationHistory.append(LLMMessage(
-            role: .user,
-            text: """
-                [System] You have made \(toolCallsSinceTaskCommunication) tool calls and gone \(minutes) minute(s) without sending a task_update.
+        conversationHistory.append(.user("""
+            [System] You have made \(toolCallsSinceTaskCommunication) tool calls and gone \(minutes) minute(s) without sending a task_update.
 
-                Smith and the user are blind to your progress until you do. Your next action MUST be a task_update tool call with a 1–2 sentence summary of:
-                1. What you have established or completed since your last update.
-                2. What you are about to try next.
+            Smith and the user are blind to your progress until you do. Your next action MUST be a task_update tool call with a 1–2 sentence summary of:
+            1. What you have established or completed since your last update.
+            2. What you are about to try next.
 
-                After sending the update, continue your work normally.
-                """
-        ))
+            After sending the update, continue your work normally.
+            """))
         brownSilenceNudgeArmed = false
         hasUnprocessedInput = true
         pushLiveContext()
@@ -2122,17 +2092,14 @@ public actor AgentActor {
             let header = smithWakes.count == 1
                 ? "[System: A timer has fired. You must immediately perform the following actions.]"
                 : "[System: \(smithWakes.count) timers have fired. You must immediately perform the following actions.]"
-            conversationHistory.append(LLMMessage(
-                role: .user,
-                text: """
-                    \(header)
+            conversationHistory.append(.user("""
+                \(header)
 
-                    You must:
-                    \(lines.joined(separator: "\n"))
+                You must:
+                \(lines.joined(separator: "\n"))
 
-                    Execute each instruction in order. If a step has already been done or is no longer appropriate (the user changed plans, the task was already started, etc.), skip that step and move on to the next. Do NOT schedule a new timer unless the user explicitly asked you to follow up again.
-                    """
-            ))
+                Execute each instruction in order. If a step has already been done or is no longer appropriate (the user changed plans, the task was already started, etc.), skip that step and move on to the next. Do NOT schedule a new timer unless the user explicitly asked you to follow up again.
+                """))
             hasUnprocessedInput = true
             pushLiveContext()
         }
@@ -2184,16 +2151,13 @@ public actor AgentActor {
         }
         lastSmithDigestAt = now
         guard let digest = await provider(last), !digest.isEmpty else { return }
-        conversationHistory.append(LLMMessage(
-            role: .user,
-            text: """
-                [System: Brown activity digest — past \(Int(Self.smithDigestIntervalSeconds / 60)) minute(s)]
+        conversationHistory.append(.user("""
+            [System: Brown activity digest — past \(Int(Self.smithDigestIntervalSeconds / 60)) minute(s)]
 
-                \(digest)
+            \(digest)
 
-                This is an automatic summary so you can supervise without waking on every Brown action. Act only if something looks wrong (Brown stuck, off-track, repeating failures). If everything looks fine, do nothing.
-                """
-        ))
+            This is an automatic summary so you can supervise without waking on every Brown action. Act only if something looks wrong (Brown stuck, off-track, repeating failures). If everything looks fine, do nothing.
+            """))
         hasUnprocessedInput = true
         pushLiveContext()
     }
@@ -2521,17 +2485,9 @@ public actor AgentActor {
                 let combined = (existingImages ?? []) + (images ?? [])
                 return combined.isEmpty ? nil : combined
             }()
-            conversationHistory[lastIndex] = LLMMessage(
-                role: .user,
-                text: merged,
-                images: mergedImages
-            )
+            conversationHistory[lastIndex] = mergedImages.map { .user(merged, images: $0) } ?? .user(merged)
         } else {
-            conversationHistory.append(LLMMessage(
-                role: .user,
-                text: combinedText,
-                images: images
-            ))
+            conversationHistory.append(images.map { .user(combinedText, images: $0) } ?? .user(combinedText))
         }
         pushLiveContext()
     }
@@ -2896,10 +2852,7 @@ public actor AgentActor {
         guard prunedCount > 0 else { return }
 
         var newHistory = [conversationHistory[0]]  // System prompt
-        newHistory.append(LLMMessage(
-            role: .user,
-            text: "[System: \(prunedCount) earlier messages were pruned to stay within context limits. Continue from the recent context below.]"
-        ))
+        newHistory.append(.user("[System: \(prunedCount) earlier messages were pruned to stay within context limits. Continue from the recent context below.]"))
         newHistory.append(contentsOf: conversationHistory[keepFromIndex...])
         conversationHistory = newHistory
         lastTurnMessageCount = conversationHistory.count
@@ -2961,10 +2914,7 @@ public actor AgentActor {
         guard prunedCount > 0 else { return }
 
         var newHistory = [conversationHistory[0]]  // System prompt
-        newHistory.append(LLMMessage(
-            role: .user,
-            text: "[System: \(prunedCount) earlier messages were aggressively pruned after a context overflow error. Continue from the recent context below.]"
-        ))
+        newHistory.append(.user("[System: \(prunedCount) earlier messages were aggressively pruned after a context overflow error. Continue from the recent context below.]"))
         newHistory.append(contentsOf: conversationHistory[keepFromIndex...])
         conversationHistory = newHistory
         lastTurnMessageCount = conversationHistory.count
