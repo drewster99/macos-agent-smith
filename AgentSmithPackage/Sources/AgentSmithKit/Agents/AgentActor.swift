@@ -1192,16 +1192,34 @@ public actor AgentActor {
         // Record the assistant message with only the calls we will execute, so that
         // subsequent tool results have a matching request in history. Build from
         // `response` via `.assistant(from:)` so reasoning AND provider continuation
-        // (Anthropic thinking signatures, Gemini thoughtSignatures) flow through;
-        // when the rate-limit prefix differs from the full response toolCalls,
-        // rewrite the content to the executed subset (the message keeps its
-        // reasoning + continuation).
+        // (Anthropic thinking signatures, Gemini thoughtSignatures) flow through.
+        //
+        // Rate-limit truncation: when the rate-limit prefix differs from the
+        // full response.toolCalls list, we rewrite content to the executed
+        // subset. We MUST also drop the Gemini portion of the continuation
+        // (the `geminiResponseParts`), because the Gemini encoder emits the
+        // saved parts verbatim — bypassing message.content — and the parts
+        // include the originally-emitted full set of functionCalls. A truncated
+        // content with the full parts would mean Gemini sees N functionCall
+        // parts on the wire but only M < N matching tool_result entries on
+        // the next turn, and silently drops the unmatched results (the
+        // original 0.0.22 regression class). Anthropic thinking blocks
+        // (which live at the start of the turn, independent of toolCalls)
+        // are safe to keep — they don't reference specific calls.
         var assistantTurn = LLMMessage.assistant(from: response)
         if callsToExecute.count < response.toolCalls.count {
             if let text = response.text, !text.isEmpty {
                 assistantTurn.content = .mixed(text: text, toolCalls: callsToExecute)
             } else {
                 assistantTurn.content = .toolCalls(callsToExecute)
+            }
+            // Clear Gemini parts (would replay full set verbatim) but keep
+            // Anthropic thinking blocks (still valid).
+            if let cont = assistantTurn.continuation,
+               cont.geminiResponseParts != nil || cont.geminiThoughtSignatures != nil {
+                assistantTurn.continuation = ProviderContinuation(
+                    anthropicThinkingBlocks: cont.anthropicThinkingBlocks
+                )
             }
         }
         conversationHistory.append(assistantTurn)

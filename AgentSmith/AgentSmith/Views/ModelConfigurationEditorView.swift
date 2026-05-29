@@ -420,21 +420,35 @@ struct ModelConfigurationEditorView: View {
     private func save() {
         let supportsThinking = selectedProviderAPIType == .anthropic || selectedProviderAPIType == .alibabaCloud
         let effectiveThinkingBudget: Int? = (supportsThinking && thinkingBudget > 0) ? thinkingBudget : nil
+
+        // Mutation-from-existing pattern: start from the existing config (if
+        // editing) and mutate only the fields the UI exposes. Guarantees we
+        // preserve every field the UI doesn't show — including future
+        // additions (thinkingEffort, extraJSONOverrides today). Rebuilding
+        // from scratch via named init would silently drop them.
+        //
         // useDefaultTemperature == true means "omit temperature from the
-        // request entirely" — encoded in 0.0.21+ as `temperature = nil`. The
-        // `useDefaultTemperature` init parameter no longer exists.
-        let config = ModelConfiguration(
-            id: existingConfig?.id ?? UUID(),
+        // request entirely" — encoded in 0.0.21+ as `temperature = nil`.
+        var config = existingConfig ?? ModelConfiguration(
             name: name,
             providerID: selectedProviderID,
-            modelID: selectedModelID,
-            temperature: useDefaultTemperature ? nil : temperature,
-            maxOutputTokens: maxOutputTokens,
-            maxContextTokens: maxContextTokens,
-            thinkingBudget: effectiveThinkingBudget,
-            extendedCacheTTL: isAnthropicLineage && extendedCacheTTL,
-            streaming: streaming
+            modelID: selectedModelID
         )
+        config.name = name
+        config.providerID = selectedProviderID
+        config.modelID = selectedModelID
+        config.temperature = useDefaultTemperature ? nil : temperature
+        config.maxOutputTokens = maxOutputTokens
+        config.maxContextTokens = maxContextTokens
+        config.thinkingBudget = effectiveThinkingBudget
+        config.extendedCacheTTL = isAnthropicLineage && extendedCacheTTL
+        config.streaming = streaming
+        // NOTE: thinkingEffort and extraJSONOverrides are preserved as-is
+        // from the existing config (or default nil for new configs). They
+        // are not yet exposed in this editor UI — users wishing to set
+        // thinkingEffort or extraJSONOverrides edit Application Support
+        // JSON directly.
+
         onSave(config)
         onDismiss()
     }
