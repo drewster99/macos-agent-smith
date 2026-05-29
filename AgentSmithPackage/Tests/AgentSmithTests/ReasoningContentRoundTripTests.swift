@@ -33,7 +33,8 @@ struct ReasoningContentRoundTripTests {
             tools: [LLMToolDefinition],
             toolChoice: LLMToolChoice?,
             thinkingEffortOverride: String?,
-            maxOutputTokensOverride: Int?
+            maxOutputTokensOverride: Int?,
+            temperatureOverride: Double?
         ) async throws -> LLMResponse {
             let isFirst = lock.withLock { () -> Bool in
                 if !_hasReturnedCanned {

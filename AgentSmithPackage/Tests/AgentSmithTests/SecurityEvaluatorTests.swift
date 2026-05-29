@@ -276,7 +276,7 @@ struct SecurityEvaluatorTests {
         private var responses: [LLMResponse]
         var capturedPrompts: [String] = []
         init(responses: [LLMResponse]) { self.responses = responses }
-        func send(messages: [LLMMessage], tools: [LLMToolDefinition], toolChoice: LLMToolChoice?, thinkingEffortOverride: String?, maxOutputTokensOverride: Int?) async throws -> LLMResponse {
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], toolChoice: LLMToolChoice?, thinkingEffortOverride: String?, maxOutputTokensOverride: Int?, temperatureOverride: Double?) async throws -> LLMResponse {
             lock.withLock {
                 if let userMsg = messages.last(where: { $0.role == .user }),
                    case .text(let text) = userMsg.content {
