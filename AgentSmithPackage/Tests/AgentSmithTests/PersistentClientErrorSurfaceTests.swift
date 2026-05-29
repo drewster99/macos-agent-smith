@@ -41,7 +41,9 @@ struct PersistentClientErrorSurfaceTests {
             maxOutputTokensOverride: Int?,
             temperatureOverride: Double?,
             topPOverride: Double?,
-            stopSequencesOverride: [String]?
+            stopSequencesOverride: [String]?,
+            frequencyPenaltyOverride: Double?,
+            presencePenaltyOverride: Double?
         ) async throws -> LLMResponse {
             let isFirst = lock.withLock { () -> Bool in
                 if !_hasFired {

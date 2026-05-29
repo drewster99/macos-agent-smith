@@ -34,7 +34,9 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
         maxOutputTokensOverride: Int?,
         temperatureOverride: Double?,
         topPOverride: Double?,
-        stopSequencesOverride: [String]?
+        stopSequencesOverride: [String]?,
+        frequencyPenaltyOverride: Double?,
+        presencePenaltyOverride: Double?
     ) async throws -> LLMResponse {
         lock.withLock {
             _receivedMessages.append(messages)
