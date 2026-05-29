@@ -29,6 +29,7 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
     func send(
         messages: [LLMMessage],
         tools: [LLMToolDefinition],
+        toolChoice: LLMToolChoice?,
         maxOutputTokensOverride: Int?
     ) async throws -> LLMResponse {
         lock.withLock {

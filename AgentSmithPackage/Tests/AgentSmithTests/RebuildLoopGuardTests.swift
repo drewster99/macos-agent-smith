@@ -37,6 +37,7 @@ struct RebuildLoopGuardTests {
         func send(
             messages: [LLMMessage],
             tools: [LLMToolDefinition],
+            toolChoice: LLMToolChoice?,
             maxOutputTokensOverride: Int?
         ) async throws -> LLMResponse {
             lock.withLock { _callCount += 1 }
