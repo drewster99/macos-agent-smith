@@ -40,7 +40,8 @@ struct RebuildLoopGuardTests {
             toolChoice: LLMToolChoice?,
             thinkingEffortOverride: String?,
             maxOutputTokensOverride: Int?,
-            temperatureOverride: Double?
+            temperatureOverride: Double?,
+            topPOverride: Double?
         ) async throws -> LLMResponse {
             lock.withLock { _callCount += 1 }
             throw LLMProviderError.httpError(
