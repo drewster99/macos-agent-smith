@@ -1,6 +1,22 @@
 import SwiftUI
 import SwiftLLMKit
 
+// TODO(agent-smith UI): expose recently-added ModelConfiguration fields in this editor.
+//   - `thinkingEffort: String?` (swift-llm-kit 0.0.27) — picker over
+//     "low"/"medium"/"high"/"xhigh"/"max" (xhigh only on Opus 4.7/4.8;
+//     max only on Opus 4.5+/Sonnet 4.6+). nil = use provider default.
+//   - `extraJSONOverrides: [String: AnyCodable]?` — power-user escape
+//     hatch; could be a JSON text editor with validation.
+//
+// Until exposed, users must edit ~/Library/Application Support/agent-smith/
+// <appname>/configurations.json directly to set these fields. The
+// mutate-from-existing pattern in save() preserves them on edit, so
+// once set via JSON they survive UI saves.
+//
+// (Tool choice is per-call, not per-config, so it doesn't belong here —
+// it would belong on a future "agent task config" surface if/when we
+// want per-task tool selection control.)
+
 /// Sheet for creating or editing a `ModelConfiguration`.
 struct ModelConfigurationEditorView: View {
     let llmKit: LLMKitManager

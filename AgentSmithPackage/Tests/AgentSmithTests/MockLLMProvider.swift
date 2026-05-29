@@ -30,6 +30,7 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
         messages: [LLMMessage],
         tools: [LLMToolDefinition],
         toolChoice: LLMToolChoice?,
+        thinkingEffortOverride: String?,
         maxOutputTokensOverride: Int?
     ) async throws -> LLMResponse {
         lock.withLock {

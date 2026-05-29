@@ -38,6 +38,7 @@ struct RebuildLoopGuardTests {
             messages: [LLMMessage],
             tools: [LLMToolDefinition],
             toolChoice: LLMToolChoice?,
+            thinkingEffortOverride: String?,
             maxOutputTokensOverride: Int?
         ) async throws -> LLMResponse {
             lock.withLock { _callCount += 1 }

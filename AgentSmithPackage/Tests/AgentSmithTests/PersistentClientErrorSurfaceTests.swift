@@ -37,6 +37,7 @@ struct PersistentClientErrorSurfaceTests {
             messages: [LLMMessage],
             tools: [LLMToolDefinition],
             toolChoice: LLMToolChoice?,
+            thinkingEffortOverride: String?,
             maxOutputTokensOverride: Int?
         ) async throws -> LLMResponse {
             let isFirst = lock.withLock { () -> Bool in
