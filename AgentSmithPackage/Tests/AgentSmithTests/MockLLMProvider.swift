@@ -29,18 +29,11 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
     func send(
         messages: [LLMMessage],
         tools: [LLMToolDefinition],
-        toolChoice: LLMToolChoice?,
-        thinkingEffortOverride: String?,
-        maxOutputTokensOverride: Int?,
-        temperatureOverride: Double?,
-        topPOverride: Double?,
-        stopSequencesOverride: [String]?,
-        frequencyPenaltyOverride: Double?,
-        presencePenaltyOverride: Double?
+        overrides: LLMCallOverrides
     ) async throws -> LLMResponse {
         lock.withLock {
             _receivedMessages.append(messages)
-            _receivedMaxTokenOverrides.append(maxOutputTokensOverride)
+            _receivedMaxTokenOverrides.append(overrides.maxOutputTokens)
             precondition(!_responses.isEmpty, "MockLLMProvider has no canned responses")
             let index = min(_callCount, _responses.count - 1)
             _callCount += 1

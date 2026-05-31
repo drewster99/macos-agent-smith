@@ -37,14 +37,7 @@ struct RebuildLoopGuardTests {
         func send(
             messages: [LLMMessage],
             tools: [LLMToolDefinition],
-            toolChoice: LLMToolChoice?,
-            thinkingEffortOverride: String?,
-            maxOutputTokensOverride: Int?,
-            temperatureOverride: Double?,
-            topPOverride: Double?,
-            stopSequencesOverride: [String]?,
-            frequencyPenaltyOverride: Double?,
-            presencePenaltyOverride: Double?
+            overrides: LLMCallOverrides
         ) async throws -> LLMResponse {
             lock.withLock { _callCount += 1 }
             throw LLMProviderError.httpError(

@@ -31,14 +31,7 @@ struct ReasoningContentRoundTripTests {
         func send(
             messages: [LLMMessage],
             tools: [LLMToolDefinition],
-            toolChoice: LLMToolChoice?,
-            thinkingEffortOverride: String?,
-            maxOutputTokensOverride: Int?,
-            temperatureOverride: Double?,
-            topPOverride: Double?,
-            stopSequencesOverride: [String]?,
-            frequencyPenaltyOverride: Double?,
-            presencePenaltyOverride: Double?
+            overrides: LLMCallOverrides
         ) async throws -> LLMResponse {
             let isFirst = lock.withLock { () -> Bool in
                 if !_hasReturnedCanned {
