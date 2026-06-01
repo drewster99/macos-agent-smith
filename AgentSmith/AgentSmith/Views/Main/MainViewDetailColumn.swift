@@ -35,6 +35,16 @@ struct MainViewDetailColumn: View {
                 persistedHistoryCount: viewModel.persistedHistoryCount,
                 hasRestoredHistory: viewModel.hasRestoredHistory,
                 onRestoreHistory: { viewModel.restoreHistory() },
+                onExportTaskPDF: { taskID, title, result, timestamp in
+                    Task {
+                        await viewModel.exportTaskCompletedBannerPDF(
+                            taskID: taskID,
+                            fallbackTitle: title,
+                            fallbackResult: result,
+                            fallbackTimestamp: timestamp
+                        )
+                    }
+                },
                 displayPrefs: TimestampPreferences(
                     taskBanners: shared.showTimestampsOnTaskBanners,
                     toolCalls: shared.showTimestampsOnToolCalls,

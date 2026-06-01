@@ -156,6 +156,10 @@ struct ChannelLogView: View, Equatable {
     var persistedHistoryCount: Int
     var hasRestoredHistory: Bool
     var onRestoreHistory: () -> Void
+    /// Invoked when the user taps the PDF button on a "Task Completed" banner. Carries the
+    /// banner's task id plus its own fields so the handler can fall back to them when the
+    /// underlying task has been permanently deleted.
+    var onExportTaskPDF: (_ taskID: UUID, _ title: String, _ result: String?, _ timestamp: Date) -> Void
     /// Display toggles forwarded into the environment so each banner / row reads them
     /// without having to thread parameters through every initializer.
     var displayPrefs: TimestampPreferences
@@ -375,11 +379,16 @@ struct ChannelLogView: View, Equatable {
                 timestamp: message.timestamp
             )
         case .taskCompleted:
+            let completedResult = message.stringMetadata("taskResult")
+            let completedTaskID = message.stringMetadata("taskID").flatMap { UUID(uuidString: $0) }
             TaskCompletedBanner(
                 title: message.content,
-                result: message.stringMetadata("taskResult"),
+                result: completedResult,
                 durationSeconds: message.doubleMetadata("durationSeconds"),
-                timestamp: message.timestamp
+                timestamp: message.timestamp,
+                onExportPDF: completedTaskID.map { taskID in
+                    { onExportTaskPDF(taskID, message.content, completedResult, message.timestamp) }
+                }
             )
         case .taskSummarized:
             TaskSummarizedBanner(

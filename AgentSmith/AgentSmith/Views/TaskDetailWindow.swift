@@ -19,6 +19,10 @@ struct TaskDetailWindow: View {
     @State private var editedDescription = ""
     @State private var recentlyCopiedSection: String?
 
+    /// Drives the "Save as PDF…" element-picker sheet and the field selection it edits.
+    @State private var isShowingPDFSheet = false
+    @State private var pdfOptions = TaskPDFFieldOptions.full
+
     /// Per-section toggle state. Empty on first render — `currentMode(_:for:)` falls back
     /// to status-driven defaults until the user interacts. Resets on each window open
     /// because @State is reinitialized when SwiftUI recreates this view per `WindowGroup`
@@ -86,6 +90,17 @@ struct TaskDetailWindow: View {
             actions: { Button("OK") { viewModel.taskActionError = nil } },
             message: { Text(viewModel.taskActionError ?? "") }
         )
+        .sheet(isPresented: $isShowingPDFSheet) {
+            TaskPDFSaveSheet(
+                options: $pdfOptions,
+                onSave: {
+                    isShowingPDFSheet = false
+                    guard let task else { return }
+                    Task { await viewModel.saveTaskPDF(task, options: pdfOptions) }
+                },
+                onCancel: { isShowingPDFSheet = false }
+            )
+        }
     }
 
     // MARK: - Body
@@ -138,6 +153,12 @@ struct TaskDetailWindow: View {
                 .buttonStyle(.borderedProminent)
                 .help("Start this task now")
             }
+            Button {
+                isShowingPDFSheet = true
+            } label: {
+                Label("Save as PDF…", systemImage: "doc.richtext")
+            }
+            .help("Save this task as a PDF")
             Button("Done") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }

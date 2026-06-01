@@ -1028,11 +1028,18 @@ final class AppViewModel {
         )
     }
 
+    /// "Run Again" from a completed task's context menu. Creates a brand-new, independent
+    /// task rather than reopening the original — the completed task is preserved as-is. The
+    /// message is phrased to override Smith's usual reuse bias (it would otherwise treat
+    /// "run again" as a `run_task` on the existing id).
     func runTaskAgain(_ task: AgentTask) async {
-        await taskStore?.archive(id: task.id)
         await sendDirectMessage(
             to: .smith,
-            text: "Please run this task again:\nTitle: \(task.title)\nDescription: \(task.description)\nID: \(task.id.uuidString)"
+            text: """
+            The user chose "Run Again" on a completed task and wants a fresh, separate copy run from scratch. Call `create_task` with the title and description below. Do NOT reopen, reuse, or call `run_task` on any existing task — this must be a brand-new task.
+            Title: \(task.title)
+            Description: \(task.description)
+            """
         )
     }
 

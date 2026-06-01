@@ -194,6 +194,8 @@ struct TaskCompletedBanner: View {
     let result: String?
     let durationSeconds: Double?
     let timestamp: Date
+    /// Invoked when the user taps the banner's PDF button. `nil` hides the button.
+    var onExportPDF: (() -> Void)?
 
     private let accentColor = AppColors.taskCompletedAccent
 
@@ -217,6 +219,16 @@ struct TaskCompletedBanner: View {
                 }
 
                 Spacer()
+
+                if let onExportPDF {
+                    Button(action: onExportPDF, label: {
+                        Image(systemName: "doc.richtext")
+                            .font(AppFonts.channelTimestamp)
+                            .foregroundStyle(accentColor)
+                    })
+                    .buttonStyle(.plain)
+                    .help("Save this task as a PDF")
+                }
 
                 ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
             }

@@ -227,6 +227,9 @@ struct TaskRowButton: View {
             Button(action: { Task { await viewModel.runTaskAgain(task) } }, label: {
                 Label("Run Again", systemImage: "arrow.clockwise")
             })
+            Button(action: { Task { await viewModel.exportTaskPDFAndOpen(task, options: .full) } }, label: {
+                Label("PDF", systemImage: "doc.richtext")
+            })
             Button(action: { Task { await viewModel.archiveTask(id: task.id) } }, label: {
                 Label("Archive", systemImage: "archivebox")
             })
