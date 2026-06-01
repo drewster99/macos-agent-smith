@@ -38,19 +38,15 @@ struct TaskPDFFieldOptions: Equatable {
         summary: false,
         result: true
     )
-
-    /// Whether any of the four metadata rows are enabled — drives whether the metadata
-    /// grid renders at all.
-    var hasAnyMetadata: Bool {
-        startTime || elapsedTime || tokens || cost
-    }
 }
 
 /// Renders an `AgentTask` to a multi-page, print-friendly PDF.
 ///
-/// The document is laid out as a single continuous SwiftUI view at US-Letter width and
-/// then sliced into 612×792 pages by translating the PDF context's CTM between
-/// `beginPDFPage` calls — so long results paginate instead of producing one oversized page.
+/// The document (`TaskPDFDocumentView.pdfBlocks()`) is laid out block-by-block onto
+/// US-Letter pages with uniform margins. Each block is rendered with `ImageRenderer` and
+/// placed whole; a block that doesn't fit in the remaining space moves to the next page, so
+/// page breaks fall *between* paragraphs rather than through them. Only a single block
+/// taller than a full page is sliced (unavoidable, and rare).
 @MainActor
 enum TaskPDFExporter {
     /// US-Letter page geometry in PDF points.
@@ -58,10 +54,12 @@ enum TaskPDFExporter {
     /// Uniform page margin in PDF points (0.5"). Applied on every page — top and bottom
     /// included — so content never runs to the paper edge at a page break.
     private static let margin: CGFloat = 48
+    /// Vertical gap inserted between consecutive blocks on the same page.
+    private static let interBlockGap: CGFloat = 12
 
     /// Builds PDF bytes for `task`. `tokens` / `cost` are only consulted when the matching
     /// option flag is set; pass `nil` otherwise. Returns `nil` if the renderer fails to
-    /// produce a context (e.g. zero-size content).
+    /// produce a Core Graphics context.
     static func makePDFData(
         for task: AgentTask,
         options: TaskPDFFieldOptions,
@@ -70,71 +68,121 @@ enum TaskPDFExporter {
         generatedAt: Date
     ) -> Data? {
         let contentWidth = pageSize.width - margin * 2
-        let content = TaskPDFDocumentView(
+        let liveHeight = pageSize.height - margin * 2
+        let topY = pageSize.height - margin       // PDF-y of the top of the live area
+        let bottomY = margin                       // PDF-y of the bottom of the live area
+
+        let document = TaskPDFDocumentView(
             task: task,
             options: options,
             tokens: tokens,
             cost: cost,
             generatedAt: generatedAt
         )
-        .frame(width: contentWidth, alignment: .topLeading)
-        .background(Color.white)
-        // Force light rendering so theme-adaptive `AppColors` resolve to ink-on-paper
-        // values regardless of the app's current appearance.
-        .environment(\.colorScheme, .light)
+        let blocks = document.pdfBlocks()
 
-        let renderer = ImageRenderer(content: content)
-        renderer.proposedSize = ProposedViewSize(width: contentWidth, height: nil)
+        let mutableData = NSMutableData()
+        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData) else { return nil }
+        var mediaBox = CGRect(origin: .zero, size: pageSize)
+        guard let pdfContext = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { return nil }
 
-        var pdfData: Data?
-        renderer.render { size, renderInContext in
-            let mutableData = NSMutableData()
-            guard let consumer = CGDataConsumer(data: mutableData as CFMutableData) else { return }
-            var mediaBox = CGRect(origin: .zero, size: pageSize)
-            guard let pdfContext = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { return }
+        var pageOpen = false
+        var cursorY = topY   // PDF-y at which the next block's TOP should sit
 
-            let totalHeight = max(size.height, 1)
-            // Height available for content on each page, once the top and bottom margins
-            // are reserved. Content is sliced into bands of this height.
-            let liveHeight = pageSize.height - margin * 2
-            let pageCount = max(1, Int(ceil(totalHeight / liveHeight)))
-
-            for pageIndex in 0..<pageCount {
-                pdfContext.beginPDFPage(nil)
-
-                // Paint the whole page white first — content shorter than a full page would
-                // otherwise leave the remainder transparent.
-                pdfContext.setFillColor(CGColor(gray: 1, alpha: 1))
-                pdfContext.fill(CGRect(origin: .zero, size: pageSize))
-
-                pdfContext.saveGState()
-                // Clip to the live content area so this page's band never bleeds into the
-                // margins (top, bottom, or sides) — including at interior page breaks.
-                pdfContext.clip(to: CGRect(x: margin, y: margin, width: contentWidth, height: liveHeight))
-                // PDF origin is bottom-left and the rendered content's visual top sits at
-                // y == totalHeight. Anchor page 0's content to the top of the live area and
-                // advance one `liveHeight` band per page.
-                let yTranslate = pageSize.height - margin - totalHeight + CGFloat(pageIndex) * liveHeight
-                pdfContext.translateBy(x: margin, y: yTranslate)
-                renderInContext(pdfContext)
-                pdfContext.restoreGState()
-
-                pdfContext.endPDFPage()
-            }
-            pdfContext.closePDF()
-            pdfData = mutableData as Data
+        func beginPage() {
+            pdfContext.beginPDFPage(nil)
+            pdfContext.setFillColor(CGColor(gray: 1, alpha: 1))
+            pdfContext.fill(CGRect(origin: .zero, size: pageSize))
+            cursorY = topY
+            pageOpen = true
         }
-        return pdfData
+        func endPage() {
+            guard pageOpen else { return }
+            pdfContext.endPDFPage()
+            pageOpen = false
+        }
+        /// Draws a block (visual top at PDF-y `top`), clipped to the live area so it can
+        /// never bleed into a margin.
+        func drawBlock(_ render: (CGContext) -> Void, height: CGFloat, top: CGFloat) {
+            pdfContext.saveGState()
+            pdfContext.clip(to: CGRect(x: margin, y: bottomY, width: contentWidth, height: liveHeight))
+            // ImageRenderer draws content with its visual top at content-space y == height;
+            // shift so that maps to page-y == top, inset by the left margin.
+            pdfContext.translateBy(x: margin, y: top - height)
+            render(pdfContext)
+            pdfContext.restoreGState()
+        }
+
+        for block in blocks {
+            let renderer = ImageRenderer(content: block
+                .frame(width: contentWidth, alignment: .topLeading)
+                .foregroundStyle(.black)
+                // Force light rendering so theme-adaptive `AppColors` resolve to
+                // ink-on-paper values regardless of the app's current appearance.
+                .environment(\.colorScheme, .light))
+            renderer.proposedSize = ProposedViewSize(width: contentWidth, height: nil)
+
+            renderer.render { size, renderInContext in
+                let height = size.height
+                if height <= 0 { return }
+                if !pageOpen { beginPage() }
+
+                let atTop = abs(cursorY - topY) < 0.5
+                let blockTop = atTop ? cursorY : cursorY - interBlockGap
+
+                if height <= liveHeight {
+                    if blockTop - height < bottomY - 0.5 {
+                        // Won't fit in the remaining space — move to a fresh page.
+                        endPage()
+                        beginPage()
+                        drawBlock(renderInContext, height: height, top: cursorY)
+                        cursorY -= height
+                    } else {
+                        drawBlock(renderInContext, height: height, top: blockTop)
+                        cursorY = blockTop - height
+                    }
+                } else {
+                    // Block taller than a whole page: slice it (unavoidable). Start on a
+                    // fresh page, then lay successive page-height bands.
+                    if !atTop {
+                        endPage()
+                        beginPage()
+                    }
+                    let sliceCount = max(1, Int(ceil(height / liveHeight)))
+                    for k in 0..<sliceCount {
+                        if k > 0 {
+                            endPage()
+                            beginPage()
+                        }
+                        pdfContext.saveGState()
+                        pdfContext.clip(to: CGRect(x: margin, y: bottomY, width: contentWidth, height: liveHeight))
+                        let yTranslate = topY - (height - CGFloat(k) * liveHeight)
+                        pdfContext.translateBy(x: margin, y: yTranslate)
+                        renderInContext(pdfContext)
+                        pdfContext.restoreGState()
+                    }
+                    let usedOnLast = height - CGFloat(sliceCount - 1) * liveHeight
+                    cursorY = topY - usedOnLast
+                }
+            }
+        }
+
+        endPage()
+        pdfContext.closePDF()
+        return mutableData as Data
     }
 
     /// A filesystem-safe `<title>.pdf` filename for `task`.
     nonisolated static func sanitizedFilename(for task: AgentTask) -> String {
         let base = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let illegal = CharacterSet(charactersIn: "/\\:?%*|\"<>")
-        let cleaned = base
+        var cleaned = base
             .components(separatedBy: illegal)
             .joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip leading dots so a title like ".zshrc" doesn't produce a hidden file.
+        while cleaned.hasPrefix(".") { cleaned.removeFirst() }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         return (cleaned.isEmpty ? "Task" : cleaned) + ".pdf"
     }
 }

@@ -1,11 +1,14 @@
 import SwiftUI
 import AgentSmithKit
 
-/// SwiftUI layout rendered to PDF by `TaskPDFExporter`. Sections are gated by
-/// `TaskPDFFieldOptions`; the title and (for terminal tasks) the completion date/time are
-/// always shown so the document is self-identifying.
+/// SwiftUI layout rendered to PDF by `TaskPDFExporter`. The document is exposed as an
+/// ordered list of `pdfBlocks()` so the exporter can paginate *between* blocks — a page
+/// break never cuts through the middle of a paragraph (only a single block taller than a
+/// full page is sliced, which is rare).
 ///
-/// Markdown bodies reuse `MarkdownText` so the PDF matches what the user sees in-app.
+/// Sections are gated by `TaskPDFFieldOptions`; the title and (for terminal tasks) the
+/// completion date/time are always shown so the document is self-identifying. Markdown
+/// bodies reuse `MarkdownText` so the PDF matches what the user sees in-app.
 struct TaskPDFDocumentView: View {
     let task: AgentTask
     let options: TaskPDFFieldOptions
@@ -14,32 +17,41 @@ struct TaskPDFDocumentView: View {
     let generatedAt: Date
 
     private static let timestampStyle = Date.FormatStyle(date: .abbreviated, time: .standard)
+    private static let bodyFont = Font.system(size: 12)
 
+    /// Single-view rendering (used for previews / non-paginated contexts). The exporter
+    /// uses `pdfBlocks()` directly instead of this.
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-
-            if options.hasAnyMetadata {
-                metadataGrid
-                Divider()
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(pdfBlocks().enumerated()), id: \.offset) { _, block in
+                block
             }
-
-            if options.description, !task.description.isEmpty {
-                section(title: "Description", body: task.description)
-            }
-
-            if options.summary, let summary = task.summary, !summary.isEmpty {
-                section(title: "Summary", body: summary)
-            }
-
-            if options.result, let result = task.result, !result.isEmpty {
-                section(title: resultTitle, body: result)
-            }
-
-            Divider()
-            footer
         }
         .foregroundStyle(.black)
+    }
+
+    /// The document split into independently-paginatable blocks, top to bottom.
+    func pdfBlocks() -> [AnyView] {
+        var blocks: [AnyView] = [AnyView(header)]
+
+        if metadataRowsPresent {
+            blocks.append(AnyView(metadataGrid))
+            blocks.append(AnyView(Divider()))
+        }
+
+        if options.description, !task.description.isEmpty {
+            blocks.append(contentsOf: sectionBlocks(title: "Description", body: task.description))
+        }
+        if options.summary, let summary = task.summary, !summary.isEmpty {
+            blocks.append(contentsOf: sectionBlocks(title: "Summary", body: summary))
+        }
+        if options.result, let result = task.result, !result.isEmpty {
+            blocks.append(contentsOf: sectionBlocks(title: resultTitle, body: result))
+        }
+
+        blocks.append(AnyView(Divider()))
+        blocks.append(AnyView(footer))
+        return blocks
     }
 
     // MARK: - Header
@@ -55,14 +67,27 @@ struct TaskPDFDocumentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// "Completed Jun 1, 2026 at 3:04:05 PM", "Failed …", or just the status for
-    /// non-terminal tasks (the detail-view Save action can target any status).
+    /// "Completed Jun 1, 2026 at 3:04:05 PM" for terminal tasks (the always-shown
+    /// completion stamp), otherwise a human-readable status label.
     private var headerSubtitle: String {
-        let statusWord = task.status == .failed ? "Failed" : "Completed"
-        if task.status.isTerminal, let completedAt = task.completedAt {
-            return "\(statusWord) \(completedAt.formatted(Self.timestampStyle))"
+        switch task.status {
+        case .completed:
+            if let completedAt = task.completedAt {
+                return "Completed \(completedAt.formatted(Self.timestampStyle))"
+            }
+            return "Completed"
+        case .failed:
+            if let completedAt = task.completedAt {
+                return "Failed \(completedAt.formatted(Self.timestampStyle))"
+            }
+            return "Failed"
+        case .awaitingReview: return "Awaiting Review"
+        case .running:        return "Running"
+        case .paused:         return "Paused"
+        case .interrupted:    return "Interrupted"
+        case .pending:        return "Pending"
+        case .scheduled:      return "Scheduled"
         }
-        return task.status.rawValue.capitalized
     }
 
     private var resultTitle: String {
@@ -71,16 +96,28 @@ struct TaskPDFDocumentView: View {
 
     // MARK: - Metadata
 
+    /// Whether the metadata grid will actually render at least one row. Gates the grid +
+    /// its divider so a selected-but-empty field set doesn't leave a stray rule under the
+    /// header.
+    private var metadataRowsPresent: Bool {
+        (options.startTime && task.startedAt != nil)
+        || (options.elapsedTime && task.completedAt != nil && task.elapsedDisplayString != nil)
+        || (options.tokens && (tokens?.total ?? 0) > 0)
+        || (options.cost && (cost ?? 0) > 0)
+    }
+
     private var metadataGrid: some View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
             if options.startTime, let startedAt = task.startedAt {
                 metadataRow("Started", startedAt.formatted(Self.timestampStyle))
             }
-            if options.elapsedTime, let elapsed = Self.elapsedTime(for: task) {
+            // Elapsed is only meaningful in a static document once the task has finished;
+            // a running task's "elapsed" would be frozen at export time and misleading.
+            if options.elapsedTime, task.completedAt != nil, let elapsed = task.elapsedDisplayString {
                 metadataRow("Elapsed", elapsed)
             }
-            if options.tokens, let tokens, Self.tokenTotal(tokens) > 0 {
-                metadataRow("Tokens", Self.formatTokenLine(tokens))
+            if options.tokens, let tokens, tokens.total > 0 {
+                metadataRow("Tokens", tokens.formattedLine())
             }
             if options.cost, let cost, cost > 0 {
                 metadataRow("Cost", String(format: "$%.2f", cost))
@@ -101,14 +138,78 @@ struct TaskPDFDocumentView: View {
 
     // MARK: - Sections
 
-    private func section(title: String, body: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
-            MarkdownText(content: body, baseFont: .system(size: 12))
-                .frame(maxWidth: .infinity, alignment: .leading)
+    /// Builds the blocks for one section: the title is grouped with the first paragraph so
+    /// a section heading is never orphaned at the bottom of a page; remaining paragraphs
+    /// become their own blocks so long bodies break between paragraphs.
+    private func sectionBlocks(title: String, body: String) -> [AnyView] {
+        let chunks = Self.splitMarkdownChunks(body)
+        guard let first = chunks.first else {
+            return [AnyView(
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            )]
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        var result: [AnyView] = [AnyView(
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                MarkdownText(content: first, baseFont: Self.bodyFont)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        )]
+        for chunk in chunks.dropFirst() {
+            result.append(AnyView(
+                MarkdownText(content: chunk, baseFont: Self.bodyFont)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            ))
+        }
+        return result
+    }
+
+    /// Splits markdown into paragraph-level chunks for pagination: blank lines separate
+    /// paragraphs, while fenced code blocks (``` … ```) are kept whole even when they
+    /// contain blank lines. Consecutive non-blank lines (lists, tables) stay together.
+    static func splitMarkdownChunks(_ text: String) -> [String] {
+        let lines = text.components(separatedBy: "\n")
+        var chunks: [String] = []
+        var current: [String] = []
+        var inFence = false
+
+        func flush() {
+            if !current.isEmpty {
+                chunks.append(current.joined(separator: "\n"))
+                current = []
+            }
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                if inFence {
+                    current.append(line)
+                    inFence = false
+                    flush()
+                } else {
+                    flush()
+                    inFence = true
+                    current.append(line)
+                }
+                continue
+            }
+            if inFence {
+                current.append(line)
+                continue
+            }
+            if trimmed.isEmpty {
+                flush()
+                continue
+            }
+            current.append(line)
+        }
+        flush()
+        return chunks
     }
 
     // MARK: - Footer
@@ -121,46 +222,5 @@ struct TaskPDFDocumentView: View {
         }
         .font(.system(size: 9))
         .foregroundStyle(.tertiary)
-    }
-
-    // MARK: - Formatting helpers
-
-    private static func tokenTotal(_ tokens: AppViewModel.TaskTokenTotals) -> Int {
-        tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite
-    }
-
-    /// Mirrors `TaskDetailWindow.formatTokenLine` — "12,345 in   6,789 out   1,234 cached".
-    private static func formatTokenLine(_ tokens: AppViewModel.TaskTokenTotals) -> String {
-        let cached = tokens.cacheRead + tokens.cacheWrite
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        let nIn = formatter.string(from: NSNumber(value: tokens.input)) ?? "\(tokens.input)"
-        let nOut = formatter.string(from: NSNumber(value: tokens.output)) ?? "\(tokens.output)"
-        let nCached = formatter.string(from: NSNumber(value: cached)) ?? "\(cached)"
-        if cached > 0 {
-            return "\(nIn) in   \(nOut) out   \(nCached) cached"
-        }
-        return "\(nIn) in   \(nOut) out"
-    }
-
-    /// Mirrors `TaskDetailWindow.elapsedTime` — human-readable `startedAt → completedAt`.
-    private static func elapsedTime(for task: AgentTask) -> String? {
-        guard let start = task.startedAt else { return nil }
-        let end = task.completedAt ?? Date()
-        let interval = end.timeIntervalSince(start)
-        guard interval >= 0 else { return nil }
-
-        let totalSeconds = Int(interval)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-
-        if hours > 0 {
-            return "\(hours)h \(minutes)m \(seconds)s"
-        } else if minutes > 0 {
-            return "\(minutes)m \(seconds)s"
-        } else {
-            return "\(seconds)s"
-        }
     }
 }

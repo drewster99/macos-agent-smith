@@ -1428,6 +1428,15 @@ final class AppViewModel {
         if taskCostInFlight.contains(taskID) { return }
         taskCostInFlight.insert(taskID)
         let records = await shared.usageStore.records(for: taskID)
+        taskCostCache[taskID] = estimatedCost(from: records)
+        taskCostInFlight.remove(taskID)
+    }
+
+    /// Estimates the total cost of a set of usage records using current pricing.
+    /// Shared by `loadTaskCost(_:force:)` and the PDF exporter so the two never diverge,
+    /// and so the exporter can compute directly from a fresh fetch (bypassing the
+    /// in-flight-guarded cache, which can early-return before it's populated).
+    func estimatedCost(from records: [UsageRecord]) -> Double {
         let lookup = shared.pricingLookup
         var total: Double = 0
         for r in records {
@@ -1439,8 +1448,7 @@ final class AppViewModel {
             total += Double(r.cacheReadTokens) * (rates.cacheRead ?? 0)
             total += Double(r.cacheWriteTokens) * (rates.cacheWrite ?? 0)
         }
-        taskCostCache[taskID] = total
-        taskCostInFlight.remove(taskID)
+        return total
     }
 
     /// Returns cached total token counts (input / output / cacheRead / cacheWrite)
@@ -1451,8 +1459,41 @@ final class AppViewModel {
         var output: Int = 0
         var cacheRead: Int = 0
         var cacheWrite: Int = 0
+
+        /// Grand total across all four buckets — used to decide whether the task has any
+        /// recorded token activity worth displaying.
+        var total: Int { input + output + cacheRead + cacheWrite }
+
+        /// Compact "12,345 in   6,789 out   1,234 cached" line. Cache-write is folded into
+        /// "cached" since only Anthropic reports it separately and the distinction is rarely
+        /// meaningful at the task summary level. Shared by the detail view and the PDF.
+        func formattedLine() -> String {
+            let cached = cacheRead + cacheWrite
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            let nIn = formatter.string(from: NSNumber(value: input)) ?? "\(input)"
+            let nOut = formatter.string(from: NSNumber(value: output)) ?? "\(output)"
+            let nCached = formatter.string(from: NSNumber(value: cached)) ?? "\(cached)"
+            if cached > 0 {
+                return "\(nIn) in   \(nOut) out   \(nCached) cached"
+            }
+            return "\(nIn) in   \(nOut) out"
+        }
     }
     private var taskTokenCache: [UUID: TaskTokenTotals] = [:]
+
+    /// Sums token counts across a set of usage records. Shared by `loadTaskTokens(_:force:)`
+    /// and the PDF exporter (see `estimatedCost(from:)` for the rationale).
+    func tokenTotals(from records: [UsageRecord]) -> TaskTokenTotals {
+        var totals = TaskTokenTotals()
+        for r in records {
+            totals.input += r.inputTokens
+            totals.output += r.outputTokens
+            totals.cacheRead += r.cacheReadTokens
+            totals.cacheWrite += r.cacheWriteTokens
+        }
+        return totals
+    }
 
     func cachedTaskTokens(_ taskID: UUID) -> TaskTokenTotals? {
         taskTokenCache[taskID]
@@ -1467,14 +1508,7 @@ final class AppViewModel {
             return
         }
         let records = await shared.usageStore.records(for: taskID)
-        var totals = TaskTokenTotals()
-        for r in records {
-            totals.input += r.inputTokens
-            totals.output += r.outputTokens
-            totals.cacheRead += r.cacheReadTokens
-            totals.cacheWrite += r.cacheWriteTokens
-        }
-        taskTokenCache[taskID] = totals
+        taskTokenCache[taskID] = tokenTotals(from: records)
     }
 
     /// Clears the per-task cost / token caches. Called from the same reset paths

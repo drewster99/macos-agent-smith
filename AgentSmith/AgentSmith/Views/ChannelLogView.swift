@@ -174,6 +174,13 @@ struct ChannelLogView: View, Equatable {
     /// the Binding manages its own invalidation internally. `displayPrefs` is included so
     /// toggling a setting at runtime invalidates the cached body.
     ///
+    /// Closures (`onRestoreHistory`, `onExportTaskPDF`) are intentionally excluded — they
+    /// can't be meaningfully compared, and their captures are session-stable here (the
+    /// per-session `viewModel` is created once by `SessionManager` and never swapped under
+    /// a live view). A future change that makes a closure capture a value that varies
+    /// without also changing one of the compared fields would route to a stale capture; if
+    /// that ever happens, fold the relevant identity into this comparator.
+    ///
     /// CORRECTNESS INVARIANT: assumes `messages` is append-only. Count + last.id is
     /// sufficient to detect "something changed" only because we never mutate existing
     /// elements in place. If this ever changes (e.g. updating an already-appended

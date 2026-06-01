@@ -13,8 +13,14 @@ extension AppViewModel {
             taskActionError = "Could not generate a PDF for this task."
             return
         }
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(filename)
+        // Per-task subdirectory so two tasks with the same title don't overwrite each
+        // other's temp file. Re-exporting the same task reuses (overwrites) its own file.
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("TaskPDFs", isDirectory: true)
+            .appendingPathComponent(task.id.uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent(filename)
         do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: url, options: .atomic)
             NSWorkspace.shared.open(url)
         } catch {
@@ -33,7 +39,12 @@ extension AppViewModel {
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = filename
         panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        // `begin` (vs `runModal`) suspends the Swift continuation without blocking the main
+        // run loop, so other main-actor work keeps flowing while the panel is up.
+        let response = await withCheckedContinuation { (continuation: CheckedContinuation<NSApplication.ModalResponse, Never>) in
+            panel.begin { continuation.resume(returning: $0) }
+        }
+        guard response == .OK, let url = panel.url else { return }
         do {
             try data.write(to: url, options: .atomic)
         } catch {
@@ -61,16 +72,24 @@ extension AppViewModel {
         await exportTaskPDFAndOpen(task, options: .transcript)
     }
 
-    /// Resolves token/cost totals (only when the matching option is enabled), renders the
-    /// document, and returns the PDF bytes plus a suggested filename.
+    /// Computes token/cost totals (only when the matching option is enabled) directly from a
+    /// fresh usage-record fetch, renders the document, and returns the PDF bytes plus a
+    /// suggested filename.
+    ///
+    /// Computing directly — rather than via `loadTaskCost`/`loadTaskTokens` — avoids the
+    /// in-flight-guarded cache, which can early-return before it's populated and would then
+    /// silently drop the Cost row from the document.
     private func buildTaskPDF(
         _ task: AgentTask,
         options: TaskPDFFieldOptions
     ) async -> (data: Data, filename: String)? {
-        if options.tokens { await loadTaskTokens(task.id) }
-        if options.cost { await loadTaskCost(task.id) }
-        let tokens = options.tokens ? cachedTaskTokens(task.id) : nil
-        let cost = options.cost ? cachedTaskCost(task.id) : nil
+        var tokens: TaskTokenTotals?
+        var cost: Double?
+        if options.tokens || options.cost {
+            let records = await shared.usageStore.records(for: task.id)
+            if options.tokens { tokens = tokenTotals(from: records) }
+            if options.cost { cost = estimatedCost(from: records) }
+        }
         guard let data = TaskPDFExporter.makePDFData(
             for: task,
             options: options,

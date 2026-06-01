@@ -611,7 +611,7 @@ struct TaskDetailWindow: View {
                 }
             }
 
-            if let elapsed = Self.elapsedTime(for: task) {
+            if let elapsed = task.elapsedDisplayString {
                 GridRow {
                     metadataLabel("Elapsed")
                     Text(elapsed)
@@ -625,11 +625,10 @@ struct TaskDetailWindow: View {
                 }
             }
 
-            if let tokens = viewModel.cachedTaskTokens(task.id),
-               (tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite) > 0 {
+            if let tokens = viewModel.cachedTaskTokens(task.id), tokens.total > 0 {
                 GridRow {
                     metadataLabel("Tokens")
-                    Text(formatTokenLine(tokens))
+                    Text(tokens.formattedLine())
                         .monospacedDigit()
                 }
             }
@@ -644,23 +643,6 @@ struct TaskDetailWindow: View {
             }
         }
         .font(.callout)
-    }
-
-    /// Renders a compact "12,345 in   6,789 out   1,234 cached" line for the
-    /// Tokens metadata row. The cache-write count is folded into "cached" since
-    /// only Anthropic reports it separately and the distinction is rarely
-    /// meaningful at the task summary level.
-    private func formatTokenLine(_ tokens: AppViewModel.TaskTokenTotals) -> String {
-        let cached = tokens.cacheRead + tokens.cacheWrite
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        let nIn = formatter.string(from: NSNumber(value: tokens.input)) ?? "\(tokens.input)"
-        let nOut = formatter.string(from: NSNumber(value: tokens.output)) ?? "\(tokens.output)"
-        let nCached = formatter.string(from: NSNumber(value: cached)) ?? "\(cached)"
-        if cached > 0 {
-            return "\(nIn) in   \(nOut) out   \(nCached) cached"
-        }
-        return "\(nIn) in   \(nOut) out"
     }
 
     private func scheduledLine(for date: Date) -> some View {
@@ -779,29 +761,6 @@ struct TaskDetailWindow: View {
             }
         }
         return parts.joined(separator: "\n")
-    }
-
-    // MARK: - Elapsed time
-
-    /// Computes a human-readable elapsed duration from `startedAt` to `completedAt`.
-    private static func elapsedTime(for task: AgentTask) -> String? {
-        guard let start = task.startedAt else { return nil }
-        let end = task.completedAt ?? Date()
-        let interval = end.timeIntervalSince(start)
-        guard interval >= 0 else { return nil }
-
-        let totalSeconds = Int(interval)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-
-        if hours > 0 {
-            return "\(hours)h \(minutes)m \(seconds)s"
-        } else if minutes > 0 {
-            return "\(minutes)m \(seconds)s"
-        } else {
-            return "\(seconds)s"
-        }
     }
 
     /// Returns the first `lines` newline-separated lines of `text`, joined back. Used to
