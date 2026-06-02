@@ -75,49 +75,49 @@ struct FileReadTool: AgentTool {
         let url = URL(fileURLWithPath: path)
         let resolvedPath = url.resolvingSymlinksInPath().path
 
-        // Record this file as read for file_write gating.
-        // Only Brown's reads count — Smith and Jones reads must not gate Brown's file_write.
-        if context.agentRole == .brown {
-            context.recordFileRead(resolvedPath)
-            context.recordFileRead(path)
-        }
-
         // Detect content type.
         let contentType = Self.detectContentType(at: resolvedPath)
 
-        let raw: String
+        let outcome: ReadOutcome
         switch contentType {
         case .pdf:
             let pagesParam: String?
             if case .string(let p) = arguments["pages"] { pagesParam = p } else { pagesParam = nil }
-            raw = Self.readPDF(at: url, pages: pagesParam)
+            outcome = Self.readPDF(at: url, pages: pagesParam)
 
         case .image:
-            raw = Self.imageMetadata(at: resolvedPath, originalPath: path)
+            outcome = Self.imageMetadata(at: resolvedPath, originalPath: path)
 
         case .text:
             let offset: Int
             if case .int(let o) = arguments["offset"] { offset = max(1, o) } else { offset = 1 }
             let limit: Int
             if case .int(let l) = arguments["limit"] { limit = max(1, l) } else { limit = Self.defaultLineLimit }
-            raw = Self.readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit)
+            outcome = Self.readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit)
 
         case .binary:
-            raw = Self.binaryMetadata(at: resolvedPath, originalPath: path)
+            outcome = Self.binaryMetadata(at: resolvedPath, originalPath: path)
         }
-        return Self.classify(raw)
+
+        // Record this file as read for file_write gating only when a genuine text read
+        // actually delivered content. Metadata-only reads (image/binary/PDF) and any
+        // failure must NOT gate Brown's later file_write — otherwise an edit could follow
+        // a read that never surfaced the file's contents. Only Brown's reads count; Smith
+        // and Jones reads must not gate Brown's file_write.
+        if context.agentRole == .brown && outcome.contentBearingTextRead {
+            context.recordFileRead(resolvedPath)
+            context.recordFileRead(path)
+        }
+
+        return outcome.succeeded ? .success(outcome.output) : .failure(outcome.output)
     }
 
-    /// Wraps a helper-function result in `.success` / `.failure`. Helper outputs that signal a
-    /// domain-level failure all begin with one of `Error`, `BLOCKED`, or the "specify a pages
-    /// parameter" prompt — keep this list in sync with the helpers if their format changes.
-    static func classify(_ output: String) -> ToolExecutionResult {
-        let trimmed = output.trimmingCharacters(in: .whitespaces)
-        if trimmed.hasPrefix("Error") || trimmed.hasPrefix("BLOCKED")
-            || trimmed.hasPrefix("PDF has ") {
-            return .failure(output)
-        }
-        return .success(output)
+    /// Result of a read helper: the text to surface, whether the read succeeded, and whether
+    /// it delivered genuine text content (the only case that should gate a later `file_edit`).
+    private struct ReadOutcome {
+        let output: String
+        let succeeded: Bool
+        let contentBearingTextRead: Bool
     }
 
     // MARK: - Content Type Detection
@@ -181,26 +181,26 @@ struct FileReadTool: AgentTool {
 
     // MARK: - Text Reading
 
-    private static func readText(at url: URL, resolvedPath: String, offset: Int, limit: Int) -> String {
+    private static func readText(at url: URL, resolvedPath: String, offset: Int, limit: Int) -> ReadOutcome {
         // Check file size before reading.
         do {
             let attrs = try FileManager.default.attributesOfItem(atPath: resolvedPath)
             if let fileSize = attrs[.size] as? UInt64, fileSize > maxCharacters {
-                return "Error: File is too large to read (\(fileSize) bytes, maximum is \(maxCharacters))."
+                return failure("Error: File is too large to read (\(fileSize) bytes, maximum is \(maxCharacters)).")
             }
         } catch {
-            return "Error checking file size: \(error.localizedDescription)"
+            return failure("Error checking file size: \(error.localizedDescription)")
         }
 
         let content: String
         do {
             content = try String(contentsOf: url, encoding: .utf8)
         } catch {
-            return "Error reading file: \(error.localizedDescription)"
+            return failure("Error reading file: \(error.localizedDescription)")
         }
 
         guard content.count <= maxCharacters else {
-            return "Error: File is too large to read (\(content.count) characters, maximum is \(maxCharacters))."
+            return failure("Error: File is too large to read (\(content.count) characters, maximum is \(maxCharacters)).")
         }
 
         let allLines = content.components(separatedBy: "\n")
@@ -209,7 +209,7 @@ struct FileReadTool: AgentTool {
         // Apply offset (1-based) and limit.
         let startIndex = offset - 1 // convert to 0-based
         guard startIndex < totalLines else {
-            return "Error: offset \(offset) is beyond the end of the file (\(totalLines) lines)."
+            return failure("Error: offset \(offset) is beyond the end of the file (\(totalLines) lines).")
         }
 
         let endIndex = min(startIndex + limit, totalLines)
@@ -236,30 +236,39 @@ struct FileReadTool: AgentTool {
             output += "\n[File has \(totalLines) total lines. Showing lines \(offset) through \(shownEnd).]"
         }
 
-        return output
+        // A genuine text read (including an empty file) is the only outcome that may gate
+        // a subsequent file_edit.
+        return ReadOutcome(output: output, succeeded: true, contentBearingTextRead: true)
+    }
+
+    /// Convenience for a failed read: never succeeds, never gates a later edit.
+    private static func failure(_ message: String) -> ReadOutcome {
+        ReadOutcome(output: message, succeeded: false, contentBearingTextRead: false)
     }
 
     // MARK: - PDF Reading
 
-    private static func readPDF(at url: URL, pages: String?) -> String {
+    private static func readPDF(at url: URL, pages: String?) -> ReadOutcome {
         guard let document = PDFDocument(url: url) else {
-            return "Error: Unable to open PDF file."
+            return failure("Error: Unable to open PDF file.")
         }
 
         let pageCount = document.pageCount
         guard pageCount > 0 else {
-            return "Error: PDF has no pages."
+            return failure("Error: PDF has no pages.")
         }
 
         // Determine which pages to read.
         let pageIndices: [Int]
         if let pages {
             guard let parsed = parsePageRange(pages, totalPages: pageCount) else {
-                return "Error: Invalid pages parameter '\(pages)'. Use formats like '1-5', '3', or '10-20'. PDF has \(pageCount) pages."
+                return failure("Error: Invalid pages parameter '\(pages)'. Use formats like '1-5', '3', or '10-20'. PDF has \(pageCount) pages.")
             }
             pageIndices = parsed
         } else if pageCount > maxAutoPages {
-            return "PDF has \(pageCount) pages. Specify a pages parameter (e.g. pages='1-5') to read specific pages."
+            // Requesting a too-large PDF without a pages parameter is a failure: no content
+            // was delivered, and it must not gate a later edit.
+            return failure("PDF has \(pageCount) pages. Specify a pages parameter (e.g. pages='1-5') to read specific pages.")
         } else {
             pageIndices = Array(0..<pageCount)
         }
@@ -277,7 +286,12 @@ struct FileReadTool: AgentTool {
             output += "\n\n[Output truncated at \(maxCharacters) characters]"
         }
 
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        // PDF text extraction succeeds but is not a plain-text read, so it does not gate edits.
+        return ReadOutcome(
+            output: output.trimmingCharacters(in: .whitespacesAndNewlines),
+            succeeded: true,
+            contentBearingTextRead: false
+        )
     }
 
     /// Parses a page range string like "1-5", "3", "10-20" into 0-based indices.
@@ -304,36 +318,46 @@ struct FileReadTool: AgentTool {
 
     // MARK: - Image Metadata
 
-    private static func imageMetadata(at path: String, originalPath: String) -> String {
+    private static func imageMetadata(at path: String, originalPath: String) -> ReadOutcome {
         let fm = FileManager.default
         let size: UInt64
         do {
             let attrs = try fm.attributesOfItem(atPath: path)
             size = attrs[.size] as? UInt64 ?? 0
         } catch {
-            return "Error checking file: \(error.localizedDescription)"
+            return failure("Error checking file: \(error.localizedDescription)")
         }
 
         let filename = (originalPath as NSString).lastPathComponent
         let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
-        return "Image file: \(filename) (\(sizeStr)). Image content cannot be displayed as text."
+        // Metadata-only success: no text content delivered, so it does not gate edits.
+        return ReadOutcome(
+            output: "Image file: \(filename) (\(sizeStr)). Image content cannot be displayed as text.",
+            succeeded: true,
+            contentBearingTextRead: false
+        )
     }
 
     // MARK: - Binary Metadata
 
-    private static func binaryMetadata(at path: String, originalPath: String) -> String {
+    private static func binaryMetadata(at path: String, originalPath: String) -> ReadOutcome {
         let fm = FileManager.default
         let size: UInt64
         do {
             let attrs = try fm.attributesOfItem(atPath: path)
             size = attrs[.size] as? UInt64 ?? 0
         } catch {
-            return "Error checking file: \(error.localizedDescription)"
+            return failure("Error checking file: \(error.localizedDescription)")
         }
 
         let filename = (originalPath as NSString).lastPathComponent
         let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
-        return "Binary file: \(filename) (\(sizeStr)). Cannot read as text."
+        // Metadata-only success: no text content delivered, so it does not gate edits.
+        return ReadOutcome(
+            output: "Binary file: \(filename) (\(sizeStr)). Cannot read as text.",
+            succeeded: true,
+            contentBearingTextRead: false
+        )
     }
 
     // MARK: - Path Restrictions
@@ -345,11 +369,11 @@ struct FileReadTool: AgentTool {
         let home = NSHomeDirectory()
 
         // Block sensitive credential directories.
-        // Lowercase both sides: APFS is case-insensitive so /Users/FOO/.SSH bypasses a case-sensitive check.
+        // Boundary-aware match so `~/.sshbackup` is not over-blocked as if under `~/.ssh`.
         let sensitiveDirs = [".ssh", ".gnupg", ".aws", ".config/gcloud", ".kube", ".docker"]
         for dir in sensitiveDirs {
             let dirPath = (home as NSString).appendingPathComponent(dir)
-            if resolved.lowercased().hasPrefix(dirPath.lowercased()) {
+            if PathNormalization.isSubpath(resolved, ofOrEqualTo: dirPath) {
                 return "BLOCKED: Cannot read sensitive credential path '\(path)'"
             }
         }
@@ -357,7 +381,7 @@ struct FileReadTool: AgentTool {
         // Block system credential files
         let systemCredentials = ["/etc/shadow", "/etc/master.passwd", "/private/etc/master.passwd"]
         for cred in systemCredentials {
-            if resolved.lowercased() == cred.lowercased() || resolved.lowercased().hasPrefix(cred.lowercased()) {
+            if PathNormalization.isSubpath(resolved, ofOrEqualTo: cred) {
                 return "BLOCKED: Cannot read system credential file '\(path)'"
             }
         }
@@ -380,13 +404,13 @@ struct FileReadTool: AgentTool {
 
         switch contentType {
         case .text:
-            return readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit)
+            return readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit).output
         case .pdf:
-            return readPDF(at: url, pages: nil)
+            return readPDF(at: url, pages: nil).output
         case .image:
-            return imageMetadata(at: resolvedPath, originalPath: path)
+            return imageMetadata(at: resolvedPath, originalPath: path).output
         case .binary:
-            return binaryMetadata(at: resolvedPath, originalPath: path)
+            return binaryMetadata(at: resolvedPath, originalPath: path).output
         }
     }
 }

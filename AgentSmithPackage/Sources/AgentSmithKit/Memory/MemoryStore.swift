@@ -132,6 +132,9 @@ public actor MemoryStore {
     private var taskSummaries: [UUID: TaskSummaryEntry] = [:]
     private let engine: SemanticSearchEngine
     private var onChange: (@Sendable () -> Void)?
+    /// Set when `searchAll` bumps retrieval stats. Decoupled from `onChange?()` so reads don't
+    /// trigger a full-corpus re-serialization; flushed lazily by `persistRetrievalStatsIfNeeded()`.
+    private var retrievalStatsDirty = false
 
     public init(engine: SemanticSearchEngine) {
         self.engine = engine
@@ -140,6 +143,16 @@ public actor MemoryStore {
     /// Registers a callback fired whenever memories or task summaries change.
     public func setOnChange(_ handler: @escaping @Sendable () -> Void) {
         onChange = handler
+    }
+
+    /// Flushes any pending retrieval-stat bumps accumulated on the read path. If stats are
+    /// dirty, clears the flag and fires `onChange?()` so the normal persist path serializes
+    /// the updated `retrievalCount`/`lastRetrievedAt` values. Harmless (a no-op) when clean,
+    /// so it is safe to call unconditionally from the app-termination flush.
+    public func persistRetrievalStatsIfNeeded() {
+        guard retrievalStatsDirty else { return }
+        retrievalStatsDirty = false
+        onChange?()
     }
 
     // MARK: - Memory Operations
@@ -635,7 +648,12 @@ public actor MemoryStore {
             }
         }
 
-        if trackedAnyRetrieval { onChange?() }
+        // Retrieval-stat bumps happen on the read path (every Brown context-inject search).
+        // Firing onChange?() here would re-serialize the entire embedding-bearing corpus on
+        // each read — quadratic-ish in practice. Instead mark the stats dirty and let
+        // persistRetrievalStatsIfNeeded() flush them once at termination. Genuine corpus
+        // mutations (save/update/delete/clear) still fire onChange?() immediately.
+        if trackedAnyRetrieval { retrievalStatsDirty = true }
 
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         memoryStoreLogger.debug("searchAll: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")

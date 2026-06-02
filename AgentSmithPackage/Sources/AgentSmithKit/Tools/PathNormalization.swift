@@ -40,6 +40,22 @@ enum PathNormalization {
         return (s as NSString).expandingTildeInPath
     }
 
+    /// Boundary-aware containment test for blocklist matching.
+    ///
+    /// Returns `true` only when `path` equals `prefix` or is a child of it — never when
+    /// `path` merely shares a textual prefix (e.g. `/Libraryland` is NOT under `/Library`,
+    /// and `~/.sshbackup` is NOT under `~/.ssh`). A bare `hasPrefix` over-blocks those.
+    ///
+    /// Both operands are assumed to be already resolved/normalized absolute paths (callers
+    /// resolve symlinks before invoking). The comparison is case-insensitive to match the
+    /// pre-existing blocklist behavior (APFS is case-insensitive, so `/SYSTEM` must match
+    /// `/System`).
+    static func isSubpath(_ path: String, ofOrEqualTo prefix: String) -> Bool {
+        let p = path.lowercased()
+        let base = prefix.lowercased()
+        return p == base || p.hasPrefix(base + "/")
+    }
+
     /// Strips backslash escapes for shell-special characters commonly inserted by an LLM
     /// that's been over-trained to quote paths for bash. Replaces `\X` with `X` for X in
     /// `[ ()&'";*?[]]`. A literal backslash followed by any other character is preserved

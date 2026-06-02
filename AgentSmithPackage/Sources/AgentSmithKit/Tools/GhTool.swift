@@ -1,126 +1,212 @@
 import Foundation
+import os
 
-/// Brown tool: runs the GitHub CLI (`gh`) with arbitrary args. Internally invokes
-/// `/bin/bash -l -c "exec gh <args>"`, so `~` and `$VAR` expansion work — but shell pipes
-/// and file redirection are refused before bash sees them, which keeps `gh` as the genuinely
-/// constrained path (anything that needs a real pipeline should use the `bash` tool, where
-/// the safety monitor sees the whole command). The tool's description includes the captured
-/// `gh auth status` output from Brown's spawn so the model has direct evidence that
-/// authentication is in place — without this, gpt-style models routinely refuse GitHub work
-/// claiming "I don't have access."
+/// Raised by `GhTool.tokenize(_:)` when the args string cannot be split into a valid argv
+/// array because shell quoting is malformed.
+public enum GhArgTokenizeError: Error {
+    /// A single or double quote was opened but never closed, or the string ended on a
+    /// dangling unquoted backslash (which would escape a non-existent following character).
+    case unterminatedQuote
+}
+
+/// Brown tool: runs the GitHub CLI (`gh`) with arbitrary args. The tool execs `gh` *directly*
+/// via a real argv array — there is no shell anywhere in the path. The model-supplied args
+/// string is split into argv by a fail-closed POSIX-style tokenizer (`tokenize(_:)`) that
+/// honors quoting but performs NO expansion: `$VAR`, `$(…)`, backticks, globs, redirects, and
+/// command chaining survive only as literal characters inside a single argv element, so they
+/// cannot have any effect. This eliminates the entire class of shell-injection / env-var
+/// exfiltration bugs that a `bash -l -c "exec gh …"` invocation exposed.
+///
+/// The tool's description includes the captured `gh auth status` output from Brown's spawn so
+/// the model has direct evidence that authentication is in place — without this, gpt-style
+/// models routinely refuse GitHub work claiming "I don't have access." `gh` auth is keyring /
+/// `~/.config/gh`-based and does not depend on login-shell environment, and `ProcessRunner`
+/// passes the process environment through, so dropping the login shell does not affect auth.
 struct GhTool: AgentTool {
     let name = "gh"
     private let authStatusSnapshot: String
 
-    /// Substrings rejected before the args reach bash. Naive (not quote-aware) — false
-    /// positives just make the model retry with different phrasing, while a false negative
-    /// would let the forbidden sequence through to the shell. We optimize for the latter.
-    ///
-    /// `$(` covers POSIX command substitution (functionally equivalent to backticks).
-    /// `>(` and `<(` cover bash process substitution (`gh foo >(curl …)` is an exfil channel).
-    /// `${` covers parameter expansion — even though `$(` is already blocked, `${VAR:?$(…)}`
-    /// would catch the `$(`, but `${VAR:-evil}` reads any env var the agent shell exports;
-    /// if the model needs $VAR expansion it should use the bare `$VAR` form, which is allowed.
-    /// `<<<` is a here-string (a read redirection). `\n` / `\r` are command separators in
-    /// `bash -c "..."` — JSON tool args trivially decode into strings containing literal
-    /// newlines, so they MUST be on the list. `\0` (NUL) corrupts `bash -c` parsing on some
-    /// shells; reject it outright.
-    ///
-    /// Note: bare shell `|`, `>`, `>>`, `<` are *also* rejected — but via the quote-aware
-    /// `firstUnquotedRedirectionOrPipe(in:)` scan rather than this naive list, because those
-    /// characters appear legitimately inside quoted `--jq` programs (`'.[] | .name'`) and
-    /// quoted `--body` text. Only their *unquoted* (operator) uses are refused.
-    static let forbiddenSequences: [String] = [
-        "&&", "||", "<<<", "$(", ">(", "<(", "${", "`", ";", "\n", "\r", "\0"
-    ]
-
-    /// Returns the first forbidden sequence found in `args`, or nil if the args are clean.
-    ///
-    /// Order matches `forbiddenSequences`; multi-char sequences are listed first so that, e.g.,
-    /// `&&` is reported as `&&` rather than as the single `&` that isn't actually forbidden.
-    /// In addition to the substring list, a bare `&` used to background or chain commands
-    /// (`& cmd`, trailing `&`) is rejected — but `&` between `=`/word characters (URL query
-    /// strings like `?a=1&b=2`) stays allowed so the common `gh api '...'` use case still works.
-    /// Finally, an *unquoted* `|` / `>` / `>>` / `<` (a real pipe or file redirect, as opposed
-    /// to those characters appearing inside a quoted `--jq` program or `--body`) is rejected.
-    static func firstForbiddenSequence(in args: String) -> String? {
-        for needle in forbiddenSequences where args.contains(needle) {
-            return needle
-        }
-        if containsCommandChainingAmpersand(args) {
-            return "&"
-        }
-        if let op = firstUnquotedRedirectionOrPipe(in: args) {
-            return op
-        }
-        return nil
+    public init(authStatusSnapshot: String = "(auth status was not captured for this spawn)") {
+        self.authStatusSnapshot = authStatusSnapshot
     }
 
-    /// Scans `args` for a `|`, `<`, or `>` that occurs *outside* shell quoting — i.e. a real
-    /// pipe / file-redirection operator, not a `|` inside a quoted `--jq` program or a `<`/`>`
-    /// inside a quoted `--body`. Returns the operator (`|`, `<`, `>`, or `>>`) if found, else
-    /// nil. Tracks `'…'` and `"…"` spans and honours backslash escapes outside single quotes;
-    /// an unterminated quote just means `bash -c` would choke anyway, so we keep scanning.
-    static func firstUnquotedRedirectionOrPipe(in args: String) -> String? {
+    // MARK: - Tokenizer
+
+    /// Splits an args string into an argv array using POSIX-shell quoting rules, but with NO
+    /// expansion of any kind — `$VAR`, `$(…)`, backticks, and globs are all preserved as
+    /// literal characters. The only transformation applied is leading-`~` expansion (see below),
+    /// because a shipped tool-description example (`~/Downloads/asset.zip`) relies on it.
+    ///
+    /// Quoting rules:
+    /// - Single quotes: everything between them is literal, including backslashes.
+    /// - Double quotes: backslash escapes only `"` and `\`; any other backslash is literal.
+    /// - Unquoted backslash: escapes the next character (taken literally).
+    /// - Whitespace outside quotes separates tokens.
+    ///
+    /// Fail-closed: throws `GhArgTokenizeError.unterminatedQuote` if a quote is left open or the
+    /// string ends on a dangling unquoted backslash, rather than silently dropping characters or
+    /// guessing — an ambiguous command must be refused, never executed.
+    ///
+    /// - Parameter args: the raw args string from the model (everything after a leading `gh`).
+    /// - Returns: the argv elements, in order.
+    /// - Throws: `GhArgTokenizeError.unterminatedQuote` on malformed quoting.
+    static func tokenize(_ args: String) throws -> [String] {
         enum QuoteState { case none, single, double }
+
+        var tokens: [String] = []
+        var current = ""
+        var haveToken = false
         var state: QuoteState = .none
         var iterator = args.makeIterator()
+
+        func appendChar(_ c: Character) {
+            current.append(c)
+            haveToken = true
+        }
+
         while let c = iterator.next() {
             switch state {
             case .none:
                 switch c {
-                case "'": state = .single
-                case "\"": state = .double
-                case "\\": _ = iterator.next()           // escaped char — consume, not an operator
-                case "|", "<": return String(c)
-                case ">":
-                    // Peek for `>>` so the refusal message names the append form accurately.
-                    // (We can't push a char back onto the iterator, but for messaging it's
-                    // enough to report `>` either way; `>>` is a nicety.)
-                    return ">"
-                default: break
+                case " ", "\t", "\n", "\r":
+                    if haveToken {
+                        tokens.append(current)
+                        current = ""
+                        haveToken = false
+                    }
+                case "'":
+                    state = .single
+                    haveToken = true
+                case "\"":
+                    state = .double
+                    haveToken = true
+                case "\\":
+                    // Unquoted backslash escapes exactly the next character. A trailing
+                    // backslash has nothing to escape, so the command is malformed.
+                    guard let next = iterator.next() else {
+                        throw GhArgTokenizeError.unterminatedQuote
+                    }
+                    appendChar(next)
+                default:
+                    appendChar(c)
                 }
             case .single:
-                if c == "'" { state = .none }
+                // Inside single quotes everything is literal until the closing quote.
+                if c == "'" {
+                    state = .none
+                } else {
+                    appendChar(c)
+                }
             case .double:
                 switch c {
-                case "\"": state = .none
-                case "\\": _ = iterator.next()
-                default: break
+                case "\"":
+                    state = .none
+                case "\\":
+                    // In double quotes a backslash only escapes `"` or `\`; otherwise it is
+                    // a literal backslash followed by the next character handled normally.
+                    guard let next = iterator.next() else {
+                        throw GhArgTokenizeError.unterminatedQuote
+                    }
+                    if next == "\"" || next == "\\" {
+                        appendChar(next)
+                    } else {
+                        appendChar("\\")
+                        appendChar(next)
+                    }
+                default:
+                    appendChar(c)
                 }
             }
         }
-        return nil
+
+        if state != .none {
+            throw GhArgTokenizeError.unterminatedQuote
+        }
+        if haveToken {
+            tokens.append(current)
+        }
+
+        return tokens.map(Self.expandLeadingTilde)
     }
 
-    /// Detects an unquoted-style chaining `&`: either `& ` followed by something, a trailing
-    /// `&`, or an isolated `&` with whitespace on at least one side. Allows URL-query
-    /// `name=value&name=value` and any `&` immediately surrounded by word characters.
-    static func containsCommandChainingAmpersand(_ args: String) -> Bool {
-        let chars = Array(args)
-        for (i, c) in chars.enumerated() where c == "&" {
-            // Skip `&&` — already handled by the substring list (and consume both halves).
-            if i + 1 < chars.count, chars[i + 1] == "&" { continue }
-            if i > 0, chars[i - 1] == "&" { continue }
+    /// Expands a leading `~/` (or a token that is exactly `~`) to the current user's home
+    /// directory. This is the ONLY expansion the tokenizer performs; it exists so the shipped
+    /// `~/Downloads/asset.zip` example keeps working now that no shell is involved. A `~` that
+    /// is not at the start of the token, or a `~user` form, is left untouched.
+    private static func expandLeadingTilde(_ token: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if token == "~" {
+            return home
+        }
+        if token.hasPrefix("~/") {
+            return home + token.dropFirst(1)
+        }
+        return token
+    }
 
-            let prev: Character? = i > 0 ? chars[i - 1] : nil
-            let next: Character? = i + 1 < chars.count ? chars[i + 1] : nil
+    // MARK: - gh path resolution
 
-            // Trailing `&` (backgrounding) or `&` followed by whitespace = chaining.
-            guard let next else { return true }
-            if next == " " || next == "\t" { return true }
+    /// Caches the resolved absolute path to the `gh` executable. Mirrors `GhAuthChecker`'s
+    /// "resolve via login shell once, then cache" pattern so we don't pay the shell-spawn cost
+    /// on every gh call. Lock-guarded because tool execution can happen concurrently across
+    /// Brown spawns.
+    private static let cachedGhPath = OSAllocatedUnfairLock<String?>(initialState: nil)
 
-            // Leading `&` or `&` preceded by whitespace + non-word next = also chaining.
-            if let prev, prev == " " || prev == "\t" {
-                return true
+    /// Resolves the absolute path to `gh`, caching the result. Resolution order:
+    /// 1. `command -v gh` via a login shell (picks up the user's PATH, e.g. a custom install).
+    /// 2. `/opt/homebrew/bin/gh` (Apple Silicon Homebrew default).
+    /// 3. `/usr/local/bin/gh` (Intel Homebrew default).
+    ///
+    /// Resolution is only valid if the candidate is an absolute path to an existing executable.
+    /// Returns `nil` if `gh` cannot be located, so `execute(...)` can surface a clear failure.
+    static func resolveGhPath() async -> String? {
+        if let cached = cachedGhPath.withLock({ $0 }) {
+            return cached
+        }
+
+        var resolved: String?
+
+        do {
+            let result = try await ProcessRunner.run(
+                executable: "/bin/bash",
+                arguments: ["-l", "-c", "command -v gh"],
+                workingDirectory: nil,
+                timeout: 30
+            )
+            if !result.timedOut, result.exitCode == 0 {
+                let candidate = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if isUsableExecutable(candidate) {
+                    resolved = candidate
+                }
+            }
+        } catch {
+            let logger = Logger(subsystem: "AgentSmith", category: "GhTool")
+            logger.debug("`command -v gh` failed: \(error.localizedDescription); falling back to known install paths")
+        }
+
+        if resolved == nil {
+            for fallback in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"] where isUsableExecutable(fallback) {
+                resolved = fallback
+                break
             }
         }
-        return false
+
+        if let resolved {
+            cachedGhPath.withLock { $0 = resolved }
+        }
+        return resolved
     }
 
-    public init(authStatusSnapshot: String = "(auth status was not captured for this spawn)") {
-        self.authStatusSnapshot = authStatusSnapshot
+    /// True when `path` is an absolute path to an existing, executable, non-directory file.
+    private static func isUsableExecutable(_ path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+        guard exists, !isDirectory.boolValue else { return false }
+        return FileManager.default.isExecutableFile(atPath: path)
     }
+
+    // MARK: - AgentTool
 
     /// Same rationale as `BashTool.executionTimeout`: subprocess timeout is enforced inside
     /// `ProcessRunner` from the user-supplied `timeout` arg (default 300 s, no upper cap).
@@ -132,22 +218,23 @@ struct GhTool: AgentTool {
         """
         Run a GitHub CLI command. THIS is the tool to use for `gh` — do NOT shell out to `gh` \
         via the `bash` tool, even though that would also work. Routing `gh` through this tool \
-        keeps the GitHub-specific argument filter, exit-code semantics, and the pre-captured \
-        auth-status snapshot below in the loop. \
-        Args are passed through `/bin/bash -l -c "exec gh <args>"` so gh's exit status is the \
-        literal return value (no intermediate shell layer). \
-        ALLOWED shell features: `~` expansion and `$VAR` expansion (bare `$VAR` form only). \
-        NOT available — these are refused before bash sees them: shell pipes (`|`), file \
-        redirection (`>`, `>>`, `<`, `2>`, `<<<`), command chaining (`;`, `&&`, `||`, bare `&`), \
-        command/process substitution (backticks, `$(...)`, `>(...)`, `<(...)`), `${...}` \
-        parameter expansion, newlines/carriage returns, and NUL bytes. \
+        keeps the GitHub-specific exit-code semantics and the pre-captured auth-status snapshot \
+        below in the loop. \
+        gh is exec'd DIRECTLY with no shell: the args string is split into individual arguments \
+        using shell-style quoting (single quotes, double quotes, and backslash escapes), but \
+        nothing is expanded or interpreted by a shell. There is no pipe (`|`), no file \
+        redirection (`>`, `>>`, `<`, `2>`, `<<<`), no command chaining (`;`, `&&`, `||`, `&`), \
+        no `$VAR` / `${...}` expansion, no command/process substitution (backticks, `$(...)`, \
+        `>(...)`, `<(...)`), and no globbing — any of those characters are passed to gh \
+        verbatim as part of an argument. The one convenience: a `~` at the start of a path \
+        argument (e.g. `~/Downloads/asset.zip`) is expanded to your home directory. \
         To filter or reshape gh's output, use gh's built-in `--jq` flag (full jq syntax, e.g. \
         `--jq '.[] | .number'` or `--json title,number --jq '.[] | select(.title|test("fix"))'`) \
-        — the `|` inside a quoted `--jq` program is fine; it's only the *shell* `|` that's \
-        refused. gh writes errors to stderr, which is already captured in the returned output, \
-        so `2>&1` is unnecessary. If you genuinely need a shell pipeline or redirection, use the \
-        `bash` tool instead (the safety monitor sees the whole command there). To run two gh \
-        commands, issue them as separate gh calls. \
+        — the `|` inside a quoted `--jq` program is part of the jq program, not a shell pipe. gh \
+        writes errors to stderr, which is already captured in the returned output, so `2>&1` is \
+        unnecessary. If you genuinely need a shell pipeline or redirection, use the `bash` tool \
+        instead (the safety monitor sees the whole command there). To run two gh commands, issue \
+        them as separate gh calls. \
         Non-zero exit from `gh` is reported as a tool-call FAILURE — retrying after a failure is \
         a legitimate response, not a duplicate operation. \
         You ARE authenticated to GitHub via `gh` — the `gh auth status` snapshot below was \
@@ -204,24 +291,20 @@ struct GhTool: AgentTool {
             throw ToolCallError.missingRequiredArgument("args")
         }
 
-        if let forbidden = Self.firstForbiddenSequence(in: args) {
-            let displayed: String
-            switch forbidden {
-            case "\n": displayed = "\\n (newline)"
-            case "\r": displayed = "\\r (carriage return)"
-            default: displayed = forbidden
-            }
+        let argv: [String]
+        do {
+            argv = try Self.tokenize(args)
+        } catch {
             return .failure("""
-                Refused: gh args contain forbidden shell sequence '\(displayed)'. \
-                The gh tool allows only `~` and bare `$VAR` expansion — no shell pipes (`|`), \
-                no file redirection (`>` `>>` `<` `2>` `<<<`), no chaining (`;` `&&` `||` `&`), \
-                no command/process substitution (backticks `$(...)` `>(...)` `<(...)`), no \
-                `${...}`, and no newlines. To filter gh output use gh's `--jq` flag (jq syntax, \
-                e.g. `--jq '.[] | .number'`) — the `|` inside a quoted `--jq` program is fine; \
-                gh's stderr is already in the output, so `2>&1` is unneeded. For a genuine \
-                pipeline or redirection use the `bash` tool instead; to run two gh commands, \
-                issue them as separate gh calls.
+                Refused: gh args have an unterminated/malformed quote. Use balanced quotes. \
+                The gh tool execs the GitHub CLI directly with NO shell — pipes |, redirection \
+                > <, chaining ; && ||, $VAR expansion, and command substitution are unavailable; \
+                use gh's --jq to filter, or the bash tool for a pipeline.
                 """)
+        }
+
+        guard !argv.isEmpty else {
+            return .failure("Refused: no gh arguments were provided.")
         }
 
         let timeoutSeconds: Int
@@ -238,11 +321,17 @@ struct GhTool: AgentTool {
             workingDir = nil
         }
 
-        // `exec gh ...` makes bash hand off the process to gh, so the returned exit code is
-        // gh's own (no shell wrapper to swallow or transform it).
+        guard let ghPath = await Self.resolveGhPath() else {
+            return .failure("""
+                Refused: could not locate the `gh` executable. Ensure the GitHub CLI is \
+                installed (e.g. via Homebrew) and on PATH, or at /opt/homebrew/bin/gh or \
+                /usr/local/bin/gh.
+                """)
+        }
+
         let result = try await ProcessRunner.run(
-            executable: "/bin/bash",
-            arguments: ["-l", "-c", "exec gh \(args)"],
+            executable: ghPath,
+            arguments: argv,
             workingDirectory: workingDir,
             timeout: TimeInterval(timeoutSeconds)
         )

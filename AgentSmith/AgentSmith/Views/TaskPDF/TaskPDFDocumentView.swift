@@ -17,7 +17,7 @@ struct TaskPDFDocumentView: View {
     let generatedAt: Date
 
     private static let timestampStyle = Date.FormatStyle(date: .abbreviated, time: .standard)
-    private static let bodyFont = Font.system(size: 12)
+    private static let bodyFont = AppFonts.pdfBody
 
     /// Single-view rendering (used for previews / non-paginated contexts). The exporter
     /// uses `pdfBlocks()` directly instead of this.
@@ -32,10 +32,10 @@ struct TaskPDFDocumentView: View {
 
     /// The document split into independently-paginatable blocks, top to bottom.
     func pdfBlocks() -> [AnyView] {
-        var blocks: [AnyView] = [AnyView(header)]
+        var blocks: [AnyView] = [AnyView(header())]
 
         if metadataRowsPresent {
-            blocks.append(AnyView(metadataGrid))
+            blocks.append(AnyView(metadataGrid()))
             blocks.append(AnyView(Divider()))
         }
 
@@ -50,18 +50,19 @@ struct TaskPDFDocumentView: View {
         }
 
         blocks.append(AnyView(Divider()))
-        blocks.append(AnyView(footer))
+        blocks.append(AnyView(footer()))
         return blocks
     }
 
     // MARK: - Header
 
-    private var header: some View {
+    @ViewBuilder
+    private func header() -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(task.title)
-                .font(.system(size: 22, weight: .bold))
+                .font(AppFonts.pdfTitle)
             Text(headerSubtitle)
-                .font(.system(size: 12))
+                .font(AppFonts.pdfBody)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -106,7 +107,8 @@ struct TaskPDFDocumentView: View {
         || (options.cost && (cost ?? 0) > 0)
     }
 
-    private var metadataGrid: some View {
+    @ViewBuilder
+    private func metadataGrid() -> some View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
             if options.startTime, let startedAt = task.startedAt {
                 metadataRow("Started", startedAt.formatted(Self.timestampStyle))
@@ -123,7 +125,7 @@ struct TaskPDFDocumentView: View {
                 metadataRow("Cost", String(format: "$%.2f", cost))
             }
         }
-        .font(.system(size: 12))
+        .font(AppFonts.pdfBody)
     }
 
     private func metadataRow(_ label: String, _ value: String) -> some View {
@@ -146,14 +148,14 @@ struct TaskPDFDocumentView: View {
         guard let first = chunks.first else {
             return [AnyView(
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(AppFonts.pdfSectionHeader)
                     .frame(maxWidth: .infinity, alignment: .leading)
             )]
         }
         var result: [AnyView] = [AnyView(
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(AppFonts.pdfSectionHeader)
                 MarkdownText(content: first, baseFont: Self.bodyFont)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -214,13 +216,14 @@ struct TaskPDFDocumentView: View {
 
     // MARK: - Footer
 
-    private var footer: some View {
+    @ViewBuilder
+    private func footer() -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text("Agent Smith · generated \(generatedAt.formatted(Self.timestampStyle))")
             Spacer()
             Text("ID: \(task.id.uuidString)")
         }
-        .font(.system(size: 9))
+        .font(AppFonts.pdfFooter)
         .foregroundStyle(.tertiary)
     }
 }

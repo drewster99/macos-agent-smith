@@ -221,6 +221,19 @@ final class AppViewModel {
     /// Kept alive independently of `runtime` so task operations work even when agents aren't running.
     private var taskStore: TaskStore?
     private var channelStreamTask: Task<Void, Never>?
+    /// Coalesces channel-log persistence: every streamed message used to enqueue the full
+    /// `allPersistedMessages` array, making writes quadratic over a long session. We debounce
+    /// instead so only the last message in a burst triggers a single full-array snapshot.
+    private var channelLogPersistTask: Task<Void, Never>?
+    private static let channelLogPersistDebounce: Duration = .milliseconds(500)
+    /// Monotonic generation tokens that serialize the application of store snapshots to the
+    /// main-actor mirrors (`tasks`, `timerHistory`). Each `onChange` Task bumps the counter
+    /// at body start (synchronously on the serial main actor), captures its generation, then
+    /// — after the `await store.allTasks()` hop — applies only if still the latest. This makes
+    /// a burst of store mutations apply last-write-wins instead of letting two racing Tasks
+    /// resolve their awaits out of order and clobber newer data with older.
+    private var taskApplyGeneration: UInt64 = 0
+    private var timerApplyGeneration: UInt64 = 0
     let persistenceManager: PersistenceManager
 
     /// Closure that resolves an attachment's bytes from the per-session attachments
@@ -445,7 +458,10 @@ final class AppViewModel {
             await standaloneStore.setOnChange { [weak self, weak standaloneStore] in
                 Task { @MainActor [weak self, weak standaloneStore] in
                     guard let self, let store = standaloneStore else { return }
+                    self.taskApplyGeneration &+= 1
+                    let myGen = self.taskApplyGeneration
                     let allTasks = await store.allTasks()
+                    guard myGen == self.taskApplyGeneration else { return }
                     self.tasks = allTasks
                     self.persistTasks()
                 }
@@ -642,11 +658,20 @@ final class AppViewModel {
         }
 
         let liveTaskStore = await newRuntime.taskStore
+        // Detach the standalone store's callback before adopting the live one. Otherwise a
+        // late mutation on the now-orphaned standalone store would fire its onChange, win the
+        // generation race with fresh data from the WRONG (stale) store, and clobber `tasks`.
+        if let oldStore = self.taskStore, oldStore !== liveTaskStore {
+            await oldStore.setOnChange { }
+        }
         self.taskStore = liveTaskStore
         await liveTaskStore.setOnChange { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.taskApplyGeneration &+= 1
+                let myGen = self.taskApplyGeneration
                 let allTasks = await liveTaskStore.allTasks()
+                guard myGen == self.taskApplyGeneration else { return }
                 self.tasks = allTasks
                 self.persistTasks()
             }
@@ -682,7 +707,10 @@ final class AppViewModel {
         await eventLog.setOnChange { [weak self, weak eventLog] in
             Task { @MainActor [weak self, weak eventLog] in
                 guard let self, let log = eventLog else { return }
+                self.timerApplyGeneration &+= 1
+                let myGen = self.timerApplyGeneration
                 let snapshot = await log.allEvents()
+                guard myGen == self.timerApplyGeneration else { return }
                 self.timerHistory = snapshot
                 self.persistTimerEvents(snapshot)
             }
@@ -1128,7 +1156,19 @@ final class AppViewModel {
     /// has hit disk. Also enqueues one final snapshot per file so the
     /// post-stop state (e.g., running tasks flipped to interrupted above) is
     /// captured in the final write.
+    /// Drains all per-session writers to disk on app termination, regardless of whether the
+    /// runtime is running. `stopAll()` early-returns when `runtime == nil`, so on a normal
+    /// Cmd-Q the per-session flush would otherwise never run; this entry point lets the
+    /// app-termination hook force the same drain unconditionally.
+    public func flushForTermination() async {
+        await flushPersistence()
+    }
+
     private func flushPersistence() async {
+        // Cancel the debounce so it can't fire a redundant full-array write after this
+        // authoritative flush; the enqueue below already captures the final state.
+        channelLogPersistTask?.cancel()
+        channelLogPersistTask = nil
         await channelLogWriter.enqueue(allPersistedMessages)
         await tasksWriter.enqueue(tasks)
         let finalState = SessionState(
@@ -1333,9 +1373,21 @@ final class AppViewModel {
     }
 
     private func persistMessages() {
-        let snapshot = allPersistedMessages
-        let writer = channelLogWriter
-        Task { await writer.enqueue(snapshot) }
+        // Debounce: cancel any pending write and schedule a fresh one. During a streaming
+        // burst this collapses N full-array enqueues into a single snapshot taken once the
+        // stream goes quiet, avoiding the prior O(n)-per-message copy. The authoritative
+        // final write happens in flushPersistence(), which also cancels this task.
+        channelLogPersistTask?.cancel()
+        channelLogPersistTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: Self.channelLogPersistDebounce)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            let snapshot = self.allPersistedMessages
+            await self.channelLogWriter.enqueue(snapshot)
+        }
     }
 
     private func persistTasks() {

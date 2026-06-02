@@ -55,28 +55,51 @@ actor InstalledApplicationsRegistry {
 
     private let scanner = InstalledApplicationsScanner()
     private var cached: [InstalledApplication]?
-    private var indexByBundleID: [String: InstalledApplication] = [:]
+    private var scanTask: Task<[InstalledApplication], Never>?
+    /// Monotonic token identifying the current in-flight scan. `Task` is a value
+    /// type and can't be compared with `===`, so we tag each scan and only let a
+    /// finishing scan promote its result if its token still matches — i.e. no
+    /// `refresh()` (which bumps the token) superseded it mid-walk.
+    private var scanToken = 0
 
     public init() {}
 
     /// Returns the cached scan, performing a fresh scan on first access.
+    ///
+    /// Single-flight: concurrent callers that arrive while a scan is in progress
+    /// await the same `scanTask` rather than each kicking off a duplicate disk
+    /// walk. The cache is only promoted from the task that owns the in-flight
+    /// scan — if `refresh()` swapped `scanTask` out from under us mid-scan, the
+    /// stale result is dropped instead of clobbering the fresher one.
     public func all() async -> [InstalledApplication] {
         if let cached { return cached }
-        let apps = await scanner.scan()
-        cached = apps
-        indexByBundleID = Dictionary(
-            apps.compactMap { app in app.bundleIdentifier.map { ($0, app) } },
-            uniquingKeysWith: { first, _ in first }
-        )
+        if let scanTask { return await scanTask.value }
+
+        // Capture only the scanner, not `self`, so the detached scan can't
+        // retain the actor for the duration of a disk walk.
+        let scanner = self.scanner
+        scanToken &+= 1
+        let myToken = scanToken
+        let task = Task { await scanner.scan() }
+        scanTask = task
+        let apps = await task.value
+        if scanToken == myToken {
+            cached = apps
+            scanTask = nil
+        }
         return apps
     }
 
     /// Look up an app by exact bundle identifier (case-insensitive).
     public func find(bundleID: String) async -> InstalledApplication? {
-        _ = await all()
-        if let exact = indexByBundleID[bundleID] { return exact }
+        // Build the lookup from the value `all()` returned, never from a re-read
+        // actor field: a concurrent `refresh()` could have cleared that field
+        // across the await above, producing a spurious nil.
+        let apps = await all()
+        let index = Self.makeIndex(apps)
+        if let hit = index[bundleID] { return hit }
         let lower = bundleID.lowercased()
-        return indexByBundleID.first { $0.key.lowercased() == lower }?.value
+        return index.first { $0.key.lowercased() == lower }?.value
     }
 
     /// Fuzzy match by bundle identifier or app filename. Substring, case-insensitive.
@@ -104,8 +127,18 @@ actor InstalledApplicationsRegistry {
     /// Force a fresh disk scan, replacing the cache.
     public func refresh() async {
         cached = nil
-        indexByBundleID = [:]
+        scanTask = nil
+        // Bump the token so any scan still in flight won't promote its now-stale
+        // result over the fresh walk we're about to start.
+        scanToken &+= 1
         _ = await all()
+    }
+
+    private static func makeIndex(_ apps: [InstalledApplication]) -> [String: InstalledApplication] {
+        Dictionary(
+            apps.compactMap { app in app.bundleIdentifier.map { ($0, app) } },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 }
 

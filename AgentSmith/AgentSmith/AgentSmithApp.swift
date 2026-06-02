@@ -5,16 +5,43 @@ import os
 
 nonisolated private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
 
+/// App delegate whose sole job is to drain persistence on quit. SwiftUI's `App` has no
+/// termination hook, so without this a normal Cmd-Q skips `SessionManager.flushAll()` and
+/// loses debounced channel-log writes, buffered usage records, and dirty memory retrieval
+/// stats. `applicationShouldTerminate` defers termination until the async flush completes.
+final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    /// Set once by `AgentSmithApp.init`. Runs the cross-session persistence drain on quit.
+    @MainActor static var flushHandler: (@MainActor () async -> Void)?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let handler = AppLifecycleDelegate.flushHandler else { return .terminateNow }
+        // Defer the actual quit until the async flush finishes, then signal AppKit to proceed.
+        Task { @MainActor in
+            await handler()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+}
+
 @main
 struct AgentSmithApp: App {
     @State private var shared: SharedAppState
     @State private var sessionManager: SessionManager
+    @NSApplicationDelegateAdaptor(AppLifecycleDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
 
     init() {
         let sharedState = SharedAppState()
         _shared = State(initialValue: sharedState)
-        _sessionManager = State(initialValue: SessionManager(shared: sharedState))
+        let manager = SessionManager(shared: sharedState)
+        _sessionManager = State(initialValue: manager)
+        // Capture the SessionManager reference (a class, so this stays valid after @State
+        // wrapping) for the quit-time flush. Set here in init so the handler exists before
+        // any window appears and the user could quit.
+        AppLifecycleDelegate.flushHandler = { [manager] in
+            await manager.flushAll()
+        }
         // Enable native NSWindow tabbing so multiple session windows auto-tab (and can be
         // dragged out to detach).
         NSWindow.allowsAutomaticWindowTabbing = true

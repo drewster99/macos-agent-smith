@@ -124,6 +124,20 @@ public actor TaskStore {
         }
     }
 
+    /// Atomically transitions a task to `newStatus` only if its current status equals
+    /// `expected`, returning whether the transition was applied. The compare and the write
+    /// run in a single synchronous actor hop (no `await` between them), so a caller acting on
+    /// a stale snapshot cannot clobber a task that has since moved off `expected` — e.g. a
+    /// `task_complete` landing `.completed` after a self-terminating agent snapshotted the
+    /// task as `.running` and tried to fail it. Routes through `updateStatus` so terminal
+    /// side-effects (`completedAt`, `onTaskTerminated`) stay consistent.
+    @discardableResult
+    public func updateStatus(id: UUID, ifCurrentlyEquals expected: AgentTask.Status, to newStatus: AgentTask.Status) -> Bool {
+        guard tasks[id]?.status == expected else { return false }
+        updateStatus(id: id, status: newStatus)
+        return true
+    }
+
     /// Resets a failed task's terminal state so it can be retried via `run_task`. Clears
     /// `result`, `commentary`, and `completedAt`; the caller is responsible for transitioning
     /// the status back to `.pending` (or via run_task → restart). Returns false if the task

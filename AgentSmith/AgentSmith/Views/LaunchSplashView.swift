@@ -45,11 +45,18 @@ struct LaunchSplashView: View {
             withAnimation(.easeOut(duration: entryDuration)) {
                 phase = .visible
             }
-            try? await Task.sleep(nanoseconds: UInt64((entryDuration + holdDuration) * 1_000_000_000))
-            withAnimation(.easeIn(duration: exitDuration)) {
-                phase = .fadingOut
+            do {
+                try await Task.sleep(nanoseconds: UInt64((entryDuration + holdDuration) * 1_000_000_000))
+                withAnimation(.easeIn(duration: exitDuration)) {
+                    phase = .fadingOut
+                }
+                try await Task.sleep(nanoseconds: UInt64(exitDuration * 1_000_000_000))
+            } catch {
+                // Task.sleep only throws on cancellation/teardown; in that case the
+                // splash is being torn down, so don't fire the completion callback.
+                return
             }
-            try? await Task.sleep(nanoseconds: UInt64(exitDuration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
             onFinished()
         }
     }

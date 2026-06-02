@@ -417,7 +417,8 @@ private struct ProviderEditorSheet: View {
         .padding(20)
         .frame(minWidth: 450)
         .onChange(of: state.apiType) { _, newType in
-            applyDefaultEndpoint(for: newType)
+            // Project rule: defer the @State mutation out of .onChange.
+            DispatchQueue.main.async { applyDefaultEndpoint(for: newType) }
         }
         .alert("Save Error", isPresented: Binding(
             get: { saveError != nil },
@@ -468,8 +469,10 @@ private struct ProviderEditorSheet: View {
     }
 
     private func applyDefaultEndpoint(for type: ProviderAPIType) {
-        state.endpointString = type.defaultEndpoint.absoluteString
+        // Only auto-fill in add mode. In edit mode the endpoint (and name) may be
+        // a user's customized value, and a type change must not silently wipe it.
         if state.mode == .add {
+            state.endpointString = type.defaultEndpoint.absoluteString
             let autoFilledNames = Set(ProviderAPIType.allCases.map(\.displayName))
             if state.name.isEmpty || autoFilledNames.contains(state.name) {
                 state.name = type.displayName

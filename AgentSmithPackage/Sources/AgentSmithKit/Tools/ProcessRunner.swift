@@ -50,6 +50,12 @@ enum ProcessRunner {
             let target = ownsProcessGroup.withLock { $0 } ? -pid : pid
             kill(target, SIGTERM)
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                // The SIGTERM may have already reaped the process; by the time
+                // this fires the pid could have been recycled onto an unrelated
+                // process. Signal 0 delivers nothing and returns 0 only while the
+                // original target/group is still alive, so it gates the escalation
+                // against killing an innocent bystander.
+                guard kill(target, 0) == 0 else { return }
                 kill(target, SIGKILL)
             }
         }

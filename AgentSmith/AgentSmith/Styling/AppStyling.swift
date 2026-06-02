@@ -201,6 +201,18 @@ enum AppFonts {
     static let aiCommentaryTitle = Font.subheadline.weight(.semibold)
     /// Body font for the AI Commentary inset.
     static let aiCommentaryBody = Font.callout
+
+    // MARK: PDF export (TaskPDFDocumentView)
+    // Fixed point sizes (not Dynamic Type styles) because these render into a fixed-size
+    // PDF page via ImageRenderer, where the document layout must be deterministic.
+    /// 22pt bold — PDF document title.
+    static let pdfTitle = Font.system(size: 22, weight: .bold)
+    /// 12pt — PDF body, subtitle, and metadata text.
+    static let pdfBody = Font.system(size: 12)
+    /// 15pt semibold — PDF section headings (Description / Summary / Result).
+    static let pdfSectionHeader = Font.system(size: 15, weight: .semibold)
+    /// 9pt — PDF footer line.
+    static let pdfFooter = Font.system(size: 9)
 }
 
 /// Pricing display formatting.

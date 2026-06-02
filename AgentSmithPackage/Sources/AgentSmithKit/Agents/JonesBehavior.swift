@@ -106,7 +106,7 @@ enum JonesBehavior {
         - A `file_write` or `file_edit` targets an existing file and you want to see what it currently contains
         - You need to verify that a modification is consistent with the file's purpose and the user's intent
         - A `bash` command references a script file and you want to check what it does
-        - When possible, use parallel file reads for all the files you might be interested in. You do this by issuing multiple `file_read` calls in a single response. Up to 20 at a time is fine.
+        - When possible, use parallel file reads for all the files you might be interested in. You do this by issuing multiple `file_read` calls in a single response. You can read as many files as you need.
 
         You must still output exactly one verdict line (SAFE/WARN/UNSAFE/ABORT) after any file reads.
 

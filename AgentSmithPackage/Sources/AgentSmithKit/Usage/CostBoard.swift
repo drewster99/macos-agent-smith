@@ -151,27 +151,62 @@ public actor CostBoard {
 
         let intervals = currentIntervals(now: now)
         let priors = priorIntervals(currentIntervals: intervals)
+
+        // Decide which windows rolled from the snapshot we observe up front, but do
+        // NOT capture the snapshot's *values* yet: the `sumCost` awaits below suspend
+        // the actor, during which `recordInserted` may apply incremental updates. If
+        // we captured `var s = snapshot` before the awaits and wrote it back after,
+        // we'd clobber those concurrent increments. So we compute every sum into a
+        // local first, then re-read the snapshot and apply in one non-suspended write.
+        let dayRolled = !snapshot.todayInterval.contains(now)
+        let weekRolled = !snapshot.weekInterval.contains(now)
+        let monthRolled = !snapshot.monthInterval.contains(now)
+        let yearRolled = !snapshot.yearInterval.contains(now)
+
+        // Day rollover: today's current becomes prior, current resets to whatever
+        // (if anything) was logged since the new boundary. Same shape for the other
+        // windows. All awaits happen here, before the snapshot is re-read.
+        var newTodayPrior = 0.0, newTodayCurrent = 0.0
+        if dayRolled {
+            newTodayPrior = await sumCost(in: priors.day)
+            newTodayCurrent = await sumCost(in: intervals.day)
+        }
+        var newWeekPrior = 0.0, newWeekCurrent = 0.0
+        if weekRolled {
+            newWeekPrior = await sumCost(in: priors.week)
+            newWeekCurrent = await sumCost(in: intervals.week)
+        }
+        var newMonthPrior = 0.0, newMonthCurrent = 0.0
+        if monthRolled {
+            newMonthPrior = await sumCost(in: priors.month)
+            newMonthCurrent = await sumCost(in: intervals.month)
+        }
+        var newYearPrior = 0.0, newYearCurrent = 0.0
+        if yearRolled {
+            newYearPrior = await sumCost(in: priors.year)
+            newYearCurrent = await sumCost(in: intervals.year)
+        }
+
+        // Critical section: no `await` between this read and the write-back below.
         var s = snapshot
-        if !s.todayInterval.contains(now) {
-            // Day rollover: today's current becomes prior, current resets to whatever
-            // (if anything) was logged since the new boundary.
-            s.todayPrior = await sumCost(in: priors.day)
-            s.todayCurrent = await sumCost(in: intervals.day)
+        if dayRolled {
+            s.todayPrior = newTodayPrior
+            s.todayCurrent = newTodayCurrent
             s.todayInterval = intervals.day
         }
-        if !s.weekInterval.contains(now) {
-            s.weekPrior = await sumCost(in: priors.week)
-            s.weekCurrent = await sumCost(in: intervals.week)
+        if weekRolled {
+            s.weekPrior = newWeekPrior
+            s.weekCurrent = newWeekCurrent
             s.weekInterval = intervals.week
         }
-        if !s.monthInterval.contains(now) {
-            s.monthPrior = await sumCost(in: priors.month)
-            s.monthCurrent = await sumCost(in: intervals.month)
+        if monthRolled {
+            s.monthPrior = newMonthPrior
+            s.monthCurrent = newMonthCurrent
             s.monthInterval = intervals.month
         }
-        if !s.yearInterval.contains(now) {
-            s.yearPrior = await sumCost(in: priors.year)
-            s.yearCurrent = await sumCost(in: intervals.year)
+        if yearRolled {
+            s.yearPrior = newYearPrior
+            s.yearCurrent = newYearCurrent
             s.yearInterval = intervals.year
         }
         s.asOf = now
@@ -208,6 +243,12 @@ public actor CostBoard {
         // Roll any elapsed boundaries first so a record that arrives shortly after
         // midnight is attributed to the new "today", not the prior one we still had cached.
         await refreshIfBoundariesElapsed()
+        // Critical-section invariant: the read of `snapshot`, the mutations, and
+        // the write-back must form one non-suspended region — there must be no
+        // `await` between `var s = snapshot` and `snapshot = s`, or a concurrent
+        // `recordInserted`/`refreshIfBoundariesElapsed` running at that suspension
+        // point would clobber this increment. This relies on `costOf` being
+        // synchronous (it is) so the cost is computed without yielding the actor.
         let cost = costOf(record)
         guard cost > 0 else { return }
         var s = snapshot

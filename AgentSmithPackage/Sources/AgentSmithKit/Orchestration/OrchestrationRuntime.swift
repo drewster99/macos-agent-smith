@@ -5,6 +5,22 @@ import os
 
 private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
 
+/// Cached date formatters for status/digest lines. `DateFormatter` is expensive to
+/// construct, so we build these once instead of per status fire. Safe to share: each is
+/// configured at init and never mutated afterward, so concurrent `string(from:)` is fine.
+private enum RuntimeDateFormatters {
+    static let timestamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+    static let clock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+}
+
 /// Thread-safe set for tracking files read during an agent session.
 /// Used by FileEditTool to verify a file was read before editing.
 ///
@@ -36,6 +52,14 @@ public actor OrchestrationRuntime {
     private var smith: AgentActor?
     private var smithID: UUID?
     private var agents: [UUID: AgentActor] = [:]
+
+    /// Set synchronously at the top of `start()` (before its first `await`) and cleared via
+    /// `defer`. `smith` isn't assigned until ~190 lines and several suspension points into
+    /// `start()`, so `guard smith == nil` alone lets a second concurrently-admitted `start()`
+    /// (e.g. a direct cold-launch racing a queued restart) slip through and build a duplicate
+    /// Smith / monitoring timer / power assertion, orphaning the first. This flag closes that
+    /// window within actor isolation.
+    private var startInProgress = false
 
     /// Current Brown agent ID (only one active at a time).
     private var currentBrownID: UUID?
@@ -685,8 +709,18 @@ public actor OrchestrationRuntime {
     /// - Parameter lastUserMessage: The most recent user message captured before a restart,
     ///   included in the initial instruction so new Smith doesn't lose user context.
     public func start(resumingTaskID: UUID? = nil, lastUserMessage: String? = nil) async {
-        guard smith == nil else { return }
+        guard !startInProgress, smith == nil else {
+            // Bailing — but if we were asked to resume a specific task, don't silently drop
+            // it (the historical `guard smith == nil` drop bug). Re-route it through the
+            // restart queue so it runs once the in-flight start has finished.
+            if let resumingTaskID {
+                restartForNewTask(taskID: resumingTaskID)
+            }
+            return
+        }
         guard !aborted else { return }
+        startInProgress = true
+        defer { startInProgress = false }
 
         // Mint a fresh session ID for this run. Propagated to every agent, evaluator,
         // and summarizer so their UsageRecords carry it, and published to the
@@ -1137,8 +1171,7 @@ public actor OrchestrationRuntime {
             }
 
             if !scheduledTasks.isEmpty {
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                let formatter = RuntimeDateFormatters.timestamp
                 let list = scheduledTasks
                     .compactMap { task -> String? in
                         guard let fireAt = task.scheduledRunAt, fireAt > nowAtBoot else { return nil }
@@ -1841,9 +1874,14 @@ public actor OrchestrationRuntime {
         // Mark any running tasks assigned to this agent as failed — no agent is working on them anymore.
         // Trigger summarization for tasks that had progress (updates).
         let allTasks = await taskStore.allTasks()
-        for task in allTasks where task.assigneeIDs.contains(id) && task.status == .running {
-            await taskStore.updateStatus(id: task.id, status: .failed)
-            if !task.updates.isEmpty {
+        for task in allTasks where task.assigneeIDs.contains(id) {
+            // Compare-and-set: only fail the task if it is STILL `.running` at the moment of
+            // the write. A task that raced to `.completed`/`.awaitingReview` (via
+            // `task_complete`) after this snapshot must not be force-failed. `task.status`
+            // from the snapshot is not trustworthy here, so the decision is made atomically
+            // inside the store.
+            let didFail = await taskStore.updateStatus(id: task.id, ifCurrentlyEquals: .running, to: .failed)
+            if didFail && !task.updates.isEmpty {
                 Task.detached { [weak self] in
                     guard let self else { return }
                     await self.summarizeAndEmbedTask(taskID: task.id)
@@ -1973,8 +2011,7 @@ public actor OrchestrationRuntime {
             lines.append("- Top tools: \(topTools)")
         }
         if let lastUpdate, let lastUpdateAt {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm:ss"
+            let formatter = RuntimeDateFormatters.clock
             let preview = lastUpdate.replacingOccurrences(of: "\n", with: " ")
             let trimmed = preview.count > 200 ? String(preview.prefix(200)) + "…" : preview
             lines.append("- Last task_update at \(formatter.string(from: lastUpdateAt)): \(trimmed)")

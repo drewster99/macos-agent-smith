@@ -12,10 +12,17 @@ public actor UsageStore {
     private let persistence: PersistenceManager
     private var isDirty = false
     private var flushTask: Task<Void, Never>?
-    /// Fired (fire-and-forget) on every `append`. Subscribers maintain their own
-    /// incremental aggregates without re-scanning `records`. Set via
-    /// `setOnInsert(_:)`; multiple subscribers should compose into one closure.
+    /// Fired on every `append`. Subscribers maintain their own incremental
+    /// aggregates without re-scanning `records`. Set via `setOnInsert(_:)`;
+    /// multiple subscribers should compose into one closure. Delivery is
+    /// serialized in append order through `pendingInserts`/`deliveryTask` (see
+    /// `append`), so an `async` handler that suspends never observes records out
+    /// of order or races a sibling delivery.
     private var onInsert: (@Sendable (UsageRecord) async -> Void)?
+    /// Records appended but not yet delivered to `onInsert`, in append order.
+    private var pendingInserts: [UsageRecord] = []
+    /// The single in-flight drain of `pendingInserts`, or `nil` when idle.
+    private var deliveryTask: Task<Void, Never>?
 
     public init(persistence: PersistenceManager) {
         self.persistence = persistence
@@ -41,8 +48,33 @@ public actor UsageStore {
     public func append(_ record: UsageRecord) {
         records.append(record)
         scheduleFlush()
-        if let handler = onInsert {
-            Task { await handler(record) }
+        // Deliver to `onInsert` in append order via a single drain task. The prior
+        // per-append `Task { await handler(record) }` let concurrent deliveries
+        // race — an `async` handler could observe records out of order. Buffer
+        // here and start one drain if none is running.
+        guard onInsert != nil else { return }
+        pendingInserts.append(record)
+        if deliveryTask == nil {
+            deliveryTask = Task { [weak self] in
+                await self?.drainInserts()
+            }
+        }
+    }
+
+    /// Delivers buffered inserts to `onInsert` one at a time, in append order.
+    private func drainInserts() async {
+        while true {
+            // Re-read both on every iteration: this actor is reentrant, so the
+            // handler and buffer can change across the `await handler(next)` below.
+            guard let handler = onInsert, !pendingInserts.isEmpty else {
+                // If `onInsert` is transiently nil, do NOT discard `pendingInserts`
+                // — leave them buffered and stop. They resume when a handler is set
+                // (a fresh `append` while a handler exists restarts the drain).
+                deliveryTask = nil
+                return
+            }
+            let next = pendingInserts.removeFirst()
+            await handler(next)
         }
     }
 

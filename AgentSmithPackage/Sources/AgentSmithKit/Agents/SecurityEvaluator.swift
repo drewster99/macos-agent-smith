@@ -128,14 +128,12 @@ actor SecurityEvaluator {
     private var consecutiveEvaluationFailures = 0
     private static let maxConsecutiveFailures = 20
     /// Cap on parse-failure retries within a single evaluation. Each unparseable verdict
-    /// costs one retry; LLM call errors also cost one retry. Independent of file-read
-    /// rounds so a chatty Jones reading 20 files doesn't burn this budget.
+    /// costs one retry; LLM call errors also cost one retry. File_read rounds are NOT
+    /// capped — Jones may read as many files as it needs before committing to a verdict;
+    /// the loop ends only on a parsed verdict, parse-retry exhaustion, or task
+    /// cancellation. (A pathological model that never stops reading is bounded only by
+    /// task cancellation — revisit if that ever shows up in practice.)
     private static let maxRetries = 5
-    /// Cap on file_read rounds within a single evaluation. Jones's prompt allows up to
-    /// 20 file_reads per round and the agent can issue several rounds; this caps the
-    /// loop so a model that keeps requesting reads without producing a verdict can't
-    /// run unbounded. Independent of `maxRetries`.
-    private static let maxFileReadRounds = 20
 
     /// Tool definition for file_read, presented to Jones's LLM.
     private static let fileReadToolDef: LLMToolDefinition = {
@@ -272,15 +270,10 @@ actor SecurityEvaluator {
         let startTime = Date()
         var retryCount = 0
         var lastError: Error?
-        // File-read rounds and parse-failure retries are tracked separately so a Jones
-        // run that legitimately needs to read many files (the prompt allows up to 20)
-        // doesn't consume the budget that exists to recover from transient parse
-        // failures. Each loop iteration increments exactly one counter depending on
-        // whether the model returned tool_calls (file_read round) or text (verdict
-        // attempt — counted as a retry only on parse failure).
-        var fileReadRounds = 0
-        let maxFileReadRounds = Self.maxFileReadRounds
-        while retryCount < Self.maxRetries && fileReadRounds < maxFileReadRounds {
+        // Only parse-failure retries bound this loop. A file_read round (the model
+        // returned tool_calls) does NOT consume the retry budget and is not otherwise
+        // capped — Jones reads as many files as it needs, then commits to a verdict.
+        while retryCount < Self.maxRetries {
             let response: LLMResponse
             let callLatencyMs: Int
             do {
@@ -312,7 +305,6 @@ actor SecurityEvaluator {
             var turnToolExecutionMs = 0
             var turnToolResultChars = 0
             if !response.toolCalls.isEmpty {
-                fileReadRounds += 1
                 // `.assistant(from:)` preserves reasoning + provider
                 // continuation (Anthropic thinking signatures / Gemini
                 // thoughtSignatures) so Jones's multi-turn file-read loop
@@ -399,7 +391,8 @@ actor SecurityEvaluator {
             return disposition
         }
 
-        // Exhausted retries or iteration limit — this evaluation fully failed.
+        // Exhausted parse-failure retries — this evaluation fully failed (the model
+        // could not produce a parseable verdict, or its LLM calls kept erroring).
         consecutiveEvaluationFailures += 1
 
         let lastErrorDescription = lastError?.localizedDescription
@@ -419,7 +412,7 @@ actor SecurityEvaluator {
             )
         }
 
-        var fallbackMessage = "Security evaluation failed after \(fileReadRounds) file-read rounds and \(retryCount) parse retries"
+        var fallbackMessage = "Security evaluation failed after \(retryCount) parse retries"
         if let desc = lastErrorDescription {
             fallbackMessage += "\nLast error: \(desc)"
         }

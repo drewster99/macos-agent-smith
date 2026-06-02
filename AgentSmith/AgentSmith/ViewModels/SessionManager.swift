@@ -173,6 +173,18 @@ final class SessionManager {
         shared.speechController.stopAll()
     }
 
+    /// Drains all persistence on app termination: every loaded session's per-session writers,
+    /// the shared usage store, and the shared memory store. Unlike `stopAll()`, this runs the
+    /// flush regardless of whether each session's runtime is running, so a normal Cmd-Q does
+    /// not lose buffered channel-log, usage, or retrieval-stat writes.
+    func flushAll() async {
+        for vm in viewModels.values {
+            await vm.flushForTermination()
+        }
+        await shared.usageStore.flush()
+        await shared.flushMemories()
+    }
+
     /// Is any session currently running?
     var isAnyRunning: Bool {
         viewModels.values.contains(where: \.isRunning)

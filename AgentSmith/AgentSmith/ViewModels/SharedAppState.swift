@@ -536,6 +536,26 @@ final class SharedAppState {
         storedTaskSummaries = await store.allTaskSummaries()
     }
 
+    /// Flushes the shared memory store to disk on app termination. First persists any pending
+    /// retrieval-stat bumps (which are deliberately decoupled from the corpus-change `onChange`
+    /// path to avoid re-serializing the full embedding corpus on every read), then enqueues a
+    /// final snapshot and drains both memory writers so no buffered writes are lost on quit.
+    public func flushMemories() async {
+        guard let store = memoryStore else { return }
+        // Persist any read-stat bumps that were withheld from the hot path. This fires
+        // onChange?(), routing through the normal persist path (which enqueues a snapshot).
+        await store.persistRetrievalStatsIfNeeded()
+        // Enqueue a final authoritative snapshot inline (awaited) so it is ordered before the
+        // flush below; the onChange-driven persist uses a detached Task whose completion we
+        // cannot await here.
+        let memories = await store.allMemories()
+        let taskSummaries = await store.allTaskSummaries()
+        await memoriesWriter.enqueue(memories)
+        await taskSummariesWriter.enqueue(taskSummaries)
+        await memoriesWriter.flush()
+        await taskSummariesWriter.flush()
+    }
+
     private func persistMemories(memoryStore: MemoryStore) {
         let memoriesWriter = memoriesWriter
         let summariesWriter = taskSummariesWriter

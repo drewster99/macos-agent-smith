@@ -102,23 +102,25 @@ struct FileWriteTool: AgentTool {
     static func checkPathRestriction(resolvedPath resolved: String) -> String? {
         let home = NSHomeDirectory()
 
-        // Block system directories.
-        // Lowercase both sides: APFS is case-insensitive so /SYSTEM/... bypasses a case-sensitive check.
+        // Block system directories. Entries must be bare (no trailing slash): isSubpath
+        // appends its own separator, so a trailing slash here would prevent the directory
+        // itself and its children from matching — opening these trees to writes.
         let systemPrefixes = [
-            "/etc", "/System", "/Library", "/usr/", "/bin/", "/sbin/",
-            "/var/", "/private/etc", "/private/var", "/dev/"
+            "/etc", "/System", "/Library", "/usr", "/bin", "/sbin",
+            "/var", "/private/etc", "/private/var", "/dev"
         ]
         for prefix in systemPrefixes {
-            if resolved.lowercased().hasPrefix(prefix.lowercased()) {
+            if PathNormalization.isSubpath(resolved, ofOrEqualTo: prefix) {
                 return "BLOCKED: Cannot write to system path '\(resolved)'"
             }
         }
 
-        // Block sensitive credential/config directories in home
+        // Block sensitive credential/config directories in home.
+        // Boundary-aware match so `~/.sshbackup` is not over-blocked as if under `~/.ssh`.
         let sensitiveDirs = [".ssh", ".gnupg", ".aws", ".config/gcloud", ".kube", ".docker"]
         for dir in sensitiveDirs {
             let dirPath = (home as NSString).appendingPathComponent(dir)
-            if resolved.lowercased().hasPrefix(dirPath.lowercased()) {
+            if PathNormalization.isSubpath(resolved, ofOrEqualTo: dirPath) {
                 return "BLOCKED: Cannot write to sensitive directory '\(resolved)'"
             }
         }
