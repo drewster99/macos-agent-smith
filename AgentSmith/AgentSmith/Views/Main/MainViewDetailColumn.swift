@@ -7,6 +7,7 @@ import AgentSmithKit
 struct MainViewDetailColumn: View {
     @Bindable var viewModel: AppViewModel
     let shared: SharedAppState
+    @Environment(\.openSettings) private var openSettings
     @Binding var isDropTargeted: Bool
     @Binding var selectedImageAttachment: Attachment?
     @FocusState.Binding var isLightboxFocused: Bool
@@ -44,6 +45,10 @@ struct MainViewDetailColumn: View {
                             fallbackTimestamp: timestamp
                         )
                     }
+                },
+                onOpenMCPSettings: {
+                    shared.settingsSelectedTab = .mcp
+                    openSettings()
                 },
                 displayPrefs: TimestampPreferences(
                     taskBanners: shared.showTimestampsOnTaskBanners,

@@ -8,6 +8,14 @@ public actor AgentActor {
     let configuration: AgentConfiguration
     private let provider: any LLMProvider
     private let tools: [any AgentTool]
+    /// Optional source of additional, dynamically-changing tools (currently MCP
+    /// server tools for Brown). Queried at the top of each turn so per-server/per-tool
+    /// toggles and `tools/list_changed` updates take effect on the next LLM call.
+    private let dynamicToolsProvider: (@Sendable () async -> [any AgentTool])?
+    /// The static `tools` merged with the latest `dynamicToolsProvider()` result.
+    /// Refreshed each turn by `refreshActiveTools()` and used for both tool-definition
+    /// assembly and tool-call dispatch.
+    private var activeTools: [any AgentTool]
     private let toolContext: ToolContext
 
     private var conversationHistory: [LLMMessage] = []
@@ -249,12 +257,15 @@ public actor AgentActor {
         configuration: AgentConfiguration,
         provider: any LLMProvider,
         tools: [any AgentTool],
-        toolContext: ToolContext
+        toolContext: ToolContext,
+        dynamicToolsProvider: (@Sendable () async -> [any AgentTool])? = nil
     ) {
         self.id = id
         self.configuration = configuration
         self.provider = provider
         self.tools = tools
+        self.activeTools = tools
+        self.dynamicToolsProvider = dynamicToolsProvider
         self.toolContext = toolContext
         self.pollInterval = configuration.pollInterval
         self.messageDebounceInterval = configuration.messageDebounceInterval
@@ -678,6 +689,19 @@ public actor AgentActor {
 
     // MARK: - Private
 
+    /// Refreshes `activeTools` by merging the static built-in tools with the latest
+    /// dynamic tools (MCP). Called at the top of each turn so toggles and server-side
+    /// `tools/list_changed` updates are reflected on the next LLM call. No-op for
+    /// agents without a dynamic provider (everyone except Brown today).
+    private func refreshActiveTools() async {
+        guard let provider = dynamicToolsProvider else {
+            activeTools = tools
+            return
+        }
+        let dynamic = await provider()
+        activeTools = tools + dynamic
+    }
+
     private func runLoop() async {
         while isRunning, !Task.isCancelled {
             // Re-inject deferred messages (e.g. task_complete held back from a previous batch)
@@ -762,11 +786,12 @@ public actor AgentActor {
                 // this point with `awaitingTaskReview == true`, but if any other wake
                 // source slips through (a stray scheduled wake, a future feature, a bug),
                 // Brown's LLM turn produces nothing he can act on.
+                await refreshActiveTools()
                 let toolDefinitions: [LLMToolDefinition]
                 if configuration.role == .brown && awaitingTaskReview {
                     toolDefinitions = []
                 } else {
-                    toolDefinitions = tools
+                    toolDefinitions = activeTools
                         .filter { $0.isAvailable(in: availabilityContext) }
                         .map { $0.definition(for: configuration.role) }
                 }
@@ -1268,7 +1293,7 @@ public actor AgentActor {
                 for call in segment.calls {
                     guard isRunning else { break }
                     let result: String
-                    if let tool = tools.first(where: { $0.name == call.name }) {
+                    if let tool = activeTools.first(where: { $0.name == call.name }) {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
                         } else {
@@ -1311,7 +1336,7 @@ public actor AgentActor {
                 var preRejections: [(batchIndex: Int, callID: String, result: String)] = []
                 for (batchIndex, call) in segment.calls.enumerated() {
                     guard isRunning else { break }
-                    guard let tool = tools.first(where: { $0.name == call.name }) else { continue }
+                    guard let tool = activeTools.first(where: { $0.name == call.name }) else { continue }
                     if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                         preRejections.append((batchIndex: batchIndex, callID: call.id, result: rejection))
                         continue
@@ -1473,7 +1498,7 @@ public actor AgentActor {
                 for (batchIndex, call) in segment.calls.enumerated() {
                     guard isRunning else { break }
                     let result: String
-                    if let tool = tools.first(where: { $0.name == call.name }) {
+                    if let tool = activeTools.first(where: { $0.name == call.name }) {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
                         } else if configuration.requiresToolApproval {

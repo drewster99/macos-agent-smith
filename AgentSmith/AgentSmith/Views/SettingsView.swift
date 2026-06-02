@@ -14,31 +14,38 @@ struct SettingsView: View {
     @State private var exportError: String?
 
     var body: some View {
-        TabView {
-            Tab("General", systemImage: "gearshape") {
+        TabView(selection: $shared.settingsSelectedTab) {
+            Tab("General", systemImage: "gearshape", value: SettingsTab.general) {
                 ScrollView {
                     generalTab()
                         .padding()
                 }
             }
 
-            Tab("Providers", systemImage: "server.rack") {
+            Tab("Providers", systemImage: "server.rack", value: SettingsTab.providers) {
                 ScrollView {
                     ProviderManagementView(llmKit: shared.llmKit)
                         .padding()
                 }
             }
 
-            Tab("Configurations", systemImage: "slider.horizontal.3") {
+            Tab("Configurations", systemImage: "slider.horizontal.3", value: SettingsTab.configurations) {
                 ScrollView {
                     configurationsTab()
                         .padding()
                 }
             }
 
-            Tab("Audio", systemImage: "speaker.wave.2") {
+            Tab("Audio", systemImage: "speaker.wave.2", value: SettingsTab.audio) {
                 ScrollView {
                     audioSettingsSection()
+                        .padding()
+                }
+            }
+
+            Tab("MCP Servers", systemImage: "network", value: SettingsTab.mcp) {
+                ScrollView {
+                    MCPServerManagementView(shared: shared)
                         .padding()
                 }
             }

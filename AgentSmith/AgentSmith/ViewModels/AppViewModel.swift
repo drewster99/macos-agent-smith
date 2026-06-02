@@ -218,6 +218,13 @@ final class AppViewModel {
     private let logger = Logger(subsystem: "com.agentsmith", category: "AppViewModel")
     private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
     private var runtime: OrchestrationRuntime?
+    /// Per-session MCP client host. Created once on first `start()` and reused across
+    /// runtime restarts so its subprocesses survive task restarts; torn down when the
+    /// session is closed (`shutdownMCP()`).
+    private var mcpHost: MCPClientHost?
+    /// Server IDs already announced as failed in this session's transcript, so a repeated
+    /// status push doesn't re-post. Cleared per server when it leaves the failed state.
+    private var mcpAnnouncedFailures: Set<UUID> = []
     /// Kept alive independently of `runtime` so task operations work even when agents aren't running.
     private var taskStore: TaskStore?
     private var channelStreamTask: Task<Void, Never>?
@@ -588,6 +595,29 @@ final class AppViewModel {
         // if a cap is changed mid-session.
         await newRuntime.setMaxAttachmentBytesPerFile(shared.maxAttachmentBytesPerFile)
         await newRuntime.setMaxAttachmentBytesPerMessage(shared.maxAttachmentBytesPerMessage)
+
+        // Per-session MCP host: create once and reuse across runtime restarts so a task
+        // restart never re-launches the configured servers. Observers push status to
+        // SharedAppState for the settings UI.
+        let mcpConfigs = shared.mcpServers
+        if mcpHost == nil {
+            let host = MCPClientHost(secretStore: shared.mcpSecretStore)
+            let sharedState = shared
+            await host.setObservers(
+                onToolsChanged: {},
+                onStatusChanged: { [weak self] statuses in
+                    Task { @MainActor in
+                        sharedState.reportMCPStatuses(statuses)
+                        self?.announceMCPFailuresIfNeeded(statuses)
+                    }
+                }
+            )
+            await host.start(configs: mcpConfigs)
+            shared.registerMCPHost(host)
+            mcpHost = host
+        }
+        await newRuntime.setMCPHost(mcpHost)
+
         runtime = newRuntime
         isRunning = true
 
@@ -1162,6 +1192,41 @@ final class AppViewModel {
     /// app-termination hook force the same drain unconditionally.
     public func flushForTermination() async {
         await flushPersistence()
+        await shutdownMCP()
+    }
+
+    /// Posts a one-time system message to this session's transcript when a configured MCP
+    /// server transitions into the failed state, so a load failure is visible without
+    /// opening Settings. Re-arms if the server later recovers and fails again.
+    private func announceMCPFailuresIfNeeded(_ statuses: [UUID: MCPServerStatus]) {
+        guard let runtime else { return }
+        for (id, status) in statuses {
+            if status.state == .failed {
+                guard !mcpAnnouncedFailures.contains(id) else { continue }
+                mcpAnnouncedFailures.insert(id)
+                let name = shared.mcpServers.first(where: { $0.id == id })?.name ?? "An MCP server"
+                let reason = (status.error?.split(separator: "\n").first).map { " — \($0)" } ?? ""
+                let content = "⚠️ MCP server “\(name)” failed to load\(reason). Open Settings → MCP Servers for the full error."
+                Task {
+                    let channel = await runtime.channel
+                    await channel.post(ChannelMessage(
+                        sender: .system,
+                        content: content,
+                        metadata: ["messageKind": .string("mcp_status"), "isWarning": .bool(true)]
+                    ))
+                }
+            } else {
+                mcpAnnouncedFailures.remove(id)
+            }
+        }
+    }
+
+    /// Terminates this session's MCP server subprocesses. Called on app termination;
+    /// individual server disables are handled live via `SharedAppState.updateMCPServers`.
+    func shutdownMCP() async {
+        guard let host = mcpHost else { return }
+        await host.shutdown()
+        mcpHost = nil
     }
 
     private func flushPersistence() async {

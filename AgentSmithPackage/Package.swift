@@ -17,14 +17,18 @@ let package = Package(
         // Local path dependency during the MLX embedding migration. Will switch to
         // a versioned git dependency on https://github.com/drewster99/swift-semantic-search
         // once the package is stable.
-        .package(path: "../../swift-semantic-search")
+        .package(path: "../../swift-semantic-search"),
+        // Official Model Context Protocol Swift SDK. Provides the MCP client used to
+        // talk to user-configured stdio MCP servers.
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk", .upToNextMinor(from: "0.12.1"))
     ],
     targets: [
         .target(
             name: "AgentSmithKit",
             dependencies: [
                 .product(name: "SwiftLLMKit", package: "swift-llm-kit"),
-                .product(name: "SemanticSearch", package: "swift-semantic-search")
+                .product(name: "SemanticSearch", package: "swift-semantic-search"),
+                .product(name: "MCP", package: "swift-sdk")
             ],
             path: "Sources/AgentSmithKit"
         ),

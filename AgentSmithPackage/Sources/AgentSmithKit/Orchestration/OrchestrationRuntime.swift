@@ -169,6 +169,12 @@ public actor OrchestrationRuntime {
     /// "no attachments resolved" — they still post text-only versions of the tool action.
     private var attachmentRegistry: AttachmentRegistry?
 
+    /// Per-session MCP client host, supplying Brown's dynamic (server-provided) tools.
+    /// Owned by the app layer (`AppViewModel`) so its subprocesses survive runtime
+    /// restarts (`restartForNewTask`); the runtime only borrows it to feed Brown's
+    /// per-turn tool list. `nil` when no MCP servers are configured.
+    private var mcpHost: MCPClientHost?
+
     /// Per-message aggregate attachment cap (bytes). Tools that resolve `attachment_ids`
     /// or `attachment_paths` enforce this against the sum of `byteCount` for the
     /// resolved set, rejecting before the channel post if exceeded. Defaults to a
@@ -613,6 +619,12 @@ public actor OrchestrationRuntime {
     /// Returns the active per-message cap. Used by tool-side resolvers to short-circuit
     /// before posting the channel message.
     public func currentMaxAttachmentBytesPerMessage() -> Int { maxAttachmentBytesPerMessage }
+
+    /// Injects the session's MCP client host. The runtime borrows it to supply Brown's
+    /// dynamic, server-provided tools each turn; lifecycle stays with the app layer.
+    public func setMCPHost(_ host: MCPClientHost?) {
+        mcpHost = host
+    }
 
     /// Registers a callback fired when an agent comes online, with its role and tool names.
     public func setOnAgentStarted(_ handler: @escaping @Sendable (AgentRole, [String]) -> Void) {
@@ -1467,6 +1479,15 @@ public actor OrchestrationRuntime {
         // the channel so it does not clutter the user-visible transcript.
         let ghAuthSnapshot = await GhAuthChecker.authStatus()
 
+        // Brown's dynamic (MCP server) tools, refreshed each turn. Built explicitly to
+        // keep the closure's `@Sendable` capture of the host actor unambiguous.
+        let mcpToolsProvider: (@Sendable () async -> [any AgentTool])?
+        if let host = mcpHost {
+            mcpToolsProvider = { await host.currentBridgedTools() }
+        } else {
+            mcpToolsProvider = nil
+        }
+
         let brownAgent = AgentActor(
             id: brownID,
             configuration: AgentConfiguration(
@@ -1483,7 +1504,8 @@ public actor OrchestrationRuntime {
             ),
             provider: brownProvider,
             tools: BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot),
-            toolContext: brownContext
+            toolContext: brownContext,
+            dynamicToolsProvider: mcpToolsProvider
         )
         await brownAgent.setSecurityEvaluator(evaluator)
         await brownAgent.setUsageStore(usageStore)

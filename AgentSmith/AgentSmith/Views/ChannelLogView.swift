@@ -140,6 +140,8 @@ private enum ChannelBannerKind: String {
     case taskSummarized = "task_summarized"
     case memorySaved = "memory_saved"
     case memorySearched = "memory_searched"
+    /// An MCP server failed to load — rendered as a clickable banner that opens Settings.
+    case mcpFailed = "mcp_status"
 }
 
 /// Color-coded scrolling message stream with attachment display.
@@ -160,6 +162,8 @@ struct ChannelLogView: View, Equatable {
     /// banner's task id plus its own fields so the handler can fall back to them when the
     /// underlying task has been permanently deleted.
     var onExportTaskPDF: (_ taskID: UUID, _ title: String, _ result: String?, _ timestamp: Date) -> Void
+    /// Invoked when the user clicks an MCP-server-failed banner to open Settings → MCP Servers.
+    var onOpenMCPSettings: () -> Void
     /// Display toggles forwarded into the environment so each banner / row reads them
     /// without having to thread parameters through every initializer.
     var displayPrefs: TimestampPreferences
@@ -427,6 +431,12 @@ struct ChannelLogView: View, Equatable {
                 memoryResults: message.stringMetadata("memoryResults"),
                 taskResults: message.stringMetadata("taskResults")
             )
+        case .mcpFailed:
+            MCPFailedBanner(
+                content: message.content,
+                timestamp: message.timestamp,
+                onOpenSettings: onOpenMCPSettings
+            )
         case .none:
             // Plain message — fall through to the generic row.
             MessageRow(
@@ -438,6 +448,43 @@ struct ChannelLogView: View, Equatable {
             )
             .equatable()
         }
+    }
+}
+
+/// Banner shown when an MCP server fails to load. The whole row is a button that opens
+/// Settings → MCP Servers, where the full error/stderr is available.
+private struct MCPFailedBanner: View {
+    let content: String
+    let timestamp: Date
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        Button(action: onOpenSettings) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(content)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                    Text("Open MCP Server settings")
+                        .font(.caption2)
+                        .foregroundStyle(.blue)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
     }
 }
 

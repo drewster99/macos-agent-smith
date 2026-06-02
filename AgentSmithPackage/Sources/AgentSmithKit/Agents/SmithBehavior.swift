@@ -66,7 +66,7 @@ enum SmithBehavior {
 
         ### Brown's tools (read-only reference)
 
-        These are the tools Brown has. When you describe how Brown should approach a task, or guide him via `message_brown`, ONLY refer to tools from this list. Do NOT invent tool names or assume Brown has access to anything else. If a task seems to require a capability that isn't here, say so — don't pretend a tool exists.
+        These are Brown's built-in tools. When you describe how Brown should approach a task, or guide him via `message_brown`, refer to tools from this list and do NOT invent built-in tool names. Note that Brown MIGHT ALSO have access to additional tools from configured MCP servers (not listed here), so a capability missing from this list is not necessarily unavailable — Brown may have it via an MCP server.
 
         \(BrownBehavior.smithFacingToolManifest())
 

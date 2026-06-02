@@ -12,6 +12,11 @@ import os
 /// Memories and task summaries are shared across all sessions — they represent facts
 /// Smith has learned about the user and the world. Per-session `OrchestrationRuntime`
 /// instances receive `sharedMemoryStore` so each Smith reads and writes the same pool.
+/// Identifies a tab in the Settings window, for selection binding and deep-linking.
+enum SettingsTab: Hashable {
+    case general, providers, configurations, audio, mcp
+}
+
 @Observable
 @MainActor
 final class SharedAppState {
@@ -222,6 +227,31 @@ final class SharedAppState {
     /// Base-path persistence manager for shared files (memories, usage, overrides, sessions list).
     let basePersistence: PersistenceManager
 
+    /// Globally-configured MCP servers (shared across all sessions). Loaded from
+    /// `mcp_servers.json` at launch; edited via the MCP settings tab. Secret env/arg
+    /// values live in `mcpSecretStore` (Keychain), never in this list.
+    var mcpServers: [MCPServerConfig] = []
+
+    /// Keychain-backed store for MCP server secrets.
+    let mcpSecretStore = MCPSecretStore()
+
+    /// Latest per-server connection status reported by any live session host, keyed by
+    /// server ID. Drives the MCP settings tab's status/stderr display. Latest report wins.
+    var mcpServerStatuses: [UUID: MCPServerStatus] = [:]
+
+    /// Which Settings tab is selected. Bound by `SettingsView`'s `TabView` and set
+    /// programmatically to deep-link (e.g. an MCP failure banner opens the MCP tab).
+    var settingsSelectedTab: SettingsTab = .general
+
+    /// Live MCP client hosts (one per active session), weakly held so closing a tab
+    /// lets its host deallocate. Used to push config changes to running sessions.
+    private var mcpHostBoxes: [WeakMCPHostBox] = []
+
+    private final class WeakMCPHostBox {
+        weak var host: MCPClientHost?
+        init(_ host: MCPClientHost) { self.host = host }
+    }
+
     private let logger = Logger(subsystem: "com.agentsmith", category: "SharedAppState")
 
     /// Coalescing serial writers for shared files. Replaces the prior per-call
@@ -232,6 +262,7 @@ final class SharedAppState {
     private let userModelOverridesWriter: SerialPersistenceWriter<[String: ModelMetadataOverride]>
     private let memoriesWriter: SerialPersistenceWriter<[MemoryEntry]>
     private let taskSummariesWriter: SerialPersistenceWriter<[TaskSummaryEntry]>
+    private let mcpServersWriter: SerialPersistenceWriter<[MCPServerConfig]>
 
     init() {
         let pm = PersistenceManager()
@@ -245,6 +276,37 @@ final class SharedAppState {
         }
         self.taskSummariesWriter = SerialPersistenceWriter(label: "taskSummaries") { snapshot in
             try await pm.saveTaskSummaries(snapshot)
+        }
+        self.mcpServersWriter = SerialPersistenceWriter(label: "mcpServers") { snapshot in
+            try await pm.saveMCPServerConfigs(snapshot)
+        }
+    }
+
+    // MARK: - MCP Servers
+
+    /// Registers a session's MCP host so future config changes are pushed to it.
+    /// Prunes any hosts that have since deallocated.
+    func registerMCPHost(_ host: MCPClientHost) {
+        mcpHostBoxes.removeAll { $0.host == nil }
+        mcpHostBoxes.append(WeakMCPHostBox(host))
+    }
+
+    /// Records the latest per-server connection status from a session host (latest wins).
+    func reportMCPStatuses(_ statuses: [UUID: MCPServerStatus]) {
+        for (id, status) in statuses { mcpServerStatuses[id] = status }
+    }
+
+    /// Replaces the global MCP server list, persists it, and propagates the change to
+    /// every live session host so running servers reconcile (launch/terminate/refilter)
+    /// without an app restart.
+    func updateMCPServers(_ servers: [MCPServerConfig]) {
+        mcpServers = servers
+        let writer = mcpServersWriter
+        Task { await writer.enqueue(servers) }
+        mcpHostBoxes.removeAll { $0.host == nil }
+        for box in mcpHostBoxes {
+            guard let host = box.host else { continue }
+            Task { await host.applyConfigChange(configs: servers) }
         }
     }
 
@@ -336,6 +398,12 @@ final class SharedAppState {
             }
         } catch {
             logger.error("Failed to load user model overrides: \(error.localizedDescription)")
+        }
+
+        do {
+            mcpServers = try await basePersistence.loadMCPServerConfigs()
+        } catch {
+            logger.error("Failed to load MCP server configs: \(error.localizedDescription)")
         }
 
         // Load persisted usage records into the shared store.

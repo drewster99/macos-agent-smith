@@ -254,6 +254,22 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([TaskSummaryEntry].self, from: data)
     }
 
+    // MARK: - MCP Server Configs (shared)
+
+    public func saveMCPServerConfigs(_ configs: [MCPServerConfig]) throws {
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(configs)
+        let url = baseDirectory.appendingPathComponent("mcp_servers.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadMCPServerConfigs() throws -> [MCPServerConfig] {
+        let url = baseDirectory.appendingPathComponent("mcp_servers.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode([MCPServerConfig].self, from: data)
+    }
+
     // MARK: - Usage Records (shared)
 
     public func saveUsageRecords(_ records: [UsageRecord]) throws {
