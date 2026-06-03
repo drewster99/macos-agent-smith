@@ -138,6 +138,27 @@ public actor TaskStore {
         return true
     }
 
+    /// Appends an update to a task copy, trimming to the max-updates cap. Caller writes back.
+    private func appendUpdate(to task: inout AgentTask, _ message: String) {
+        task.updates.append(AgentTask.TaskUpdate(message: message))
+        if task.updates.count > AgentTask.maxUpdates {
+            task.updates.removeFirst(task.updates.count - AgentTask.maxUpdates)
+        }
+    }
+
+    /// Preserves a task's current result (and commentary) into its update history before that
+    /// result is cleared or replaced, so re-running or re-completing a task doesn't silently
+    /// erase the original deliverable — the user can still recover it after the live transcript
+    /// is gone. No-op when there's no result to preserve.
+    private func preserveResultIntoHistory(_ task: inout AgentTask) {
+        guard let previous = task.result, !previous.isEmpty else { return }
+        var line = "Replacing previous result:\n\(previous)"
+        if let commentary = task.commentary, !commentary.isEmpty {
+            line += "\n\nPrevious commentary:\n\(commentary)"
+        }
+        appendUpdate(to: &task, line)
+    }
+
     /// Resets a failed task's terminal state so it can be retried via `run_task`. Clears
     /// `result`, `commentary`, and `completedAt`; the caller is responsible for transitioning
     /// the status back to `.pending` (or via run_task → restart). Returns false if the task
@@ -145,6 +166,7 @@ public actor TaskStore {
     @discardableResult
     public func resetFailedTask(id: UUID) -> Bool {
         guard var task = tasks[id], task.status == .failed else { return false }
+        preserveResultIntoHistory(&task)
         task.result = nil
         task.commentary = nil
         task.completedAt = nil
@@ -165,6 +187,7 @@ public actor TaskStore {
     @discardableResult
     public func reopenCompletedTask(id: UUID) -> Bool {
         guard var task = tasks[id], task.status == .completed else { return false }
+        preserveResultIntoHistory(&task)
         task.result = nil
         task.commentary = nil
         task.completedAt = nil
@@ -358,9 +381,14 @@ public actor TaskStore {
         return newCount
     }
 
-    /// Stores an LLM-generated summary on a completed or failed task.
+    /// Stores an LLM-generated summary on a completed or failed task. If the task already had a
+    /// (different) summary — e.g. it was re-completed after a follow-up — the prior summary is
+    /// preserved into the update history first, so re-summarization doesn't erase the original.
     public func setSummary(id: UUID, summary: String) {
         guard var task = tasks[id] else { return }
+        if let previous = task.summary, !previous.isEmpty, previous != summary {
+            appendUpdate(to: &task, "Replacing previous summary:\n\(previous)")
+        }
         task.summary = summary
         task.updatedAt = Date()
         tasks[id] = task
@@ -381,9 +409,12 @@ public actor TaskStore {
         onChange?()
     }
 
-    /// Clears the stored result and commentary on a task.
+    /// Clears the stored result and commentary on a task. Preserves the prior result into the
+    /// task's update history first (used by the review "request changes" path), so re-work
+    /// doesn't erase the original deliverable.
     public func clearResult(id: UUID) {
         guard var task = tasks[id] else { return }
+        preserveResultIntoHistory(&task)
         task.result = nil
         task.commentary = nil
         task.updatedAt = Date()
