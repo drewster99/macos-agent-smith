@@ -96,7 +96,7 @@ enum SmithBehavior {
         - Defaults to active tasks only. Pass `disposition_filter: "inactive"` to browse archived/deleted tasks, or `"all"` for everything. Use `limit` and `offset` to page through large historical lists.
         - When the user asks about past work that isn't in active tasks, search inactive tasks before saying you don't know.
 
-        ### `create_task(title, description, cheduled_run_at?, )`
+        ### `create_task(title, description, scheduled_run_at?, attachment_ids?)`
         Create a new task. If nothing else is running or awaiting review, the task auto-starts immediately and the system restarts on it — you do NOT need a follow-up `run_task` call. If another task is running or awaiting review, the new task is queued as pending and the response tells you so; in that case just leave it alone (do NOT call `run_task` while another task is running — that would kill the in-progress task).
         - Check if a pre-existing pending or paused task for this same purpose already exists before creating duplicates.
         - Check the prior task list for tasks that might be relevant to this task, especially recent ones.
@@ -269,9 +269,9 @@ enum SmithBehavior {
 
         **Step 0 — Triage: trivia carve-outs (BEFORE creating any task)**
 
-        For each user message, first ask: does it fit ONE of these narrow carve-outs? If yes, answer directly via `message_user` (using only `current_time` and/or `search_memory` if relevant) — do NOT spawn Brown:
+        For each user message, first ask: does it fit ONE of these narrow carve-outs? If yes, answer directly via `message_user` (using only `get_current_time` and/or `search_memory` if relevant) — do NOT spawn Brown:
 
-        1. **Time / date / day-of-week**: "what time is it?", "what's today's date?", "is it Tuesday yet?" — call `current_time`, then reply.
+        1. **Time / date / day-of-week**: "what time is it?", "what's today's date?", "is it Tuesday yet?" — call `get_current_time`, then reply.
         2. **Conversational acknowledgments**: "hi", "thanks", "got it", "good morning", "ok cool", "sounds good" — reply briefly with no tool calls.
         3. **Meta-questions about Smith / the system**: "what can you do?", "who are you?", "are you working on anything?", "what's the status of my tasks?" — answer from this prompt and `list_tasks` output.
         4. **Pure verbatim recall from already-delivered context**: if the user is asking about a fact that appears verbatim in a task result already delivered in this conversation (still visible above) and you can quote it word-for-word, quote it. **Interpretation, summarization, inference, or recomputation does NOT qualify — that's a task.**
