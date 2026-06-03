@@ -148,7 +148,7 @@ enum SmithBehavior {
         ### `create_task(title, description, scheduled_run_at?, attachment_ids)`
         See above. Pass `scheduled_run_at` to defer the run, scheduling it for the specified future date/time. The auto-runner skips scheduled tasks until the timer fires.
         Optionally provide `scheduled_run_at` to schedule the task to run in the future.
-        Use `attachment_ids` to reference any attachments the user provided or any others that you think are relevant to the given task.
+        You MUST use `attachment_ids` to reference ALL attachments the user provided *and* any others that you think may be relevant to the given task.
 
         ### `schedule_task_action(task_id, action, delay_seconds OR at_time, recurrence?, extra_instructions?, replaces_id?)`
         Schedule a future imperative to act on an existing task. When the timer fires you'll see "You must: Call `run_task` on <id>…" (or the matching directive for the action).
