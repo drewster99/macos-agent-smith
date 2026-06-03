@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// Image and binary files return metadata only.
 struct FileReadTool: AgentTool {
     let name = "file_read"
-    let toolDescription = "Read the contents of a file. Text files are returned with line numbers in `cat -n` format, which means each line of text starts with a line number, padded on the left to 6 characters, followed by two spaces, and then the line's content. Supports PDF files via a pages parameter. Returns metadata ONLY for images and binary files. Before invoking `file_read`, consider if there are other files you will wish to read as well. If so, read them all in parallel by issuing multiple `file_read` calls in a single response."
+    let toolDescription = "Read the contents of a file. Text files are returned with line numbers in `cat -n` format, which means each line of text starts with a line number, padded on the left to 6 characters, followed by two spaces, and then the line's content. Supports PDF files via a pages parameter. Returns metadata ONLY for images and binary files. To read only part of a file — for example a range of lines around a known location in a large file — pass `startingLineNum` and `maxLines` (e.g. startingLineNum: 4900, maxLines: 200 to see the lines around line 5000). Before invoking `file_read`, consider if there are other files you will wish to read as well. If so, read them all in parallel by issuing multiple `file_read` calls in a single response."
 
     public func description(for role: AgentRole) -> String {
         switch role {
@@ -28,13 +28,13 @@ struct FileReadTool: AgentTool {
                 "type": .string("string"),
                 "description": .string("File path to read (absolute or ~/relative).")
             ]),
-            "offset": .dictionary([
+            "startingLineNum": .dictionary([
                 "type": .string("integer"),
-                "description": .string("1-based line number to start reading from. Defaults to 1 (beginning of file). Only applies to text files.")
+                "description": .string("1-based line number to start reading from. Defaults to 1 (the first line). Use together with `maxLines` to read a specific range of lines from a large file. Text files only.")
             ]),
-            "limit": .dictionary([
+            "maxLines": .dictionary([
                 "type": .string("integer"),
-                "description": .string("Maximum number of lines to return. Defaults to 2500. Only applies to text files.")
+                "description": .string("How many lines to return, starting at `startingLineNum`. This is a COUNT of lines — NOT an ending line number. Defaults to 2500. Example: to read lines 5000 through 5499, pass startingLineNum: 5000, maxLines: 500. Text files only.")
             ]),
             "pages": .dictionary([
                 "type": .string("string"),
@@ -45,7 +45,7 @@ struct FileReadTool: AgentTool {
     ]
 
     /// Maximum characters in total output to prevent context overflow. Also the whole-file size
-    /// ceiling: a file larger than this currently can't be read even with `offset`/`limit`,
+    /// ceiling: a file larger than this currently can't be read even with `startingLineNum`/`maxLines`,
     /// because the file is loaded in full before being windowed. (A future streaming read could
     /// page through larger files.)
     static let maxCharacters = 1_000_000
@@ -93,9 +93,9 @@ struct FileReadTool: AgentTool {
 
         case .text:
             let offset: Int
-            if case .int(let o) = arguments["offset"] { offset = max(1, o) } else { offset = 1 }
+            if case .int(let o) = arguments["startingLineNum"] { offset = max(1, o) } else { offset = 1 }
             let limit: Int
-            if case .int(let l) = arguments["limit"] { limit = max(1, l) } else { limit = Self.defaultLineLimit }
+            if case .int(let l) = arguments["maxLines"] { limit = max(1, l) } else { limit = Self.defaultLineLimit }
             outcome = Self.readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit)
 
         case .binary:
@@ -212,7 +212,7 @@ struct FileReadTool: AgentTool {
         // Apply offset (1-based) and limit.
         let startIndex = offset - 1 // convert to 0-based
         guard startIndex < totalLines else {
-            return failure("Error: offset \(offset) is beyond the end of the file (\(totalLines) lines).")
+            return failure("Error: startingLineNum \(offset) is beyond the end of the file (\(totalLines) lines).")
         }
 
         let endIndex = min(startIndex + limit, totalLines)

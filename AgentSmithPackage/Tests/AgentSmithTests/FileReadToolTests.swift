@@ -37,8 +37,8 @@ struct FileReadToolTests {
         let result = try await FileReadTool().execute(
             arguments: [
                 "path": .string(path),
-                "offset": .int(3),
-                "limit": .int(2)
+                "startingLineNum": .int(3),
+                "maxLines": .int(2)
             ],
             context: TestToolContext.make()
         )
@@ -51,8 +51,8 @@ struct FileReadToolTests {
         #expect(result.output.contains("[File has 10 total lines"))
     }
 
-    @Test("offset past end of file returns failure")
-    func offsetPastEndIsFailure() async throws {
+    @Test("startingLineNum past end of file returns failure")
+    func startingLineNumPastEndIsFailure() async throws {
         let dir = TempDir()
         defer { dir.cleanup() }
         let path = try dir.write("only one line\n", to: "fixture.txt")
@@ -60,12 +60,12 @@ struct FileReadToolTests {
         let result = try await FileReadTool().execute(
             arguments: [
                 "path": .string(path),
-                "offset": .int(100)
+                "startingLineNum": .int(100)
             ],
             context: TestToolContext.make()
         )
         #expect(!result.succeeded)
-        #expect(result.output.contains("offset"))
+        #expect(result.output.contains("startingLineNum"))
     }
 
     @Test("missing file returns failure")
