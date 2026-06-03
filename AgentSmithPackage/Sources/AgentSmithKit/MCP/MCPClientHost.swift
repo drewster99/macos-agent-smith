@@ -239,6 +239,7 @@ public actor MCPClientHost {
                     prefixedName: prefixed,
                     serverName: conn.config.name,
                     serverID: conn.config.id,
+                    serverInstructions: conn.instructions,
                     originalToolName: tool.name,
                     toolDescription: tool.description ?? "MCP tool \(tool.name) from \(conn.config.name).",
                     parameters: MCPValueConversion.parametersSchema(from: tool.inputSchema),

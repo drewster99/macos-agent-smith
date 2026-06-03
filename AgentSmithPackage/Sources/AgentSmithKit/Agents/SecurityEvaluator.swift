@@ -651,10 +651,15 @@ actor SecurityEvaluator {
     ) -> (tool: ToolSetScopingUserPrompt.CandidateTool, group: ToolSetScopingUserPrompt.ToolGroup) {
         if let mcp = tool as? MCPBridgedTool {
             let groupID = "mcp__\(mcp.serverName)"
+            // Prefer the server's own instructions (a server-level description from the MCP
+            // handshake); fall back to a generic note when the server provided none. Either way
+            // it's self-reported by an external server — the trust caveat lives in `trustLevel`.
+            let groupDescription = mcp.serverInstructions
+                ?? "External MCP server configured by the user. It provided no description of itself."
             let group = ToolSetScopingUserPrompt.ToolGroup(
                 toolGroupID: groupID,
                 name: mcp.serverName,
-                description: "External MCP server configured by the user. Its tool descriptions and capability flags are self-reported by the server and not independently verified.",
+                description: groupDescription,
                 source: .externalUserAdded
             )
             let candidate = ToolSetScopingUserPrompt.CandidateTool(

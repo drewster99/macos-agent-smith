@@ -10,6 +10,10 @@ struct MCPBridgedTool: AgentTool {
     let prefixedName: String
     let serverName: String
     let serverID: UUID
+    /// The server's own `instructions` from the MCP handshake (a server-level description),
+    /// surfaced to Jones as the tool group's description during scoping. nil when the server
+    /// provided none.
+    let serverInstructions: String?
     let originalToolName: String
     let toolDescription: String
     let parameters: [String: AnyCodable]
