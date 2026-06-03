@@ -80,18 +80,9 @@ struct AgentCardExpandedSections: View {
                         }
                     }
                 }
-                .onAppear {
-                    // Project rule: defer @State / @Binding mutations out of SwiftUI
-                    // lifecycle closures so they can't race the active render pass.
-                    if let last = llmTurns.last {
-                        DispatchQueue.main.async { expandedTurnIDs.insert(last.id) }
-                    }
-                }
-                .onChange(of: llmTurns.count) {
-                    if let last = llmTurns.last {
-                        DispatchQueue.main.async { expandedTurnIDs.insert(last.id) }
-                    }
-                }
+                // Turns are added collapsed; the user expands the ones they want to read. (We
+                // used to auto-expand the latest turn on every new turn, which made a streaming
+                // Security Agent's turn list churn open messily.)
             }
 
             // Direct message input — hidden for Jones since its filter drops private messages.

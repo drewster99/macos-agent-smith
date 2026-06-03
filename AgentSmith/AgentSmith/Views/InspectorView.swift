@@ -769,9 +769,15 @@ struct EvaluationRecordRow: View {
     let record: EvaluationRecord
     @State private var expanded = false
 
+    /// Per-task tool-scoping records aren't a SAFE/UNSAFE verdict on one call — they're a
+    /// "here's the approved tool set" decision — so they get their own label/color.
+    private var isScoping: Bool { record.toolName == "(tool scoping)" }
+
     private var dispositionLabel: String {
         if record.disposition.isCancelled {
             return "CANCELLED"
+        } else if isScoping {
+            return record.disposition.approved ? "SCOPED" : "NO TOOLS"
         } else if record.disposition.approved && record.disposition.isAutoApproval {
             return "AUTO"
         } else if record.disposition.approved {
@@ -785,6 +791,7 @@ struct EvaluationRecordRow: View {
 
     private var dispositionColor: Color {
         if record.disposition.isCancelled { return .secondary }
+        if isScoping { return record.disposition.approved ? .blue : .red }
         if record.disposition.approved { return .green }
         if record.disposition.isWarning { return .orange }
         return .red
@@ -828,10 +835,20 @@ struct EvaluationRecordRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(5)
                     }
-                    Text("Response: \(record.response)")
-                        .font(AppFonts.inspectorBody.italic())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                    if isScoping {
+                        // The scoping response is the full allow/block JSON — show all of it
+                        // (mono, no truncation); the row grows and the inspector scrolls.
+                        Text(record.response)
+                            .font(AppFonts.smallMonoCode)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text("Response: \(record.response)")
+                            .font(AppFonts.inspectorBody.italic())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                    }
                 }
             }
             .padding(.vertical, 3)
