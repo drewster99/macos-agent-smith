@@ -76,16 +76,21 @@ struct SerialPersistenceWriterTests {
             }
         }
         await writer.flush()
-        let last = await recorder.last
-        // The drain processes whatever's pending at the time it runs. With
-        // concurrent producers, the LAST enqueue to land at the writer wins,
-        // and that's the last snapshot we'll see written.
-        #expect(last != nil, "At least one snapshot must be written")
-        // We can't assert last == 50 deterministically — concurrent enqueues
-        // can arrive in any order at the writer. What we CAN assert is that
-        // the writer is monotonic and that some snapshot landed.
-        let isMonotonic = await recorder.isMonotonic
-        #expect(isMonotonic, "Within a single drain, written snapshots must be monotonic")
+        let written = await recorder.received
+        // The writer's monotonicity guarantee is by ENQUEUE SEQUENCE, not by value:
+        // it never writes a snapshot with a lower `enqueueSeq` after a higher one
+        // (see `enqueueSeq`/`writtenSeq` in SerialPersistenceWriter). With 50 racing
+        // producers the ARRIVAL order at the actor is nondeterministic, so `enqueue(3)`
+        // can be serialized after `enqueue(50)` and legitimately written later — which
+        // means the output is NOT value-monotonic, and asserting so here is a race.
+        // Value-monotonicity (where enqueue order == value order) is verified
+        // deterministically by `writerNeverWritesOutOfOrder`. Here we assert only the
+        // invariants that hold under genuine concurrency:
+        #expect(!written.isEmpty, "At least one snapshot must be written")
+        #expect(written.allSatisfy { (1...50).contains($0) }, "Only enqueued values may be written; got \(written)")
+        #expect(written.count <= 50, "Coalescing must never produce more writes than enqueues; got \(written.count)")
+        // flush() returning at all proves the drain fully completed without deadlock
+        // despite the post-flush re-arming hazard the watermark design guards against.
     }
 
     @Test("Coalescing — total writes ≤ enqueues for rapid bursts")
