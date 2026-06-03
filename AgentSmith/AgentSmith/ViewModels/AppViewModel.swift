@@ -1024,10 +1024,26 @@ final class AppViewModel {
         }
     }
 
+    /// Tells Smith — via a user-directed channel message, the same path `retryTask` uses — that
+    /// the user changed a task's state from the app UI. Without this, Smith's conversational
+    /// context keeps treating a paused/stopped/deleted task as still in progress (it can't see
+    /// deleted tasks via its tools, so its only knowledge is what it was last told), and it
+    /// refuses to start new work. Capture the title BEFORE the mutation so a soft-deleted task
+    /// (already gone from `tasks`) still names itself.
+    private func notifySmithTaskStateChanged(taskID: UUID, title: String, message: String) async {
+        await runtime?.sendDirectMessage(
+            to: .smith,
+            text: "[System notice — user action in the app] \(message) Task: \"\(title)\" (ID: \(taskID.uuidString)). No reply to the user is needed unless they ask about it."
+        )
+    }
+
     func deleteTask(id: UUID) async {
         guard let taskStore else { return }
+        let title = tasks.first { $0.id == id }?.title ?? "(unknown)"
         let succeeded = await taskStore.softDelete(id: id)
-        if !succeeded {
+        if succeeded {
+            await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user deleted this task. It is no longer active — do not work on it, wait for it, or treat it as in progress.")
+        } else {
             taskActionError = "This task is in progress and cannot be deleted."
         }
     }
@@ -1042,6 +1058,8 @@ final class AppViewModel {
 
     func permanentlyDeleteTask(id: UUID) async {
         guard let taskStore else { return }
+        // No Smith notification here: a permanently-deleted task was already soft-deleted (Smith
+        // was notified then), so it's already out of Smith's working set.
         let succeeded = await taskStore.permanentlyDelete(id: id)
         if !succeeded {
             taskActionError = "This task is in progress and cannot be permanently deleted."
@@ -1059,22 +1077,26 @@ final class AppViewModel {
     func pauseTask(id: UUID) async {
         let slug = id.uuidString.prefix(8)
         let entry = Date()
+        let title = tasks.first { $0.id == id }?.title ?? "(unknown)"
         stopLogger.notice("VM.pauseTask entry task=\(slug, privacy: .public)")
         await runtime?.terminateTaskAgents(taskID: id)
         let afterTerm = Date()
         stopLogger.notice("VM.pauseTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
         await taskStore?.pause(id: id)
+        await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user paused this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress; the user may resume it later.")
         stopLogger.notice("VM.pauseTask exit task=\(slug, privacy: .public) totalMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
     }
 
     func stopTask(id: UUID) async {
         let slug = id.uuidString.prefix(8)
         let entry = Date()
+        let title = tasks.first { $0.id == id }?.title ?? "(unknown)"
         stopLogger.notice("VM.stopTask entry task=\(slug, privacy: .public)")
         await runtime?.terminateTaskAgents(taskID: id)
         let afterTerm = Date()
         stopLogger.notice("VM.stopTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
         await taskStore?.stop(id: id)
+        await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user stopped this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress.")
         stopLogger.notice("VM.stopTask exit task=\(slug, privacy: .public) totalMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
     }
 
