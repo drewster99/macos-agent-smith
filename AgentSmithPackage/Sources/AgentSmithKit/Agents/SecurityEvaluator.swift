@@ -187,6 +187,10 @@ actor SecurityEvaluator {
 
     /// Fires after each evaluation is recorded, pushing the record to the UI layer.
     private var onEvaluationRecorded: (@Sendable (EvaluationRecord) -> Void)?
+    /// Fires after each Jones LLM call so the inspector's per-agent token/cost view for the
+    /// security agent is populated (Jones is a SecurityEvaluator, not an AgentActor, so without
+    /// this it never produced turn records and showed 0 tokens / $0.00).
+    private var onTurnRecorded: (@Sendable (LLMTurnRecord) -> Void)?
 
     /// Token usage store for persistent analytics.
     private let usageStore: UsageStore?
@@ -261,6 +265,30 @@ actor SecurityEvaluator {
     /// Registers a callback fired after each security evaluation is recorded.
     public func setOnEvaluationRecorded(_ handler: @escaping @Sendable (EvaluationRecord) -> Void) {
         onEvaluationRecorded = handler
+    }
+
+    /// Registers a callback fired after each Jones LLM call, carrying a turn record so the
+    /// inspector can show the security agent's per-session token usage and cost.
+    public func setOnTurnRecorded(_ handler: @escaping @Sendable (LLMTurnRecord) -> Void) {
+        onTurnRecorded = handler
+    }
+
+    /// Builds and emits a turn record for one Jones LLM call.
+    private func emitTurnRecord(response: LLMResponse, latencyMs: Int, messageCount: Int) {
+        guard let onTurnRecorded else { return }
+        onTurnRecorded(LLMTurnRecord(
+            inputDelta: [],
+            response: response,
+            totalMessageCount: messageCount,
+            latencyMs: latencyMs,
+            modelID: configuration?.model ?? "",
+            providerType: providerType,
+            providerID: configuration?.providerID,
+            temperature: configuration?.temperature ?? 0,
+            maxOutputTokens: configuration?.maxTokens ?? 0,
+            thinkingBudget: configuration?.thinkingBudget,
+            usage: response.usage
+        ))
     }
 
     /// Evaluates a tool request and returns a security disposition.
@@ -382,6 +410,8 @@ actor SecurityEvaluator {
                     to: usageStore
                 )
             }
+
+            emitTurnRecord(response: response, latencyMs: callLatencyMs, messageCount: conversationMessages.count)
 
             if !response.toolCalls.isEmpty {
                 continue
@@ -532,6 +562,8 @@ actor SecurityEvaluator {
                     to: usageStore
                 )
             }
+
+            emitTurnRecord(response: response, latencyMs: callLatencyMs, messageCount: messages.count)
 
             let responseText = response.text ?? ""
             guard let approved = Self.parseScopingResponse(responseText, candidateNames: candidateNames) else {

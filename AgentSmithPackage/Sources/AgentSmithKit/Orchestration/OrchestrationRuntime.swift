@@ -1059,7 +1059,8 @@ public actor OrchestrationRuntime {
                         Brown is already working on task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)). \
                         The task description and any prior progress have been delivered to Brown automatically. \
                         Do NOT call `run_task`, `create_task`, or `message_brown` — Brown is already briefed and working. \
-                        Brown will signal progress via task_update / task_complete; you'll also get an automatic 10-minute Brown-activity digest. Do NOT poll.
+                        Brown will signal progress via task_update / task_complete; you'll also get an automatic 10-minute Brown-activity digest. Do NOT poll. \
+                        The user is already informed. Don't inform them for a 2nd time.
                         """)
                 } else {
                     smithParts.append("""
@@ -1462,6 +1463,12 @@ public actor OrchestrationRuntime {
         // verdicts. (Wiring it after scoping would drop the scoping record from the live view.)
         if let evalCallback = onEvaluationRecorded {
             await evaluator.setOnEvaluationRecorded(evalCallback)
+        }
+        // Forward Jones's LLM turn records so the inspector shows the security agent's per-session
+        // token usage and cost (previously empty — Jones produced no turn records, so its card
+        // always read 0 tokens / $0.00 even though its usage was in the global UsageStore).
+        if let turnCallback = onTurnRecorded {
+            await evaluator.setOnTurnRecorded { turn in turnCallback(.jones, turn) }
         }
 
         // Brown's message filter: drop security review messages and tool execution trace messages.
