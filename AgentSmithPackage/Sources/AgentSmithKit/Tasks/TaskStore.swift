@@ -318,7 +318,13 @@ public actor TaskStore {
     /// `message_brown` to deliver them to the running agent.
     public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) {
         guard var task = tasks[id] else { return }
-        task.description += "\n\n[Amendment]: \(amendment)"
+        // Dedup: don't stack an [Amendment] identical to the one already at the end of the
+        // description. `run_task` amends BEFORE it tries to spawn/scope, so a failed start
+        // (e.g. a tool-scoping failure) leaves the amendment applied; retrying with the same
+        // instructions would otherwise append the same block over and over.
+        if !task.description.hasSuffix("[Amendment]: \(amendment)") {
+            task.description += "\n\n[Amendment]: \(amendment)"
+        }
         if !attachments.isEmpty {
             task.descriptionAttachments.append(contentsOf: attachments)
         }
