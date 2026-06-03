@@ -645,6 +645,15 @@ public actor AgentActor {
         }
         runTask = nil
 
+        // Force-clear this agent's live activity indicators. A turn cancelled mid-flight leaves
+        // its `onProcessingStateChange(true)` un-paired: that pairing's clearing `defer` only runs
+        // when the in-flight LLM call finally returns, which — for a slow or cancellation-ignoring
+        // provider (e.g. a hung Ollama Cloud request) — can be minutes after `stop()` gave up and
+        // orphaned the call. Without this, the agent shows "Thinking"/"Evaluating" indefinitely
+        // after being paused/stopped. Firing `false` here is idempotent with the eventual defer.
+        toolContext.onProcessingStateChange(false)
+        toolContext.onJonesProcessingStateChange(false)
+
         // Drop UI/runtime observer callbacks now that the agent has shut down.
         // Releases the strong references those closures hold against the app
         // layer's view model so a stopped agent can be deinitialized cleanly.
