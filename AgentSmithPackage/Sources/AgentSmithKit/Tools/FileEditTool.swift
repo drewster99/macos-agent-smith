@@ -42,8 +42,9 @@ struct FileEditTool: AgentTool {
         "required": .array([.string("file_path"), .string("old_string"), .string("new_string")])
     ]
 
-    /// Maximum file size in characters for editing.
-    private static let maxCharacters = 250_000
+    /// Maximum file size in characters for editing. Kept in sync with `FileReadTool.maxCharacters`
+    /// so a file the agent can read is also editable.
+    private static let maxCharacters = 1_000_000
 
     public init() {}
 

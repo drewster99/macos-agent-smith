@@ -809,12 +809,15 @@ public actor AgentActor {
     private func rescopeToolsStateless() async {
         guard let evaluator = securityEvaluator,
               let task = await currentTaskForScoping() else { return }
+        // Light the Security Agent card while it re-scopes (a real Jones LLM call).
+        toolContext.onJonesProcessingStateChange(true)
         let result = await evaluator.scopeTools(
             candidateTools: toolRegistry.candidateTools,
             taskTitle: task.title,
             taskID: task.id.uuidString,
             taskDescription: task.description
         )
+        toolContext.onJonesProcessingStateChange(false)
         guard result.succeeded else { return }
         // Only act when the *approved* set actually changed. A candidate-set change that
         // leaves Brown's usable tools identical (e.g. a new MCP tool that Jones blocks) must

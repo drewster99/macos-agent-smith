@@ -1526,12 +1526,16 @@ public actor OrchestrationRuntime {
             }
             let builtIns = BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot)
             let mcpTools = mcpHost != nil ? await mcpHost!.currentBridgedTools() : []
+            // Light the Security Agent card while it scopes — this is a real (often slow) Jones
+            // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
+            await notifyProcessingStateChange(role: .jones, isProcessing: true)
             let scoping = await evaluator.scopeTools(
                 candidateTools: builtIns + mcpTools,
                 taskTitle: task.title,
                 taskID: task.id.uuidString,
                 taskDescription: task.description
             )
+            await notifyProcessingStateChange(role: .jones, isProcessing: false)
             guard scoping.succeeded else {
                 // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
                 // a worker; surface to the user.
