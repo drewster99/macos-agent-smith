@@ -44,8 +44,11 @@ struct FileReadTool: AgentTool {
         "required": .array([.string("path")])
     ]
 
-    /// Maximum characters in total output to prevent context overflow.
-    static let maxCharacters = 250_000
+    /// Maximum characters in total output to prevent context overflow. Also the whole-file size
+    /// ceiling: a file larger than this currently can't be read even with `offset`/`limit`,
+    /// because the file is loaded in full before being windowed. (A future streaming read could
+    /// page through larger files.)
+    static let maxCharacters = 1_000_000
     /// Default number of lines to return when no limit is specified.
     private static let defaultLineLimit = 2500
     /// PDFs with more pages than this require an explicit pages parameter.
