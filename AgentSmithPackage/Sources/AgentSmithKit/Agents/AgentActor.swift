@@ -16,6 +16,24 @@ public actor AgentActor {
     /// Refreshed each turn by `refreshActiveTools()` and used for both tool-definition
     /// assembly and tool-call dispatch.
     private var activeTools: [any AgentTool]
+    /// Per-agent tool registry + availability gate. Rebuilt each turn from the candidate
+    /// set (built-ins + dynamic MCP tools); `activeTools` is its `availableTools()`.
+    private var toolRegistry = ToolRegistry()
+    /// When true (Brown only), this agent's tools are security-scoped per task: candidates are
+    /// seeded *disabled* and only `approvedToolNames` (plus forced lifecycle tools) are
+    /// available. When false (Smith/Jones), every candidate is seeded approved (no scoping).
+    private var toolScopingEnabled = false
+    /// The current security-approved tool names (the scoping verdict). Drives `isApproved`.
+    private var approvedToolNames: Set<String> = []
+    /// Whether the worker has acknowledged its task yet — gates which forced lifecycle tools
+    /// are exposed (pre-ack: `task_acknowledged`; post-ack: `task_update` / `task_complete`).
+    private var taskAcknowledged = false
+    /// Fingerprint of the candidate set at the last scoping. A change (MCP added/removed/
+    /// redefined) triggers a fresh stateless re-scope at the next turn boundary.
+    private var lastScopedFingerprint: String?
+    /// Fired when the approved tool set changes (initial scope already happened in the runtime;
+    /// this is for mid-task re-scopes) so the runtime can persist it on the task as a record.
+    private var onApprovedToolsChanged: (@Sendable (Set<String>) async -> Void)?
     private let toolContext: ToolContext
 
     private var conversationHistory: [LLMMessage] = []
@@ -395,6 +413,21 @@ public actor AgentActor {
         syntheticFirstToolCall = toolName
     }
 
+    /// Enables per-task security scoping for this agent (Brown), seeding the initial approved
+    /// set from the runtime's pre-start scoping pass. After this, only approved + forced
+    /// lifecycle tools are available; mid-task candidate changes trigger a fresh stateless
+    /// re-scope at the turn boundary.
+    public func enableToolScoping(approvedNames: Set<String>) {
+        toolScopingEnabled = true
+        approvedToolNames = approvedNames
+    }
+
+    /// Registers a callback fired when the approved tool set changes mid-task, so the runtime
+    /// can persist the new set on the task as a record.
+    public func setOnApprovedToolsChanged(_ handler: @escaping @Sendable (Set<String>) async -> Void) {
+        onApprovedToolsChanged = handler
+    }
+
     /// Replaces the actor's scheduled-wake list with the supplied set. Used by the runtime at
     /// cold-launch to replay wakes persisted from a prior process. Bypasses the
     /// `onWakeScheduled` callback so the timer-event log isn't double-stamped (the original
@@ -694,12 +727,88 @@ public actor AgentActor {
     /// `tools/list_changed` updates are reflected on the next LLM call. No-op for
     /// agents without a dynamic provider (everyone except Brown today).
     private func refreshActiveTools() async {
-        guard let provider = dynamicToolsProvider else {
-            activeTools = tools
+        let dynamic = await dynamicToolsProvider?() ?? []
+        let candidates = tools + dynamic
+
+        guard toolScopingEnabled else {
+            // Unscoped agents (Smith/Jones): every candidate approved → activeTools == all
+            // candidates, identical to the pre-registry behavior.
+            toolRegistry.rebuild(candidates: candidates, defaultApproved: true)
+            activeTools = toolRegistry.availableTools()
             return
         }
-        let dynamic = await provider()
-        activeTools = tools + dynamic
+
+        // Scoped agent (Brown): candidates start disabled; only the security-approved set and
+        // forced lifecycle tools are available.
+        toolRegistry.rebuild(candidates: candidates, defaultApproved: false)
+
+        // Stateless per-turn re-evaluation: if the candidate set changed (by content
+        // fingerprint, so a silent redefinition counts), re-scope from scratch. The very
+        // first refresh just records the fingerprint — the runtime already scoped this set
+        // before the worker started.
+        let fingerprint = toolRegistry.candidateFingerprint
+        if let last = lastScopedFingerprint, last != fingerprint {
+            await rescopeToolsStateless()
+        }
+        lastScopedFingerprint = fingerprint
+
+        toolRegistry.applyApproval(approvedNames: approvedToolNames)
+        applyForcedLifecycleFlags()
+        activeTools = toolRegistry.availableTools()
+    }
+
+    /// Forces the small set of trusted built-in lifecycle tools available regardless of the
+    /// security verdict, so the task lifecycle always functions. Phased on acknowledgement:
+    /// pre-ack only `task_acknowledged`; post-ack `task_update` / `task_complete`. `reply_to_user`
+    /// is forced throughout but remains gated by its own `isAvailable(in:)` context check
+    /// (user-has-messaged) at the definition/dispatch sites. Forcing is a deliberate security
+    /// bypass applied ONLY to these trusted built-ins.
+    private func applyForcedLifecycleFlags() {
+        toolRegistry.setForcedAvailable("task_acknowledged", !taskAcknowledged)
+        toolRegistry.setForcedAvailable("task_update", taskAcknowledged)
+        toolRegistry.setForcedAvailable("task_complete", taskAcknowledged)
+        toolRegistry.setForcedAvailable("reply_to_user", true)
+    }
+
+    /// Re-runs the security scoping pass against the current candidate set (stateless — no
+    /// memory of prior approvals), updates `approvedToolNames`, persists the new set on the
+    /// task, and injects a generic "tools changed" nudge into the worker's history. On failure
+    /// the prior approvals are kept (last-known-good) and nothing is injected.
+    private func rescopeToolsStateless() async {
+        guard let evaluator = securityEvaluator,
+              let task = await currentTaskForScoping() else { return }
+        let candidates = toolRegistry.candidateTools.map { tool in
+            ToolScopingCandidate(
+                name: tool.name,
+                summary: tool.smithFacingSummary,
+                isDestructive: tool.isDestructive,
+                isOpenWorld: tool.isOpenWorld,
+                isMCP: tool.name.hasPrefix(MCPToolNaming.prefix)
+            )
+        }
+        let result = await evaluator.scopeTools(
+            candidates: candidates,
+            taskTitle: task.title,
+            taskID: task.id.uuidString,
+            taskDescription: task.description
+        )
+        guard result.succeeded else { return }
+        // Only act when the *approved* set actually changed. A candidate-set change that
+        // leaves Brown's usable tools identical (e.g. a new MCP tool that Jones blocks) must
+        // not persist a redundant record or nag Brown.
+        guard result.approvedNames != approvedToolNames else { return }
+        approvedToolNames = result.approvedNames
+        await onApprovedToolsChanged?(approvedToolNames)
+        // Generic, intentionally short. Fired only on a security-driven change to the usable
+        // set — not on the forced-flag transitions this actor drives deliberately (e.g.
+        // ack → update/complete).
+        conversationHistory.append(.user("[System] Available tools have changed - confirm availability before use."))
+    }
+
+    /// The task this worker is currently assigned to, for scoping context.
+    private func currentTaskForScoping() async -> AgentTask? {
+        let allTasks = await toolContext.taskStore.allTasks()
+        return allTasks.first { $0.assigneeIDs.contains(toolContext.agentID) }
     }
 
     private func runLoop() async {
@@ -764,6 +873,7 @@ public actor AgentActor {
                         lastTaskCommunicationAt = Date()
                         toolCallsSinceTaskCommunication = 0
                         brownSilenceNudgeArmed = true
+                        taskAcknowledged = true
                     }
                     pushLiveContext()
                 }
@@ -1965,6 +2075,7 @@ public actor AgentActor {
             switch call.name {
             case "task_acknowledged":
                 isSuccessfulTaskCommunication = result.hasPrefix("Task acknowledged:") || result.hasPrefix("Task continuing:")
+                if isSuccessfulTaskCommunication { taskAcknowledged = true }
             case "task_update":
                 isSuccessfulTaskCommunication = result == "Update sent to Agent Smith."
             case "task_complete":

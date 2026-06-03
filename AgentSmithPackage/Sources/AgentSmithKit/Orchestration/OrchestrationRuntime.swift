@@ -991,7 +991,7 @@ public actor OrchestrationRuntime {
             if var resumingTask = await taskStore.task(id: resumingTaskID) {
                 // Auto-spawn Brown and deliver the task briefing
                 let brownSpawned: Bool
-                if let brownID = await spawnBrown() {
+                if let brownID = await spawnBrown(for: resumingTask) {
                     await taskStore.updateStatus(id: resumingTaskID, status: .running)
                     await taskStore.assignAgent(taskID: resumingTaskID, agentID: brownID)
                     // Re-read to get the latest state (includes any amendments from run_task)
@@ -1096,7 +1096,7 @@ public actor OrchestrationRuntime {
             // auto-start the first interrupted task by spawning Brown and delivering the briefing.
             var autoResumedTask: AgentTask?
             if autoRunInterruptedTasks, awaitingReviewTasks.isEmpty, let task = interruptedTasks.first {
-                if let brownID = await spawnBrown() {
+                if let brownID = await spawnBrown(for: task) {
                     await taskStore.updateStatus(id: task.id, status: .running)
                     await taskStore.assignAgent(taskID: task.id, agentID: brownID)
 
@@ -1403,7 +1403,7 @@ public actor OrchestrationRuntime {
     }
 
     /// Spawns a Brown+Jones pair. Terminates any existing Brown first (single Brown policy).
-    public func spawnBrown() async -> UUID? {
+    public func spawnBrown(for task: AgentTask? = nil) async -> UUID? {
         guard !aborted else { return nil }
 
         // Enforce single Brown — terminate existing one if present
@@ -1488,6 +1488,65 @@ public actor OrchestrationRuntime {
             mcpToolsProvider = nil
         }
 
+        // Per-task tool scoping: before the worker starts, let the security agent (Jones) pick
+        // the subset of tools it may use for THIS task. Skipped when there's no task context
+        // (e.g. the post-review re-spawn path), which falls back to the unscoped tool set.
+        var scopedApprovedNames: Set<String>?
+        if let task {
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Preparing task — starting MCP servers and checking security policy…",
+                metadata: ["messageKind": .string("preparing")]
+            ))
+            if let host = mcpHost {
+                await host.waitUntilSettled(timeout: .seconds(5))
+            }
+            guard !aborted else {
+                securityEvaluators.removeValue(forKey: brownID)
+                return nil
+            }
+            let builtIns = BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot)
+            let mcpTools = mcpHost != nil ? await mcpHost!.currentBridgedTools() : []
+            let candidates = (builtIns + mcpTools).map { tool in
+                ToolScopingCandidate(
+                    name: tool.name,
+                    summary: tool.smithFacingSummary,
+                    isDestructive: tool.isDestructive,
+                    isOpenWorld: tool.isOpenWorld,
+                    isMCP: tool.name.hasPrefix(MCPToolNaming.prefix)
+                )
+            }
+            let scoping = await evaluator.scopeTools(
+                candidates: candidates,
+                taskTitle: task.title,
+                taskID: task.id.uuidString,
+                taskDescription: task.description
+            )
+            guard scoping.succeeded else {
+                // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
+                // a worker; surface to the user.
+                securityEvaluators.removeValue(forKey: brownID)
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Jones's model configuration.",
+                    metadata: ["isError": .bool(true)]
+                ))
+                return nil
+            }
+            guard !scoping.approvedNames.isEmpty else {
+                // Refusal — no tools approved for this task. Don't spawn a hamstrung worker.
+                securityEvaluators.removeValue(forKey: brownID)
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "The security agent did not approve any tools for task \"\(task.title)\", so it cannot be run.",
+                    metadata: ["isWarning": .bool(true)]
+                ))
+                return nil
+            }
+            scopedApprovedNames = scoping.approvedNames
+            await taskStore.setApprovedTools(id: task.id, approvedTools: Array(scoping.approvedNames))
+        }
+
         let brownAgent = AgentActor(
             id: brownID,
             configuration: AgentConfiguration(
@@ -1508,6 +1567,14 @@ public actor OrchestrationRuntime {
             dynamicToolsProvider: mcpToolsProvider
         )
         await brownAgent.setSecurityEvaluator(evaluator)
+        if let scopedApprovedNames, let task {
+            await brownAgent.enableToolScoping(approvedNames: scopedApprovedNames)
+            let scopedTaskID = task.id
+            await brownAgent.setOnApprovedToolsChanged { [weak self] names in
+                guard let self else { return }
+                await self.taskStore.setApprovedTools(id: scopedTaskID, approvedTools: Array(names))
+            }
+        }
         await brownAgent.setUsageStore(usageStore)
         await brownAgent.setSessionID(currentSessionID)
         if let turnCallback = onTurnRecorded {

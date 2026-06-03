@@ -315,6 +315,25 @@ public actor TaskStore {
         onChange?()
     }
 
+    /// Records the security-approved tool set on a task (per-task tool scoping). This is a
+    /// **record**, not the enforcement gate — the live `ToolRegistry` enforces. When the set
+    /// changes from a previously-recorded one, a labeled update is appended for history.
+    public func setApprovedTools(id: UUID, approvedTools: [String]) {
+        guard var task = tasks[id] else { return }
+        let previous = task.approvedTools
+        task.approvedTools = approvedTools
+        if let previous, Set(previous) != Set(approvedTools) {
+            let line = "Approved tool list was replaced. Previous: \(previous.sorted().joined(separator: ", ")). New: \(approvedTools.sorted().joined(separator: ", "))."
+            task.updates.append(AgentTask.TaskUpdate(message: line))
+            if task.updates.count > AgentTask.maxUpdates {
+                task.updates.removeFirst(task.updates.count - AgentTask.maxUpdates)
+            }
+        }
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
     /// Saves a compressed summary of Brown's last working state for resumability.
     public func setLastBrownContext(id: UUID, context: String) {
         guard var task = tasks[id] else { return }

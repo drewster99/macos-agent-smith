@@ -431,6 +431,84 @@ A `SkillStore` (similar to `TaskStore`) manages in-memory state and persistence:
 
 Tool availability is currently enforced only at the definition level — tools excluded by `isAvailable` are omitted from the tool list sent to the LLM, but if the LLM hallucinates a call to an unavailable tool, `AgentActor` still executes it (line ~606, lookup is against the full `tools` array, not the filtered `toolDefinitions`). Add an execution-level guard: before running a tool call, re-check `isAvailable` and return an error result (e.g. "Tool '\(name)' is not currently available") instead of executing. This is defense-in-depth — the LLM shouldn't call tools it wasn't offered, but when it does, the system should refuse rather than silently comply.
 
+### Per-task dynamic tool scoping for Brown (security-gated tool registry) ✅ (v1)
+**Shipped (v1).** Built and verified (app builds clean; full package suite 401 tests green, incl. new `ToolRegistryTests` and `SecurityEvaluatorScopingTests`; launch smoke test clean). What landed:
+- `AgentTool.isDestructive` / `isOpenWorld` + central fail-closed `ToolSafetyClassification` (all 36 built-ins classified); MCP `destructiveHint`/`openWorldHint` captured (untrusted) on `MCPBridgedTool`.
+- `ToolRegistry` (registry + dispatcher gate) with the three-flag model, flag-preserving rebuilds, hallucinated-allow rejection, and the SHA-256 candidate fingerprint (full-schema, rug-pull defense). Wired as the single gate in `AgentActor.refreshActiveTools` — unavailable tools fall through to the existing "Unknown tool" path.
+- `SecurityEvaluator.scopeTools(...)` + `JonesBehavior.toolScopingSystemPrompt`: text ALLOW/BLOCK, fail-closed, bounded retry, intersect-with-candidates; records an `EvaluationRecord` for audit; surfaces `destructive`/`open-world` (true-only) with built-in-vs-MCP trust labels.
+- `OrchestrationRuntime.spawnBrown(for:)`: MCP settle (`MCPClientHost.waitUntilSettled`, 5 s) → scope → then enable Brown. `succeeded == false` → hard stop (surface to user, no Brown); zero approved → refusal (no Brown). `Preparing…` surfaced as a channel message.
+- `AgentActor` scoped mode: candidates seeded disabled, approvals applied, forced lifecycle flags (phased `task_acknowledged` → `task_update`/`task_complete`, `reply_to_user` forced + context-gated), stateless per-turn re-eval on fingerprint change with the generic "Available tools have changed" nudge.
+- `AgentTask.approvedTools` record (Codable `decodeIfPresent`) + `TaskStore.setApprovedTools` with replacement annotation in `updates`.
+
+**v1 deviations to revisit (not yet done):**
+- `Preparing…` is a channel message, not a formal `Task.Status` case (the `Task.Status` enum ripple was avoided for v1).
+- `isUnavailableDueToContext` exists on the registry but is **not driven** in v1 — context gating (e.g. `reply_to_user` until the user messages, awaiting-review) still flows through the existing `isAvailable(in:)` filter, which composes with the registry gate. The flag is there for future use.
+- The post-review re-spawn path (`ReviewWorkTool` → `context.spawnBrown()` with no task) is **unscoped** in v1 (falls back to the full tool set). The two primary task-start paths (new task, resume) are scoped.
+- Abort-during-`Preparing` is handled by the `!aborted` recheck + `scopeTools` cancellation, but not exhaustively hardened.
+
+Original design notes below.
+
+Let the security agent (Jones) decide, per task, which of Brown's tools are available — including MCP tools. Brown starts each task with **nothing** enabled; Jones is shown the full candidate list in the context of the task and returns an explicit allow/block per tool. Only allowed tools are dispatchable. This replaces today's fixed `BrownBehavior.tools()` list with a per-task, security-curated subset, and gives the system a single enforcement surface.
+
+**The registry (`ToolRegistry`) — registry and dispatcher in one.** A new type that owns a set of tool entries, each carrying three independent flags, and that is also the lookup surface at dispatch (replacing the scattered `activeTools.first(where:)` calls in `AgentActor`). One registry per agent instance, backed by the shared session MCP host for dynamic tools. A tool's availability is:
+
+```
+isAvailable = isForcedAvailableBySystem || (isApproved && !isUnavailableDueToContext)
+```
+
+- `isApproved` — **security permission.** Set *only* by the Jones scoping verdict.
+- `isUnavailableDueToContext` — **transient orchestration context** (e.g. `reply_to_user` off until the user has messaged; work tools hidden during `awaitingTaskReview`). Set by orchestration code, never by Jones.
+- `isForcedAvailableBySystem` — **system override / security bypass.** Short-circuits everything. Used to make a small set of trusted built-in lifecycle tools available exactly when the loop needs them.
+
+`getAvailableTools()` returns the entries where `isAvailable` is true. The dispatcher looks tools up in the same registry, so the advertised set and the dispatchable set cannot drift; an unavailable tool is simply not found and falls through to the existing "Reject unavailable tool calls" guard above (rejected identically to a nonexistent tool — Brown can't distinguish "blocked" from "doesn't exist").
+
+**Smith and Jones registries are trivial** — all built-ins, `isApproved` effectively always true, no scoping pass. Only Brown's registry runs the enable/disable flow.
+
+**Everything goes through the security agent — no auto-grant.** Even read-only built-ins (`file_read`, `grep`, …) are scoped by Jones. (Earlier discussion considered auto-granting trusted read-only built-ins; rejected in favor of a uniform model.) MCP tool annotations (`readOnlyHint`/`destructiveHint`/`openWorldHint`) are **untrusted hints** and never gate anything; they are passed to Jones as advisory context only when `destructiveHint` or `openWorldHint` is true (we do *not* surface `readOnlyHint` or `idempotentHint`). For our own built-ins, the equivalent facts (`isDestructive`, `isOpenWorld`) are authored on the tool and surfaced to Jones as fact, not hint. Jones is instructed to construct the smallest, safest subset that can complete the task. The verdict is **fail-closed**: any tool omitted from Jones's response is treated as blocked. Jones's response stays text-based (allow/block list), consistent with the rest of its design — not tool calls.
+
+**Verdict handling.** Jones's raw response is *not* stored; it is consumed once to mark known registry tools allowed/blocked. Robustness rules: intersect the allow list with the actual candidate set (ignore any tool name Jones invents or hallucinates — never enable something that isn't really there); and give the scoping call a bounded retry on a malformed/unparseable response (same spirit as `SecurityEvaluator`'s retry budget). **Two-tier, reaffirmed:** being on the approved list only means a tool is *offered* — `bash`/`gh`/`run_applescript`/MCP calls still get per-call Jones evaluation at execution time. Approved ≠ auto-run; don't let a later refactor collapse the two tiers.
+
+**Zero approved = task refusal.** If Jones approves no work tools, do **not** spawn a hamstrung Brown that can only acknowledge and dead-end. Treat it as a refusal (tie into Jones's existing ABORT semantics): fail/abort the task with a surfaced reason rather than running it.
+
+**Startup sequence (when Smith calls `create_task` or `run_task`).** Brown is **not** created until scoping is done:
+1. Build the machinery and start MCP servers; wait up to a bounded **settle deadline (~5s)** for each to reach started-or-errored — never wait forever (ties to the MCP connect-deadline gotcha). Servers that miss the deadline are treated as absent; if they come up later they trigger a re-eval at a turn boundary (see below).
+2. **MCP failure → ignore** that server; its tools are simply absent. Proceed.
+3. Run the Jones scoping pass against the full candidate list (built-ins + available MCP tools) **exactly once** after the settle window — coalesce/debounce so N servers starting within the window produce a single scoping pass, not one evaluation per server.
+4. **Security-LLM failure → hard stop, surfaced to the user.** This is a serious error, not a degrade-and-continue: we cannot safely scope, so we do not spawn Brown.
+5. Only then create/assign Brown with the curated registry.
+
+The task shows a **`Preparing…` status** during this window (which may update through sub-states like "Starting MCPs…", "Checking security…") since MCP startup + a Jones call adds real latency before Brown exists.
+
+**Forced lifecycle tools (interim approach).** Rather than a permanent "always enabled" class, the loop drives `isForcedAvailableBySystem` to expose the few tools the system needs, when it needs them:
+- Initially: force `task_acknowledged` available; `reply_to_user` is `isUnavailableDueToContext = true` (user hasn't messaged).
+- On receiving `task_acknowledged`: clear its force / set `isUnavailableDueToContext = true`, and force `task_update` + `task_complete` available.
+- For initial testing these lifecycle tools are *also* sent to Jones so we can observe its verdict — but because `isForcedAvailableBySystem` short-circuits the formula, the verdict is **observed/logged, not enforced** for forced tools. (Forcing is a deliberate security bypass; it may only ever be set by our code on trusted built-in lifecycle tools, never derived from MCP or any external input.)
+
+**Per-turn re-evaluation is stateless.** At the start of each Brown turn, re-fetch the candidate tool list (built-ins + current MCP tools). Candidate identity is a **content hash of name + description + input schema** — *not name alone* — so a server that silently redefines a tool under the same name (a rug-pull) forces re-evaluation instead of riding a stale approval. If the candidate set (by hash) is identical to last turn, leave the registry alone. If it changed (MCP added/removed/`tools/list_changed`/redefined), run a **fresh** Jones scoping pass with no memory of prior verdicts — allow → `isApproved = true`, everything else → `isApproved = false`. (The stateless approach can re-litigate unchanged tools due to LLM non-determinism; accepted for simplicity, mitigated by the nudge below.) Changes apply at the **turn boundary**, never mid-turn; mind the known MCP actor-reentrancy gotcha (the async re-eval must resolve and apply at the boundary, not while the turn loop holds state).
+
+When — and *only* when — a security re-eval changes the approved list, inject a generic synthetic user-role message into Brown's history: **"Available tools have changed - confirm availability before use."** Do **not** inject it for context/force flag flips the system drove deliberately (e.g. the `task_acknowledged` → `task_update` transition), or Brown gets nagged on every acknowledgement.
+
+**Task storage (record, not gate).** Persist the latest approved list on `AgentTask` (`approvedTools: [String]?`; custom Codable already in place — use `decodeIfPresent` so old tasks load as `nil`). The registry remains the source of truth for gating; the task field is a record + future UI surface. On a mid-task replacement, overwrite the field and append a `TaskUpdate` ("approved tool list replaced. Previous: …"). On resume, a fresh stateless scope runs and (if different) annotates a replacement.
+
+**Explicitly out of scope for v1 (start with the simplest thing):**
+- No escape hatch / `request_tools` tool. If Jones under-grants, the task may dead-end; revisit later.
+- No auto-grant of read-only tools.
+- No verdict-seeded re-eval (the stability refinement over stateless) and no store-for-fast-resume optimization.
+- Smith-side scoping (Smith's tools stay fixed; the annotations live on the tools for possible future use).
+
+**Must handle in v1 (implementation traps, not deferrable):**
+- **Abort/cancel during the `Preparing…` window.** The Stop/abort path today assumes Brown/Jones actors exist; the user can hit Stop while MCPs are starting or scoping is running, before Brown is created. That path must cancel cleanly with no Brown yet.
+- **New `Task.Status` ripples.** Adding `Preparing…` touches persistence (Codable), sidebar rendering/filtering, auto-advance / next-pending logic, and the summarizer's terminal-state assumptions. Enumerate and update all sites before adding the case.
+- **Test seam.** Jones is an LLM, so the scoping pass needs a mockable evaluator (inject a stub returning a fixed allow/block) to deterministically test registry wiring, the hash-based candidate diff, forced-flag transitions, and fail-closed/parse-retry handling — same pattern as the existing `SecurityEvaluator` tests.
+- **Prompt-cache cost awareness.** Re-scoping changes Brown's tools array (breaks the cached prefix) and the synthetic "tools changed" message mutates history. Stable MCP config → fires once; a flapping server now costs a Jones call *and* a full Brown cache miss each changed turn. Document so a future cost-spike investigation has the explanation.
+
+**Deferred to a follow-up milestone (after initial test rounds):** the *robust handling* of the under-grant / refusal failure modes. The mechanisms are decided but intentionally not in the first slice:
+- **Refusal UX** for zero-approved (graceful surfaced refusal vs. today's abort plumbing).
+- **Brown under-grant ergonomics:** prompt language asserting the task-scoped toolset is authoritative ("do not assume tools beyond those offered"), plus a clean `task_complete`-as-failed path so Brown reports "no tool for X" instead of looping on `"Unknown tool"` rejections.
+- **Smith's blind spot:** Smith never sees the scoping decision, so re-running an under-granted task re-scopes the same way → same failure → loop. Smith needs a signal (the approved list, or "Brown was scoped and lacked X") to break the cycle or escalate to the user.
+
+**Noted, not changing now:** Jones scopes from task title + description + ID only — task **attachments are invisible** to scoping, though a `.sql`/`.xcodeproj`/etc. attachment may imply needed tools. Cheap future improvement: feed Jones the attachment filenames/types. Left as a known limitation for v1.
+
 ### Harden `isRetryableError` in TaskSummarizer
 `TaskSummarizer.isRetryableError` currently matches on `error.localizedDescription` strings (e.g. `hasPrefix("HTTP 429")`, regex for `^HTTP 5\d\d`). This works because `LLMProviderError.httpError` formats its description as `"HTTP \(code): \(body)"`, but it's fragile — if error wrapping or formatting changes, retries silently stop working. Replace with direct pattern matching on `LLMProviderError.httpError(statusCode:body:url:)` to check the status code as an integer.
 

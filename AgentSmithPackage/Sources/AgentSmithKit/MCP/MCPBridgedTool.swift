@@ -16,6 +16,12 @@ struct MCPBridgedTool: AgentTool {
     /// `readOnlyHint` from the server's tool annotations, surfaced to Jones. These are
     /// hints from a third party and are never trusted for access decisions.
     let isReadOnlyHint: Bool?
+    /// `destructiveHint` / `openWorldHint` from the server's tool annotations. Like
+    /// `isReadOnlyHint`, these are untrusted third-party claims — advisory context for Jones
+    /// only, never a grant mechanism. Absent hint → fail-closed `true` via the computed
+    /// `isDestructive` / `isOpenWorld` below.
+    let destructiveHint: Bool?
+    let openWorldHint: Bool?
     let host: MCPClientHost
 
     var name: String { prefixedName }
@@ -23,6 +29,13 @@ struct MCPBridgedTool: AgentTool {
     /// MCP servers can run longer than in-process tools (network calls, spawned work),
     /// so allow more headroom than the 120 s default.
     var executionTimeout: Duration { .seconds(180) }
+
+    /// Fail-closed: an MCP tool that doesn't declare `destructiveHint` is assumed destructive.
+    /// Untrusted — surfaced to Jones as a server-claimed hint, never used to grant access.
+    var isDestructive: Bool { destructiveHint ?? true }
+
+    /// Fail-closed: an MCP tool that doesn't declare `openWorldHint` is assumed open-world.
+    var isOpenWorld: Bool { openWorldHint ?? true }
 
     func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         let result: MCPToolCallResult

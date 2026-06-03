@@ -185,6 +185,20 @@ public actor MCPClientHost {
 
     public func statusSnapshot() -> [UUID: MCPServerStatus] { statuses }
 
+    /// Waits until no configured server is still in the `.connecting` state, or `timeout`
+    /// elapses — whichever comes first. Used before per-task tool scoping so servers that
+    /// connect quickly are included in the candidate list, without blocking task start forever
+    /// on a slow or hung server. A server that connects after the deadline simply triggers a
+    /// re-scope at the worker's next turn (its tools change the candidate fingerprint).
+    public func waitUntilSettled(timeout: Duration) async {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            let stillConnecting = statuses.values.contains { $0.state == .connecting }
+            if !stillConnecting { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
     // MARK: - Tools
 
     /// The MCP tools currently exposed to Brown, as bridged `AgentTool`s. Recomputed
@@ -210,6 +224,8 @@ public actor MCPClientHost {
                     toolDescription: tool.description ?? "MCP tool \(tool.name) from \(conn.config.name).",
                     parameters: MCPValueConversion.parametersSchema(from: tool.inputSchema),
                     isReadOnlyHint: tool.annotations.readOnlyHint,
+                    destructiveHint: tool.annotations.destructiveHint,
+                    openWorldHint: tool.annotations.openWorldHint,
                     host: self
                 ))
             }

@@ -85,6 +85,46 @@ public struct EvaluationRecord: Sendable, Identifiable, Equatable {
     }
 }
 
+/// A single tool offered to the per-task scoping pass. Built by the runtime from the
+/// candidate tool set; carries only what Jones needs to decide allow/block. `isDestructive`
+/// / `isOpenWorld` are facts for built-ins and (untrusted) server-claimed hints for MCP tools
+/// — `isMCP` tells Jones which.
+public struct ToolScopingCandidate: Sendable {
+    public let name: String
+    public let summary: String
+    public let isDestructive: Bool
+    public let isOpenWorld: Bool
+    public let isMCP: Bool
+
+    public init(name: String, summary: String, isDestructive: Bool, isOpenWorld: Bool, isMCP: Bool) {
+        self.name = name
+        self.summary = summary
+        self.isDestructive = isDestructive
+        self.isOpenWorld = isOpenWorld
+        self.isMCP = isMCP
+    }
+}
+
+/// Outcome of a per-task tool scoping pass.
+public struct ToolScopingResult: Sendable {
+    /// Tool names the security agent approved (already intersected with the real candidate set,
+    /// so hallucinated names are excluded).
+    public let approvedNames: Set<String>
+    /// The raw security-agent response, for the audit record.
+    public let rawResponse: String
+    /// `false` when the security agent could not produce a parseable allow/block decision after
+    /// retries — a hard error the caller must surface to the user (do NOT spawn the worker).
+    /// `true` even when `approvedNames` is empty: that is a deliberate "block everything"
+    /// refusal, which is a different situation from a failed evaluation.
+    public let succeeded: Bool
+
+    public init(approvedNames: Set<String>, rawResponse: String, succeeded: Bool) {
+        self.approvedNames = approvedNames
+        self.rawResponse = rawResponse
+        self.succeeded = succeeded
+    }
+}
+
 /// Direct security evaluator that replaces the Jones agent actor.
 ///
 /// Makes LLM calls using Jones's model configuration to evaluate tool requests.
@@ -424,6 +464,193 @@ actor SecurityEvaluator {
         recordEvaluation(toolName: toolName, toolParams: toolParams, taskTitle: taskTitle, prompt: evalPrompt, response: recordedResponse, disposition: fallback, startTime: startTime, toolCallID: toolCallID ?? "")
         appendSummary(toolName: toolName, toolParams: toolParams, verdict: "UNSAFE (evaluation failed)", toolCallID: toolCallID)
         return fallback
+    }
+
+    // MARK: - Tool scoping (per-task)
+
+    /// Per-task tool scoping pass: presents the full candidate tool list to the security agent
+    /// (Jones), in the context of the task, and returns the subset it approves. Stateless — it
+    /// does not consult or store prior approvals; the caller re-runs it whenever the candidate
+    /// set changes. Fail-closed: a tool not explicitly allowed is blocked, and an unparseable
+    /// response after retries returns `succeeded == false` so the caller can hard-stop.
+    ///
+    /// Uses a dedicated scoping system prompt and offers no tools (no file reads during scoping).
+    func scopeTools(
+        candidates: [ToolScopingCandidate],
+        taskTitle: String,
+        taskID: String,
+        taskDescription: String
+    ) async -> ToolScopingResult {
+        let candidateNames = Set(candidates.map(\.name))
+        guard !candidateNames.isEmpty else {
+            return ToolScopingResult(approvedNames: [], rawResponse: "(no candidate tools)", succeeded: true)
+        }
+
+        let prompt = Self.buildScopingPrompt(
+            candidates: candidates,
+            taskTitle: taskTitle,
+            taskID: taskID,
+            taskDescription: taskDescription
+        )
+        let messages: [LLMMessage] = [
+            .system(JonesBehavior.toolScopingSystemPrompt),
+            .user(prompt)
+        ]
+
+        let startTime = Date()
+        var retryCount = 0
+        var lastError: Error?
+        while retryCount < Self.maxRetries {
+            let response: LLMResponse
+            let callLatencyMs: Int
+            do {
+                let callStart = Date()
+                response = try await provider.send(messages: messages, tools: [])
+                callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
+            } catch {
+                if Task.isCancelled {
+                    return ToolScopingResult(approvedNames: [], rawResponse: "(cancelled)", succeeded: false)
+                }
+                lastError = error
+                retryCount += 1
+                continue
+            }
+
+            if let usageStore {
+                await UsageRecorder.record(
+                    response: response,
+                    context: LLMCallContext(
+                        agentRole: .jones,
+                        taskID: UUID(uuidString: taskID),
+                        modelID: configuration?.model ?? "",
+                        providerType: providerType,
+                        providerID: configuration?.providerID,
+                        configuration: configuration,
+                        sessionID: sessionID
+                    ),
+                    latencyMs: callLatencyMs,
+                    to: usageStore
+                )
+            }
+
+            let responseText = response.text ?? ""
+            guard let approved = Self.parseScopingResponse(responseText, candidateNames: candidateNames) else {
+                retryCount += 1
+                continue
+            }
+
+            consecutiveEvaluationFailures = 0
+            recordScopingEvaluation(
+                taskTitle: taskTitle,
+                prompt: prompt,
+                response: responseText,
+                approvedNames: approved,
+                candidateCount: candidateNames.count,
+                startTime: startTime
+            )
+            return ToolScopingResult(approvedNames: approved, rawResponse: responseText, succeeded: true)
+        }
+
+        // Exhausted retries — the security agent could not produce a usable decision.
+        consecutiveEvaluationFailures += 1
+        let failureText = "(scoping failed after \(retryCount) retries)" +
+            (lastError.map { "\nLast error: \($0.localizedDescription)" } ?? "")
+        recordScopingEvaluation(
+            taskTitle: taskTitle,
+            prompt: prompt,
+            response: failureText,
+            approvedNames: [],
+            candidateCount: candidateNames.count,
+            startTime: startTime
+        )
+        return ToolScopingResult(approvedNames: [], rawResponse: failureText, succeeded: false)
+    }
+
+    /// Builds the scoping prompt: task context plus the candidate tool list, each line tagged
+    /// with trust origin and (true-only) destructive / open-world flags per the design.
+    private static func buildScopingPrompt(
+        candidates: [ToolScopingCandidate],
+        taskTitle: String,
+        taskID: String,
+        taskDescription: String
+    ) -> String {
+        var lines: [String] = []
+        for candidate in candidates {
+            var tags: [String] = []
+            tags.append(candidate.isMCP ? "MCP (server-claimed, unverified)" : "built-in")
+            if candidate.isDestructive { tags.append("destructive") }
+            if candidate.isOpenWorld { tags.append("open-world") }
+            let summary = candidate.summary.isEmpty ? "" : " — \(candidate.summary)"
+            lines.append("- \(candidate.name) [\(tags.joined(separator: ", "))]\(summary)")
+        }
+
+        return """
+            # Task to scope tools for
+            - title: \(taskTitle)
+            - identifier: \(taskID)
+            - description:
+            \(taskDescription)
+
+            # Candidate tools
+            Decide ALLOW or BLOCK for each of the following tools, choosing the smallest safe
+            subset that could plausibly complete the task above:
+
+            \(lines.joined(separator: "\n"))
+
+            # Response
+            Output exactly one line per tool — `ALLOW <tool_name>` or `BLOCK <tool_name>` — using
+            the exact names above, and nothing else.
+            """
+    }
+
+    /// Parses an allow/block scoping response into the set of approved (and real) tool names.
+    /// Returns nil if no candidate was recognized at all (treated as a parse failure → retry).
+    /// Fail-closed: a candidate with no recognized line is omitted (blocked). Hallucinated names
+    /// not in `candidateNames` are ignored.
+    static func parseScopingResponse(_ text: String, candidateNames: Set<String>) -> Set<String>? {
+        var approved: Set<String> = []
+        var recognizedAny = false
+        let leadingStrip = CharacterSet(charactersIn: " \t*_`#>-•·")
+        let tokenStrip = CharacterSet(charactersIn: "`'\"*_ \t,.;:()[]")
+        for rawLine in text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            // Strip leading bullets / markdown from the whole line first, so a line like
+            // "- allow `file_read`" doesn't make the bullet the verb token.
+            let line = String(rawLine).trimmingCharacters(in: leadingStrip)
+            guard !line.isEmpty else { continue }
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let verb = parts[0].trimmingCharacters(in: tokenStrip).uppercased()
+            let nameToken = parts[1].trimmingCharacters(in: tokenStrip)
+            guard verb == "ALLOW" || verb == "BLOCK" else { continue }
+            guard candidateNames.contains(nameToken) else { continue }
+            recognizedAny = true
+            if verb == "ALLOW" { approved.insert(nameToken) }
+        }
+        return recognizedAny ? approved : nil
+    }
+
+    /// Records a scoping decision as an `EvaluationRecord` for the inspector / audit trail.
+    private func recordScopingEvaluation(
+        taskTitle: String,
+        prompt: String,
+        response: String,
+        approvedNames: Set<String>,
+        candidateCount: Int,
+        startTime: Date
+    ) {
+        let disposition = SecurityDisposition(
+            approved: !approvedNames.isEmpty,
+            message: "Approved \(approvedNames.count)/\(candidateCount) tools: \(approvedNames.sorted().joined(separator: ", "))"
+        )
+        recordEvaluation(
+            toolName: "(tool scoping)",
+            toolParams: "candidates: \(candidateCount)",
+            taskTitle: taskTitle,
+            prompt: prompt,
+            response: response,
+            disposition: disposition,
+            startTime: startTime
+        )
     }
 
     // MARK: - Private

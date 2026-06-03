@@ -54,6 +54,18 @@ public protocol AgentTool: Sendable {
     /// cancellation-aware `await` will keep running and delay the agent loop until it finishes
     /// on its own. A long-running tool must poll cancellation in its hot loop.
     var executionTimeout: Duration { get }
+
+    /// Whether invoking this tool can cause destructive or hard-to-reverse effects (data loss,
+    /// irreversible state change). Surfaced to the security agent (Jones) when scoping a task's
+    /// tool set. Defaults to the central `ToolSafetyClassification`, which is fail-closed —
+    /// an unrecognized name is treated as destructive. MCP tools override this from the
+    /// server's (untrusted) `destructiveHint`.
+    var isDestructive: Bool { get }
+
+    /// Whether the tool reaches an open/external world beyond a closed local system (arbitrary
+    /// network access, external app control, the internet). Surfaced to Jones when scoping.
+    /// Same fail-closed default as `isDestructive`; MCP tools override from `openWorldHint`.
+    var isOpenWorld: Bool { get }
 }
 
 /// Contextual information for determining tool availability before an LLM call.
@@ -84,6 +96,12 @@ extension AgentTool {
     /// comfortably while a tool that overruns gets cancelled (and, if it polls cancellation,
     /// actually stops) instead of pinning the agent loop on a stuck call.
     public var executionTimeout: Duration { .seconds(120) }
+
+    /// Default classification from the central built-in table (fail-closed for unknown names).
+    public var isDestructive: Bool { ToolSafetyClassification.isDestructive(toolName: name) }
+
+    /// Default classification from the central built-in table (fail-closed for unknown names).
+    public var isOpenWorld: Bool { ToolSafetyClassification.isOpenWorld(toolName: name) }
 
     /// One-line summary of what the tool does, suitable for inclusion in *another* agent's
     /// system prompt (notably Smith's "Brown's tools" manifest). Returns the first sentence
