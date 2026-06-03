@@ -421,7 +421,10 @@ struct ChannelLogView: View, Equatable {
         case .memorySearched:
             MemoryBanner(
                 kind: .searched,
-                summary: message.stringMetadata("searchQuery") ?? message.content,
+                // Smith's automatic search-on-the-user's-message echoes the message shown right
+                // above it, so suppress the query preview for those; explicit `search_memory`
+                // calls still show what was searched.
+                summary: message.boolMetadata("autoSearch") == true ? "" : (message.stringMetadata("searchQuery") ?? message.content),
                 detail: nil,
                 tags: nil,
                 source: nil,

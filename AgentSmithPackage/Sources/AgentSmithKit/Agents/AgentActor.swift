@@ -2448,7 +2448,11 @@ public actor AgentActor {
             "messageKind": .string("memory_searched"),
             "searchQuery": .string(query),
             "memoryCount": .int(results.memories.count),
-            "taskCount": .int(results.taskSummaries.count)
+            "taskCount": .int(results.taskSummaries.count),
+            // Marks this as Smith's AUTOMATIC search-on-the-user's-message (vs an explicit
+            // `search_memory` call). The query equals the user message shown directly above, so
+            // the UI suppresses the redundant query preview for these.
+            "autoSearch": .bool(true)
         ]
         if !memoryEntries.isEmpty {
             bannerMetadata["memoryResults"] = .string(memoryEntries.joined(separator: "\u{1E}"))
