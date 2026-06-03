@@ -23,13 +23,29 @@ public struct MCPServerStatus: Sendable, Equatable {
     public var stderrTail: String?
     /// Raw (unprefixed) tool names the server advertised, for the per-tool toggle UI.
     public var advertisedToolNames: [String]
+    /// Per-tool descriptions (unprefixed tool name → description) the server advertised, for the
+    /// settings UI. Empty when a tool declared no description.
+    public var toolDescriptions: [String: String]
+    /// The server's own description / usage notes, from the MCP `initialize` response's
+    /// `instructions` field. `nil` when the server didn't provide any.
+    public var serverInstructions: String?
 
-    public init(state: State, toolCount: Int = 0, error: String? = nil, stderrTail: String? = nil, advertisedToolNames: [String] = []) {
+    public init(
+        state: State,
+        toolCount: Int = 0,
+        error: String? = nil,
+        stderrTail: String? = nil,
+        advertisedToolNames: [String] = [],
+        toolDescriptions: [String: String] = [:],
+        serverInstructions: String? = nil
+    ) {
         self.state = state
         self.toolCount = toolCount
         self.error = error
         self.stderrTail = stderrTail
         self.advertisedToolNames = advertisedToolNames
+        self.toolDescriptions = toolDescriptions
+        self.serverInstructions = serverInstructions
     }
 }
 
@@ -89,6 +105,9 @@ public actor MCPClientHost {
         let stderr: Pipe
         let stderrBuffer: StderrBuffer
         var tools: [Tool]
+        /// The server's `instructions` from the MCP handshake (a server-level description). nil
+        /// when the server provided none.
+        var instructions: String?
     }
 
     private let secretStore: MCPSecretStore
@@ -303,14 +322,19 @@ public actor MCPClientHost {
             stdout: launched.stdout,
             stderr: launched.stderr,
             stderrBuffer: launched.stderrBuffer,
-            tools: []
+            tools: [],
+            instructions: nil
         )
         do {
-            try await connectWithDeadline(
+            let initResult = try await connectWithDeadline(
                 client: launched.client,
                 transport: launched.transport,
                 process: launched.process
             )
+            // Capture the server's self-description for the settings UI. Trim so a server that
+            // sends whitespace-only instructions shows nothing rather than a blank block.
+            let trimmed = initResult.instructions?.trimmingCharacters(in: .whitespacesAndNewlines)
+            connections[config.id]?.instructions = (trimmed?.isEmpty == false) ? trimmed : nil
         } catch {
             // If the connection was already torn down (disabled mid-connect), don't clobber state.
             if connections[config.id] != nil {
@@ -353,18 +377,21 @@ public actor MCPClientHost {
     /// the handshake (a crashed/misconfigured server — fast fail) and (b) an overall
     /// deadline. The SDK does not fail a pending `initialize` on stdin/stdout EOF, so in
     /// both cases we call `disconnect()` to unblock the connect task, then throw.
+    @discardableResult
     private nonisolated func connectWithDeadline(
         client: Client,
         transport: StdioTransport,
         process: Process,
         timeout: Duration = .seconds(120)
-    ) async throws {
+    ) async throws -> Initialize.Result {
         let pid = process.processIdentifier
         // Records why we abandoned the handshake so we can surface that reason rather
         // than the SDK's "Client disconnected" that our own `disconnect()` produces.
         let abandonReason = OSAllocatedUnfairLock<MCPConnectError?>(initialState: nil)
-        try await withThrowingTaskGroup(of: Void.self) { group in
+        return try await withThrowingTaskGroup(of: Initialize.Result.self) { group in
             group.addTask {
+                // The handshake result carries the server's `instructions` (a server-level
+                // description) and serverInfo — propagated up so the settings UI can show it.
                 try await client.connect(transport: transport)
             }
             group.addTask {
@@ -385,7 +412,10 @@ public actor MCPClientHost {
             }
             defer { group.cancelAll() }
             do {
-                try await group.next()
+                guard let result = try await group.next() else {
+                    throw MCPConnectError.processExited
+                }
+                return result
             } catch {
                 if let reason = abandonReason.withLock({ $0 }) { throw reason }
                 throw error
@@ -399,11 +429,17 @@ public actor MCPClientHost {
             let (tools, _) = try await client.listTools()
             guard let config = connections[serverID]?.config else { return }
             connections[serverID]?.tools = tools
+            var descriptions: [String: String] = [:]
+            for tool in tools {
+                if let d = tool.description, !d.isEmpty { descriptions[tool.name] = d }
+            }
             statuses[serverID] = MCPServerStatus(
                 state: .connected,
                 toolCount: exposedToolCount(serverID: serverID, config: config),
                 stderrTail: connections[serverID]?.stderrBuffer.tail,
-                advertisedToolNames: tools.map(\.name)
+                advertisedToolNames: tools.map(\.name),
+                toolDescriptions: descriptions,
+                serverInstructions: connections[serverID]?.instructions
             )
         } catch {
             statuses[serverID] = MCPServerStatus(

@@ -136,6 +136,14 @@ private struct MCPServerRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        if let instructions = status?.serverInstructions, !instructions.isEmpty {
+                            Text(instructions)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 1)
+                        }
                     }
                     Spacer()
                     Button("Edit", action: onEdit).buttonStyle(.borderless)
@@ -167,14 +175,24 @@ private struct MCPServerRow: View {
 
                 if let tools = status?.advertisedToolNames, !tools.isEmpty {
                     DisclosureGroup(isExpanded: $expanded) {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 6) {
                             ForEach(tools.sorted(), id: \.self) { tool in
-                                Toggle(tool, isOn: Binding(
-                                    get: { !server.disabledTools.contains(tool) },
-                                    set: { onToggleTool(tool, $0) }
-                                ))
-                                .font(.caption)
-                                .toggleStyle(.checkbox)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Toggle(tool, isOn: Binding(
+                                        get: { !server.disabledTools.contains(tool) },
+                                        set: { onToggleTool(tool, $0) }
+                                    ))
+                                    .font(.caption)
+                                    .toggleStyle(.checkbox)
+                                    if let desc = status?.toolDescriptions[tool], !desc.isEmpty {
+                                        Text(desc)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .padding(.leading, 20)
+                                    }
+                                }
                             }
                         }
                         .padding(.leading, 8)
