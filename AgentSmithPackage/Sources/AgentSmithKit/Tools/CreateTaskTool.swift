@@ -20,7 +20,14 @@ public struct CreateTaskTool: AgentTool {
         set, the task is created with status `scheduled` (auto-start is suppressed) and a timer is \
         auto-scheduled to fire at that time and instruct you to call `run_task`. Do NOT call \
         `schedule_task_action` separately when you've already passed `scheduled_run_at` — that \
-        would double-schedule the run.
+        would double-schedule the run. \
+        \
+        IMPORTANT — `attachment_ids`: if the user's message included ANY attachments (an image, \
+        screenshot, PDF, or other file — shown to you as `[filename](file://…) … id=<UUID>` \
+        markdown links), and the worker will need them to do the task, you MUST pass their EXACT \
+        `id=` UUIDs in the `attachment_ids` array. The worker (Brown) does NOT see the user's \
+        attachments unless you forward them here — omitting them means the worker is blind to the \
+        screenshot/file the user provided.
         """
 
     public let parameters: [String: AnyCodable] = [
