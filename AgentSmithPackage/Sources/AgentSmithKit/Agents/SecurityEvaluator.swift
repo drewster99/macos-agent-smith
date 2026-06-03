@@ -155,6 +155,13 @@ actor SecurityEvaluator {
     /// task cancellation — revisit if that ever shows up in practice.)
     private static let maxRetries = 5
 
+    /// Output-token floors (a minimum, not a cap — the configured Jones `max_tokens` still wins
+    /// when larger). A per-call verdict is short; a per-task scoping pass emits an allow/block
+    /// line for every candidate tool and usually reasons through them first, so it needs much
+    /// more headroom.
+    private static let perCallEvalMaxTokensFloor = 1500
+    private static let toolScopingMaxTokensFloor = 25000
+
     /// Tool definition for file_read, presented to Jones's LLM.
     private static let fileReadToolDef: LLMToolDefinition = {
         let tool = FileReadTool()
@@ -326,15 +333,14 @@ actor SecurityEvaluator {
             let callLatencyMs: Int
             do {
                 let callStart = Date()
-                // No max_tokens override — Jones uses whatever output cap its own
-                // model configuration specifies. An earlier hard 200-token cap here
-                // collided with extended thinking: the Anthropic provider has to
-                // raise max_tokens above the thinking budget (>=1024), so a 200 cap
-                // got clamped to budget+1, leaving ~1 token for the actual verdict
-                // and producing empty, unparseable responses.
+                // Floor the output budget so a small configured Jones max_tokens can't starve
+                // the verdict (the model may reason a little before committing). The configured
+                // value still wins when it's larger; the floor only raises it. A FLOOR, never a
+                // cap — an earlier hard 200-token cap here collided with extended thinking.
                 response = try await provider.send(
                     messages: conversationMessages,
-                    tools: [Self.fileReadToolDef]
+                    tools: [Self.fileReadToolDef],
+                    overrides: LLMCallOverrides(maxOutputTokens: max(configuration?.maxTokens ?? 0, Self.perCallEvalMaxTokensFloor))
                 )
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {
@@ -517,7 +523,14 @@ actor SecurityEvaluator {
             let callLatencyMs: Int
             do {
                 let callStart = Date()
-                response = try await provider.send(messages: messages, tools: [])
+                // Scoping responds with the full allow/block JSON for every candidate tool and
+                // typically reasons through them first — it needs far more room than a single
+                // verdict. Floor it high; a larger configured max_tokens still wins.
+                response = try await provider.send(
+                    messages: messages,
+                    tools: [],
+                    overrides: LLMCallOverrides(maxOutputTokens: max(configuration?.maxTokens ?? 0, Self.toolScopingMaxTokensFloor))
+                )
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {
                 if Task.isCancelled {

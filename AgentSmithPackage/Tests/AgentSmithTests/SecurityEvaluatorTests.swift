@@ -258,14 +258,16 @@ struct SecurityEvaluatorTests {
 
     // MARK: - Output token budget
 
-    @Test("evaluator does not override the provider's max-output-tokens")
-    func tokenCapNotOverridden() async {
-        // The evaluator must let Jones use its own configured output budget. A prior
-        // hard 200-token override collided with extended thinking (the provider has to
-        // raise max_tokens above the thinking budget), leaving no room for the verdict.
+    @Test("per-call evaluation floors max-output-tokens (never starves the verdict)")
+    func tokenBudgetFloored() async {
+        // A FLOOR, not a cap: the evaluator raises a too-small (here: unset → 0) configured Jones
+        // max_tokens to a safe minimum so a verbose/thinking model still has room for the verdict,
+        // while a larger configured value would still win. (A prior hard 200-token override
+        // collided with extended thinking — this is the opposite: a minimum, well above the
+        // thinking budget.)
         let (evaluator, provider, _) = makeEvaluator(responses: [textResponse("SAFE ok")])
         _ = await evaluate(evaluator)
-        #expect(provider.receivedMaxTokenOverrides == [nil])
+        #expect(provider.receivedMaxTokenOverrides == [1500])
     }
 
     // MARK: - Execution-outcome annotation (the new feature)
