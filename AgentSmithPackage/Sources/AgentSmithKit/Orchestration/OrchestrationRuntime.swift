@@ -627,6 +627,12 @@ public actor OrchestrationRuntime {
     }
 
     /// Registers a callback fired when an agent comes online, with its role and tool names.
+    /// Forwards a live available-tool-names update to the same sink as agent-start, so the
+    /// inspector's "Available Tools" reflects the current (scoped) set rather than the static list.
+    private func publishAvailableToolNames(_ role: AgentRole, _ names: [String]) {
+        onAgentStarted?(role, names)
+    }
+
     public func setOnAgentStarted(_ handler: @escaping @Sendable (AgentRole, [String]) -> Void) {
         onAgentStarted = handler
     }
@@ -1451,6 +1457,12 @@ public actor OrchestrationRuntime {
             }
         )
         securityEvaluators[brownID] = evaluator
+        // Wire the evaluation-recorded callback BEFORE the per-task scoping pass runs below, so
+        // the "(tool scoping)" evaluation record is pushed live to the inspector like per-call
+        // verdicts. (Wiring it after scoping would drop the scoping record from the live view.)
+        if let evalCallback = onEvaluationRecorded {
+            await evaluator.setOnEvaluationRecorded(evalCallback)
+        }
 
         // Brown's message filter: drop security review messages and tool execution trace messages.
         // Brown already receives all security feedback directly as tool results — approved calls
@@ -1583,9 +1595,15 @@ public actor OrchestrationRuntime {
         if let contextCallback = onContextChanged {
             await brownAgent.setOnContextChanged { messages in contextCallback(.brown, messages) }
         }
-        if let evalCallback = onEvaluationRecorded {
-            await evaluator.setOnEvaluationRecorded(evalCallback)
+        // Push Brown's LIVE scoped tool set to the inspector as it changes. Reuses the
+        // `onAgentStarted` sink (which just sets `agentToolNames[role]`), so the inspector shows
+        // the actual scoped tools instead of the static configured list.
+        await brownAgent.setOnActiveToolNamesChanged { [weak self] names in
+            guard let self else { return }
+            Task { await self.publishAvailableToolNames(.brown, names) }
         }
+        // Note: evaluator.setOnEvaluationRecorded is wired earlier (right after the evaluator is
+        // created) so the per-task scoping evaluation record is captured live.
 
         agents[brownID] = brownAgent
         agentRoles[brownID] = .brown

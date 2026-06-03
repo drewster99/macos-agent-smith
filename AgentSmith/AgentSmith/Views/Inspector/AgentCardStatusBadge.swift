@@ -28,10 +28,12 @@ struct AgentCardStatusBadge: View {
                     Text(isJones ? "Evaluating" : "Thinking")
                         .font(AppFonts.inspectorLabel)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     if let start = processingStartDate {
                         ThinkingElapsedTime(since: start, font: AppFonts.inspectorLabel)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
             } else if !executingTools.isEmpty {
                 HStack(spacing: 4) {
                     ProgressView()
@@ -39,10 +41,12 @@ struct AgentCardStatusBadge: View {
                     Text(workingLabel)
                         .font(AppFonts.inspectorLabel)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     if let start = toolExecutingStartDate {
                         ThinkingElapsedTime(since: start, font: AppFonts.inspectorLabel)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
             } else if hasActivity && isTerminated {
                 Text("Terminated")
                     .font(AppFonts.inspectorLabel)

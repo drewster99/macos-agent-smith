@@ -34,6 +34,11 @@ public actor AgentActor {
     /// Fired when the approved tool set changes (initial scope already happened in the runtime;
     /// this is for mid-task re-scopes) so the runtime can persist it on the task as a record.
     private var onApprovedToolsChanged: (@Sendable (Set<String>) async -> Void)?
+    /// Fired (when the set changes) with the names of the tools currently available to this
+    /// agent — the live, registry-gated set — so the inspector can show the real scoped tools
+    /// rather than the static configured list.
+    private var onActiveToolNamesChanged: (@Sendable ([String]) -> Void)?
+    private var lastPublishedToolNames: [String]?
     private let toolContext: ToolContext
 
     private var conversationHistory: [LLMMessage] = []
@@ -428,6 +433,12 @@ public actor AgentActor {
         onApprovedToolsChanged = handler
     }
 
+    /// Registers a callback fired (on change) with the live set of available tool names, so the
+    /// inspector reflects the actual scoped tools rather than the static configured list.
+    public func setOnActiveToolNamesChanged(_ handler: @escaping @Sendable ([String]) -> Void) {
+        onActiveToolNamesChanged = handler
+    }
+
     /// Replaces the actor's scheduled-wake list with the supplied set. Used by the runtime at
     /// cold-launch to replay wakes persisted from a prior process. Bypasses the
     /// `onWakeScheduled` callback so the timer-event log isn't double-stamped (the original
@@ -735,6 +746,7 @@ public actor AgentActor {
             // candidates, identical to the pre-registry behavior.
             toolRegistry.rebuild(candidates: candidates, defaultApproved: true)
             activeTools = toolRegistry.availableTools()
+            publishActiveToolNamesIfChanged()
             return
         }
 
@@ -755,6 +767,17 @@ public actor AgentActor {
         toolRegistry.applyApproval(approvedNames: approvedToolNames)
         applyForcedLifecycleFlags()
         activeTools = toolRegistry.availableTools()
+        publishActiveToolNamesIfChanged()
+    }
+
+    /// Publishes the current available tool names to the inspector when they change. Uses the
+    /// registry-available set (never empty — forced lifecycle tools are always present), so it
+    /// won't trip the "terminated" badge that keys off an empty tool list.
+    private func publishActiveToolNamesIfChanged() {
+        let names = activeTools.map(\.name)
+        guard names != lastPublishedToolNames else { return }
+        lastPublishedToolNames = names
+        onActiveToolNamesChanged?(names)
     }
 
     /// Forces the small set of trusted built-in lifecycle tools available regardless of the

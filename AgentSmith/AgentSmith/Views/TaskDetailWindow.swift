@@ -641,6 +641,15 @@ struct TaskDetailWindow: View {
                         .foregroundStyle(.orange)
                 }
             }
+
+            if let approved = task.approvedTools, !approved.isEmpty {
+                GridRow(alignment: .top) {
+                    metadataLabel("Approved tools")
+                    Text("\(approved.count) — \(approved.sorted().joined(separator: ", "))")
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
         }
         .font(.callout)
     }
