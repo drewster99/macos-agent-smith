@@ -85,26 +85,6 @@ public struct EvaluationRecord: Sendable, Identifiable, Equatable {
     }
 }
 
-/// A single tool offered to the per-task scoping pass. Built by the runtime from the
-/// candidate tool set; carries only what Jones needs to decide allow/block. `isDestructive`
-/// / `isOpenWorld` are facts for built-ins and (untrusted) server-claimed hints for MCP tools
-/// — `isMCP` tells Jones which.
-public struct ToolScopingCandidate: Sendable {
-    public let name: String
-    public let summary: String
-    public let isDestructive: Bool
-    public let isOpenWorld: Bool
-    public let isMCP: Bool
-
-    public init(name: String, summary: String, isDestructive: Bool, isOpenWorld: Bool, isMCP: Bool) {
-        self.name = name
-        self.summary = summary
-        self.isDestructive = isDestructive
-        self.isOpenWorld = isOpenWorld
-        self.isMCP = isMCP
-    }
-}
-
 /// Outcome of a per-task tool scoping pass.
 public struct ToolScopingResult: Sendable {
     /// Tool names the security agent approved (already intersected with the real candidate set,
@@ -506,18 +486,20 @@ actor SecurityEvaluator {
     ///
     /// Uses a dedicated scoping system prompt and offers no tools (no file reads during scoping).
     func scopeTools(
-        candidates: [ToolScopingCandidate],
+        candidateTools: [any AgentTool],
         taskTitle: String,
         taskID: String,
         taskDescription: String
     ) async -> ToolScopingResult {
-        let candidateNames = Set(candidates.map(\.name))
+        // toolID == the tool's dispatch name (bare for built-ins, prefixed for MCP), so the
+        // registry map-back is identity.
+        let candidateNames = Set(candidateTools.map(\.name))
         guard !candidateNames.isEmpty else {
             return ToolScopingResult(approvedNames: [], rawResponse: "(no candidate tools)", succeeded: true)
         }
 
         let prompt = Self.buildScopingPrompt(
-            candidates: candidates,
+            candidateTools: candidateTools,
             taskTitle: taskTitle,
             taskID: taskID,
             taskDescription: taskDescription
@@ -598,67 +580,200 @@ actor SecurityEvaluator {
         return ToolScopingResult(approvedNames: [], rawResponse: failureText, succeeded: false)
     }
 
-    /// Builds the scoping prompt: task context plus the candidate tool list, each line tagged
-    /// with trust origin and (true-only) destructive / open-world flags per the design.
+    // MARK: - Structured scoping payloads
+
+    /// The structured request handed to the security agent for per-task tool scoping. Serialized
+    /// to JSON as the user message — a clean schema the model parses mechanically instead of a
+    /// layered-prose prompt. We only ever encode it.
+    private struct ToolSetScopingUserPrompt: Encodable {
+        let taskID: String
+        let taskTitle: String
+        let taskDescription: String
+        let toolGroups: [ToolGroup]
+        let candidateTools: [CandidateTool]
+
+        /// Tri-state capability flag. `unknown` = could not be determined (e.g. an MCP server
+        /// that didn't declare the hint) — the agent is told to assume the riskier possibility.
+        enum Flag: String, Encodable { case yes, no, unknown }
+
+        /// How far to trust a tool's self-reported description and flags.
+        enum TrustLevel: String, Encodable {
+            /// Built-in: flags are authoritative facts.
+            case requiredBySystem
+            /// From an external server the user installed: description/flags are self-reported.
+            case approvedByUser
+            /// External, not explicitly installed by the user. (Unused today; reserved.)
+            case untrusted
+        }
+
+        enum Source: String, Encodable {
+            case builtIn
+            case externalUserAdded
+            case externalAutoDiscovered
+        }
+
+        struct ToolGroup: Encodable {
+            let toolGroupID: String
+            let name: String
+            let description: String
+            let source: Source
+        }
+
+        struct CandidateTool: Encodable {
+            /// Unique id == the tool's dispatch name (the registry key).
+            let toolID: String
+            let toolGroupID: String
+            let trustLevel: TrustLevel
+            /// The tool's own name (unprefixed for MCP tools).
+            let name: String
+            let description: String
+            let hasSideEffects: Flag
+            let isDestructive: Flag
+            let isOpenWorld: Flag
+        }
+    }
+
+    /// The structured response we require back from the security agent: an allow/block decision
+    /// per tool. We only ever decode it.
+    private struct ToolSetScopingAIResponse: Decodable {
+        struct ToolDecision: Decodable {
+            let toolID: String
+            let isAllowed: Bool
+        }
+        let toolResponses: [ToolDecision]
+    }
+
+    /// Classifies one candidate tool into its structured representation plus the group it belongs
+    /// to. Built-in flags are authoritative facts; MCP flags come from the server's untrusted
+    /// hints and become `.unknown` when the hint is absent.
+    private static func classify(
+        _ tool: any AgentTool
+    ) -> (tool: ToolSetScopingUserPrompt.CandidateTool, group: ToolSetScopingUserPrompt.ToolGroup) {
+        if let mcp = tool as? MCPBridgedTool {
+            let groupID = "mcp__\(mcp.serverName)"
+            let group = ToolSetScopingUserPrompt.ToolGroup(
+                toolGroupID: groupID,
+                name: mcp.serverName,
+                description: "External MCP server configured by the user. Its tool descriptions and capability flags are self-reported by the server and not independently verified.",
+                source: .externalUserAdded
+            )
+            let candidate = ToolSetScopingUserPrompt.CandidateTool(
+                toolID: mcp.name,
+                toolGroupID: groupID,
+                trustLevel: .approvedByUser,
+                name: mcp.originalToolName,
+                description: mcp.toolDescription,
+                hasSideEffects: flag(fromReadOnlyHint: mcp.isReadOnlyHint),
+                isDestructive: flag(mcp.destructiveHint),
+                isOpenWorld: flag(mcp.openWorldHint)
+            )
+            return (candidate, group)
+        }
+        let group = ToolSetScopingUserPrompt.ToolGroup(
+            toolGroupID: "builtin",
+            name: "Built-in tools",
+            description: "Tools provided and vetted by the system. Their capability flags are authoritative facts.",
+            source: .builtIn
+        )
+        let candidate = ToolSetScopingUserPrompt.CandidateTool(
+            toolID: tool.name,
+            toolGroupID: "builtin",
+            trustLevel: .requiredBySystem,
+            name: tool.name,
+            description: tool.smithFacingSummary,
+            hasSideEffects: ToolSafetyClassification.hasSideEffects(toolName: tool.name) ? .yes : .no,
+            isDestructive: tool.isDestructive ? .yes : .no,
+            isOpenWorld: tool.isOpenWorld ? .yes : .no
+        )
+        return (candidate, group)
+    }
+
+    private static func flag(_ hint: Bool?) -> ToolSetScopingUserPrompt.Flag {
+        guard let hint else { return .unknown }
+        return hint ? .yes : .no
+    }
+
+    private static func flag(fromReadOnlyHint readOnly: Bool?) -> ToolSetScopingUserPrompt.Flag {
+        guard let readOnly else { return .unknown }
+        return readOnly ? .no : .yes   // read-only ⇒ no side effects
+    }
+
+    /// Builds the scoping user message: the structured request serialized to pretty, sorted-key
+    /// JSON. Sorted keys keep it deterministic (prompt-cache friendly).
     private static func buildScopingPrompt(
-        candidates: [ToolScopingCandidate],
+        candidateTools: [any AgentTool],
         taskTitle: String,
         taskID: String,
         taskDescription: String
     ) -> String {
-        var lines: [String] = []
-        for candidate in candidates {
-            var tags: [String] = []
-            tags.append(candidate.isMCP ? "MCP (server-claimed, unverified)" : "built-in")
-            if candidate.isDestructive { tags.append("destructive") }
-            if candidate.isOpenWorld { tags.append("open-world") }
-            let summary = candidate.summary.isEmpty ? "" : " — \(candidate.summary)"
-            lines.append("- \(candidate.name) [\(tags.joined(separator: ", "))]\(summary)")
+        var groupsByID: [String: ToolSetScopingUserPrompt.ToolGroup] = [:]
+        var candidates: [ToolSetScopingUserPrompt.CandidateTool] = []
+        for tool in candidateTools {
+            let (candidate, group) = classify(tool)
+            groupsByID[group.toolGroupID] = group
+            candidates.append(candidate)
         }
-
-        return """
-            # Task to scope tools for
-            - title: \(taskTitle)
-            - identifier: \(taskID)
-            - description:
-            \(taskDescription)
-
-            # Candidate tools
-            Decide ALLOW or BLOCK for each of the following tools, choosing the smallest safe
-            subset that could plausibly complete the task above:
-
-            \(lines.joined(separator: "\n"))
-
-            # Response
-            Output exactly one line per tool — `ALLOW <tool_name>` or `BLOCK <tool_name>` — using
-            the exact names above, and nothing else.
-            """
+        let payload = ToolSetScopingUserPrompt(
+            taskID: taskID,
+            taskTitle: taskTitle,
+            taskDescription: taskDescription,
+            toolGroups: groupsByID.values.sorted { $0.toolGroupID < $1.toolGroupID },
+            candidateTools: candidates
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(payload), let json = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return json
     }
 
-    /// Parses an allow/block scoping response into the set of approved (and real) tool names.
-    /// Returns nil if no candidate was recognized at all (treated as a parse failure → retry).
-    /// Fail-closed: a candidate with no recognized line is omitted (blocked). Hallucinated names
-    /// not in `candidateNames` are ignored.
+    /// Decodes the structured allow/block response into the set of approved (and real) tool names.
+    /// Tolerates ```json fences / surrounding prose by extracting the first balanced JSON object.
+    /// Fail-closed: a candidate not explicitly allowed is blocked; hallucinated toolIDs are dropped.
+    /// Returns nil — a parse failure that triggers a retry — when no decision object can be decoded
+    /// OR when the decoded response references not a single real candidate (a garbage response).
     static func parseScopingResponse(_ text: String, candidateNames: Set<String>) -> Set<String>? {
+        guard let jsonData = extractJSONObject(from: text),
+              let decoded = try? JSONDecoder().decode(ToolSetScopingAIResponse.self, from: jsonData) else {
+            return nil
+        }
         var approved: Set<String> = []
         var recognizedAny = false
-        let leadingStrip = CharacterSet(charactersIn: " \t*_`#>-•·")
-        let tokenStrip = CharacterSet(charactersIn: "`'\"*_ \t,.;:()[]")
-        for rawLine in text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
-            // Strip leading bullets / markdown from the whole line first, so a line like
-            // "- allow `file_read`" doesn't make the bullet the verb token.
-            let line = String(rawLine).trimmingCharacters(in: leadingStrip)
-            guard !line.isEmpty else { continue }
-            let parts = line.split(separator: " ", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            let verb = parts[0].trimmingCharacters(in: tokenStrip).uppercased()
-            let nameToken = parts[1].trimmingCharacters(in: tokenStrip)
-            guard verb == "ALLOW" || verb == "BLOCK" else { continue }
-            guard candidateNames.contains(nameToken) else { continue }
+        for decision in decoded.toolResponses {
+            guard candidateNames.contains(decision.toolID) else { continue }
             recognizedAny = true
-            if verb == "ALLOW" { approved.insert(nameToken) }
+            if decision.isAllowed { approved.insert(decision.toolID) }
         }
         return recognizedAny ? approved : nil
+    }
+
+    /// Extracts the first balanced top-level JSON object from arbitrary model text (handles
+    /// ```json fences and leading/trailing prose). Brace counting ignores braces inside strings.
+    static func extractJSONObject(from text: String) -> Data? {
+        let chars = Array(text)
+        guard let start = chars.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for i in start..<chars.count {
+            let c = chars[i]
+            if inString {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inString = false }
+            } else if c == "\"" {
+                inString = true
+            } else if c == "{" {
+                depth += 1
+            } else if c == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(chars[start...i]).data(using: .utf8)
+                }
+            }
+        }
+        return nil
     }
 
     /// Records a scoping decision as an `EvaluationRecord` for the inspector / audit trail.

@@ -37,6 +37,10 @@ struct MCPBridgedTool: AgentTool {
     /// Fail-closed: an MCP tool that doesn't declare `openWorldHint` is assumed open-world.
     var isOpenWorld: Bool { openWorldHint ?? true }
 
+    /// Server install UUID — salts the scoping fingerprint so a reinstalled same-named server
+    /// (a fresh `serverID`) always forces a re-scope rather than inheriting a prior approval.
+    var identityToken: String? { serverID.uuidString }
+
     func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         let result: MCPToolCallResult
         do {

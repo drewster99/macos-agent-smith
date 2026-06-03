@@ -1526,17 +1526,8 @@ public actor OrchestrationRuntime {
             }
             let builtIns = BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot)
             let mcpTools = mcpHost != nil ? await mcpHost!.currentBridgedTools() : []
-            let candidates = (builtIns + mcpTools).map { tool in
-                ToolScopingCandidate(
-                    name: tool.name,
-                    summary: tool.smithFacingSummary,
-                    isDestructive: tool.isDestructive,
-                    isOpenWorld: tool.isOpenWorld,
-                    isMCP: tool.name.hasPrefix(MCPToolNaming.prefix)
-                )
-            }
             let scoping = await evaluator.scopeTools(
-                candidates: candidates,
+                candidateTools: builtIns + mcpTools,
                 taskTitle: task.title,
                 taskID: task.id.uuidString,
                 taskDescription: task.description

@@ -144,6 +144,11 @@ struct ToolRegistry: Sendable {
             hasher.update(data: Data("\u{1F}".utf8))
             hasher.update(data: Data(entry.tool.toolDescription.utf8))
             hasher.update(data: Data("\u{1F}".utf8))
+            // Identity salt (e.g. an MCP server's install UUID) so a tool whose provenance
+            // changes forces a re-scope even when its name/description/schema are byte-identical
+            // (a reinstalled same-named server). Built-ins contribute nothing here.
+            hasher.update(data: Data((entry.tool.identityToken ?? "").utf8))
+            hasher.update(data: Data("\u{1F}".utf8))
             // Deterministic full schema serialization (sorted keys) so any change to the
             // parameter shape — including nested properties — alters the fingerprint. If a
             // schema somehow fails to encode, the name+description still contribute.

@@ -45,6 +45,20 @@ enum ToolSafetyClassification {
         "bash", "gh", "run_applescript"
     ]
 
+    /// Built-in tools that are read-only — they inspect state but don't modify anything, so
+    /// they have no side effects.
+    private static let readOnlyNames: Set<String> = [
+        "file_read", "view_attachment", "glob", "directory_tree", "directory_listing",
+        "grep", "search_memory", "get_task_details", "list_scriptable_apps",
+        "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes"
+    ]
+
+    /// Whether a built-in tool has side effects (mutates state / acts). Read-only tools don't;
+    /// everything else does. Fail-closed: unknown name → `true`.
+    static func hasSideEffects(toolName: String) -> Bool {
+        !readOnlyNames.contains(toolName)
+    }
+
     /// Fail-closed: unknown name → `true`.
     static func isDestructive(toolName: String) -> Bool {
         if destructiveNames.contains(toolName) { return true }

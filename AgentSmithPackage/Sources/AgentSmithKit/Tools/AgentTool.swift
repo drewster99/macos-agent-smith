@@ -66,6 +66,14 @@ public protocol AgentTool: Sendable {
     /// network access, external app control, the internet). Surfaced to Jones when scoping.
     /// Same fail-closed default as `isDestructive`; MCP tools override from `openWorldHint`.
     var isOpenWorld: Bool { get }
+
+    /// A stable identity salt folded into the per-task scoping fingerprint, so a tool whose
+    /// *provenance* changes (not just its name/description/schema) forces a re-scope. Built-in
+    /// tools return `nil` (their name is their identity). MCP tools return their server's
+    /// install-stable UUID, so deleting a server and reinstalling a same-named one — even with a
+    /// byte-identical tool spec — produces a different fingerprint and never inherits the prior
+    /// approval. Not part of the dispatch name and never persisted.
+    var identityToken: String? { get }
 }
 
 /// Contextual information for determining tool availability before an LLM call.
@@ -102,6 +110,9 @@ extension AgentTool {
 
     /// Default classification from the central built-in table (fail-closed for unknown names).
     public var isOpenWorld: Bool { ToolSafetyClassification.isOpenWorld(toolName: name) }
+
+    /// Default: built-in tools have no separate identity salt (their name is their identity).
+    public var identityToken: String? { nil }
 
     /// One-line summary of what the tool does, suitable for inclusion in *another* agent's
     /// system prompt (notably Smith's "Brown's tools" manifest). Returns the first sentence

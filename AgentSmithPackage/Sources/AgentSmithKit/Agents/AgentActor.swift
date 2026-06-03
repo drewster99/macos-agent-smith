@@ -809,17 +809,8 @@ public actor AgentActor {
     private func rescopeToolsStateless() async {
         guard let evaluator = securityEvaluator,
               let task = await currentTaskForScoping() else { return }
-        let candidates = toolRegistry.candidateTools.map { tool in
-            ToolScopingCandidate(
-                name: tool.name,
-                summary: tool.smithFacingSummary,
-                isDestructive: tool.isDestructive,
-                isOpenWorld: tool.isOpenWorld,
-                isMCP: tool.name.hasPrefix(MCPToolNaming.prefix)
-            )
-        }
         let result = await evaluator.scopeTools(
-            candidates: candidates,
+            candidateTools: toolRegistry.candidateTools,
             taskTitle: task.title,
             taskID: task.id.uuidString,
             taskDescription: task.description
