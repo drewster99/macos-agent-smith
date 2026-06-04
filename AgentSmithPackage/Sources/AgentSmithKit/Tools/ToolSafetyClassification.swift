@@ -23,8 +23,8 @@ enum ToolSafetyClassification {
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
         // Low-risk side-effecting (lifecycle / orchestration)
-        "task_acknowledged", "task_update", "task_complete", "reply_to_user",
-        "message_user", "message_brown", "review_work", "create_task", "run_task",
+        "task_acknowledged", "task_update", "task_complete", "request_help", "reply_to_user",
+        "message_user", "message_brown", "review_work", "provide_help", "create_task", "run_task",
         "update_task", "amend_task", "schedule_task_action", "reschedule_wake", "cancel_wake",
         // Destructive
         "file_write", "file_edit", "save_memory", "manage_task_disposition",

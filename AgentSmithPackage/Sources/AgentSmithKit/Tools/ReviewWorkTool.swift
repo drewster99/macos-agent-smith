@@ -66,6 +66,15 @@ struct ReviewWorkTool: AgentTool {
             return .failure("Task not found: \(taskIDString)")
         }
 
+        // A help request parks in awaitingReview too, but it is NOT completed work — accepting
+        // it would deliver a non-result, rejecting it just loops Brown on the same blocker.
+        guard task.helpRequest == nil else {
+            return .failure("""
+                Task '\(task.title)' is a help request from Brown (it is blocked, not finished work). \
+                Answer it with `provide_help`, or `update_task` to fail the task — do not `review_work` it.
+                """)
+        }
+
         guard task.status == .awaitingReview else {
             return .failure("""
                 Task '\(task.title)' is not awaiting review (current status: \(task.status.rawValue)). \

@@ -152,6 +152,19 @@ public actor AgentActor {
     /// Brown (tool-heavy) triggers at 6; Smith (conversational) at 30.
     private var consecutiveTextOnlyResponses = 0
 
+    /// Timestamp of the most recent text-only response. Used to tell a tight degenerate loop
+    /// (responses seconds apart) from legitimate periodic idleness — e.g. Smith answering the
+    /// 10-minute Brown digest with "No action needed." across many hours. Without this, those
+    /// well-separated idle assessments accumulated toward the text-only limit and terminated a
+    /// perfectly healthy Smith (observed: 30 digest ticks over ~5h killed it as a "loop").
+    private var lastTextOnlyResponseAt: Date?
+
+    /// A text-only response arriving at least this long after the previous one is treated as a
+    /// fresh idle assessment (digest tick, scheduled wake, new user message), not a loop
+    /// iteration — so `consecutiveTextOnlyResponses` resets. Comfortably below the 600s digest
+    /// cadence and far above any tight degenerate loop, which re-fires in seconds.
+    private static let textOnlyLoopGapSeconds: TimeInterval = 120
+
     /// Tracks consecutive completely empty responses (no text AND no tool calls).
     /// Distinct from text-only: empty means the model produced NOTHING, not even
     /// narration. For Brown, a three-strike escalation applies:
@@ -799,6 +812,7 @@ public actor AgentActor {
         toolRegistry.setForcedAvailable("task_acknowledged", !taskAcknowledged)
         toolRegistry.setForcedAvailable("task_update", taskAcknowledged)
         toolRegistry.setForcedAvailable("task_complete", taskAcknowledged)
+        toolRegistry.setForcedAvailable("request_help", taskAcknowledged)
         toolRegistry.setForcedAvailable("reply_to_user", true)
     }
 
@@ -1198,6 +1212,15 @@ public actor AgentActor {
 
         let toolCalls = response.toolCalls
         if toolCalls.isEmpty {
+            // A long real-time gap since the previous text-only response means this is a fresh
+            // idle assessment (10-minute digest, scheduled wake, new inbound message), not a
+            // tight loop iteration — reset so periodic idleness can never trip the breaker.
+            let textOnlyNow = Date()
+            if let last = lastTextOnlyResponseAt,
+               textOnlyNow.timeIntervalSince(last) >= Self.textOnlyLoopGapSeconds {
+                consecutiveTextOnlyResponses = 0
+            }
+            lastTextOnlyResponseAt = textOnlyNow
             consecutiveTextOnlyResponses += 1
             // Reset tool repetition tracker — a text-only response breaks any tool call streak.
             lastToolCallSignature = nil
@@ -1338,6 +1361,7 @@ public actor AgentActor {
         }
 
         consecutiveTextOnlyResponses = 0
+        lastTextOnlyResponseAt = nil
         consecutiveEmptyResponses = 0
 
         // Cap tool calls before recording to history — every recorded tool call must have
@@ -1394,7 +1418,7 @@ public actor AgentActor {
         var calledCreateTask = false
 
         let taskLifecycleTools: Set<String> = [
-            "task_acknowledged", "task_update", "task_complete", "reply_to_user",
+            "task_acknowledged", "task_update", "task_complete", "request_help", "reply_to_user",
             "message_user", "message_brown"
         ]
 
@@ -1701,8 +1725,10 @@ public actor AgentActor {
             return
         }
 
-        // After completing a task, stop and wait for Smith's review.
-        // This takes priority over the sentMessage check since task_complete also posts a message.
+        // After completing a task (task_complete) OR escalating a blocker (request_help), stop and
+        // wait for Smith — `awaitingTaskReview` means "parked, waiting on Smith" for both. Reset
+        // when Smith's private reply (review_work feedback / provide_help) reaches Brown.
+        // This takes priority over the sentMessage check since both tools also post a message.
         if calledTaskComplete {
             awaitingTaskReview = true
             hasUnprocessedInput = false
@@ -2093,6 +2119,9 @@ public actor AgentActor {
         if call.name == "message_brown" && result == "Message sent to Brown." { sentMessage = true }
         if call.name == "reply_to_user" && result == "Reply sent to user." { sentMessage = true }
         if call.name == "task_complete" && result.hasPrefix("Task submitted for review:") { calledTaskComplete = true }
+        // request_help parks Brown identically to task_complete — it hands off to Smith and must
+        // wait. Reuses the same control flag so the run loop sets `awaitingTaskReview` and idles.
+        if call.name == "request_help" && result.hasPrefix("Help requested for task:") { calledTaskComplete = true }
         if call.name == "run_task" && result.contains("System is restarting") { calledCreateTask = true }
         if call.name == "create_task" && result.contains("System is restarting") { calledCreateTask = true }
 

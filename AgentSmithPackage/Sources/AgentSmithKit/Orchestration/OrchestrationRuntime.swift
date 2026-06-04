@@ -1128,8 +1128,12 @@ public actor OrchestrationRuntime {
                     """)
             }
 
-            if !awaitingReviewTasks.isEmpty {
-                let taskList = awaitingReviewTasks.map { task in
+            // A help request also parks in awaitingReview, but it's a blocker, not finished
+            // work — split it out so Smith is pointed at `provide_help`, not `review_work`.
+            let helpRequestTasks = awaitingReviewTasks.filter { $0.helpRequest != nil }
+            let reviewTasks = awaitingReviewTasks.filter { $0.helpRequest == nil }
+            if !reviewTasks.isEmpty {
+                let taskList = reviewTasks.map { task in
                     var entry = "- \(task.title) (id: \(task.id.uuidString))"
                     if let result = task.result {
                         entry += "\n  Result: \(result)"
@@ -1139,7 +1143,13 @@ public actor OrchestrationRuntime {
                     }
                     return entry
                 }.joined(separator: "\n")
-                parts.append("\(awaitingReviewTasks.count) task(s) are awaiting your review:\n\(taskList)\nReview each and call `review_work`.")
+                parts.append("\(reviewTasks.count) task(s) are awaiting your review:\n\(taskList)\nReview each and call `review_work`.")
+            }
+            if !helpRequestTasks.isEmpty {
+                let taskList = helpRequestTasks.map { task in
+                    "- \(task.title) (id: \(task.id.uuidString))\n  \(task.helpRequest ?? "")"
+                }.joined(separator: "\n")
+                parts.append("\(helpRequestTasks.count) task(s) have a BLOCKER from Brown awaiting your help (not a review):\n\(taskList)\nResolve each with `provide_help`, or `message_user` first if you need something from the user. Do NOT call `review_work` on these.")
             }
 
             // Show interrupted tasks that were NOT auto-resumed
@@ -2053,6 +2063,13 @@ public actor OrchestrationRuntime {
     /// with a digest about an agent that was already gone.
     private func assembleDigestIfBrownAlive(since: Date) async -> String? {
         guard agentIDForRole(.brown) != nil else { return nil }
+        // Nothing to monitor while a task sits in awaitingReview — Brown has stopped and is
+        // waiting on Smith's `review_work`, and the `task_complete` already woke Smith with the
+        // review prompt. A recurring "Brown activity" digest here is pure noise; historically it
+        // woke Smith every 10 minutes into a "No action needed" text-only loop that the circuit
+        // breaker eventually terminated. Smith's job in this state is to review, not to monitor.
+        let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
+        if activeTasks.contains(where: { $0.status == .awaitingReview }) { return nil }
         return await Self.assembleBrownActivityDigest(channel: channel, since: since)
     }
 
@@ -2067,6 +2084,8 @@ public actor OrchestrationRuntime {
     static func assembleBrownActivityDigest(channel: MessageChannel, since: Date) async -> String? {
         let recent = await channel.messages(since: since)
         guard !recent.isEmpty else { return nil }
+        // The post-scan `noBrownActivity` check below is the real suppression gate; this early
+        // return is just a cheap short-circuit for a genuinely empty window.
 
         var taskUpdateCount = 0
         var toolCallCount = 0
@@ -2110,6 +2129,16 @@ public actor OrchestrationRuntime {
                 lastDenial = msg.content
             }
         }
+
+        // Honor this function's contract ("returns nil when nothing meaningful has happened").
+        // The raw window is frequently non-empty purely because Smith's own idle "No action
+        // needed" posts land on the channel — so keying suppression off `recent.isEmpty` alone
+        // let a phantom "Brown made 0 tool calls — likely stuck" digest fire every cycle, which
+        // woke Smith into a self-sustaining text-only loop. Suppress on the absence of actual
+        // Brown activity instead.
+        let noBrownActivity = toolCallCount == 0 && taskUpdateCount == 0
+            && jonesDenials == 0 && msgFromBrownToSmith.isEmpty
+        guard !noBrownActivity else { return nil }
 
         var lines: [String] = []
         lines.append("- Brown made \(toolCallCount) tool call(s) and sent \(taskUpdateCount) task_update(s).")

@@ -26,6 +26,7 @@ enum BrownBehavior {
             TaskAcknowledgedTool(),
             TaskUpdateTool(),
             TaskCompleteTool(),
+            RequestHelpTool(),
             ReplyToUserTool(),
             BashTool(),
             GhTool(authStatusSnapshot: ghAuthStatusSnapshot ?? "(auth status was not captured for this spawn)"),
@@ -229,6 +230,12 @@ enum BrownBehavior {
           (do not summarize). After calling this, STOP working and wait for Smith's verdict. \
           The `commentary` field should include a concise numbered list of the steps you took — what was done, \
           in what order, and any key decisions or alternatives you considered. This helps future task references.
+        - `request_help(blocker:, needed:)` — Escalate a genuine blocker to Smith when you cannot proceed without \
+          information, a decision, or access that only the user or Smith can provide, AND you have already \
+          exhausted your own tools. NEVER report a blocker via `task_complete` — that tool is only for finished \
+          work, and submitting a non-result as if it were complete derails the review flow. Use `request_help` \
+          instead: state the `blocker` (what you tried, why you're stuck) and exactly what's `needed`. Then STOP \
+          and wait — Smith's answer arrives as a message and returns the task to running.
         - `reply_to_user(message:)` — Only available when the user has messaged you directly within the \
           last 10 minutes. Use it to reply to the user's direct question.
 
@@ -278,8 +285,9 @@ enum BrownBehavior {
         4. Updating progress at relevant crossroads, using the `task_update` tool: +10
         5. Sometimes a task is legitimately impossible to complete. If you are unable to complete the task, whatever the reason, you're expected to clearly and directly explain this to Agent Smith, and ask for help, suggestions or ideas. Being direct and honest about this and asking for help is not usually considered a failure, unless it was actually an easily and readily solveable problem.
             5a. Delivering honest but disappointing news to the Agent Smith: +50
-            5b. Asking for help when needed: +50
+            5b. Asking for help when needed — via `request_help`, NOT by faking a `task_complete`: +50
             5c. Failing to do any of these when you are stuck: -200
+            5d. Reporting a blocker through `task_complete` instead of `request_help` (submitting a non-result as finished work): -200
         6. Lying to the user or making up answers is absolutely unacceptable in all situations. This includes lies of omission, misrepresentations, intentional or unintentional minor errors, etc. Lying: -10000
         7. Performing actions which may harm the user's data, the user, the user's family, friends, or any human: -1000000
         8. Monthly token efficiency bonus (assigned to 1 agent each month): +1000

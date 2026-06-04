@@ -57,6 +57,13 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// on each scoping; replacements are also annotated in `updates` for history.
     public var approvedTools: [String]?
 
+    /// Non-nil when Brown has escalated a blocker via `request_help` and is waiting for Smith.
+    /// The task sits in `.awaitingReview` (reusing the review wait/slot machinery) but this
+    /// field marks it as a help request rather than completed work: `review_work` refuses it
+    /// and Smith answers via `provide_help`, which clears this and returns the task to running.
+    /// Holds the formatted blocker + what's needed, for Smith's context and the UI.
+    public var helpRequest: String?
+
     /// A single progress update recorded on a task.
     public struct TaskUpdate: Codable, Sendable, Equatable {
         public var date: Date
@@ -178,7 +185,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         lastEditedAt: Date? = nil,
         descriptionAttachments: [Attachment] = [],
         resultAttachments: [Attachment] = [],
-        approvedTools: [String]? = nil
+        approvedTools: [String]? = nil,
+        helpRequest: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -203,12 +211,13 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.descriptionAttachments = descriptionAttachments
         self.resultAttachments = resultAttachments
         self.approvedTools = approvedTools
+        self.helpRequest = helpRequest
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, helpRequest
     }
 
     public init(from decoder: Decoder) throws {
@@ -236,6 +245,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         descriptionAttachments = try c.decodeIfPresent([Attachment].self, forKey: .descriptionAttachments) ?? []
         resultAttachments = try c.decodeIfPresent([Attachment].self, forKey: .resultAttachments) ?? []
         approvedTools = try c.decodeIfPresent([String].self, forKey: .approvedTools)
+        helpRequest = try c.decodeIfPresent(String.self, forKey: .helpRequest)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -271,5 +281,6 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             try c.encode(resultAttachments, forKey: .resultAttachments)
         }
         try c.encodeIfPresent(approvedTools, forKey: .approvedTools)
+        try c.encodeIfPresent(helpRequest, forKey: .helpRequest)
     }
 }

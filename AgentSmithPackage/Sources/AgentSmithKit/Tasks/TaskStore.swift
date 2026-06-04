@@ -312,10 +312,11 @@ public actor TaskStore {
 
     /// Appends a clearly-labeled amendment to a task's description, optionally adding
     /// attachments to the task's `descriptionAttachments`. Used by Smith to relay user
-    /// clarifications so that Brown and Jones see the updated context. Attachments
-    /// appended here will be re-injected into Brown's briefing on the next respawn,
-    /// but the LIVE Brown won't automatically see them — Smith should follow with
-    /// `message_brown` to deliver them to the running agent.
+    /// clarifications so that Jones (which reads the live description on every approval)
+    /// sees the updated context. This only mutates the stored task — delivering the
+    /// amendment to a running Brown is `AmendTaskTool`'s responsibility, since Brown's
+    /// briefing is a one-time spawn snapshot. Attachments appended here are also
+    /// re-injected into Brown's briefing on any future respawn.
     public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) {
         guard var task = tasks[id] else { return }
         // Dedup: don't stack an [Amendment] identical to the one already at the end of the
@@ -328,6 +329,29 @@ public actor TaskStore {
         if !attachments.isEmpty {
             task.descriptionAttachments.append(contentsOf: attachments)
         }
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
+    /// Records a help-request escalation from Brown and parks the task in `.awaitingReview`,
+    /// reusing the review wait/slot machinery. `helpRequest` marks it as a blocker (not a
+    /// result), so `review_work` refuses it and Smith answers via `provide_help`. Deliberately
+    /// does NOT touch `result` — there is no completed work to deliver.
+    public func requestHelp(id: UUID, request: String) {
+        guard var task = tasks[id] else { return }
+        task.helpRequest = request
+        task.status = .awaitingReview
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
+    /// Clears a task's pending help request. Called when Smith answers via `provide_help`
+    /// (which also returns the task to running) or otherwise resolves the escalation.
+    public func clearHelpRequest(id: UUID) {
+        guard var task = tasks[id], task.helpRequest != nil else { return }
+        task.helpRequest = nil
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
