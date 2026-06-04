@@ -107,6 +107,12 @@ struct RunTaskTool: AgentTool {
                 """)
         }
         if let reviewTask = allTasks.first(where: { $0.status == .awaitingReview && $0.id != taskID }) {
+            if reviewTask.helpRequest != nil {
+                return .failure("""
+                    Cannot start '\(task.title)' — task '\(reviewTask.title)' has a blocker from Brown awaiting your help. \
+                    Resolve it with `provide_help` (or `message_user` first if you need something from the user) before starting the next task.
+                    """)
+            }
             return .failure("""
                 Cannot start '\(task.title)' — task '\(reviewTask.title)' is awaiting your review. \
                 Call review_work to accept or reject it first, then run_task to start the next task.

@@ -272,15 +272,17 @@ struct AbortBanner: View {
     }
 }
 
-/// Small banner shown when a task is awaiting Smith's review.
+/// Small banner shown when a task is awaiting Smith's review — or, when the task is a
+/// `request_help` escalation, awaiting Smith's help instead.
 struct ReviewBanner: View {
     let taskTitle: String
+    var isHelpRequest: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "eye.circle.fill")
+            Image(systemName: isHelpRequest ? "lifepreserver.fill" : "eye.circle.fill")
                 .foregroundStyle(.orange)
-            Text("Awaiting review:")
+            Text(isHelpRequest ? "Needs help:" : "Awaiting review:")
                 .font(.caption.bold())
                 .foregroundStyle(.orange)
             Text(taskTitle)
