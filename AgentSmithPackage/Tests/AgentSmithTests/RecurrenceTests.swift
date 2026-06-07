@@ -79,11 +79,43 @@ struct RecurrenceTests {
         #expect(next == Self.date(2026, 5, 1, 9, 0))
     }
 
+    @Test("monthly recurrence picks same-month date when requested day is still ahead")
+    func monthlySameMonthAhead() {
+        let recurrence = Recurrence.monthlyOnDay(at: TimeOfDay(hour: 9, minute: 0), dayOfMonth: 30)
+        let now = Self.date(2026, 4, 25, 12, 0)
+        let next = recurrence.nextOccurrence(after: now, calendar: Self.utc)
+        #expect(next == Self.date(2026, 4, 30, 9, 0))
+    }
+
     @Test("monthly recurrence with day = 0 returns nil")
     func monthlyInvalidDayReturnsNil() {
         let recurrence = Recurrence.monthlyOnDay(at: TimeOfDay(hour: 9, minute: 0), dayOfMonth: 0)
         let now = Self.date(2026, 4, 25, 12, 0)
         #expect(recurrence.nextOccurrence(after: now, calendar: Self.utc) == nil)
+    }
+
+    @Test("monthly recurrence skips February for day 31 instead of rolling to March 1")
+    func monthlySkipsMissingDay() {
+        let recurrence = Recurrence.monthlyOnDay(at: TimeOfDay(hour: 9, minute: 0), dayOfMonth: 31)
+        let now = Self.date(2026, 1, 31, 10, 0)
+        let next = recurrence.nextOccurrence(after: now, calendar: Self.utc)
+        #expect(next == Self.date(2026, 3, 31, 9, 0))
+    }
+
+    @Test("monthly recurrence preserves requested time after skipping an invalid month")
+    func monthlyPreservesTimeAfterInvalidMonth() {
+        let recurrence = Recurrence.monthlyOnDay(at: TimeOfDay(hour: 18, minute: 45), dayOfMonth: 31)
+        let now = Self.date(2026, 2, 1, 10, 0)
+        let next = recurrence.nextOccurrence(after: now, calendar: Self.utc)
+        #expect(next == Self.date(2026, 3, 31, 18, 45))
+    }
+
+    @Test("monthly recurrence skips April for day 31 instead of rolling to May 1")
+    func monthlySkipsThirtyDayMonth() {
+        let recurrence = Recurrence.monthlyOnDay(at: TimeOfDay(hour: 7, minute: 15), dayOfMonth: 31)
+        let now = Self.date(2026, 3, 31, 8, 0)
+        let next = recurrence.nextOccurrence(after: now, calendar: Self.utc)
+        #expect(next == Self.date(2026, 5, 31, 7, 15))
     }
 
     // MARK: - Display strings

@@ -11,13 +11,15 @@ let package = Package(
         .library(name: "AgentSmithKit", targets: ["AgentSmithKit"])
     ],
     dependencies: [
-        // Local path dependency during development of the built-in providers / agent-centric
-        // settings work. Revert to a versioned git dependency before release.
-        .package(path: "../../swift-llm-kit"),
-        // Local path dependency during the MLX embedding migration. Will switch to
-        // a versioned git dependency on https://github.com/drewster99/swift-semantic-search
-        // once the package is stable.
-        .package(path: "../../swift-semantic-search"),
+        // Providers, model configs, and Keychain-backed API key storage. Breaking changes
+        // ship as patch releases on this 0.0.x line, so a floor (not an open range) is what
+        // keeps an out-of-date checkout from satisfying the build. Package.resolved locks the
+        // exact commit for reproducible clones.
+        .package(url: "https://github.com/drewster99/swift-llm-kit.git", from: "0.0.36"),
+        // On-device semantic memory (MLX embeddings). This package is not yet tagged, so it is
+        // pinned to an exact commit. Switch to a versioned floor once it cuts a release.
+        .package(url: "https://github.com/drewster99/swift-semantic-search.git",
+                 revision: "8b4ede81326d323f0ebd6ce026c4d072f7df06b9"),
         // Official Model Context Protocol Swift SDK. Provides the MCP client used to
         // talk to user-configured stdio MCP servers.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk", .upToNextMinor(from: "0.12.1"))
