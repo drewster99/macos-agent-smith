@@ -15,6 +15,11 @@ struct MCPServerEditorSheet: View {
     @State private var envRows: [EnvRow] = []
     @State private var validationError: String?
     @State private var loaded = false
+    /// Stable id for a not-yet-persisted server. Generated once per sheet presentation so
+    /// Keychain accounts stay consistent across multiple Save attempts (a partial write
+    /// followed by a retry reuses the same accounts instead of orphaning the first try's
+    /// secrets). Unused when editing an existing server (`serverID` returns `existing.id`).
+    @State private var draftID = UUID()
 
     private struct ArgRow: Identifiable {
         let id = UUID()
@@ -81,7 +86,7 @@ struct MCPServerEditorSheet: View {
                 })
                 .buttonStyle(.borderless)
             }
-            Text("Passed to the command in order. Flag any argument that holds a secret (API key, token) — its value moves to the Keychain.")
+            Text("Passed to the command in order. Flag any argument that holds a secret (API key, token) — its value moves to the Keychain on Save.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ForEach($argRows) { $row in
@@ -159,9 +164,16 @@ struct MCPServerEditorSheet: View {
         }
     }
 
+    /// Stable server id used for Keychain accounts: the existing server's id when editing,
+    /// otherwise the per-presentation `draftID`. Always returns the same value for a given
+    /// sheet, so the accounts written under it stay in sync with the saved config.
+    private var serverID: UUID {
+        existing?.id ?? draftID
+    }
+
     private func save() {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
-        let id = existing?.id ?? UUID()
+        let id = serverID
 
         // Reject a name that collides with a different server (it's the tool-name prefix).
         if shared.mcpServers.contains(where: { $0.name == trimmedName && $0.id != id }) {
@@ -169,31 +181,99 @@ struct MCPServerEditorSheet: View {
             return
         }
 
-        // Clear any prior secrets for this server, then re-write the current set so stale
-        // entries (renamed env vars, re-flagged args) never linger in the Keychain.
-        shared.mcpSecretStore.deleteAll(
-            serverID: id,
-            envVarNames: existing?.envVarNames ?? [],
-            secretArgIndices: existing?.secretArgIndices ?? []
-        )
+        // Validate up front: every secret-flagged arg must have a value. We deliberately
+        // check this BEFORE touching the Keychain so a partial-write failure can't leave
+        // the store in a state inconsistent with the config.
+        for (index, row) in argRows.enumerated() where row.isSecret && row.value.isEmpty {
+            validationError = "Argument #\(index + 1) is marked Secret but has no value."
+            return
+        }
 
+        // Compute the final arg layout and the new set of secret indices from the
+        // current form state. Values for secret rows stay in `row.value` (we do NOT
+        // migrate to the Keychain on toggle) and ride along to the final index, so
+        // reordering or removing a row above a secret row can never strand a value
+        // at the wrong Keychain account.
         var finalArgs: [String] = []
-        var secretIndices: Set<Int> = []
+        var newSecretIndices: Set<Int> = []
         for (index, row) in argRows.enumerated() {
             if row.isSecret {
-                secretIndices.insert(index)
-                try? shared.mcpSecretStore.save(row.value, account: MCPSecretStore.argAccount(serverID: id, index: index))
-                finalArgs.append("")
+                newSecretIndices.insert(index)
+                finalArgs.append("")  // placeholder; real value lives in the Keychain
             } else {
                 finalArgs.append(row.value)
             }
         }
 
-        var envNames: [String] = []
-        for row in envRows where !row.name.trimmingCharacters(in: .whitespaces).isEmpty {
+        // Two-phase commit so a failure on row N can't leave rows < N already wiped:
+        // 1. compute the set of Keychain accounts to delete (existing indices that
+        //    are no longer flagged secret, plus env vars that were renamed/removed);
+        // 2. compute the set to write (current secret args and env vars);
+        // 3. perform all writes/deletes; if any one fails, abort BEFORE updating
+        //    the config and surface a clear error pointing at the failed account.
+        let previousSecretIndices = existing?.secretArgIndices ?? []
+        let indicesToDelete = previousSecretIndices.subtracting(newSecretIndices)
+        let previousEnvNames = Set(existing?.envVarNames ?? [])
+        // Preserve the order the user entered env vars in, deduping by name; a Set is
+        // derived alongside for the rename/removal diff.
+        var newEnvNamesOrdered: [String] = []
+        var newEnvNames: Set<String> = []
+        for row in envRows {
+            let trimmed = row.name.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, newEnvNames.insert(trimmed).inserted else { continue }
+            newEnvNamesOrdered.append(trimmed)
+        }
+        let envNamesToDelete = previousEnvNames.subtracting(newEnvNames)
+
+        var keychainFailures: [String] = []
+
+        // Phase 1: write new/updated secret args.
+        for index in newSecretIndices.sorted() {
+            let row = argRows[index]
+            let account = MCPSecretStore.argAccount(serverID: id, index: index)
+            do {
+                try shared.mcpSecretStore.save(row.value, account: account)
+            } catch {
+                keychainFailures.append("argument #\(index + 1)")
+            }
+        }
+
+        // Phase 2: write new/updated env vars.
+        for row in envRows {
             let envName = row.name.trimmingCharacters(in: .whitespaces)
-            try? shared.mcpSecretStore.save(row.value, account: MCPSecretStore.envAccount(serverID: id, name: envName))
-            envNames.append(envName)
+            guard !envName.isEmpty else { continue }
+            do {
+                try shared.mcpSecretStore.save(row.value, account: MCPSecretStore.envAccount(serverID: id, name: envName))
+            } catch {
+                keychainFailures.append("environment variable \"\(envName)\"")
+            }
+        }
+
+        // Phase 3: delete Keychain accounts that are no longer referenced. Only run
+        // this if all writes succeeded — otherwise we'd lose old secrets we can no
+        // longer reconstruct.
+        if keychainFailures.isEmpty {
+            for index in indicesToDelete.sorted() {
+                let account = MCPSecretStore.argAccount(serverID: id, index: index)
+                do {
+                    try shared.mcpSecretStore.delete(account: account)
+                } catch {
+                    keychainFailures.append("argument #\(index + 1) (cleanup)")
+                }
+            }
+            for envName in envNamesToDelete.sorted() {
+                let account = MCPSecretStore.envAccount(serverID: id, name: envName)
+                do {
+                    try shared.mcpSecretStore.delete(account: account)
+                } catch {
+                    keychainFailures.append("environment variable \"\(envName)\" (cleanup)")
+                }
+            }
+        }
+
+        if !keychainFailures.isEmpty {
+            validationError = "Failed to save secret(s) to the Keychain: \(keychainFailures.joined(separator: ", ")). The configuration was not updated; please retry."
+            return
         }
 
         let config = MCPServerConfig(
@@ -203,8 +283,8 @@ struct MCPServerEditorSheet: View {
             command: command.trimmingCharacters(in: .whitespaces),
             args: finalArgs,
             workingDirectory: workingDirectory.isEmpty ? nil : workingDirectory,
-            envVarNames: envNames,
-            secretArgIndices: secretIndices,
+            envVarNames: newEnvNamesOrdered,
+            secretArgIndices: newSecretIndices,
             disabledTools: existing?.disabledTools ?? []
         )
 
