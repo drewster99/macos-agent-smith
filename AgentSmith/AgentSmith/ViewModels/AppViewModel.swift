@@ -727,6 +727,12 @@ final class AppViewModel {
             }
         }
 
+        await newRuntime.setOnLearnedModelOutputLimit { [weak self] providerID, modelID, limit in
+            Task { @MainActor [weak self] in
+                self?.shared.learnModelOutputLimit(providerID: providerID, modelID: modelID, limit: limit)
+            }
+        }
+
         // Restore prior timer history into the runtime's event log so subsequent appends
         // join an existing series rather than start fresh on each launch.
         let priorEvents = timerHistory

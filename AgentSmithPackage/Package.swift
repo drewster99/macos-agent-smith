@@ -15,7 +15,7 @@ let package = Package(
         // ship as patch releases on this 0.0.x line, so a floor (not an open range) is what
         // keeps an out-of-date checkout from satisfying the build. Package.resolved locks the
         // exact commit for reproducible clones.
-        .package(url: "https://github.com/drewster99/swift-llm-kit.git", from: "0.0.36"),
+        .package(url: "https://github.com/drewster99/swift-llm-kit.git", from: "0.0.39"),
         // On-device semantic memory (MLX embeddings). This package is not yet tagged, so it is
         // pinned to an exact commit. Switch to a versioned floor once it cuts a release.
         .package(url: "https://github.com/drewster99/swift-semantic-search.git",

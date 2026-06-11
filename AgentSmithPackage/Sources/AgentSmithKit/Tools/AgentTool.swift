@@ -274,6 +274,11 @@ public struct ToolContext: Sendable {
     /// tool-side check is independent of the per-file cap enforced by the registry's
     /// `ingestFile`.
     public let maxAttachmentBytesPerMessage: @Sendable () async -> Int
+    /// Invoked when a backend rejects a request because the configured output-token cap
+    /// exceeds the model's true maximum, reporting that maximum as `(providerID, modelID,
+    /// limit)`. The app layer persists it as a catalog override so future provider builds
+    /// clamp to it (and the Settings UI reflects the corrected limit). No-op by default.
+    public let onLearnedModelOutputLimit: @Sendable (_ providerID: String, _ modelID: String, _ limit: Int) -> Void
 
     init(
         agentID: UUID,
@@ -323,7 +328,8 @@ public struct ToolContext: Sendable {
         },
         attachmentURLProvider: @escaping @Sendable (UUID, String) -> URL? = { _, _ in nil },
         stageAttachmentsForNextTurn: @escaping @Sendable ([Attachment], String) async -> Void = { _, _ in },
-        maxAttachmentBytesPerMessage: @escaping @Sendable () async -> Int = { 50 * 1024 * 1024 }
+        maxAttachmentBytesPerMessage: @escaping @Sendable () async -> Int = { 50 * 1024 * 1024 },
+        onLearnedModelOutputLimit: @escaping @Sendable (String, String, Int) -> Void = { _, _, _ in }
     ) {
         self.agentID = agentID
         self.agentRole = agentRole
@@ -359,6 +365,7 @@ public struct ToolContext: Sendable {
         self.attachmentURLProvider = attachmentURLProvider
         self.stageAttachmentsForNextTurn = stageAttachmentsForNextTurn
         self.maxAttachmentBytesPerMessage = maxAttachmentBytesPerMessage
+        self.onLearnedModelOutputLimit = onLearnedModelOutputLimit
     }
 
     /// Posts a message to the channel, auto-stamping it with the owning agent's

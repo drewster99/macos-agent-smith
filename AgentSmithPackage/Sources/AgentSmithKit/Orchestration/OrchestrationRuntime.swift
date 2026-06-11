@@ -118,6 +118,10 @@ public actor OrchestrationRuntime {
     private var onAgentStarted: (@Sendable (AgentRole, [String]) -> Void)?
     /// Callback fired when an agent records a new LLM turn, for incremental UI updates.
     private var onTurnRecorded: (@Sendable (AgentRole, LLMTurnRecord) -> Void)?
+    /// Fired when an agent learns a model's true maximum output-token limit from a backend
+    /// rejection. Args: `(providerID, modelID, limit)`. The app layer persists the limit as
+    /// a catalog override so future provider builds clamp to it.
+    private var onLearnedModelOutputLimit: (@Sendable (String, String, Int) -> Void)?
     /// Callback fired when a security evaluation is recorded, for incremental UI updates.
     private var onEvaluationRecorded: (@Sendable (EvaluationRecord) -> Void)?
     /// Callback fired when an agent's conversation history changes, for live inspector updates.
@@ -640,6 +644,10 @@ public actor OrchestrationRuntime {
     /// Registers a callback fired when any agent records a new LLM turn.
     public func setOnTurnRecorded(_ handler: @escaping @Sendable (AgentRole, LLMTurnRecord) -> Void) {
         onTurnRecorded = handler
+    }
+
+    public func setOnLearnedModelOutputLimit(_ handler: @escaping @Sendable (String, String, Int) -> Void) {
+        onLearnedModelOutputLimit = handler
     }
 
     /// Registers a callback fired when a security evaluation is recorded.
@@ -1830,6 +1838,7 @@ public actor OrchestrationRuntime {
         // share state. When unset, a fresh tracker is created for this agent only — that
         // agent's writes/reads stay consistent, but no one else can observe them.
         let tracker = executionTracker ?? ToolExecutionTracker()
+        let learnedLimitCallback = onLearnedModelOutputLimit
 
         return ToolContext(
             agentID: agentID,
@@ -1956,6 +1965,12 @@ public actor OrchestrationRuntime {
             maxAttachmentBytesPerMessage: { [weak self] in
                 guard let self else { return 50 * 1024 * 1024 }
                 return await self.maxAttachmentBytesPerMessage
+            },
+            // Capture the runtime callback by value (not `self`) so this @Sendable closure
+            // can fire from the agent's context without an actor hop — mirrors how
+            // `onTurnRecorded` is threaded to agents.
+            onLearnedModelOutputLimit: { providerID, modelID, limit in
+                learnedLimitCallback?(providerID, modelID, limit)
             }
         )
     }

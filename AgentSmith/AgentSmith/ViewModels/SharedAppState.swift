@@ -568,6 +568,21 @@ final class SharedAppState {
         Task { await writer.enqueue(snapshot) }
     }
 
+    /// Records a model's true maximum output-token limit — learned at runtime when a backend
+    /// rejects a request whose output cap exceeds what the model allows — as a catalog
+    /// override. Merges into any existing override for the model so unrelated fields (e.g.
+    /// behavior flags) are preserved. Once stored, `LLMKitManager.makeProvider` clamps every
+    /// future provider for this model to the limit and the Settings UI shows the corrected
+    /// value. NOTE: this is the model's *last reported* ceiling — if the provider later raises
+    /// it, clear the override (or bump it) to re-probe; we can't auto-detect an increase.
+    func learnModelOutputLimit(providerID: String, modelID: String, limit: Int) {
+        let key = "\(providerID)/\(modelID)"
+        var override = userModelOverrides[key] ?? ModelMetadataOverride()
+        guard override.maxOutputTokens != limit else { return }
+        override.maxOutputTokens = limit
+        setUserModelOverride(providerID: providerID, modelID: modelID, override: override)
+    }
+
     /// Returns true when every field on the override is at its no-op value. Used by
     /// `setUserModelOverride` to remove rather than persist an empty patch — keeps the
     /// on-disk JSON tidy and means "revert to bundled" is a single-call operation.

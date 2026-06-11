@@ -136,6 +136,13 @@ public actor AgentActor {
     private var consecutiveContextOverflows = 0
     private static let maxContextOverflowRetries = 3
 
+    /// The model's true maximum output-token limit, learned from a backend rejection
+    /// ("max_tokens (X) exceeds model's maximum output tokens (Y)"). Once set, every send
+    /// this run clamps its output cap to it so the agent stops re-hitting the same 400.
+    /// `nil` until learned; the persisted catalog override (written via the runtime callback)
+    /// clamps future runs at provider-construction time.
+    private var learnedMaxOutputCeiling: Int?
+
     /// Tracks consecutive prune-driven rebuilds without an intervening successful
     /// LLM turn. The run loop calls `pruneHistoryIfNeeded` at the top of every
     /// iteration; if the rebuilt context is still over the threshold, the next
@@ -977,9 +984,16 @@ public actor AgentActor {
                 let messagesForLLM = conversationHistory
 
                 let llmStartTime = Date()
+                // Clamp this turn's output cap to any limit we've learned from a prior
+                // rejection. Passed as a per-call override so we don't have to rebuild the
+                // provider mid-run; nil leaves the provider's configured cap untouched.
+                let outputCapOverride = learnedMaxOutputCeiling.map {
+                    min(configuration.llmConfig.maxTokens, $0)
+                }
                 let response = try await provider.send(
                     messages: messagesForLLM,
-                    tools: toolDefinitions
+                    tools: toolDefinitions,
+                    overrides: LLMCallOverrides(maxOutputTokens: outputCapOverride)
                 )
                 let llmLatencyMs = Int(Date().timeIntervalSince(llmStartTime) * 1000)
                 guard isRunning else { break }
@@ -1107,6 +1121,31 @@ public actor AgentActor {
                         ))
                         isRunning = false
                         break
+                    }
+                }
+
+                // Max output-token limit exceeded: the backend rejected the request because
+                // our configured output cap is larger than the model actually allows, and it
+                // told us the real ceiling. Learn it, persist it as a catalog override (so
+                // future provider builds clamp to it and the UI shows it), and retry this turn
+                // immediately with the clamped cap — backoff won't help a fixed config limit.
+                if let reportedLimit = (error as? LLMProviderError)?.reportedMaxOutputTokenLimit {
+                    let priorCeiling = learnedMaxOutputCeiling ?? configuration.llmConfig.maxTokens
+                    // Only treat as recoverable when this actually tightens the cap; otherwise
+                    // we'd loop forever if the backend keeps rejecting even at the stated limit.
+                    if reportedLimit < priorCeiling {
+                        learnedMaxOutputCeiling = reportedLimit
+                        toolContext.onLearnedModelOutputLimit(
+                            configuration.llmConfig.providerID,
+                            configuration.llmConfig.model,
+                            reportedLimit
+                        )
+                        consecutiveErrors = 0
+                        await toolContext.post(ChannelMessage(
+                            sender: .system,
+                            content: "\(configuration.role.displayName): model '\(configuration.llmConfig.model)' caps output at \(reportedLimit) tokens — clamped and retrying. Saved as a model override."
+                        ))
+                        continue  // Retry immediately with the clamped output cap.
                     }
                 }
 
