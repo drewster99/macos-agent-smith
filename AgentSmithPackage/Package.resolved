@@ -1,5 +1,5 @@
 {
-  "originHash" : "ba3e599d61f2e457808e22f092b6a262689a2c84646d375ab6725fde1c265cce",
+  "originHash" : "3ebe913bafb69592647057adc3e7898e08bf464227a30f0627d76759df5dc02a",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -116,6 +116,15 @@
       "state" : {
         "revision" : "a0ae212ebf6eab5f754c3129608bc5557637e605",
         "version" : "0.12.1"
+      }
+    },
+    {
+      "identity" : "swift-semantic-search",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/drewster99/swift-semantic-search.git",
+      "state" : {
+        "revision" : "2470aa5d1ca025ba46f234b30c5387c8cbfc99a5",
+        "version" : "0.0.3"
       }
     },
     {

@@ -388,6 +388,17 @@ public actor MemoryStore {
     /// ordering instead of relying on a high hardcoded gate.
     public static let defaultSearchThreshold: Double = 0.10
 
+    /// Absolute cosine relevance gates for context INJECTION — distinct from `defaultSearchThreshold`,
+    /// which is only a noise floor on `max(semantic, text)`. A candidate is injected only if its
+    /// semantic cosine clears the pool's gate. This is what suppresses the "always inject the top-K"
+    /// behavior that fires context on unrelated/no-answer queries. Gating is on COSINE, not lexical:
+    /// the retrieval eval showed keyword presence ≠ relevance (it re-introduces false injects), while
+    /// the embedding cosine separates gold from noise. Values are conservative initial settings from
+    /// the (query-type × pool) retrieval matrix — gold-vs-top-3-FP cosine medians were task≈0.74/0.65
+    /// and memory≈0.69/0.52–0.56 — and are meant to be tuned via `RetrievalEvalRunner`.
+    public static let taskInjectionCosineGate: Double = 0.62
+    public static let memoryInjectionCosineGate: Double = 0.56
+
     /// Common English stopwords stripped from query tokens before text scoring.
     private static let englishStopwords: Set<String> = [
         "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "been", "being",
@@ -405,7 +416,7 @@ public actor MemoryStore {
         "only", "own", "same"
     ]
 
-    private static func tokenize(_ text: String) -> [String] {
+    static func tokenize(_ text: String) -> [String] {
         var tokens: [String] = []
         var current = ""
         for scalar in text.lowercased().unicodeScalars {
@@ -420,7 +431,7 @@ public actor MemoryStore {
         return tokens
     }
 
-    private static func queryTokenSet(from query: String) -> Set<String> {
+    static func queryTokenSet(from query: String) -> Set<String> {
         Set(tokenize(query).filter { !englishStopwords.contains($0) })
     }
 
@@ -626,7 +637,9 @@ public actor MemoryStore {
         query: String,
         memoryLimit: Int = 3,
         taskLimit: Int = 3,
-        threshold: Double = MemoryStore.defaultSearchThreshold
+        threshold: Double = MemoryStore.defaultSearchThreshold,
+        memoryCosineGate: Double? = nil,
+        taskCosineGate: Double? = nil
     ) async throws -> SemanticSearchResults {
         let start = Date()
         let queryVector = try await engine.embed(query)
@@ -699,6 +712,7 @@ public actor MemoryStore {
             switch refs[idx] {
             case .memory(let entry):
                 guard memoryResults.count < memoryLimit else { continue }
+                if let gate = memoryCosineGate, semanticScores[idx] < gate { continue }
                 memoryResults.append(MemorySearchResult(
                     memory: entry,
                     similarity: semanticScores[idx],
@@ -713,6 +727,7 @@ public actor MemoryStore {
                 }
             case .task(let entry):
                 guard taskResults.count < taskLimit else { continue }
+                if let gate = taskCosineGate, semanticScores[idx] < gate { continue }
                 taskResults.append(TaskSummarySearchResult(
                     summary: entry,
                     similarity: semanticScores[idx],

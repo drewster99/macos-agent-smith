@@ -49,6 +49,10 @@ struct SearchMemoryTool: AgentTool {
             limit = 5
         }
 
+        // No cosine gate here: this is an EXPLICIT agent search (pull), not pushed auto-context.
+        // The agent asked, so a miss is worse than mild noise — return the RRF top-K and let the
+        // agent judge relevance from the similarity scores. The gates are for the push sites
+        // (CreateTaskTool / Smith's auto-context injection) where unrequested noise is the problem.
         let results = try await context.memoryStore.searchAll(
             query: query,
             memoryLimit: limit,

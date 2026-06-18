@@ -168,6 +168,295 @@ struct RetrievalEvalRunner {
         #expect(scored > 0, "no scorable queries found — check the RetrievalEval/data dir")
     }
 
+    /// Standalone (no MLX needed) bake-off of candidate LEXICAL scoring functions for the relevance
+    /// gate, over the frozen corpus TEXT + labels. The naive `matched/N` fraction inflates on short
+    /// common-word queries and deflates on long ones; this compares it against an N-scaled form and
+    /// an IDF-weighted (term-rarity) form. The decisive readout is the **no-answer top score**: the
+    /// strongest spurious lexical match on a query that should inject nothing — the false-inject fuel
+    /// a lexical escape would add. A good variant keeps GOLD high while keeping that low.
+    @Test
+    func lexicalVariantAnalysis() throws {
+        let data = try dataDir()
+        let tasks = try decodeJSON([TaskSummaryEntry].self, data.appending(path: "frozen/task_summaries.json"))
+        let memories = try decodeJSON([MemoryEntry].self, data.appending(path: "frozen/memories.json"))
+        let labels = try decodeJSON([String: Label].self, data.appending(path: "labels.json"))
+
+        // Doc id → token set (production tokenizer), and document frequency for IDF.
+        var docTokens: [String: Set<String>] = [:]
+        for t in tasks { docTokens[t.id.uuidString] = Set(MemoryStore.tokenize(t.embeddingSourceText)) }
+        for m in memories { docTokens[m.id.uuidString] = Set(MemoryStore.tokenize(m.content)) }
+        let numDocs = docTokens.count
+        var docFreq: [String: Int] = [:]
+        for toks in docTokens.values { for tok in toks { docFreq[tok, default: 0] += 1 } }
+        func idf(_ tok: String) -> Double { log(Double(numDocs + 1) / Double((docFreq[tok] ?? 0) + 1)) }
+
+        // Scoring functions of (matched query tokens, query size N):
+        //  naive  = matched/N                  (current production lexical channel)
+        //  nScale = tanh(frac · (1 + ln√N))    (reward matching many words; floor short queries at N=1)
+        //  idf    = Σidf(matched) / Σidf(all)  (term-rarity: common words contribute ~0)
+        //  idfN   = tanh(idf · (1 + ln√N))     (rarity + length combined)
+        struct Acc { var gold: [Double] = []; var other: [Double] = []; var naMax: [Double] = [] }
+        var naive = Acc(), nScale = Acc(), idfA = Acc(), idfN = Acc()
+        var goldMatchedZero = 0, goldTotal = 0
+
+        for (_, label) in labels where label.uncovered != true {
+            let q = MemoryStore.queryTokenSet(from: label.text)
+            guard !q.isEmpty else { continue }
+            let N = Double(q.count)
+            let lenScale = 1.0 + log(sqrt(N))
+            let qIdfTotal = q.reduce(0.0) { $0 + idf($1) }
+            let goldIDs = Set(label.gold.map(\.id))
+            var mNaive = 0.0, mN = 0.0, mIdf = 0.0, mIdfN = 0.0
+            for (docID, toks) in docTokens {
+                let matched = q.intersection(toks)
+                let frac = Double(matched.count) / N
+                let vNaive = frac
+                let vN = tanh(frac * lenScale)
+                let idfFrac = qIdfTotal > 0 ? matched.reduce(0.0) { $0 + idf($1) } / qIdfTotal : 0
+                let vIdf = idfFrac
+                let vIdfN = tanh(idfFrac * lenScale)
+                if goldIDs.contains(docID) {
+                    goldTotal += 1
+                    if matched.isEmpty {
+                        goldMatchedZero += 1   // gold doc with NO lexical overlap — cosine-only territory
+                    } else {
+                        naive.gold.append(vNaive); nScale.gold.append(vN); idfA.gold.append(vIdf); idfN.gold.append(vIdfN)
+                    }
+                } else if !matched.isEmpty {   // spurious match on a non-gold doc — what a lexical gate must reject
+                    naive.other.append(vNaive); nScale.other.append(vN); idfA.other.append(vIdf); idfN.other.append(vIdfN)
+                }
+                mNaive = max(mNaive, vNaive); mN = max(mN, vN); mIdf = max(mIdf, vIdf); mIdfN = max(mIdfN, vIdfN)
+            }
+            if goldIDs.isEmpty {   // no-answer query: strongest spurious lexical match across the corpus
+                naive.naMax.append(mNaive); nScale.naMax.append(mN); idfA.naMax.append(mIdf); idfN.naMax.append(mIdfN)
+            }
+        }
+
+        print("\n================ LEXICAL VARIANTS (no MLX) ================")
+        print("corpus docs: \(numDocs)   gold pairs: \(goldTotal)   zero lexical overlap: "
+              + "\(goldMatchedZero) (\(pct(goldMatchedZero, goldTotal))) ← only cosine can see these")
+        print("GOLD = relevant pairs (matched>0) · NON-gold = spurious matches · NO-ANSWER = top score per silent query")
+        func block(_ name: String, _ a: Acc) {
+            print("\n[\(name)]")
+            print("  GOLD     " + percentiles(a.gold))
+            print("  NON-gold " + percentiles(a.other))
+            print("  NO-ANS   " + percentiles(a.naMax))
+        }
+        block("naive  matched/N", naive)
+        block("nScale tanh(frac·(1+ln√N))", nScale)
+        block("idf    Σidf(hit)/Σidf(all)", idfA)
+        block("idfN   tanh(idf·(1+ln√N))", idfN)
+        print("==========================================================\n")
+        #expect(numDocs > 0)
+    }
+
+    /// Query-construction experiment ("what do we search WITH"). CreateTaskTool searches with
+    /// `title + " " + description` — a 271-word-median string that embeds to one diffuse vector.
+    /// This retrieves related prior TASKS using **title-only** vs **title+description** (the
+    /// `\n\n[Amendment]:` blocks AmendTaskTool appends are stripped first), each ranked by cosine
+    /// and by the lexical variants, so we can see whether the shorter, focused query retrieves better.
+    @Test
+    func queryConstructionExperiment() async throws {
+        let data = try dataDir()
+        let engine = SemanticSearchEngine()
+        for try await _ in engine.prepare() { /* drain progress */ }
+        try await ensureFrozen(Self.frozenSubdir, data: data, engine: engine)
+        let tasks = try decodeJSON([TaskSummaryEntry].self, data.appending(path: "\(Self.frozenSubdir)/task_summaries.json"))
+        let memories = try decodeJSON([MemoryEntry].self, data.appending(path: "\(Self.frozenSubdir)/memories.json"))
+        let labels = try decodeJSON([String: Label].self, data.appending(path: "labels.json"))
+        let titleByID = Dictionary(uniqueKeysWithValues:
+            try decodeJSON([QTaskRow].self, data.appending(path: "queries_tasks.json")).map { ($0.query_id, $0.title) })
+        let excludeByQuery = try loadExcludeIDs(data)
+        let taskIDs = Set(tasks.map { $0.id.uuidString })
+
+        // IDF over the TASK corpus (the docs we rank), via the production tokenizer.
+        var docTokens: [String: Set<String>] = [:]
+        for t in tasks { docTokens[t.id.uuidString] = Set(MemoryStore.tokenize(t.embeddingSourceText)) }
+        let numDocs = docTokens.count
+        var docFreq: [String: Int] = [:]
+        for toks in docTokens.values { for tok in toks { docFreq[tok, default: 0] += 1 } }
+        func idf(_ t: String) -> Double { log(Double(numDocs + 1) / Double((docFreq[t] ?? 0) + 1)) }
+
+        let store = MemoryStore(engine: engine)
+        struct Tally { var r3 = 0.0, r10 = 0.0, mrr = 0.0, n = 0; var goldCos: [Double] = []; var fpCos: [Double] = [] }
+        var T: [String: Tally] = [:]
+        let constructionsOrder = ["title", "title+desc"]
+        let signalsOrder = ["cosine", "naive", "idf"]
+
+        // Rank by score desc; fold recall@3, recall@10, and MRR (reciprocal rank of first gold).
+        func rank(_ ids: [(id: String, s: Double)], gold: Set<String>, into t: inout Tally) {
+            let ordered = ids.sorted { $0.s > $1.s }.map(\.id)
+            let top3 = Set(ordered.prefix(3)), top10 = Set(ordered.prefix(10))
+            t.r3 += Double(gold.intersection(top3).count) / Double(gold.count)
+            t.r10 += Double(gold.intersection(top10).count) / Double(gold.count)
+            for (i, id) in ordered.enumerated() where gold.contains(id) { t.mrr += 1.0 / Double(i + 1); break }
+            t.n += 1
+        }
+
+        for (qid, label) in labels.sorted(by: { $0.key < $1.key })
+        where label.kind == "task" && label.uncovered != true {
+            let goldTasks = Set(label.gold.map(\.id).filter { taskIDs.contains($0) })
+            guard !goldTasks.isEmpty, let title = titleByID[qid] else { continue }
+            // text == title + "\n" + description; strip the title prefix, then drop trailing amendments.
+            let text = label.text
+            let desc = text.hasPrefix(title) ? String(text.dropFirst(title.count)) : text
+            let stripped = (desc.components(separatedBy: "\n\n[Amendment]:").first ?? desc)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let constructions = ["title": title, "title+desc": title + " " + stripped]
+
+            let excluded = Set(excludeByQuery[qid] ?? [])
+            await store.clear()
+            await store.restore(memories: memories, taskSummaries: tasks.filter { !excluded.contains($0.id.uuidString) })
+
+            for cName in constructionsOrder {
+                guard let q = constructions[cName] else { continue }
+                let docs = rankedDocs(try await store.searchAll(query: q, memoryLimit: 0, taskLimit: 400)).filter { $0.isTask }
+
+                var cosT = T["\(cName)|cosine"] ?? Tally()
+                rank(docs.map { ($0.id, $0.cosine) }, gold: goldTasks, into: &cosT)
+                for d in docs where goldTasks.contains(d.id) { cosT.goldCos.append(d.cosine) }
+                for d in docs.sorted(by: { $0.cosine > $1.cosine }).prefix(3) where !goldTasks.contains(d.id) {
+                    cosT.fpCos.append(d.cosine)
+                }
+                T["\(cName)|cosine"] = cosT
+
+                let qTokens = MemoryStore.queryTokenSet(from: q)
+                let N = Double(max(qTokens.count, 1))
+                let qIdfTotal = qTokens.reduce(0.0) { $0 + idf($1) }
+                func textScores(idfWeighted: Bool) -> [(id: String, s: Double)] {
+                    docs.map { d in
+                        let matched = qTokens.intersection(docTokens[d.id] ?? [])
+                        let s = idfWeighted
+                            ? (qIdfTotal > 0 ? matched.reduce(0.0) { $0 + idf($1) } / qIdfTotal : 0)
+                            : Double(matched.count) / N
+                        return (id: d.id, s: s)
+                    }
+                }
+                var nT = T["\(cName)|naive"] ?? Tally(); rank(textScores(idfWeighted: false), gold: goldTasks, into: &nT); T["\(cName)|naive"] = nT
+                var iT = T["\(cName)|idf"] ?? Tally(); rank(textScores(idfWeighted: true), gold: goldTasks, into: &iT); T["\(cName)|idf"] = iT
+            }
+        }
+
+        let n0 = T["title|cosine"]?.n ?? 0
+        print("\n========== QUERY CONSTRUCTION × SIGNAL — related prior TASKS ==========")
+        print("task queries scored: \(n0)  ·  no gate, ranking only  ·  recall@K = frac of gold tasks in top-K")
+        print(col("construction", 14) + col("signal", 8) + col("recall@3", 10) + col("recall@10", 11) + col("MRR", 8))
+        for c in constructionsOrder {
+            for s in signalsOrder {
+                let t = T["\(c)|\(s)"] ?? Tally()
+                let n = Double(max(t.n, 1))
+                print(col(c, 14) + col(s, 8)
+                      + col(String(format: "%.3f", t.r3 / n), 10)
+                      + col(String(format: "%.3f", t.r10 / n), 11)
+                      + col(String(format: "%.3f", t.mrr / n), 8))
+            }
+        }
+        print("\n-- cosine separability: gold task cosine vs top-3 non-gold (FP) cosine --")
+        for c in constructionsOrder {
+            print("  " + col(c, 12) + " GOLD: " + percentiles(T["\(c)|cosine"]?.goldCos ?? []))
+            print("  " + col(c, 12) + " FP:   " + percentiles(T["\(c)|cosine"]?.fpCos ?? []))
+        }
+        print("====================================================================\n")
+        #expect(n0 > 0)
+    }
+
+    /// Full (query-type × pool) retrieval matrix — the four real production paths:
+    ///   long→task  : CreateTaskTool (title+desc) finding prior tasks
+    ///   long→mem   : CreateTaskTool (title+desc) finding memories
+    ///   short→task : auto-context / search_memory (user message) finding prior tasks
+    ///   short→mem  : auto-context / search_memory (user message) finding memories
+    /// Each query is bucketed by kind (task=long, memory=short) and scored against its task-gold and
+    /// memory-gold separately. Reports cosine recall + the gold-vs-FP cosine GAP, because that gap is
+    /// what decides whether a path can be cosine-gated at all (≈0 ⇒ no usable gate).
+    @Test
+    func retrievalMatrix() async throws {
+        let data = try dataDir()
+        let engine = SemanticSearchEngine()
+        for try await _ in engine.prepare() { /* drain progress */ }
+        try await ensureFrozen(Self.frozenSubdir, data: data, engine: engine)
+        let tasks = try decodeJSON([TaskSummaryEntry].self, data.appending(path: "\(Self.frozenSubdir)/task_summaries.json"))
+        let memories = try decodeJSON([MemoryEntry].self, data.appending(path: "\(Self.frozenSubdir)/memories.json"))
+        let labels = try decodeJSON([String: Label].self, data.appending(path: "labels.json"))
+        let excludeByQuery = try loadExcludeIDs(data)
+        let taskIDs = Set(tasks.map { $0.id.uuidString })
+        let memIDs = Set(memories.map { $0.id.uuidString })
+
+        // Per-pool tokens + IDF (rank within a pool ⇒ rarity is relative to that pool).
+        func buildIDF(_ pairs: [(String, String)]) -> (tokens: [String: Set<String>], idf: (String) -> Double) {
+            var toks: [String: Set<String>] = [:]
+            for (id, text) in pairs { toks[id] = Set(MemoryStore.tokenize(text)) }
+            let n = toks.count
+            var df: [String: Int] = [:]
+            for s in toks.values { for t in s { df[t, default: 0] += 1 } }
+            return (toks, { log(Double(n + 1) / Double((df[$0] ?? 0) + 1)) })
+        }
+        let taskPool = buildIDF(tasks.map { ($0.id.uuidString, $0.embeddingSourceText) })
+        let memPool = buildIDF(memories.map { ($0.id.uuidString, $0.content) })
+
+        struct Cell { var r3 = 0.0, r10 = 0.0, mrr = 0.0, r3idf = 0.0, n = 0; var goldCos: [Double] = []; var fpCos: [Double] = [] }
+        var cells: [String: Cell] = [:]
+        func recallMRR(_ ranked: [(id: String, s: Double)], _ gold: Set<String>) -> (Double, Double, Double) {
+            let ord = ranked.sorted { $0.s > $1.s }.map(\.id)
+            let t3 = Set(ord.prefix(3)), t10 = Set(ord.prefix(10))
+            var mrr = 0.0
+            for (i, id) in ord.enumerated() where gold.contains(id) { mrr = 1.0 / Double(i + 1); break }
+            return (Double(gold.intersection(t3).count) / Double(gold.count),
+                    Double(gold.intersection(t10).count) / Double(gold.count), mrr)
+        }
+        func measure(_ key: String, docs: [RankedDoc], gold: Set<String>, q: String,
+                     tokens: [String: Set<String>], idf: (String) -> Double) {
+            guard !gold.isEmpty else { return }
+            var c = cells[key] ?? Cell()
+            let (r3, r10, mrr) = recallMRR(docs.map { ($0.id, $0.cosine) }, gold)
+            c.r3 += r3; c.r10 += r10; c.mrr += mrr; c.n += 1
+            let qTokens = MemoryStore.queryTokenSet(from: q)
+            let qIdfTotal = qTokens.reduce(0.0) { $0 + idf($1) }
+            let idfScores = docs.map { d -> (id: String, s: Double) in
+                let m = qTokens.intersection(tokens[d.id] ?? [])
+                return (d.id, qIdfTotal > 0 ? m.reduce(0.0) { $0 + idf($1) } / qIdfTotal : 0)
+            }
+            c.r3idf += recallMRR(idfScores, gold).0
+            for d in docs where gold.contains(d.id) { c.goldCos.append(d.cosine) }
+            for d in docs.sorted(by: { $0.cosine > $1.cosine }).prefix(3) where !gold.contains(d.id) { c.fpCos.append(d.cosine) }
+            cells[key] = c
+        }
+
+        let store = MemoryStore(engine: engine)
+        for (qid, label) in labels.sorted(by: { $0.key < $1.key }) where label.uncovered != true && !label.gold.isEmpty {
+            let q = label.text
+            let tag = label.kind == "task" ? "long " : "short"
+            let excluded = Set(excludeByQuery[qid] ?? [])
+            await store.clear()
+            await store.restore(memories: memories, taskSummaries: tasks.filter { !excluded.contains($0.id.uuidString) })
+            let docs = rankedDocs(try await store.searchAll(query: q, memoryLimit: 400, taskLimit: 400))
+            let goldTasks = Set(label.gold.map(\.id).filter { taskIDs.contains($0) })
+            let goldMems = Set(label.gold.map(\.id).filter { memIDs.contains($0) })
+            measure("\(tag)→task", docs: docs.filter { $0.isTask }, gold: goldTasks, q: q, tokens: taskPool.tokens, idf: taskPool.idf)
+            measure("\(tag)→mem", docs: docs.filter { !$0.isTask }, gold: goldMems, q: q, tokens: memPool.tokens, idf: memPool.idf)
+        }
+
+        func med(_ xs: [Double]) -> Double { xs.isEmpty ? 0 : xs.sorted()[xs.count / 2] }
+        print("\n============= RETRIEVAL MATRIX (query-type × pool, cosine, no gate) =============")
+        print(col("cell", 12) + col("nQ", 5) + col("rec@3", 8) + col("rec@10", 8) + col("MRR", 7)
+              + col("idf@3", 8) + col("goldCos", 9) + col("fpCos", 8) + col("gap", 8))
+        for key in ["long →task", "long →mem", "short→task", "short→mem"] {
+            guard let c = cells[key] else { continue }
+            let n = Double(max(c.n, 1))
+            let gc = med(c.goldCos), fc = med(c.fpCos)
+            print(col(key, 12) + col("\(c.n)", 5)
+                  + col(String(format: "%.3f", c.r3 / n), 8)
+                  + col(String(format: "%.3f", c.r10 / n), 8)
+                  + col(String(format: "%.3f", c.mrr / n), 7)
+                  + col(String(format: "%.3f", c.r3idf / n), 8)
+                  + col(String(format: "%.3f", gc), 9)
+                  + col(String(format: "%.3f", fc), 8)
+                  + col(String(format: "%+.3f", gc - fc), 8))
+        }
+        print("gap = median(gold cosine) − median(top-3 FP cosine); larger ⇒ a cosine gate can separate.")
+        print("================================================================================\n")
+        #expect(!cells.isEmpty)
+    }
+
     // MARK: - Metrics
 
     private struct GateTally {
@@ -368,6 +657,10 @@ struct RetrievalEvalRunner {
     private struct GoldItem: Decodable { let id: String; let grade: Int }
 
     private struct QueryRow: Decodable { let query_id: String; let exclude_ids: [String]? }
+
+    /// Row of `queries_tasks.json` — carries the clean `title` separately from the combined `text`,
+    /// so the query-construction experiment can rebuild title-only vs title+description.
+    private struct QTaskRow: Decodable { let query_id: String; let title: String }
 
     private func loadExcludeIDs(_ data: URL) throws -> [String: [String]] {
         var out = [String: [String]]()

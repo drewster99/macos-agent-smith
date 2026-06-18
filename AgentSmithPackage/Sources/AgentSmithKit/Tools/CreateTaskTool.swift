@@ -139,7 +139,9 @@ public struct CreateTaskTool: AgentTool {
             let results = try await context.memoryStore.searchAll(
                 query: searchQuery,
                 memoryLimit: 3,
-                taskLimit: 3
+                taskLimit: 3,
+                memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
+                taskCosineGate: MemoryStore.taskInjectionCosineGate
             )
             if !results.isEmpty {
                 let memories: [RelevantMemory]? = results.memories.isEmpty ? nil : results.memories.map {

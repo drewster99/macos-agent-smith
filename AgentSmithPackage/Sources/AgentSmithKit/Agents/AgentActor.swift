@@ -2495,6 +2495,12 @@ public actor AgentActor {
     /// we don't re-attach the same kind of background to consecutive user messages.
     private static let autoMemoryContextMarker = "[AUTO_MEMORY_CONTEXT]"
 
+    /// When true, Smith's auto-memory context injects at most once per conversation (guarded by the
+    /// marker above). Temporarily `false` to surface the banner on EVERY user message while we
+    /// evaluate retrieval; flip back to `true` to restore once-per-conversation behavior. The guard
+    /// code (`conversationHasAutoMemoryContext`) is intentionally left intact for that reason.
+    private static let autoMemoryOncePerConversation = false
+
     private static let autoMemoryContextDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
@@ -2520,7 +2526,7 @@ public actor AgentActor {
         guard !query.isEmpty else { return }
 
         // Skip if a prior auto-context is still present in the conversation history (post-pruning).
-        if conversationHasAutoMemoryContext() { return }
+        if Self.autoMemoryOncePerConversation && conversationHasAutoMemoryContext() { return }
 
         // Capture the target message ID before the await — we re-locate by ID afterward
         // because the actor may process other isolated methods during the suspend, and a
@@ -2533,7 +2539,9 @@ public actor AgentActor {
             results = try await toolContext.memoryStore.searchAll(
                 query: query,
                 memoryLimit: 3,
-                taskLimit: 3
+                taskLimit: 3,
+                memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
+                taskCosineGate: MemoryStore.taskInjectionCosineGate
             )
         } catch {
             return
@@ -2543,7 +2551,7 @@ public actor AgentActor {
 
         // Re-check the marker — another path on this actor may have added a marker-bearing
         // user message into the conversation while we were awaiting the search.
-        if conversationHasAutoMemoryContext() { return }
+        if Self.autoMemoryOncePerConversation && conversationHasAutoMemoryContext() { return }
 
         // Re-locate the target message by ID. If it's no longer in the pending queue
         // (e.g. drained by an interleaved code path), skip silently.
