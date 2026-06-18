@@ -2,3 +2,9 @@
 .claude
 .swiftpm
 .DS_Store
+
+# Retrieval-eval fixtures contain real (personal) task/memory data — never commit.
+# Only the harness *code* under RetrievalEval/ is tracked; all generated data is local.
+RetrievalEval/data/
+__pycache__/
+*.pyc
