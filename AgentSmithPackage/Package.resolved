@@ -1,5 +1,5 @@
 {
-  "originHash" : "da2f45cd32f655d606d5f4ff63286faee1a3fc41ff7423dd43c7036b84283ed1",
+  "originHash" : "ba3e599d61f2e457808e22f092b6a262689a2c84646d375ab6725fde1c265cce",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-asn1.git",
       "state" : {
-        "revision" : "eb50cbd14606a9161cbc5d452f18797c90ef0bab",
-        "version" : "1.7.0"
+        "revision" : "a9a5efd40eaf558a2bcd48d64b1d1646be686008",
+        "version" : "1.7.1"
       }
     },
     {
@@ -116,14 +116,6 @@
       "state" : {
         "revision" : "a0ae212ebf6eab5f754c3129608bc5557637e605",
         "version" : "0.12.1"
-      }
-    },
-    {
-      "identity" : "swift-semantic-search",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/drewster99/swift-semantic-search.git",
-      "state" : {
-        "revision" : "8b4ede81326d323f0ebd6ce026c4d072f7df06b9"
       }
     },
     {

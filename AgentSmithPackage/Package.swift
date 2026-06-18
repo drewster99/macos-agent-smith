@@ -16,10 +16,10 @@ let package = Package(
         // keeps an out-of-date checkout from satisfying the build. Package.resolved locks the
         // exact commit for reproducible clones.
         .package(url: "https://github.com/drewster99/swift-llm-kit.git", from: "0.0.39"),
-        // On-device semantic memory (MLX embeddings). This package is not yet tagged, so it is
-        // pinned to an exact commit. Switch to a versioned floor once it cuts a release.
-        .package(url: "https://github.com/drewster99/swift-semantic-search.git",
-                 revision: "8b4ede81326d323f0ebd6ce026c4d072f7df06b9"),
+        // On-device semantic memory (MLX embeddings). 0.0.1 last-token pooling; 0.0.2 identifier
+        // encodes the pooling scheme (re-embed detection); 0.0.3 pooling is a declared per-model
+        // property + load-phase timing. See the package CHANGELOG. Package.resolved locks the commit.
+        .package(url: "https://github.com/drewster99/swift-semantic-search.git", from: "0.0.3"),
         // Official Model Context Protocol Swift SDK. Provides the MCP client used to
         // talk to user-configured stdio MCP servers.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk", .upToNextMinor(from: "0.12.1"))

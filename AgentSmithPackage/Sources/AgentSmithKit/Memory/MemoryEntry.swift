@@ -39,6 +39,11 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
     /// Who performed the most recent edit. `nil` if never edited.
     public var lastUpdatedBy: UpdateSource?
 
+    /// The embedding model/scheme signature (`SemanticSearchEngine.model.identifier`) that produced
+    /// `embedding`. `nil` for entries saved before this field existed. On load, an entry whose value
+    /// differs from the current engine identifier is stale and gets re-embedded.
+    public var embeddingModelID: String?
+
     /// Who originated the memory at save time.
     public enum Source: String, Codable, Sendable {
         case user
@@ -65,7 +70,8 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
         lastRetrievedAt: Date? = nil,
         retrievalCount: Int = 0,
         lastUpdatedAt: Date? = nil,
-        lastUpdatedBy: UpdateSource? = nil
+        lastUpdatedBy: UpdateSource? = nil,
+        embeddingModelID: String? = nil
     ) {
         self.id = id
         self.content = content
@@ -78,11 +84,12 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
         self.retrievalCount = retrievalCount
         self.lastUpdatedAt = lastUpdatedAt
         self.lastUpdatedBy = lastUpdatedBy
+        self.embeddingModelID = embeddingModelID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, content, embedding, source, tags, sourceTaskID, createdAt
-        case lastRetrievedAt, retrievalCount, lastUpdatedAt, lastUpdatedBy
+        case lastRetrievedAt, retrievalCount, lastUpdatedAt, lastUpdatedBy, embeddingModelID
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +105,7 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
         retrievalCount = try c.decodeIfPresent(Int.self, forKey: .retrievalCount) ?? 0
         lastUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .lastUpdatedAt)
         lastUpdatedBy = try c.decodeIfPresent(UpdateSource.self, forKey: .lastUpdatedBy)
+        embeddingModelID = try c.decodeIfPresent(String.self, forKey: .embeddingModelID)
     }
 
     /// Decodes `embedding`, tolerating legacy `[[Double]]` (multi-vector) and `[Double]`

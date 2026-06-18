@@ -27,6 +27,11 @@ public struct TaskSummaryEntry: Codable, Identifiable, Sendable {
     /// because a long-running task can be created days before its summary is written.
     public let createdAt: Date
 
+    /// The embedding model/scheme signature (`SemanticSearchEngine.model.identifier`) that produced
+    /// `embedding`. `nil` for summaries saved before this field existed; a mismatch with the current
+    /// engine identifier on load means the vector is stale and gets re-embedded.
+    public let embeddingModelID: String?
+
     public init(
         id: UUID,
         title: String,
@@ -35,7 +40,8 @@ public struct TaskSummaryEntry: Codable, Identifiable, Sendable {
         embedding: [Float],
         status: AgentTask.Status,
         taskCreatedAt: Date,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        embeddingModelID: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -45,10 +51,11 @@ public struct TaskSummaryEntry: Codable, Identifiable, Sendable {
         self.status = status
         self.taskCreatedAt = taskCreatedAt
         self.createdAt = createdAt
+        self.embeddingModelID = embeddingModelID
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, summary, embeddingSourceText, embedding, status, taskCreatedAt, createdAt
+        case id, title, summary, embeddingSourceText, embedding, status, taskCreatedAt, createdAt, embeddingModelID
     }
 
     public init(from decoder: Decoder) throws {
@@ -61,5 +68,6 @@ public struct TaskSummaryEntry: Codable, Identifiable, Sendable {
         status = try c.decode(AgentTask.Status.self, forKey: .status)
         taskCreatedAt = try c.decode(Date.self, forKey: .taskCreatedAt)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        embeddingModelID = try c.decodeIfPresent(String.self, forKey: .embeddingModelID)
     }
 }

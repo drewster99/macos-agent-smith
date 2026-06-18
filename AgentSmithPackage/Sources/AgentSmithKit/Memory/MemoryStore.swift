@@ -173,7 +173,8 @@ public actor MemoryStore {
             embedding: vector,
             source: source,
             tags: tags,
-            sourceTaskID: sourceTaskID
+            sourceTaskID: sourceTaskID,
+            embeddingModelID: engine.model.identifier
         )
         memories[entry.id] = entry
         onChange?()
@@ -194,8 +195,9 @@ public actor MemoryStore {
         guard let preEmbed = memories[id] else { return nil }
         let newContent = content ?? preEmbed.content
         let newTags = tags ?? preEmbed.tags
+        let reembedded = content != nil && content != preEmbed.content
         let newEmbedding: [Float]
-        if content != nil && content != preEmbed.content {
+        if reembedded {
             newEmbedding = try await engine.embed(newContent)
             try Self.validate(embedding: newEmbedding)
         } else {
@@ -218,7 +220,8 @@ public actor MemoryStore {
             lastRetrievedAt: current.lastRetrievedAt,
             retrievalCount: current.retrievalCount,
             lastUpdatedAt: Date(),
-            lastUpdatedBy: updatedBy
+            lastUpdatedBy: updatedBy,
+            embeddingModelID: reembedded ? engine.model.identifier : current.embeddingModelID
         )
         memories[id] = updated
         onChange?()
@@ -285,11 +288,72 @@ public actor MemoryStore {
             embeddingSourceText: embeddingText,
             embedding: vector,
             status: status,
-            taskCreatedAt: task.createdAt
+            taskCreatedAt: task.createdAt,
+            embeddingModelID: engine.model.identifier
         )
         taskSummaries[task.id] = entry
         onChange?()
         return entry
+    }
+
+    /// Re-embeds any stored memory or task summary whose `embeddingModelID` differs from the current
+    /// engine's model identifier (including legacy `nil` rows). This is the migration hook for an
+    /// embedding-output change (model / quantization / pooling) where the vector *dimension* is
+    /// unchanged and so would otherwise go undetected. Per-entry failures are logged and skipped so
+    /// one bad row can't abort the pass. Fires `onChange()` once if anything changed so the caller's
+    /// persistence runs. Returns how many of each were re-embedded.
+    @discardableResult
+    public func reembedStaleEntries() async -> (memories: Int, taskSummaries: Int) {
+        let signature = engine.model.identifier
+        let start = Date()
+        var memCount = 0, taskCount = 0
+
+        for id in memories.filter({ $0.value.embeddingModelID != signature }).map(\.key) {
+            guard let entry = memories[id], entry.embeddingModelID != signature, !entry.content.isEmpty else { continue }
+            do {
+                let vector = try await engine.embed(entry.content)
+                try Self.validate(embedding: vector)
+                // Re-read post-suspension (actor reentrancy): skip if deleted or content changed.
+                guard let cur = memories[id], cur.content == entry.content else { continue }
+                memories[id] = MemoryEntry(
+                    id: cur.id, content: cur.content, embedding: vector, source: cur.source,
+                    tags: cur.tags, sourceTaskID: cur.sourceTaskID, createdAt: cur.createdAt,
+                    lastRetrievedAt: cur.lastRetrievedAt, retrievalCount: cur.retrievalCount,
+                    lastUpdatedAt: cur.lastUpdatedAt, lastUpdatedBy: cur.lastUpdatedBy,
+                    embeddingModelID: signature
+                )
+                memCount += 1
+            } catch {
+                memoryStoreLogger.error("reembedStaleEntries: memory \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        for id in taskSummaries.filter({ $0.value.embeddingModelID != signature }).map(\.key) {
+            guard let entry = taskSummaries[id], entry.embeddingModelID != signature,
+                  !entry.embeddingSourceText.isEmpty else { continue }
+            do {
+                let vector = try await engine.embed(entry.embeddingSourceText)
+                try Self.validate(embedding: vector)
+                guard let cur = taskSummaries[id], cur.embeddingSourceText == entry.embeddingSourceText else { continue }
+                taskSummaries[id] = TaskSummaryEntry(
+                    id: cur.id, title: cur.title, summary: cur.summary,
+                    embeddingSourceText: cur.embeddingSourceText, embedding: vector, status: cur.status,
+                    taskCreatedAt: cur.taskCreatedAt, createdAt: cur.createdAt,
+                    embeddingModelID: signature
+                )
+                taskCount += 1
+            } catch {
+                memoryStoreLogger.error("reembedStaleEntries: task summary \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        if memCount > 0 || taskCount > 0 {
+            let elapsed = Date().timeIntervalSince(start)
+            let perDoc = elapsed * 1000 / Double(max(1, memCount + taskCount))
+            memoryStoreLogger.notice("reembedStaleEntries: re-embedded \(memCount, privacy: .public) memories + \(taskCount, privacy: .public) task summaries to model \(signature, privacy: .public) in \(String(format: "%.1f", elapsed), privacy: .public)s (\(String(format: "%.0f", perDoc), privacy: .public) ms/doc)")
+            onChange?()
+        }
+        return (memCount, taskCount)
     }
 
     /// All task summaries, newest first.

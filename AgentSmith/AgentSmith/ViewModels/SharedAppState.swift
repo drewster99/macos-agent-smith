@@ -507,6 +507,14 @@ final class SharedAppState {
             let savedTaskSummaries = try await basePersistence.loadTaskSummaries()
             if !savedMemories.isEmpty || !savedTaskSummaries.isEmpty {
                 await store.restore(memories: savedMemories, taskSummaries: savedTaskSummaries)
+                // One-time re-embed if the embedding model/scheme changed (e.g. mean → last-token
+                // pooling). The vector dimension is unchanged, so this signature check is the only
+                // thing that detects it. Fires the store's onChange, which persists the refreshed
+                // corpus. NOTE: blocks first launch after such a change while it re-embeds.
+                let migrated = await store.reembedStaleEntries()
+                if migrated.memories > 0 || migrated.taskSummaries > 0 {
+                    logger.notice("Re-embedded \(migrated.memories) memories + \(migrated.taskSummaries) task summaries after embedding-model change")
+                }
             }
         } catch {
             logger.error("Failed to load memories: \(error.localizedDescription, privacy: .public)")
