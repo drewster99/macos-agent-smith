@@ -422,7 +422,7 @@ struct ModelConfigurationEditorView: View {
         maxContextTokens = config.maxContextTokens
         thinkingBudget = config.thinkingBudget ?? 0
         extendedCacheTTL = config.extendedCacheTTL
-        useDefaultTemperature = config.useDefaultTemperature
+        useDefaultTemperature = config.temperature == nil
         streaming = false
         // If the loaded name still matches what we'd auto-suggest for this provider+model,
         // treat it as untouched and let it track future provider/model changes. If it

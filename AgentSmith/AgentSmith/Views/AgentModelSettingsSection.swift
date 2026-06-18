@@ -525,7 +525,7 @@ struct AgentModelSettingsSection: View {
         maxContextTokens = config.maxContextTokens
         thinkingBudget = config.thinkingBudget ?? 0
         extendedCacheTTL = config.extendedCacheTTL
-        useDefaultTemperature = config.useDefaultTemperature
+        useDefaultTemperature = config.temperature == nil
     }
 
     private func selectModel(provider: ModelProvider, model: ModelInfo) {
@@ -555,12 +555,11 @@ struct AgentModelSettingsSection: View {
         var updated = previous
         updated.providerID = providerID
         updated.modelID = modelID
-        updated.temperature = temperature
+        updated.temperature = useDefaultTemperature ? nil : temperature
         updated.maxOutputTokens = max(1, maxOutputTokens)
         updated.maxContextTokens = max(1, maxContextTokens)
         updated.thinkingBudget = (thinkingSupported && thinkingBudget > 0) ? thinkingBudget : nil
         updated.extendedCacheTTL = anthropicCacheVisible && extendedCacheTTL
-        updated.useDefaultTemperature = useDefaultTemperature
 
         // Skip if nothing meaningfully changed — saves both a redundant write and a
         // useless undo entry.
