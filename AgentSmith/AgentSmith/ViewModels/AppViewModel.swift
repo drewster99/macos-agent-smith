@@ -595,6 +595,18 @@ final class AppViewModel {
         // if a cap is changed mid-session.
         await newRuntime.setMaxAttachmentBytesPerFile(shared.maxAttachmentBytesPerFile)
         await newRuntime.setMaxAttachmentBytesPerMessage(shared.maxAttachmentBytesPerMessage)
+        // Tool-security configuration (Settings). Applied to each Brown at spawn; changes take
+        // effect on the next session start (consistent with the other start-time settings).
+        await newRuntime.setToolSecurity(
+            preflightScoping: shared.enablePreflightScoping,
+            perCallCheck: shared.enablePerToolCheck,
+            globalPolicy: shared.globalToolPolicies
+        )
+        // Apply later Settings changes to this session immediately (no restart). Re-registering on
+        // each start() replaces any prior closure for this session.
+        shared.registerToolSecurityObserver(session.id) { [weak self] in
+            self?.pushToolSecurity()
+        }
 
         // Per-session MCP host: create once and reuse across runtime restarts so a task
         // restart never re-launches the configured servers. Observers push status to
@@ -1112,6 +1124,28 @@ final class AppViewModel {
             to: .smith,
             text: "Please retry this failed task:\nTitle: \(task.title)\nDescription: \(task.description)\nID: \(task.id.uuidString)"
         )
+    }
+
+    /// Pushes the current global tool-security settings to this session's runtime. Called on a
+    /// Settings change (via the registered observer) so changes take effect without a session restart.
+    private func pushToolSecurity() {
+        let pre = shared.enablePreflightScoping
+        let per = shared.enablePerToolCheck
+        let pol = shared.globalToolPolicies
+        Task { await runtime?.setToolSecurity(preflightScoping: pre, perCallCheck: per, globalPolicy: pol) }
+    }
+
+    /// Sets (or clears, with `enabled == nil`) a per-task user tool override from the task-detail UI.
+    /// Routes through the live runtime so a running worker picks it up next turn; persists on the task
+    /// either way. The override survives re-evaluation (the registry re-applies it after each scope).
+    func setTaskToolOverride(taskID: UUID, tool: String, enabled: Bool?) {
+        Task {
+            if let runtime {
+                await runtime.setTaskToolOverride(taskID: taskID, tool: tool, enabled: enabled)
+            } else {
+                await taskStore?.setUserToolOverride(id: taskID, tool: tool, enabled: enabled)
+            }
+        }
     }
 
     /// "Run Again" from a completed task's context menu. Creates a brand-new, independent

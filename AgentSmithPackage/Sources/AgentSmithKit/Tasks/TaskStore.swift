@@ -387,6 +387,23 @@ public actor TaskStore {
         onChange?()
     }
 
+    /// Sets (or clears) a per-task user override for a single tool. `enabled == nil` removes the
+    /// override (the tool reverts to the global policy / automatic verdict). User overrides survive
+    /// re-evaluation — the live registry re-applies them after every scoping pass.
+    public func setUserToolOverride(id: UUID, tool: String, enabled: Bool?) {
+        guard var task = tasks[id] else { return }
+        var overrides = task.userToolOverrides ?? [:]
+        if let enabled {
+            overrides[tool] = enabled
+        } else {
+            overrides.removeValue(forKey: tool)
+        }
+        task.userToolOverrides = overrides.isEmpty ? nil : overrides
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
     /// Saves a compressed summary of Brown's last working state for resumability.
     public func setLastBrownContext(id: UUID, context: String) {
         guard var task = tasks[id] else { return }

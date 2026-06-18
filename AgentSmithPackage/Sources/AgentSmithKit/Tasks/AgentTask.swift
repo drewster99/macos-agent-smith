@@ -57,6 +57,12 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// on each scoping; replacements are also annotated in `updates` for history.
     public var approvedTools: [String]?
 
+    /// Per-task user overrides of tool availability, keyed by tool name. `true` = the user forced the
+    /// tool ON for this task; `false` = forced OFF. Takes precedence over both the automatic scoping
+    /// verdict and the global `ToolPolicy`, and is re-applied after every re-evaluation so a re-scope
+    /// never clobbers the user's choice. `nil`/absent = no per-task overrides.
+    public var userToolOverrides: [String: Bool]?
+
     /// Non-nil when Brown has escalated a blocker via `request_help` and is waiting for Smith.
     /// The task sits in `.awaitingReview` (reusing the review wait/slot machinery) but this
     /// field marks it as a help request rather than completed work: `review_work` refuses it
@@ -186,6 +192,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         descriptionAttachments: [Attachment] = [],
         resultAttachments: [Attachment] = [],
         approvedTools: [String]? = nil,
+        userToolOverrides: [String: Bool]? = nil,
         helpRequest: String? = nil
     ) {
         self.id = id
@@ -211,13 +218,14 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.descriptionAttachments = descriptionAttachments
         self.resultAttachments = resultAttachments
         self.approvedTools = approvedTools
+        self.userToolOverrides = userToolOverrides
         self.helpRequest = helpRequest
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, helpRequest
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, userToolOverrides, helpRequest
     }
 
     public init(from decoder: Decoder) throws {
@@ -245,6 +253,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         descriptionAttachments = try c.decodeIfPresent([Attachment].self, forKey: .descriptionAttachments) ?? []
         resultAttachments = try c.decodeIfPresent([Attachment].self, forKey: .resultAttachments) ?? []
         approvedTools = try c.decodeIfPresent([String].self, forKey: .approvedTools)
+        userToolOverrides = try c.decodeIfPresent([String: Bool].self, forKey: .userToolOverrides)
         helpRequest = try c.decodeIfPresent(String.self, forKey: .helpRequest)
     }
 
@@ -281,6 +290,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             try c.encode(resultAttachments, forKey: .resultAttachments)
         }
         try c.encodeIfPresent(approvedTools, forKey: .approvedTools)
+        try c.encodeIfPresent(userToolOverrides, forKey: .userToolOverrides)
         try c.encodeIfPresent(helpRequest, forKey: .helpRequest)
     }
 }

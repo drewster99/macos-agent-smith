@@ -303,6 +303,16 @@ public actor MemoryStore {
     /// one bad row can't abort the pass. Fires `onChange()` once if anything changed so the caller's
     /// persistence runs. Returns how many of each were re-embedded.
     @discardableResult
+    /// How many stored entries `reembedStaleEntries()` would re-embed — i.e. whose `embeddingModelID`
+    /// differs from the engine's current model identifier (and have re-embeddable text). Cheap; runs
+    /// no embeddings. Lets the caller decide whether to show a progress UI before starting.
+    public func staleEntryCount() -> Int {
+        let signature = engine.model.identifier
+        let mem = memories.values.filter { $0.embeddingModelID != signature && !$0.content.isEmpty }.count
+        let task = taskSummaries.values.filter { $0.embeddingModelID != signature && !$0.embeddingSourceText.isEmpty }.count
+        return mem + task
+    }
+
     public func reembedStaleEntries() async -> (memories: Int, taskSummaries: Int) {
         let signature = engine.model.identifier
         let start = Date()

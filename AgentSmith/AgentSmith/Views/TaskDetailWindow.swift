@@ -642,12 +642,10 @@ struct TaskDetailWindow: View {
                 }
             }
 
-            if let approved = task.approvedTools, !approved.isEmpty {
+            if task.approvedTools != nil {
                 GridRow(alignment: .top) {
-                    metadataLabel("Approved tools")
-                    Text("\(approved.count) — \(approved.sorted().joined(separator: ", "))")
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    metadataLabel("Tools")
+                    TaskToolOverrideEditor(task: task, viewModel: viewModel)
                 }
             }
         }

@@ -14,7 +14,7 @@ import os
 /// instances receive `sharedMemoryStore` so each Smith reads and writes the same pool.
 /// Identifies a tab in the Settings window, for selection binding and deep-linking.
 enum SettingsTab: Hashable {
-    case general, providers, configurations, audio, mcp
+    case general, providers, configurations, audio, mcp, tools
 }
 
 @Observable
@@ -103,6 +103,54 @@ final class SharedAppState {
     /// the runtime silently truncating.
     var maxAttachmentBytesPerMessage: Int = SharedAppState.intDefault(key: "maxAttachmentBytesPerMessage", default: 50 * 1024 * 1024) {
         didSet { UserDefaults.standard.set(maxAttachmentBytesPerMessage, forKey: "maxAttachmentBytesPerMessage") }
+    }
+
+    /// True while the one-time embedding re-embed migration runs AND it's large enough to warrant a
+    /// blocking overlay (≈10s+, see `migrationOverlayThreshold`). Transient — not persisted.
+    var migrationInProgress: Bool = false
+    /// Number of entries the in-progress migration is re-embedding (for the overlay's copy).
+    var migrationEntryCount: Int = 0
+    /// Below this many stale entries the migration is fast enough (≈10s at the measured ~1.3 s/doc)
+    /// that no overlay is shown — it just blocks briefly during startup.
+    static let migrationOverlayThreshold = 8
+
+    /// Security: whether Jones runs the per-task pre-flight tool-scoping pass. Off ⇒ Brown starts
+    /// with all candidate tools (subject to global policy + per-task overrides). Takes effect on the
+    /// next session start. Persisted.
+    var enablePreflightScoping: Bool = SharedAppState.boolDefault(key: "enablePreflightScoping", default: true) {
+        didSet { UserDefaults.standard.set(enablePreflightScoping, forKey: "enablePreflightScoping"); notifyToolSecurityChanged() }
+    }
+    /// Security: whether Jones evaluates each individual Brown tool call (SAFE/WARN/UNSAFE/ABORT).
+    /// Off ⇒ Brown's approved tools run without per-call review. Applied immediately to active sessions.
+    var enablePerToolCheck: Bool = SharedAppState.boolDefault(key: "enablePerToolCheck", default: true) {
+        didSet { UserDefaults.standard.set(enablePerToolCheck, forKey: "enablePerToolCheck"); notifyToolSecurityChanged() }
+    }
+    /// Global per-tool availability policy (Default/Always/Never), keyed by tool name. Overrides the
+    /// automatic scoping verdict for Brown. Persisted as JSON; applied immediately to active sessions.
+    var globalToolPolicies: [String: ToolPolicy] = SharedAppState.loadToolPolicies() {
+        didSet { SharedAppState.saveToolPolicies(globalToolPolicies); notifyToolSecurityChanged() }
+    }
+    /// Observers (one per active session) that push the current tool-security settings down to their
+    /// runtime when any setting changes — so global Settings apply immediately, with no restart.
+    private var toolSecurityObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerToolSecurityObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        toolSecurityObservers[id] = observer
+    }
+    func removeToolSecurityObserver(_ id: UUID) {
+        toolSecurityObservers.removeValue(forKey: id)
+    }
+    private func notifyToolSecurityChanged() {
+        for observer in toolSecurityObservers.values { observer() }
+    }
+    private static func loadToolPolicies() -> [String: ToolPolicy] {
+        guard let data = UserDefaults.standard.data(forKey: "globalToolPolicies"),
+              let decoded = try? JSONDecoder().decode([String: ToolPolicy].self, from: data) else { return [:] }
+        return decoded
+    }
+    private static func saveToolPolicies(_ policies: [String: ToolPolicy]) {
+        if let data = try? JSONEncoder().encode(policies) {
+            UserDefaults.standard.set(data, forKey: "globalToolPolicies")
+        }
     }
 
     /// Reads an Int from UserDefaults, defaulting when the key has never been set.
@@ -510,8 +558,15 @@ final class SharedAppState {
                 // One-time re-embed if the embedding model/scheme changed (e.g. mean → last-token
                 // pooling). The vector dimension is unchanged, so this signature check is the only
                 // thing that detects it. Fires the store's onChange, which persists the refreshed
-                // corpus. NOTE: blocks first launch after such a change while it re-embeds.
+                // corpus. NOTE: blocks first launch after such a change while it re-embeds; a large
+                // migration shows a blocking overlay (the await below lets the UI render it first).
+                let staleCount = await store.staleEntryCount()
+                if staleCount >= SharedAppState.migrationOverlayThreshold {
+                    migrationEntryCount = staleCount
+                    migrationInProgress = true
+                }
                 let migrated = await store.reembedStaleEntries()
+                migrationInProgress = false
                 if migrated.memories > 0 || migrated.taskSummaries > 0 {
                     logger.notice("Re-embedded \(migrated.memories) memories + \(migrated.taskSummaries) task summaries after embedding-model change")
                 }

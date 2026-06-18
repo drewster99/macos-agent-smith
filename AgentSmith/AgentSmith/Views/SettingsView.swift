@@ -49,6 +49,13 @@ struct SettingsView: View {
                         .padding()
                 }
             }
+
+            Tab("Tools", systemImage: "wrench.and.screwdriver", value: SettingsTab.tools) {
+                ScrollView {
+                    ToolsSettingsView(shared: shared)
+                        .padding()
+                }
+            }
         }
         .frame(minWidth: 550, minHeight: 600)
         .onAppear {
@@ -100,6 +107,18 @@ struct SettingsView: View {
             Toggle("Scheduled tasks interrupt the running task", isOn: $shared.scheduledWakesInterruptRunning)
 
             Text("When ON: a scheduled task's wake pauses any currently running task, runs the scheduled task to completion, then resumes the paused task. When OFF (default): the running task finishes first, then the scheduled task runs. Either way, scheduled tasks ALWAYS run when their wake fires — independent of \"Auto-run next task\".")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            Text("Security")
+                .font(AppFonts.sectionHeader)
+
+            Toggle("Pre-flight tool scoping (Jones picks each task's tools)", isOn: $shared.enablePreflightScoping)
+            Toggle("Per-tool-call security check (Jones reviews every tool call)", isOn: $shared.enablePerToolCheck)
+
+            Text("Pre-flight scoping has the security agent choose which tools the worker may use for a task before it starts. The per-call check reviews each individual tool call (SAFE/WARN/UNSAFE/ABORT). Turning either off reduces oversight. Per-tool Always/Never overrides live in the Tools tab. Changes apply immediately to active sessions.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

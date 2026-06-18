@@ -52,6 +52,12 @@ public actor OrchestrationRuntime {
     private var smith: AgentActor?
     private var smithID: UUID?
     private var agents: [UUID: AgentActor] = [:]
+    /// Global tool-security configuration (user Settings); applied to each Brown at spawn.
+    /// `preflightScopingEnabled` gates the Jones pre-flight scoping pass; `perCallCheckEnabled`
+    /// gates the per-tool-call Jones evaluation; `globalToolPolicy` is the per-tool Always/Never map.
+    private var preflightScopingEnabled = true
+    private var perCallCheckEnabled = true
+    private var globalToolPolicy: [String: ToolPolicy] = [:]
 
     /// Set synchronously at the top of `start()` (before its first `await`) and cleared via
     /// `defer`. `smith` isn't assigned until ~190 lines and several suspension points into
@@ -628,6 +634,33 @@ public actor OrchestrationRuntime {
     /// dynamic, server-provided tools each turn; lifecycle stays with the app layer.
     public func setMCPHost(_ host: MCPClientHost?) {
         mcpHost = host
+    }
+
+    /// Updates the global tool-security configuration (user Settings). Applied to each Brown at its
+    /// next spawn (the per-call flag and pre-flight flag are read at spawn; the global policy too).
+    public func setToolSecurity(preflightScoping: Bool, perCallCheck: Bool, globalPolicy: [String: ToolPolicy]) async {
+        preflightScopingEnabled = preflightScoping
+        perCallCheckEnabled = perCallCheck
+        globalToolPolicy = globalPolicy
+        // Apply to the live worker so changes take effect immediately (no session restart) — picked
+        // up on Brown's next turn (policy / scoping flag) or next tool call (per-call review).
+        if let brownID = currentBrownID, let brown = agents[brownID] {
+            await brown.setGlobalToolPolicy(globalPolicy)
+            await brown.setPreflightScopingActive(preflightScoping)
+            await brown.setPerCallApprovalEnabled(perCallCheck)
+        }
+    }
+
+    /// Sets (or clears, with `enabled == nil`) a per-task user tool override: persists it on the task
+    /// and, if that task's worker is live, pushes the updated set so it takes effect next turn. A
+    /// later re-evaluation will NOT clobber it — the live registry re-applies overrides each refresh.
+    public func setTaskToolOverride(taskID: UUID, tool: String, enabled: Bool?) async {
+        await taskStore.setUserToolOverride(id: taskID, tool: tool, enabled: enabled)
+        guard let task = await taskStore.task(id: taskID),
+              let brownID = currentBrownID,
+              task.assigneeIDs.contains(brownID),
+              let brown = agents[brownID] else { return }
+        await brown.setUserToolOverrides(task.userToolOverrides ?? [:])
     }
 
     /// Registers a callback fired when an agent comes online, with its role and tool names.
@@ -1544,39 +1577,47 @@ public actor OrchestrationRuntime {
             }
             let builtIns = BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot)
             let mcpTools = mcpHost != nil ? await mcpHost!.currentBridgedTools() : []
-            // Light the Security Agent card while it scopes — this is a real (often slow) Jones
-            // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
-            await notifyProcessingStateChange(role: .jones, isProcessing: true)
-            let scoping = await evaluator.scopeTools(
-                candidateTools: builtIns + mcpTools,
-                taskTitle: task.title,
-                taskID: task.id.uuidString,
-                taskDescription: task.description
-            )
-            await notifyProcessingStateChange(role: .jones, isProcessing: false)
-            guard scoping.succeeded else {
-                // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
-                // a worker; surface to the user.
-                securityEvaluators.removeValue(forKey: brownID)
-                await channel.post(ChannelMessage(
-                    sender: .system,
-                    content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Jones's model configuration.",
-                    metadata: ["isError": .bool(true)]
-                ))
-                return nil
+            let candidateNames = Set((builtIns + mcpTools).map(\.name))
+            if preflightScopingEnabled {
+                // Light the Security Agent card while it scopes — this is a real (often slow) Jones
+                // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
+                await notifyProcessingStateChange(role: .jones, isProcessing: true)
+                let scoping = await evaluator.scopeTools(
+                    candidateTools: builtIns + mcpTools,
+                    taskTitle: task.title,
+                    taskID: task.id.uuidString,
+                    taskDescription: task.description
+                )
+                await notifyProcessingStateChange(role: .jones, isProcessing: false)
+                guard scoping.succeeded else {
+                    // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
+                    // a worker; surface to the user.
+                    securityEvaluators.removeValue(forKey: brownID)
+                    await channel.post(ChannelMessage(
+                        sender: .system,
+                        content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Jones's model configuration.",
+                        metadata: ["isError": .bool(true)]
+                    ))
+                    return nil
+                }
+                guard !scoping.approvedNames.isEmpty else {
+                    // Refusal — no tools approved for this task. Don't spawn a hamstrung worker.
+                    securityEvaluators.removeValue(forKey: brownID)
+                    await channel.post(ChannelMessage(
+                        sender: .system,
+                        content: "The security agent did not approve any tools for task \"\(task.title)\", so it cannot be run.",
+                        metadata: ["isWarning": .bool(true)]
+                    ))
+                    return nil
+                }
+                scopedApprovedNames = scoping.approvedNames
+                await taskStore.setApprovedTools(id: task.id, approvedTools: Array(scoping.approvedNames))
+            } else {
+                // Pre-flight scoping disabled in Settings: the base approved set is every candidate.
+                // Global Always/Never policy and per-task user overrides still apply at the registry.
+                scopedApprovedNames = candidateNames
+                await taskStore.setApprovedTools(id: task.id, approvedTools: Array(candidateNames))
             }
-            guard !scoping.approvedNames.isEmpty else {
-                // Refusal — no tools approved for this task. Don't spawn a hamstrung worker.
-                securityEvaluators.removeValue(forKey: brownID)
-                await channel.post(ChannelMessage(
-                    sender: .system,
-                    content: "The security agent did not approve any tools for task \"\(task.title)\", so it cannot be run.",
-                    metadata: ["isWarning": .bool(true)]
-                ))
-                return nil
-            }
-            scopedApprovedNames = scoping.approvedNames
-            await taskStore.setApprovedTools(id: task.id, approvedTools: Array(scoping.approvedNames))
         }
 
         let brownAgent = AgentActor(
@@ -1599,8 +1640,12 @@ public actor OrchestrationRuntime {
             dynamicToolsProvider: mcpToolsProvider
         )
         await brownAgent.setSecurityEvaluator(evaluator)
+        await brownAgent.setPerCallApprovalEnabled(perCallCheckEnabled)
         if let scopedApprovedNames, let task {
             await brownAgent.enableToolScoping(approvedNames: scopedApprovedNames)
+            await brownAgent.setPreflightScopingActive(preflightScopingEnabled)
+            await brownAgent.setGlobalToolPolicy(globalToolPolicy)
+            await brownAgent.setUserToolOverrides(task.userToolOverrides ?? [:])
             let scopedTaskID = task.id
             await brownAgent.setOnApprovedToolsChanged { [weak self] names in
                 guard let self else { return }

@@ -31,6 +31,20 @@ public actor AgentActor {
     /// Fingerprint of the candidate set at the last scoping. A change (MCP added/removed/
     /// redefined) triggers a fresh stateless re-scope at the next turn boundary.
     private var lastScopedFingerprint: String?
+    /// Global per-tool availability policy (user-set in Settings). Overrides the automatic scoping
+    /// verdict: `.never` strips a tool, `.always` adds it. Empty = no global overrides.
+    private var globalToolPolicy: [String: ToolPolicy] = [:]
+    /// Per-task user overrides keyed by tool name (`true` = force on, `false` = force off). Applied
+    /// AFTER the global policy (so they win) and re-applied every refresh, so a re-scope can't
+    /// clobber the user's choice.
+    private var userToolOverrides: [String: Bool] = [:]
+    /// Whether Jones pre-flight scoping is active for this worker. When false, the base approved set
+    /// is "every current candidate" (no scoping verdict, no mid-task re-scope); global policy and
+    /// per-task overrides still apply on top.
+    private var preflightScopingActive = true
+    /// Whether the per-tool-call security evaluation (Jones SAFE/WARN/UNSAFE/ABORT) is active. When
+    /// false, Brown's approved tools execute without per-call review. Live-toggleable from Settings.
+    private var perCallApprovalEnabled = true
     /// Fired when the approved tool set changes (initial scope already happened in the runtime;
     /// this is for mid-task re-scopes) so the runtime can persist it on the task as a record.
     private var onApprovedToolsChanged: (@Sendable (Set<String>) async -> Void)?
@@ -447,6 +461,44 @@ public actor AgentActor {
         approvedToolNames = approvedNames
     }
 
+    /// Sets the global per-tool availability policy (user Settings). Takes effect next refresh.
+    public func setGlobalToolPolicy(_ policy: [String: ToolPolicy]) {
+        globalToolPolicy = policy
+    }
+
+    /// Sets the per-task user tool overrides. Takes effect next refresh.
+    public func setUserToolOverrides(_ overrides: [String: Bool]) {
+        userToolOverrides = overrides
+    }
+
+    /// Whether Jones pre-flight scoping is active (false ⇒ base set is all candidates, no re-scope).
+    public func setPreflightScopingActive(_ active: Bool) {
+        preflightScopingActive = active
+    }
+
+    /// Toggles the per-tool-call security evaluation live (false ⇒ approved tools run un-reviewed).
+    public func setPerCallApprovalEnabled(_ enabled: Bool) {
+        perCallApprovalEnabled = enabled
+    }
+
+    /// Applies the global tool policy, then per-task user overrides, on top of a base approved set.
+    /// Order is deliberate: global `.always`/`.never` override the automatic verdict; per-task
+    /// overrides then override the globals. Forced lifecycle tools are handled separately (above all).
+    private func resolveEffectiveApproved(base: Set<String>, candidates: Set<String>) -> Set<String> {
+        var result = base
+        for name in candidates {
+            switch globalToolPolicy[name] {
+            case .never: result.remove(name)
+            case .always: result.insert(name)
+            case .default, .none: break
+            }
+        }
+        for (name, enabled) in userToolOverrides where candidates.contains(name) {
+            if enabled { result.insert(name) } else { result.remove(name) }
+        }
+        return result
+    }
+
     /// Registers a callback fired when the approved tool set changes mid-task, so the runtime
     /// can persist the new set on the task as a record.
     public func setOnApprovedToolsChanged(_ handler: @escaping @Sendable (Set<String>) async -> Void) {
@@ -783,17 +835,24 @@ public actor AgentActor {
         // forced lifecycle tools are available.
         toolRegistry.rebuild(candidates: candidates, defaultApproved: false)
 
-        // Stateless per-turn re-evaluation: if the candidate set changed (by content
-        // fingerprint, so a silent redefinition counts), re-scope from scratch. The very
-        // first refresh just records the fingerprint — the runtime already scoped this set
-        // before the worker started.
+        // Pre-flight scoping ON: re-scope from scratch if the candidate set changed (content
+        // fingerprint, so a silent redefinition counts). The first refresh just records the
+        // fingerprint — the runtime already scoped this set before the worker started.
+        // Pre-flight scoping OFF: the base approved set is simply every current candidate.
+        let candidateNames = Set(candidates.map(\.name))
         let fingerprint = toolRegistry.candidateFingerprint
-        if let last = lastScopedFingerprint, last != fingerprint {
-            await rescopeToolsStateless()
+        if preflightScopingActive {
+            if let last = lastScopedFingerprint, last != fingerprint {
+                await rescopeToolsStateless()
+            }
+        } else {
+            approvedToolNames = candidateNames
         }
         lastScopedFingerprint = fingerprint
 
-        toolRegistry.applyApproval(approvedNames: approvedToolNames)
+        // Layer global policy + per-task overrides on top of the base verdict, then force lifecycle.
+        let resolved = resolveEffectiveApproved(base: approvedToolNames, candidates: candidateNames)
+        toolRegistry.applyApproval(approvedNames: resolved)
         applyForcedLifecycleFlags()
         activeTools = toolRegistry.availableTools()
         publishActiveToolNamesIfChanged()
@@ -1507,7 +1566,7 @@ public actor AgentActor {
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                 }
-            } else if segment.calls.count > 1 && configuration.requiresToolApproval,
+            } else if segment.calls.count > 1 && configuration.requiresToolApproval && perCallApprovalEnabled,
                       let evaluator = securityEvaluator {
                 // --- Approval segment with multiple calls: parallel evaluation + execution ---
                 let approvalSummaries = segment.calls.map {
@@ -1700,7 +1759,7 @@ public actor AgentActor {
                     if let tool = activeTools.first(where: { $0.name == call.name }) {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
-                        } else if configuration.requiresToolApproval {
+                        } else if configuration.requiresToolApproval && perCallApprovalEnabled {
                             let siblings = segment.calls.count > 1
                                 ? approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil }
                                 : []

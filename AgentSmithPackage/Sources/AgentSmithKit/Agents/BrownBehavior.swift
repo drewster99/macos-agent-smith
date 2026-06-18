@@ -1,7 +1,7 @@
 import Foundation
 
 /// Defines Brown's tool set and system prompt.
-enum BrownBehavior {
+public enum BrownBehavior {
     // MARK: - Shared tool description helpers
 
     /// Returns the standard approval-gate suffix for Brown-facing tool descriptions.
@@ -50,7 +50,7 @@ enum BrownBehavior {
 
     /// Tool names for configuration. Auth-status snapshot is irrelevant for names, so the
     /// default is fine here.
-    static var toolNames: [String] {
+    public static var toolNames: [String] {
         tools().map(\.name)
     }
 

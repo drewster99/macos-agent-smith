@@ -51,6 +51,7 @@ struct AgentSmithApp: App {
         WindowGroup(id: "app-main") {
             SessionScene(shared: shared, sessionManager: sessionManager)
                 .frame(minWidth: 900, minHeight: 600)
+                .migrationOverlay(shared)
         }
         .commands {
             CommandGroup(replacing: .newItem) {
