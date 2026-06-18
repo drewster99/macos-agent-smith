@@ -457,6 +457,100 @@ struct RetrievalEvalRunner {
         #expect(!cells.isEmpty)
     }
 
+    /// Picks the per-pool instruction prefix AND re-reads the cosine gate it implies. The prefix is
+    /// query-side, so it shifts every cosine — the gates tuned on raw queries (0.56/0.62) won't carry
+    /// over. For each pool, sweeps {none, short, long} prompts over the queries with gold there and
+    /// reports recall + the gold-vs-FP cosine gap; the winning prompt's gold/FP medians give the new
+    /// gate. Prompts are query-side only (documents stay raw).
+    @Test
+    func instructionPromptSweep() async throws {
+        let data = try dataDir()
+        let engine = SemanticSearchEngine()
+        for try await _ in engine.prepare() { /* drain progress */ }
+        try await ensureFrozen(Self.frozenSubdir, data: data, engine: engine)
+        let tasks = try decodeJSON([TaskSummaryEntry].self, data.appending(path: "\(Self.frozenSubdir)/task_summaries.json"))
+        let memories = try decodeJSON([MemoryEntry].self, data.appending(path: "\(Self.frozenSubdir)/memories.json"))
+        let labels = try decodeJSON([String: Label].self, data.appending(path: "labels.json"))
+        let excludeByQuery = try loadExcludeIDs(data)
+        let taskIDs = Set(tasks.map { $0.id.uuidString })
+        let memIDs = Set(memories.map { $0.id.uuidString })
+        let store = MemoryStore(engine: engine)
+
+        let taskPrompts: [(String, String)] = [
+            ("none ", ""),
+            ("short", "Return related tasks"),
+            ("long ", "Given a software engineering task, retrieve earlier tasks that are related, similar, or could inform how to carry it out.")
+        ]
+        let memPrompts: [(String, String)] = [
+            ("none ", ""),
+            ("short", "Return related memories"),
+            ("long ", "Given a request or task, retrieve saved notes, facts, and user preferences that are relevant to it.")
+        ]
+
+        struct Cell { var r3 = 0.0, r10 = 0.0, mrr = 0.0, n = 0; var goldCos: [Double] = []; var fpCos: [Double] = [] }
+        var cells: [String: Cell] = [:]
+        func score(_ docs: [(id: String, cos: Double)], _ gold: Set<String>, into key: String) {
+            let ord = docs.sorted { $0.cos > $1.cos }
+            let ids = ord.map(\.id)
+            let t3 = Set(ids.prefix(3)), t10 = Set(ids.prefix(10))
+            var c = cells[key] ?? Cell()
+            c.r3 += Double(gold.intersection(t3).count) / Double(gold.count)
+            c.r10 += Double(gold.intersection(t10).count) / Double(gold.count)
+            for (i, id) in ids.enumerated() where gold.contains(id) { c.mrr += 1.0 / Double(i + 1); break }
+            for d in ord where gold.contains(d.id) { c.goldCos.append(d.cos) }
+            for d in ord.prefix(3) where !gold.contains(d.id) { c.fpCos.append(d.cos) }
+            c.n += 1
+            cells[key] = c
+        }
+
+        for (qid, label) in labels.sorted(by: { $0.key < $1.key }) where label.uncovered != true && !label.gold.isEmpty {
+            let goldTasks = Set(label.gold.map(\.id).filter { taskIDs.contains($0) })
+            let goldMems = Set(label.gold.map(\.id).filter { memIDs.contains($0) })
+            guard !goldTasks.isEmpty || !goldMems.isEmpty else { continue }
+            let excluded = Set(excludeByQuery[qid] ?? [])
+            await store.clear()
+            await store.restore(memories: memories, taskSummaries: tasks.filter { !excluded.contains($0.id.uuidString) })
+
+            if !goldTasks.isEmpty {
+                for (name, prompt) in taskPrompts {
+                    let q = MemoryStore.instructed(prompt.isEmpty ? nil : prompt, label.text)
+                    let res = try await store.searchTaskSummaries(query: q, limit: 400, threshold: 0.0)
+                    score(res.map { ($0.summary.id.uuidString, $0.similarity) }, goldTasks, into: "task|\(name)")
+                }
+            }
+            if !goldMems.isEmpty {
+                for (name, prompt) in memPrompts {
+                    let q = MemoryStore.instructed(prompt.isEmpty ? nil : prompt, label.text)
+                    let res = try await store.searchMemories(query: q, limit: 400, threshold: 0.0)
+                    score(res.map { ($0.memory.id.uuidString, $0.similarity) }, goldMems, into: "mem|\(name)")
+                }
+            }
+        }
+
+        func med(_ xs: [Double]) -> Double { xs.isEmpty ? 0 : xs.sorted()[xs.count / 2] }
+        print("\n============= INSTRUCTION PROMPT SWEEP (cosine, ungated) =============")
+        for (pool, prompts) in [("TASK", taskPrompts), ("MEMORY", memPrompts)] {
+            print("\n\(pool) pool:")
+            print(col("prompt", 8) + col("nQ", 5) + col("rec@3", 8) + col("rec@10", 8) + col("MRR", 7)
+                  + col("goldCos", 9) + col("fpCos", 8) + col("gap", 8))
+            for (name, _) in prompts {
+                guard let c = cells["\(pool == "TASK" ? "task" : "mem")|\(name)"] else { continue }
+                let n = Double(max(c.n, 1))
+                let gc = med(c.goldCos), fc = med(c.fpCos)
+                print(col(name, 8) + col("\(c.n)", 5)
+                      + col(String(format: "%.3f", c.r3 / n), 8)
+                      + col(String(format: "%.3f", c.r10 / n), 8)
+                      + col(String(format: "%.3f", c.mrr / n), 7)
+                      + col(String(format: "%.3f", gc), 9)
+                      + col(String(format: "%.3f", fc), 8)
+                      + col(String(format: "%+.3f", gc - fc), 8))
+            }
+        }
+        print("\npick the prompt with the best recall + gap; its goldCos/fpCos set the new gate.")
+        print("=====================================================================\n")
+        #expect(!cells.isEmpty)
+    }
+
     // MARK: - Metrics
 
     private struct GateTally {

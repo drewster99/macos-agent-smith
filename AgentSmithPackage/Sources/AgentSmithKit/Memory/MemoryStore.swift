@@ -393,11 +393,18 @@ public actor MemoryStore {
     /// semantic cosine clears the pool's gate. This is what suppresses the "always inject the top-K"
     /// behavior that fires context on unrelated/no-answer queries. Gating is on COSINE, not lexical:
     /// the retrieval eval showed keyword presence ≠ relevance (it re-introduces false injects), while
-    /// the embedding cosine separates gold from noise. Values are conservative initial settings from
-    /// the (query-type × pool) retrieval matrix — gold-vs-top-3-FP cosine medians were task≈0.74/0.65
-    /// and memory≈0.69/0.52–0.56 — and are meant to be tuned via `RetrievalEvalRunner`.
+    /// the embedding cosine separates gold from noise. Values are from the prompt-sweep eval, measured
+    /// WITH the per-pool instructions below (which shift cosines): task gold≈0.72/FP≈0.64, memory
+    /// gold≈0.68/FP≈0.51. Tunable via `RetrievalEvalRunner`.
     public static let taskInjectionCosineGate: Double = 0.62
-    public static let memoryInjectionCosineGate: Double = 0.56
+    public static let memoryInjectionCosineGate: Double = 0.58
+
+    /// Per-pool Qwen3 retrieval instructions, applied query-side at the context-injection sites
+    /// (CreateTaskTool, Smith's auto-context). The long task framing measured best for prior-task
+    /// retrieval (rec@10 0.95→0.97, MRR +0.02); the short memory framing is ≈ tied with a longer one,
+    /// so we keep it simple. Document embeddings stay raw. Picked via the prompt-sweep eval.
+    public static let taskRetrievalInstruction = "Given a software engineering task, retrieve earlier tasks that are related, similar, or could inform how to carry it out."
+    public static let memoryRetrievalInstruction = "Return related memories"
 
     /// Common English stopwords stripped from query tokens before text scoring.
     private static let englishStopwords: Set<String> = [
@@ -433,6 +440,14 @@ public actor MemoryStore {
 
     static func queryTokenSet(from query: String) -> Set<String> {
         Set(tokenize(query).filter { !englishStopwords.contains($0) })
+    }
+
+    /// Wraps a query in the Qwen3 instruction format when an instruction is given; returns the bare
+    /// query otherwise. Applied per-pool, query-side only, so memories and task summaries can be
+    /// retrieved under different task framings (the document embeddings stay raw).
+    static func instructed(_ instruction: String?, _ query: String) -> String {
+        guard let instruction, !instruction.isEmpty else { return query }
+        return "Instruct: \(instruction)\nQuery: \(query)"
     }
 
     private static func textScore(queryTokens: Set<String>, document: String) -> Double {
@@ -523,7 +538,8 @@ public actor MemoryStore {
         queryVector: [Float],
         queryTokens: Set<String>,
         limit: Int,
-        threshold: Double
+        threshold: Double,
+        cosineGate: Double? = nil
     ) -> [MemorySearchResult] {
         var entryRefs: [MemoryEntry] = []
         var semanticScores: [Double] = []
@@ -561,7 +577,10 @@ public actor MemoryStore {
             ))
         }
         results.sort { $0.rrfScore > $1.rrfScore }
-        return Array(results.prefix(limit))
+        // Optional injection cosine gate: keep only candidates whose semantic cosine clears the bar,
+        // then take the top-`limit` by RRF. nil ⇒ ungated (browse / explicit-search paths).
+        let gated = cosineGate.map { gate in results.filter { $0.similarity >= gate } } ?? results
+        return Array(gated.prefix(limit))
     }
 
     public func searchTaskSummaries(
@@ -588,7 +607,8 @@ public actor MemoryStore {
         queryVector: [Float],
         queryTokens: Set<String>,
         limit: Int,
-        threshold: Double
+        threshold: Double,
+        cosineGate: Double? = nil
     ) -> [TaskSummarySearchResult] {
         var entryRefs: [TaskSummaryEntry] = []
         var semanticScores: [Double] = []
@@ -626,122 +646,71 @@ public actor MemoryStore {
             ))
         }
         results.sort { $0.rrfScore > $1.rrfScore }
-        return Array(results.prefix(limit))
+        // Optional injection cosine gate: keep only candidates whose semantic cosine clears the bar,
+        // then take the top-`limit` by RRF. nil ⇒ ungated (browse / explicit-search paths).
+        let gated = cosineGate.map { gate in results.filter { $0.similarity >= gate } } ?? results
+        return Array(gated.prefix(limit))
     }
 
-    /// Searches both memories and task summaries jointly using Reciprocal Rank Fusion.
-    /// `threshold` is the noise floor on `MAX(semantic, text)` — same semantics as the
-    /// per-corpus searches. RRF handles the ordering, so this just keeps pure-noise
-    /// candidates out of the rank.
+    /// Searches memories and task summaries, each against its own (optionally instruction-prefixed)
+    /// query embedding, and returns the per-pool top-K. Qwen3 instruction prefixes are query-side, so
+    /// each pool needs its own embedding — which is why this delegates to the per-pool searches
+    /// instead of sharing one vector. RRF is fused within each pool; the optional cosine gates apply
+    /// the injection relevance floor; `threshold` is the candidate noise floor on `max(semantic, text)`.
     public func searchAll(
         query: String,
         memoryLimit: Int = 3,
         taskLimit: Int = 3,
         threshold: Double = MemoryStore.defaultSearchThreshold,
         memoryCosineGate: Double? = nil,
-        taskCosineGate: Double? = nil
+        taskCosineGate: Double? = nil,
+        memoryInstruction: String? = nil,
+        taskInstruction: String? = nil
     ) async throws -> SemanticSearchResults {
         let start = Date()
-        let queryVector = try await engine.embed(query)
-        try Self.validate(embedding: queryVector)
-        let queryTokens = Self.queryTokenSet(from: query)
-
-        enum CandidateRef {
-            case memory(MemoryEntry)
-            case task(TaskSummaryEntry)
-        }
-        var refs: [CandidateRef] = []
-        var semanticScores: [Double] = []
-        var textScores: [Double] = []
-
-        for entry in memories.values {
-            let semantic: Double
-            if entry.embedding.count == queryVector.count, !entry.embedding.isEmpty {
-                semantic = Double(VectorMath.dotProduct(queryVector, entry.embedding))
-            } else {
-                semantic = 0
-            }
-            let text = Self.textScore(queryTokens: queryTokens, document: entry.content)
-            if max(semantic, text) >= threshold {
-                refs.append(.memory(entry))
-                semanticScores.append(semantic)
-                textScores.append(text)
-            }
-        }
-        for entry in taskSummaries.values {
-            let semantic: Double
-            if entry.embedding.count == queryVector.count, !entry.embedding.isEmpty {
-                semantic = Double(VectorMath.dotProduct(queryVector, entry.embedding))
-            } else {
-                semantic = 0
-            }
-            let text = Self.textScore(queryTokens: queryTokens, document: entry.embeddingSourceText)
-            if max(semantic, text) >= threshold {
-                refs.append(.task(entry))
-                semanticScores.append(semantic)
-                textScores.append(text)
-            }
+        // Each pool gets its own (optionally instruction-prefixed) query embedding. Reuse the
+        // memory vector for tasks when the prefixed queries are identical — the common (no-prefix
+        // or same-prefix) case — so we don't pay for a second embed needlessly.
+        let memoryQuery = Self.instructed(memoryInstruction, query)
+        let taskQuery = Self.instructed(taskInstruction, query)
+        let memoryVector = try await engine.embed(memoryQuery)
+        try Self.validate(embedding: memoryVector)
+        let taskVector: [Float]
+        if taskQuery == memoryQuery {
+            taskVector = memoryVector
+        } else {
+            taskVector = try await engine.embed(taskQuery)
+            try Self.validate(embedding: taskVector)
         }
 
-        guard !refs.isEmpty else {
-            let ms = Int(Date().timeIntervalSince(start) * 1000)
-            memoryStoreLogger.debug("searchAll: 0 results in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
-            return SemanticSearchResults(memories: [], taskSummaries: [])
-        }
-
-        let rrfScores = Self.reciprocalRankFusion(
-            semanticScores: semanticScores,
-            textScores: textScores
+        let memoryResults = searchMemoriesInternal(
+            queryVector: memoryVector,
+            queryTokens: Self.queryTokenSet(from: memoryQuery),
+            limit: memoryLimit,
+            threshold: threshold,
+            cosineGate: memoryCosineGate
+        )
+        let taskResults = searchTaskSummariesInternal(
+            queryVector: taskVector,
+            queryTokens: Self.queryTokenSet(from: taskQuery),
+            limit: taskLimit,
+            threshold: threshold,
+            cosineGate: taskCosineGate
         )
 
-        let order = (0..<refs.count).sorted { rrfScores[$0] > rrfScores[$1] }
-
-        var memoryResults: [MemorySearchResult] = []
-        var taskResults: [TaskSummarySearchResult] = []
-        memoryResults.reserveCapacity(memoryLimit)
-        taskResults.reserveCapacity(taskLimit)
+        // Retrieval-stat bumps for the memories we actually return. Marked dirty (not flushed) so we
+        // don't re-serialize the embedding-bearing corpus on every read; persistRetrievalStatsIfNeeded()
+        // flushes once at termination. Genuine corpus mutations still fire onChange?() immediately.
         let retrievedAt = Date()
         var trackedAnyRetrieval = false
-        // Walk the RRF-sorted candidates and fill each bucket up to its caller-specified
-        // limit. Stop iterating once both buckets are full so we don't waste work, but
-        // keep iterating past full buckets of the *other* type rather than truncating
-        // the global list — this is what makes `memoryLimit` and `taskLimit` mean what
-        // they say independently.
-        for idx in order {
-            if memoryResults.count >= memoryLimit && taskResults.count >= taskLimit { break }
-            switch refs[idx] {
-            case .memory(let entry):
-                guard memoryResults.count < memoryLimit else { continue }
-                if let gate = memoryCosineGate, semanticScores[idx] < gate { continue }
-                memoryResults.append(MemorySearchResult(
-                    memory: entry,
-                    similarity: semanticScores[idx],
-                    textScore: textScores[idx],
-                    rrfScore: rrfScores[idx]
-                ))
-                if var stored = memories[entry.id] {
-                    stored.lastRetrievedAt = retrievedAt
-                    stored.retrievalCount += 1
-                    memories[entry.id] = stored
-                    trackedAnyRetrieval = true
-                }
-            case .task(let entry):
-                guard taskResults.count < taskLimit else { continue }
-                if let gate = taskCosineGate, semanticScores[idx] < gate { continue }
-                taskResults.append(TaskSummarySearchResult(
-                    summary: entry,
-                    similarity: semanticScores[idx],
-                    textScore: textScores[idx],
-                    rrfScore: rrfScores[idx]
-                ))
+        for result in memoryResults {
+            if var stored = memories[result.memory.id] {
+                stored.lastRetrievedAt = retrievedAt
+                stored.retrievalCount += 1
+                memories[result.memory.id] = stored
+                trackedAnyRetrieval = true
             }
         }
-
-        // Retrieval-stat bumps happen on the read path (every Brown context-inject search).
-        // Firing onChange?() here would re-serialize the entire embedding-bearing corpus on
-        // each read — quadratic-ish in practice. Instead mark the stats dirty and let
-        // persistRetrievalStatsIfNeeded() flush them once at termination. Genuine corpus
-        // mutations (save/update/delete/clear) still fire onChange?() immediately.
         if trackedAnyRetrieval { retrievalStatsDirty = true }
 
         let ms = Int(Date().timeIntervalSince(start) * 1000)

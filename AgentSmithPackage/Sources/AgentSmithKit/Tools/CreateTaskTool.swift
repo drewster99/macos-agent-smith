@@ -141,7 +141,9 @@ public struct CreateTaskTool: AgentTool {
                 memoryLimit: 3,
                 taskLimit: 3,
                 memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
-                taskCosineGate: MemoryStore.taskInjectionCosineGate
+                taskCosineGate: MemoryStore.taskInjectionCosineGate,
+                memoryInstruction: MemoryStore.memoryRetrievalInstruction,
+                taskInstruction: MemoryStore.taskRetrievalInstruction
             )
             if !results.isEmpty {
                 let memories: [RelevantMemory]? = results.memories.isEmpty ? nil : results.memories.map {

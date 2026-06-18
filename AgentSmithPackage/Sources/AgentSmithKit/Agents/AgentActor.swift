@@ -2541,7 +2541,9 @@ public actor AgentActor {
                 memoryLimit: 3,
                 taskLimit: 3,
                 memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
-                taskCosineGate: MemoryStore.taskInjectionCosineGate
+                taskCosineGate: MemoryStore.taskInjectionCosineGate,
+                memoryInstruction: MemoryStore.memoryRetrievalInstruction,
+                taskInstruction: MemoryStore.taskRetrievalInstruction
             )
         } catch {
             return
