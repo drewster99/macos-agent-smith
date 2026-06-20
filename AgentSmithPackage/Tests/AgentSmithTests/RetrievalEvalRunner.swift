@@ -551,6 +551,108 @@ struct RetrievalEvalRunner {
         #expect(!cells.isEmpty)
     }
 
+    /// Chunking experiment (ROADMAP #1). Task summaries are long (median ~1000 words), so a single
+    /// whole-doc embedding is diffuse. This splits each task summary into overlapping word-window
+    /// chunks, embeds each, and scores a doc by its BEST-matching chunk (max-pool) — letting a query
+    /// relevant to one section match that section instead of the averaged whole. Compares whole-doc
+    /// vs chunked vs a hybrid (max of both), on the long→task path with the production task prefix.
+    @Test
+    func chunkingExperiment() async throws {
+        let data = try dataDir()
+        let engine = SemanticSearchEngine()
+        for try await _ in engine.prepare() { /* drain progress */ }
+        try await ensureFrozen(Self.frozenSubdir, data: data, engine: engine)
+        let tasks = try decodeJSON([TaskSummaryEntry].self, data.appending(path: "\(Self.frozenSubdir)/task_summaries.json"))
+        let labels = try decodeJSON([String: Label].self, data.appending(path: "labels.json"))
+        let excludeByQuery = try loadExcludeIDs(data)
+        let taskIDs = Set(tasks.map { $0.id.uuidString })
+
+        func dot(_ a: [Float], _ b: [Float]) -> Double {
+            guard a.count == b.count else { return 0 }
+            var s: Float = 0
+            for i in 0..<a.count { s += a[i] * b[i] }
+            return Double(s)
+        }
+        // Overlapping fixed word-window chunks; short docs collapse to a single chunk.
+        func chunk(_ text: String, size: Int, overlap: Int) -> [String] {
+            let words = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" || $0 == "\r" }).map(String.init)
+            if words.count <= size { return [text] }
+            var out: [String] = []
+            let step = max(1, size - overlap)
+            var i = 0
+            while i < words.count {
+                let end = min(i + size, words.count)
+                out.append(words[i..<end].joined(separator: " "))
+                if end >= words.count { break }
+                i += step
+            }
+            return out
+        }
+
+        let chunkSize = 192, overlap = 48
+        var chunkVecs: [String: [[Float]]] = [:]
+        var wholeVec: [String: [Float]] = [:]
+        var totalChunks = 0
+        for t in tasks {
+            wholeVec[t.id.uuidString] = t.embedding
+            let cs = chunk(t.embeddingSourceText, size: chunkSize, overlap: overlap)
+            var vecs: [[Float]] = []
+            for c in cs { vecs.append(try await engine.embed(c)) }
+            chunkVecs[t.id.uuidString] = vecs
+            totalChunks += cs.count
+        }
+
+        struct Tally { var r3 = 0.0, r10 = 0.0, mrr = 0.0, n = 0; var goldCos: [Double] = []; var fpCos: [Double] = [] }
+        func fold(_ scores: [(id: String, s: Double)], _ gold: Set<String>, into t: inout Tally) {
+            let ord = scores.sorted { $0.s > $1.s }
+            let ids = ord.map(\.id)
+            let t3 = Set(ids.prefix(3)), t10 = Set(ids.prefix(10))
+            t.r3 += Double(gold.intersection(t3).count) / Double(gold.count)
+            t.r10 += Double(gold.intersection(t10).count) / Double(gold.count)
+            for (i, id) in ids.enumerated() where gold.contains(id) { t.mrr += 1.0 / Double(i + 1); break }
+            for d in ord where gold.contains(d.id) { t.goldCos.append(d.s) }
+            for d in ord.prefix(3) where !gold.contains(d.id) { t.fpCos.append(d.s) }
+            t.n += 1
+        }
+        var whole = Tally(), chunked = Tally(), hybrid = Tally()
+
+        for (qid, label) in labels.sorted(by: { $0.key < $1.key }) where label.kind == "task" && label.uncovered != true {
+            let goldTasks = Set(label.gold.map(\.id).filter { taskIDs.contains($0) })
+            guard !goldTasks.isEmpty else { continue }
+            let excluded = Set(excludeByQuery[qid] ?? [])
+            let qVec = try await engine.embed(MemoryStore.instructed(MemoryStore.taskRetrievalInstruction, label.text))
+            var wScores: [(id: String, s: Double)] = [], cScores: [(id: String, s: Double)] = [], hScores: [(id: String, s: Double)] = []
+            for t in tasks where !excluded.contains(t.id.uuidString) {
+                let id = t.id.uuidString
+                let wc = dot(qVec, wholeVec[id] ?? [])
+                let cc = (chunkVecs[id] ?? []).map { dot(qVec, $0) }.max() ?? wc
+                wScores.append((id, wc)); cScores.append((id, cc)); hScores.append((id, max(wc, cc)))
+            }
+            fold(wScores, goldTasks, into: &whole)
+            fold(cScores, goldTasks, into: &chunked)
+            fold(hScores, goldTasks, into: &hybrid)
+        }
+
+        func med(_ xs: [Double]) -> Double { xs.isEmpty ? 0 : xs.sorted()[xs.count / 2] }
+        print("\n============= CHUNKING EXPERIMENT — long→task, task prefix =============")
+        print("chunk \(chunkSize)w / \(overlap) overlap · \(totalChunks) chunks over \(tasks.count) summaries · doc score = max chunk cosine")
+        print(col("method", 11) + col("nQ", 5) + col("rec@3", 8) + col("rec@10", 8) + col("MRR", 7)
+              + col("goldCos", 9) + col("fpCos", 8) + col("gap", 8))
+        for (name, t) in [("whole-doc", whole), ("chunked", chunked), ("hybrid", hybrid)] {
+            let n = Double(max(t.n, 1))
+            let gc = med(t.goldCos), fc = med(t.fpCos)
+            print(col(name, 11) + col("\(t.n)", 5)
+                  + col(String(format: "%.3f", t.r3 / n), 8)
+                  + col(String(format: "%.3f", t.r10 / n), 8)
+                  + col(String(format: "%.3f", t.mrr / n), 7)
+                  + col(String(format: "%.3f", gc), 9)
+                  + col(String(format: "%.3f", fc), 8)
+                  + col(String(format: "%+.3f", gc - fc), 8))
+        }
+        print("=======================================================================\n")
+        #expect(whole.n > 0)
+    }
+
     // MARK: - Metrics
 
     private struct GateTally {
