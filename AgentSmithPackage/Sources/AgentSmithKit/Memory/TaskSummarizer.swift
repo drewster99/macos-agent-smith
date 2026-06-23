@@ -221,6 +221,73 @@ actor TaskSummarizer {
         return nil
     }
 
+    /// Runs `prompt` against fetched web-page `content` and returns the extracted answer, or
+    /// `nil` if the model returns nothing or the call fails. Backs the `web_fetch` tool's hybrid
+    /// extraction mode (reuses the summarizer's provider so no separate LLM agent is needed).
+    /// `content` is capped to `resultCharBudget` so an oversized page can't exceed the model's
+    /// context window.
+    public func extractWebContent(content: String, prompt: String) async -> String? {
+        let systemPrompt = """
+            You extract information from web page content. Given a page's text and a user's \
+            request, answer the request using ONLY information present in the content. Be concise \
+            and factual; cite specifics (names, numbers, dates, URLs) when relevant. If the \
+            content does not contain what was asked, say so plainly. Output ONLY the answer — no \
+            preamble or commentary.
+            """
+        let capped = content.count > resultCharBudget ? String(content.prefix(resultCharBudget)) : content
+        let userPrompt = "Request:\n\(prompt)\n\nWeb page content:\n\(capped)"
+        let messages: [LLMMessage] = [
+            .system(systemPrompt),
+            .user(userPrompt)
+        ]
+
+        var lastError: Error?
+        for attempt in 0...Self.maxRetries {
+            if attempt > 0 {
+                let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
+                do { try await Task.sleep(for: .seconds(delay)) } catch { break }
+            }
+
+            do {
+                let callStart = Date()
+                let response = try await provider.send(messages: messages, tools: [])
+                let callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
+
+                if let usageStore {
+                    await UsageRecorder.record(
+                        response: response,
+                        context: LLMCallContext(
+                            agentRole: .summarizer,
+                            taskID: nil,
+                            modelID: configuration?.model ?? "",
+                            providerType: providerType,
+                            providerID: configuration?.providerID,
+                            configuration: configuration,
+                            sessionID: sessionID
+                        ),
+                        latencyMs: callLatencyMs,
+                        to: usageStore
+                    )
+                }
+
+                guard let text = response.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                lastError = error
+                guard Self.isRetryableError(error) else { break }
+            }
+        }
+
+        await postToChannel(ChannelMessage(
+            sender: .agent(.summarizer),
+            content: "Web content extraction failed: \(lastError?.localizedDescription ?? "unknown error")",
+            metadata: ["isError": .bool(true)]
+        ))
+        return nil
+    }
+
     // MARK: - Private
 
     private func generateSummary(for task: AgentTask) async throws -> String {

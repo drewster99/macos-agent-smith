@@ -1961,6 +1961,10 @@ public actor OrchestrationRuntime {
                 guard let self else { return nil }
                 return await self.taskSummarizer?.mergeMemoryTexts(existing: existing, new: new)
             },
+            extractWebContent: { [weak self] content, prompt in
+                guard let self else { return nil }
+                return await self.taskSummarizer?.extractWebContent(content: content, prompt: prompt)
+            },
             autoAdvanceEnabled: { [weak self] in await self?.autoAdvanceEnabled ?? false },
             recordFileRead: { path in
                 filesReadInSession?.record(PathNormalization.normalize(path))

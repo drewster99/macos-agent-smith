@@ -1,12 +1,12 @@
 import Foundation
 
-/// A `URLProtocol` that returns a canned response (status + body, or a transport error) so the
-/// network layer of the web tools can be tested deterministically — non-200 status, anti-bot
-/// pages, malformed/non-UTF-8 bodies — without hitting the real network.
+/// A `URLProtocol` that returns a canned response, isolated **per session** so concurrently
+/// running test suites can't clobber one another's stub. Build a session with
+/// `URLProtocolStub.makeSession(statusCode:body:error:)`; the canned response is keyed to that
+/// session via a unique id header, so there is no shared "current response" global to race on.
 ///
-/// Usage: build a session with `URLProtocolStub.makeSession()`, call `setResponse(...)` before
-/// the request, and `reset()` after. Because the canned response lives in lock-guarded static
-/// state, suites that use it must be `.serialized`.
+/// Usage: `let session = URLProtocolStub.makeSession(statusCode: 200, body: data)` then inject
+/// `session` into the code under test. No teardown needed.
 final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     private struct Canned {
         let statusCode: Int
@@ -15,27 +15,20 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     }
 
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var canned: Canned?
+    nonisolated(unsafe) private static var registry: [String: Canned] = [:]
+    private static let idHeader = "X-URLProtocolStub-Id"
 
-    static func setResponse(statusCode: Int = 200, body: Data = Data(), error: Error? = nil) {
-        lock.lock(); defer { lock.unlock() }
-        canned = Canned(statusCode: statusCode, body: body, error: error)
-    }
+    /// A `URLSession` that returns the given canned response for every request, identified by a
+    /// unique id carried in a header on the session's requests.
+    static func makeSession(statusCode: Int = 200, body: Data = Data(), error: Error? = nil) -> URLSession {
+        let id = UUID().uuidString
+        lock.lock()
+        registry[id] = Canned(statusCode: statusCode, body: body, error: error)
+        lock.unlock()
 
-    static func reset() {
-        lock.lock(); defer { lock.unlock() }
-        canned = nil
-    }
-
-    private static func current() -> Canned? {
-        lock.lock(); defer { lock.unlock() }
-        return canned
-    }
-
-    /// A `URLSession` configured to route all requests through this stub.
-    static func makeSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [URLProtocolStub.self]
+        config.httpAdditionalHeaders = [idHeader: id]
         return URLSession(configuration: config)
     }
 
@@ -43,7 +36,12 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let response = Self.current() else {
+        let canned: Canned? = {
+            guard let id = request.value(forHTTPHeaderField: Self.idHeader) else { return nil }
+            Self.lock.lock(); defer { Self.lock.unlock() }
+            return Self.registry[id]
+        }()
+        guard let response = canned else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }

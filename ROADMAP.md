@@ -235,8 +235,10 @@ Why temporary matters: HTML scraping is brittle (breaks when DuckDuckGo reshuffl
 
 Scope reality (verified June 2026): the JSON API returns useful data essentially only for recognized entities. Dictionary definitions and unit/currency conversions are **not** returned by the JSON API (they're JS-only "spice" endpoints), and open-ended queries return nothing — hence the tool description steers those to `web_search`.
 
-### Web Fetch tool
+### Web Fetch tool ✅
 Given a URL and a prompt, fetch the URL content, convert to markdown, then run the prompt against the content to extract useful details. Useful for reading documentation, articles, and other web content.
+
+**Implemented — hybrid mode (2026-06-23):** `web_fetch` (`WebFetchTool`), Brown-only. Fetches an http(s) URL via `URLSession` (injectable for tests), converts the page to readable markdown (`htmlToMarkdown`: drops script/style/head/comments, maps headings/links/list-items/block elements, strips remaining tags, decodes entities via the shared `DuckDuckGoHTMLSearchBackend.decodeEntities`, collapses whitespace). **Hybrid behavior:** if a `prompt` is supplied, the markdown is run through an extraction LLM and only the answer is returned (keeps large pages out of Brown's context); if `prompt` is omitted, the truncated markdown (cap 50k chars) is returned for Brown to read. Extraction reuses the **summarizer-role** model via `TaskSummarizer.extractWebContent(content:prompt:)`, wired through a new `ToolContext.extractWebContent` closure + `OrchestrationRuntime` (mirrors `mergeMemoryContent`); when no extraction model is wired it falls back to returning markdown. Classified open-world + non-destructive + read-only; Jones-gated. Output carries an untrusted-content warning. Tested: HTML→markdown conversion, both execute() modes + fallback, HTTP errors, URL validation, classification/wiring, a real Brown agent-loop invocation, and a gated live fetch.
 
 ### Grep tool ✅
 Ripgrep-based content search tool for Agent Brown. Parameters: `pattern` (required, regex), `path` (required), `output_mode` (enum: files_with_matches / content), `glob` (file filter).

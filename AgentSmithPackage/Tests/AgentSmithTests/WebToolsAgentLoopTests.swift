@@ -94,13 +94,10 @@ struct WebToolsAgentLoopTests {
 
     @Test("Brown's live agent loop invokes instant_answer and receives an entity summary")
     func brownInvokesInstantAnswer() async {
-        URLProtocolStub.setResponse(statusCode: 200, body: Data("""
+        let service = DuckDuckGoInstantAnswerService(session: URLProtocolStub.makeSession(statusCode: 200, body: Data("""
         { "Heading": "Swift", "AbstractText": "A language.", "AbstractSource": "Wikipedia",
           "AbstractURL": "https://en.wikipedia.org/wiki/Swift", "Type": "A" }
-        """.utf8))
-        defer { URLProtocolStub.reset() }
-
-        let service = DuckDuckGoInstantAnswerService(session: URLProtocolStub.makeSession())
+        """.utf8)))
         let call = LLMToolCall(id: "ia-1", name: "instant_answer", arguments: #"{"query":"Swift"}"#)
         let history = await runBrown(tool: InstantAnswerTool(service: service), toolCall: call)
         let result = toolResult(in: history, callID: "ia-1")

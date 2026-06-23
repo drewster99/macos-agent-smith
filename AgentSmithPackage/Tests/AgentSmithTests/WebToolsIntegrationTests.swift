@@ -143,9 +143,7 @@ struct WebToolsNetworkTests {
 
     @Test("DuckDuckGo backend: non-200 throws .http")
     func ddgNon200() async {
-        let session = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 503, body: Data())
-        defer { URLProtocolStub.reset() }
+        let session = URLProtocolStub.makeSession(statusCode: 503, body: Data())
         let backend = DuckDuckGoHTMLSearchBackend(session: session)
         let error = await caughtError { _ = try await backend.search(query: "swift", limit: 5) }
         #expect(matches(error, WebSearchError.self) { event in
@@ -156,12 +154,10 @@ struct WebToolsNetworkTests {
 
     @Test("DuckDuckGo backend: 200 challenge page with no results throws .blocked")
     func ddgBlockedPage() async {
-        let session = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(
+        let session = URLProtocolStub.makeSession(
             statusCode: 200,
             body: Data(String(repeating: "x", count: 600).appending(" unusual traffic detected ").utf8)
         )
-        defer { URLProtocolStub.reset() }
         let backend = DuckDuckGoHTMLSearchBackend(session: session)
         let error = await caughtError { _ = try await backend.search(query: "swift", limit: 5) }
         #expect(matches(error, WebSearchError.self) { event in
@@ -172,9 +168,7 @@ struct WebToolsNetworkTests {
 
     @Test("DuckDuckGo backend: non-UTF-8 body throws .parse")
     func ddgNonUTF8() async {
-        let session = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 200, body: Data([0xFF, 0xFE, 0xFF, 0xFE]))
-        defer { URLProtocolStub.reset() }
+        let session = URLProtocolStub.makeSession(statusCode: 200, body: Data([0xFF, 0xFE, 0xFF, 0xFE]))
         let backend = DuckDuckGoHTMLSearchBackend(session: session)
         let error = await caughtError { _ = try await backend.search(query: "swift", limit: 5) }
         #expect(matches(error, WebSearchError.self) { event in
@@ -185,9 +179,7 @@ struct WebToolsNetworkTests {
 
     @Test("DuckDuckGo backend: valid HTML returns parsed results")
     func ddgValid() async throws {
-        let session = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 200, body: Data(Self.ddgResultsHTML.utf8))
-        defer { URLProtocolStub.reset() }
+        let session = URLProtocolStub.makeSession(statusCode: 200, body: Data(Self.ddgResultsHTML.utf8))
         let backend = DuckDuckGoHTMLSearchBackend(session: session)
         let results = try await backend.search(query: "swift", limit: 5)
         #expect(results.count == 1)
@@ -197,9 +189,7 @@ struct WebToolsNetworkTests {
 
     @Test("Instant Answer service: non-200 throws .http")
     func iaNon200() async {
-        let session = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 500, body: Data())
-        defer { URLProtocolStub.reset() }
+        let session = URLProtocolStub.makeSession(statusCode: 500, body: Data())
         let service = DuckDuckGoInstantAnswerService(session: session)
         let error = await caughtError { _ = try await service.lookup(query: "swift") }
         #expect(matches(error, InstantAnswerError.self) { event in
@@ -210,9 +200,7 @@ struct WebToolsNetworkTests {
 
     @Test("Instant Answer service: malformed (non-object) JSON throws .parse")
     func iaMalformed() async {
-        let session = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 200, body: Data("[]".utf8))
-        defer { URLProtocolStub.reset() }
+        let session = URLProtocolStub.makeSession(statusCode: 200, body: Data("[]".utf8))
         let service = DuckDuckGoInstantAnswerService(session: session)
         let error = await caughtError { _ = try await service.lookup(query: "swift") }
         #expect(matches(error, InstantAnswerError.self) { event in
@@ -223,9 +211,7 @@ struct WebToolsNetworkTests {
 
     @Test("Instant Answer service: valid JSON parses an entity")
     func iaValid() async throws {
-        let session = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 200, body: Data(Self.entityJSON.utf8))
-        defer { URLProtocolStub.reset() }
+        let session = URLProtocolStub.makeSession(statusCode: 200, body: Data(Self.entityJSON.utf8))
         let service = DuckDuckGoInstantAnswerService(session: session)
         let answer = try await service.lookup(query: "swift")
         #expect(answer.heading == "Swift")
@@ -234,21 +220,17 @@ struct WebToolsNetworkTests {
 
     @Test("instant_answer tool: success and error both flow through execute")
     func iaToolExecute() async throws {
-        let okSession = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 200, body: Data(Self.entityJSON.utf8))
+        let okSession = URLProtocolStub.makeSession(statusCode: 200, body: Data(Self.entityJSON.utf8))
         let okTool = InstantAnswerTool(service: DuckDuckGoInstantAnswerService(session: okSession))
         let okResult = try await okTool.execute(arguments: ["query": .string("swift")], context: TestToolContext.make())
         #expect(okResult.succeeded)
         #expect(okResult.output.contains("Swift"))
-        URLProtocolStub.reset()
 
-        let errSession = URLProtocolStub.makeSession()
-        URLProtocolStub.setResponse(statusCode: 500, body: Data())
+        let errSession = URLProtocolStub.makeSession(statusCode: 500, body: Data())
         let errTool = InstantAnswerTool(service: DuckDuckGoInstantAnswerService(session: errSession))
         let failed = try await errTool.execute(arguments: ["query": .string("swift")], context: TestToolContext.make())
         #expect(!failed.succeeded)
         #expect(failed.output.contains("Instant answer lookup failed"))
-        URLProtocolStub.reset()
     }
 }
 

@@ -226,6 +226,10 @@ public struct ToolContext: Sendable {
     /// Merges two related memory texts into a single consolidated memory via LLM.
     /// Parameters: (existingContent, newContent). Returns merged text, or nil if unavailable.
     public let mergeMemoryContent: @Sendable (String, String) async -> String?
+    /// Runs a prompt against fetched web-page content via the summarizer's LLM and returns the
+    /// extracted answer, or nil if unavailable or the call fails. Backs `web_fetch`'s hybrid
+    /// extraction mode. Parameters: (content, prompt).
+    public let extractWebContent: @Sendable (String, String) async -> String?
     /// Whether Smith should automatically run the next pending task after completing one.
     /// Closure so the value reflects the current setting, not the value at init time.
     public let autoAdvanceEnabled: @Sendable () async -> Bool
@@ -304,6 +308,7 @@ public struct ToolContext: Sendable {
         memoryStore: MemoryStore,
         summarizeCompletedTask: @escaping @Sendable (UUID) async -> Void = { _ in },
         mergeMemoryContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
+        extractWebContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
         autoAdvanceEnabled: @escaping @Sendable () async -> Bool = { true },
         recordFileRead: @escaping @Sendable (String) -> Void = { _ in },
         hasFileBeenRead: @escaping @Sendable (String) -> Bool = { _ in false },
@@ -354,6 +359,7 @@ public struct ToolContext: Sendable {
         self.memoryStore = memoryStore
         self.summarizeCompletedTask = summarizeCompletedTask
         self.mergeMemoryContent = mergeMemoryContent
+        self.extractWebContent = extractWebContent
         self.autoAdvanceEnabled = autoAdvanceEnabled
         self.recordFileRead = recordFileRead
         self.hasFileBeenRead = hasFileBeenRead
