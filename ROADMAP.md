@@ -217,8 +217,23 @@ Today only `GhTool.firstForbiddenSequence` has direct test coverage (`GhToolArgs
 - **Wave 4 (subprocess pure-logic only):** `BashTool` arg validation, `RunAppleScriptTool` serialization, `KillProcessTool` pid validation, `ListProcessesTool` output parsing. End-to-end subprocess execution stays out of the unit suite.
 - **Integration-only (excluded from `swift test`):** `SaveMemoryTool`, `SearchMemoryTool` — covered by the existing `MemoryStoreIntegrationTests` xcodebuild path.
 
-### Web Search tool
+### Web Search tool ⚠️ (shipped with a TEMPORARY backend)
 Given a query and optional `allowed_domains` and `blocked_domains` arrays, perform a web search. Only return results from `allowed_domains` (if non-empty) and exclude results from `blocked_domains` (if non-empty).
+
+**Implemented — TEMPORARY backend (2026-06-23):** `web_search` tool added to Brown (`WebSearchTool`). Returns ranked results; `allowed_domains`/`blocked_domains` filter on result host (equal-or-subdomain match, leading `www.` ignored); `max_results` caps output (default 10, max 20). `WebSearchResult` carries `title`/`url`/`snippet` (the universal fields) plus optional `age` (freshness), `score`, `extraSnippets`, and `faviconURL` — the common extras keyed APIs return — so a richer backend (Brave `page_age`/`extra_snippets`/`meta_url.favicon`, Tavily `published_date`/`score`) maps in with a direct field copy; the scrape backend just leaves them empty. The output formatter already surfaces `age` when present, so it lights up automatically on a backend swap. Classified open-world **but non-destructive** in `ToolSafetyClassification` (read-only network) — the first built-in that is open-world without being destructive — so Jones still gates it.
+
+The search source sits behind a `WebSearchBackend` protocol (`WebSearchBackend.swift`). The shipped backend is `DuckDuckGoHTMLSearchBackend`, which **scrapes the DuckDuckGo HTML SERP** (`html.duckduckgo.com/html/`). This is explicitly **temporary** — it exists only so the rest of the harness can develop against a usable `web_search` with no API key. It was chosen after verifying (June 2026) that no major engine returns keyless *structured* results: DDG and Google both ignore `Accept: application/json` / `format=json` on their SERP and always return HTML; DDG's keyless JSON endpoint (`api.duckduckgo.com`) is the Instant Answer API (Wikipedia abstracts), not web search, and returns nothing for normal queries; Google's Custom Search JSON API is closed to new customers and fully discontinued 2027-01-01.
+
+Why temporary matters: HTML scraping is brittle (breaks when DuckDuckGo reshuffles `result__a`/`result__snippet` markup), rate-limited, and ToS-gray.
+
+**Replacement plan (re-evaluate week of 2026-06-30):** pick a permanent keyed JSON provider — leading candidates **Brave Search API** or **Tavily** (clean JSON, domain filters, recency, SLA) — implement it as another `WebSearchBackend`, store its key in Keychain (mirror `MCPSecretStore` / SwiftLLMKit `KeychainService`), and switch the default in `BrownBehavior.tools()`. `WebSearchTool` and Brown's wiring (and the domain-filter/cap logic, which is backend-agnostic) should not need to change. Google CSE is rejected (closed to new signups + sunsetting). The DDG-scrape backend can stay as a keyless fallback if desired.
+
+### Instant Answer tool ✅
+`instant_answer` (`InstantAnswerTool`) — Brown tool wrapping DuckDuckGo's keyless Instant Answer JSON API (`api.duckduckgo.com`). Complements `web_search`: it returns a Wikipedia-style **entity** summary — abstract, infobox key facts, source URL, official site, related topics — for a recognized person/place/org/technology/concept, not a list of web pages.
+
+**Implemented (2026-06-23):** `DuckDuckGoInstantAnswerService` (network + a pure, testable `parse` over the loosely-typed JSON via `JSONSerialization` — `RelatedTopics` mixes flat + grouped entries, `Infobox.content[].value` can be string or number). Classified open-world + non-destructive + read-only (same as `web_search`); Brown-only. Output formatter has three branches: entity summary, disambiguation ("ambiguous → use `web_search`"), and empty ("no instant answer → use `web_search`"). Unlike `web_search`, this is **not** temporary — it's a single official keyless JSON endpoint with no provider to swap.
+
+Scope reality (verified June 2026): the JSON API returns useful data essentially only for recognized entities. Dictionary definitions and unit/currency conversions are **not** returned by the JSON API (they're JS-only "spice" endpoints), and open-ended queries return nothing — hence the tool description steers those to `web_search`.
 
 ### Web Fetch tool
 Given a URL and a prompt, fetch the URL content, convert to markdown, then run the prompt against the content to extract useful details. Useful for reading documentation, articles, and other web content.

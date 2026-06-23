@@ -30,6 +30,8 @@ public enum BrownBehavior {
             ReplyToUserTool(),
             BashTool(),
             GhTool(authStatusSnapshot: ghAuthStatusSnapshot ?? "(auth status was not captured for this spawn)"),
+            WebSearchTool(),
+            InstantAnswerTool(),
             FileReadTool(),
             ViewAttachmentTool(),
             FileWriteTool(),

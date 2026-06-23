@@ -22,6 +22,7 @@ enum ToolSafetyClassification {
         "file_read", "view_attachment", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
+        "web_search", "instant_answer",
         // Low-risk side-effecting (lifecycle / orchestration)
         "task_acknowledged", "task_update", "task_complete", "request_help", "reply_to_user",
         "message_user", "message_brown", "review_work", "provide_help", "create_task", "run_task",
@@ -40,9 +41,10 @@ enum ToolSafetyClassification {
     ]
 
     /// Built-in tools that reach an open/external world beyond a closed local system
-    /// (arbitrary network access, external app control, the internet).
+    /// (arbitrary network access, external app control, the internet). `web_search` is here
+    /// (it queries the internet) but is NOT destructive — read-only network access.
     private static let openWorldNames: Set<String> = [
-        "bash", "gh", "run_applescript"
+        "bash", "gh", "run_applescript", "web_search", "instant_answer"
     ]
 
     /// Built-in tools that are read-only — they inspect state but don't modify anything, so
@@ -50,7 +52,8 @@ enum ToolSafetyClassification {
     private static let readOnlyNames: Set<String> = [
         "file_read", "view_attachment", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
-        "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes"
+        "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
+        "web_search", "instant_answer"
     ]
 
     /// Whether a built-in tool has side effects (mutates state / acts). Read-only tools don't;
