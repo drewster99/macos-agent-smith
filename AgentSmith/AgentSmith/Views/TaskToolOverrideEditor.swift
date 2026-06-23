@@ -37,7 +37,11 @@ struct TaskToolOverrideEditor: View {
             }
             .padding(.top, 4)
         } label: {
-            let n = task.approvedTools?.count ?? 0
+            // Count only tools that actually appear as rows. Forced lifecycle tools are approved
+            // by scoping but deliberately not listed (see `tools`), so counting the raw
+            // `approvedTools` made the header disagree with the visible list (e.g. "5 approved"
+            // while only 2 rows show a checkmark).
+            let n = approved.subtracting(Self.forcedLifecycle).count
             let o = task.userToolOverrides?.count ?? 0
             Text(o > 0 ? "\(n) approved · \(o) override\(o == 1 ? "" : "s")" : "\(n) approved")
                 .foregroundStyle(.secondary)
