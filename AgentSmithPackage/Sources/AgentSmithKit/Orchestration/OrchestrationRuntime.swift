@@ -663,6 +663,17 @@ public actor OrchestrationRuntime {
         await brown.setUserToolOverrides(task.userToolOverrides ?? [:])
     }
 
+    /// Bulk variant of `setTaskToolOverride`: sets the same `enabled` value for many tools at once
+    /// (one persist) and pushes the merged set to a live worker. Backs the per-MCP-server shortcut.
+    public func setTaskToolOverrides(taskID: UUID, tools: [String], enabled: Bool?) async {
+        await taskStore.setUserToolOverrides(id: taskID, tools: tools, enabled: enabled)
+        guard let task = await taskStore.task(id: taskID),
+              let brownID = currentBrownID,
+              task.assigneeIDs.contains(brownID),
+              let brown = agents[brownID] else { return }
+        await brown.setUserToolOverrides(task.userToolOverrides ?? [:])
+    }
+
     /// Registers a callback fired when an agent comes online, with its role and tool names.
     /// Forwards a live available-tool-names update to the same sink as agent-start, so the
     /// inspector's "Available Tools" reflects the current (scoped) set rather than the static list.
@@ -1991,6 +2002,18 @@ public actor OrchestrationRuntime {
                     return (nil, "Attachment registry not configured for this runtime.")
                 }
                 let result = await registry.ingestFile(path: path)
+                switch result {
+                case .success(let attachment):
+                    return (attachment, nil)
+                case .failure(let err):
+                    return (nil, err.description)
+                }
+            },
+            ingestAttachmentData: { [weak self] data, filename, mimeType in
+                guard let registry = await self?.attachmentRegistry else {
+                    return (nil, "Attachment registry not configured for this runtime.")
+                }
+                let result = await registry.ingestData(data, filename: filename, mimeType: mimeType)
                 switch result {
                 case .success(let attachment):
                     return (attachment, nil)

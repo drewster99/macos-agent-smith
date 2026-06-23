@@ -160,6 +160,47 @@ struct AttachmentRegistryTests {
         }
     }
 
+    @Test("ingestData mints an Attachment from in-memory bytes, persists, and resolves")
+    func ingestDataSuccess() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let registry = makeRegistry(tempDir: dir)
+        let bytes = Data([0x89, 0x50, 0x4E, 0x47, 0x01, 0x02, 0x03])
+
+        let result = await registry.ingestData(bytes, filename: "fetched-image.png", mimeType: "image/png")
+        switch result {
+        case .success(let attachment):
+            #expect(attachment.filename == "fetched-image.png")
+            #expect(attachment.mimeType == "image/png")
+            #expect(attachment.byteCount == bytes.count)
+            #expect(attachment.isImage)
+            // Registered → resolvable by ID, bytes intact.
+            let resolved = await registry.resolve(attachment.id)
+            #expect(resolved?.data == bytes)
+        case .failure(let err):
+            Issue.record("expected success, got: \(err)")
+        }
+    }
+
+    @Test("ingestData rejects empty data and honors the size cap")
+    func ingestDataGuards() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let registry = makeRegistry(tempDir: dir)
+
+        let empty = await registry.ingestData(Data(), filename: "x.png", mimeType: "image/png")
+        if case .failure(.readFailed) = empty {} else { Issue.record("expected .readFailed on empty data, got \(empty)") }
+
+        await registry.setMaxIngestBytes(8)
+        let big = await registry.ingestData(Data(repeating: 0x41, count: 64), filename: "big.bin", mimeType: "application/octet-stream")
+        if case .failure(.tooLarge(_, let size, let max)) = big {
+            #expect(size == 64)
+            #expect(max == 8)
+        } else {
+            Issue.record("expected .tooLarge, got \(big)")
+        }
+    }
+
     @Test("setMaxIngestBytes clamps at zero (no-op for negatives)")
     func sizeCapClamp() async throws {
         let dir = TempDir()

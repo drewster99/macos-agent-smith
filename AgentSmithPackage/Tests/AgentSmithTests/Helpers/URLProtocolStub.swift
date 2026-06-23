@@ -12,6 +12,7 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
         let statusCode: Int
         let body: Data
         let error: Error?
+        let headerFields: [String: String]?
     }
 
     private static let lock = NSLock()
@@ -20,10 +21,10 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
 
     /// A `URLSession` that returns the given canned response for every request, identified by a
     /// unique id carried in a header on the session's requests.
-    static func makeSession(statusCode: Int = 200, body: Data = Data(), error: Error? = nil) -> URLSession {
+    static func makeSession(statusCode: Int = 200, body: Data = Data(), error: Error? = nil, headerFields: [String: String]? = nil) -> URLSession {
         let id = UUID().uuidString
         lock.lock()
-        registry[id] = Canned(statusCode: statusCode, body: body, error: error)
+        registry[id] = Canned(statusCode: statusCode, body: body, error: error, headerFields: headerFields)
         lock.unlock()
 
         let config = URLSessionConfiguration.ephemeral
@@ -51,7 +52,7 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
         }
         guard let url = request.url,
               let httpResponse = HTTPURLResponse(
-                url: url, statusCode: response.statusCode, httpVersion: "HTTP/1.1", headerFields: nil
+                url: url, statusCode: response.statusCode, httpVersion: "HTTP/1.1", headerFields: response.headerFields
               ) else {
             client?.urlProtocol(self, didFailWithError: URLError(.cannotParseResponse))
             return

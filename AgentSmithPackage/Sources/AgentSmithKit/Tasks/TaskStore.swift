@@ -404,6 +404,26 @@ public actor TaskStore {
         onChange?()
     }
 
+    /// Bulk variant of `setUserToolOverride`: applies the same `enabled` value to many tools in a
+    /// single mutation (one persist, one `onChange`). `enabled == nil` clears the override for each.
+    /// Backs the per-MCP-server Auto/On/Off shortcut so toggling a whole server doesn't fan out into
+    /// N separate writes. No-op when `tools` is empty.
+    public func setUserToolOverrides(id: UUID, tools: [String], enabled: Bool?) {
+        guard !tools.isEmpty, var task = tasks[id] else { return }
+        var overrides = task.userToolOverrides ?? [:]
+        for tool in tools {
+            if let enabled {
+                overrides[tool] = enabled
+            } else {
+                overrides.removeValue(forKey: tool)
+            }
+        }
+        task.userToolOverrides = overrides.isEmpty ? nil : overrides
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
     /// Saves a compressed summary of Brown's last working state for resumability.
     public func setLastBrownContext(id: UUID, context: String) {
         guard var task = tasks[id] else { return }

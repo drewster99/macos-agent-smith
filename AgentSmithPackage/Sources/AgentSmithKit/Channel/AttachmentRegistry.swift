@@ -164,6 +164,39 @@ actor AttachmentRegistry {
         return .success(attachment)
     }
 
+    /// Mints a fresh `Attachment` from bytes already in memory (rather than read from a path),
+    /// persists them to the per-session attachments dir, and registers it. Used by `web_fetch`
+    /// when a fetched URL returns binary content (image / PDF) that was downloaded into memory.
+    /// Mirrors `ingestFile(path:)` minus the disk read; honors the same `maxIngestBytes` cap.
+    ///
+    /// The caller is responsible for passing a clean `filename` (a single path component) and a
+    /// best-known `mimeType`. On failure returns an `IngestError` describing why.
+    func ingestData(_ data: Data, filename: String, mimeType: String) async -> Result<Attachment, IngestError> {
+        guard !data.isEmpty else {
+            return .failure(.readFailed(path: filename, message: "no data to ingest"))
+        }
+        if data.count > maxIngestBytes {
+            return .failure(.tooLarge(path: filename, size: data.count, max: maxIngestBytes))
+        }
+
+        let attachment = Attachment(
+            filename: filename,
+            mimeType: mimeType,
+            byteCount: data.count,
+            data: data
+        )
+
+        do {
+            try await saver(attachment)
+        } catch {
+            attachmentRegistryLogger.error("ingestData saver failed for \(filename, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return .failure(.persistFailed(path: filename, message: error.localizedDescription))
+        }
+
+        register(attachment)
+        return .success(attachment)
+    }
+
     /// Best-effort MIME type from the file extension. Falls back to
     /// `application/octet-stream` so the attachment is still valid (Smith/Brown's view code
     /// can render it as a generic file). Image/PDF MIME types are detected so the LLM

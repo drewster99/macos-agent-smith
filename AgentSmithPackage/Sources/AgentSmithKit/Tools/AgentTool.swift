@@ -257,6 +257,12 @@ public struct ToolContext: Sendable {
     /// produced during the task. Returns the new `Attachment` on success; on failure
     /// returns nil with a human-readable error string.
     public let ingestAttachmentFile: @Sendable (String) async -> (attachment: Attachment?, error: String?)
+    /// Mints an `Attachment` from bytes already in memory (`data`, `filename`, `mimeType`),
+    /// persists + registers it, and returns it. Used by `web_fetch` when a fetched URL returns
+    /// binary content (image / PDF) downloaded into memory rather than read from a path.
+    /// Mirrors `ingestAttachmentFile` but for in-hand bytes. Returns the new `Attachment` on
+    /// success; on failure returns nil with a human-readable error string.
+    public let ingestAttachmentData: @Sendable (_ data: Data, _ filename: String, _ mimeType: String) async -> (attachment: Attachment?, error: String?)
     /// Synchronous resolver for the on-disk URL of an attachment by `(id, filename)`.
     /// Used by sync-only paths in `AgentActor` (e.g. `drainPendingMessages`) to produce
     /// `file://` markdown links without an actor hop. Returns nil when no per-session
@@ -331,6 +337,9 @@ public struct ToolContext: Sendable {
         ingestAttachmentFile: @escaping @Sendable (String) async -> (attachment: Attachment?, error: String?) = { _ in
             (nil, "ToolContext.ingestAttachmentFile was not configured.")
         },
+        ingestAttachmentData: @escaping @Sendable (Data, String, String) async -> (attachment: Attachment?, error: String?) = { _, _, _ in
+            (nil, "ToolContext.ingestAttachmentData was not configured.")
+        },
         attachmentURLProvider: @escaping @Sendable (UUID, String) -> URL? = { _, _ in nil },
         stageAttachmentsForNextTurn: @escaping @Sendable ([Attachment], String) async -> Void = { _, _ in },
         maxAttachmentBytesPerMessage: @escaping @Sendable () async -> Int = { 50 * 1024 * 1024 },
@@ -368,6 +377,7 @@ public struct ToolContext: Sendable {
         self.hasToolFailed = hasToolFailed
         self.resolveAttachments = resolveAttachments
         self.ingestAttachmentFile = ingestAttachmentFile
+        self.ingestAttachmentData = ingestAttachmentData
         self.attachmentURLProvider = attachmentURLProvider
         self.stageAttachmentsForNextTurn = stageAttachmentsForNextTurn
         self.maxAttachmentBytesPerMessage = maxAttachmentBytesPerMessage

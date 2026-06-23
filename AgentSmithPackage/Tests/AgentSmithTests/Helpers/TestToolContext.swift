@@ -55,6 +55,9 @@ enum TestToolContext {
         extractWebContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
         attachmentResolver: @escaping @Sendable ([String]) async -> (resolved: [Attachment], rejected: [String]) = { ids in ([], ids) },
         attachmentIngestor: @escaping @Sendable (String) async -> (attachment: Attachment?, error: String?) = { _ in (nil, "ingest not configured in test") },
+        attachmentDataIngestor: @escaping @Sendable (Data, String, String) async -> (attachment: Attachment?, error: String?) = { data, filename, mimeType in
+            (Attachment(filename: filename, mimeType: mimeType, byteCount: data.count, data: data), nil)
+        },
         stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024
     ) -> ToolContext {
@@ -78,6 +81,7 @@ enum TestToolContext {
             hasToolFailed: { _ in false },
             resolveAttachments: attachmentResolver,
             ingestAttachmentFile: attachmentIngestor,
+            ingestAttachmentData: attachmentDataIngestor,
             stageAttachmentsForNextTurn: { attachments, detail in
                 await stagedAttachmentRecorder.record(attachments: attachments, detail: detail)
             },

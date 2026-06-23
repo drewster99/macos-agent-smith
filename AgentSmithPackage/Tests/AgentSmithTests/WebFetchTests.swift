@@ -72,6 +72,52 @@ struct WebFetchTests {
         let empty = try? await tool.execute(arguments: ["url": .string("   ")], context: ctx)
         #expect(empty?.succeeded == false)
     }
+
+    // MARK: - Content classification (pure)
+
+    @Test("classifyContent: magic numbers win over the declared type")
+    func classifyMagic() {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        #expect(WebFetchTool.classifyContent(data: png, declaredMimeType: "text/html") == .image(mimeType: "image/png"))
+        let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE0])
+        #expect(WebFetchTool.classifyContent(data: jpeg, declaredMimeType: nil) == .image(mimeType: "image/jpeg"))
+        let gif = Data([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+        #expect(WebFetchTool.classifyContent(data: gif, declaredMimeType: nil) == .image(mimeType: "image/gif"))
+        let webp = Data([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50])
+        #expect(WebFetchTool.classifyContent(data: webp, declaredMimeType: nil) == .image(mimeType: "image/webp"))
+        let pdf = Data("%PDF-1.4".utf8)
+        #expect(WebFetchTool.classifyContent(data: pdf, declaredMimeType: nil) == .pdf)
+    }
+
+    @Test("classifyContent: declared-type routing — SVG is text, HEIC is image, params stripped")
+    func classifyDeclared() {
+        let opaque = Data([0x01, 0x02, 0x03, 0x04])
+        #expect(WebFetchTool.classifyContent(data: opaque, declaredMimeType: "image/svg+xml") == .text)
+        #expect(WebFetchTool.classifyContent(data: opaque, declaredMimeType: "image/heic") == .image(mimeType: "image/heic"))
+        #expect(WebFetchTool.classifyContent(data: opaque, declaredMimeType: "text/html; charset=utf-8") == .text)
+        #expect(WebFetchTool.classifyContent(data: opaque, declaredMimeType: "application/json") == .text)
+        // An image format we can't inject and can't re-encode is refused, not staged.
+        #expect(WebFetchTool.classifyContent(data: opaque, declaredMimeType: "image/avif") == .binary(mimeType: "image/avif"))
+    }
+
+    @Test("classifyContent: NUL byte ⇒ binary; clean bytes with no declared type ⇒ text")
+    func classifyHeuristic() {
+        let nul = Data([0x41, 0x00, 0x42])
+        #expect(WebFetchTool.classifyContent(data: nul, declaredMimeType: nil) == .binary(mimeType: "application/octet-stream"))
+        #expect(WebFetchTool.classifyContent(data: nul, declaredMimeType: "application/octet-stream") == .binary(mimeType: "application/octet-stream"))
+        let text = Data("<html>hi</html>".utf8)
+        #expect(WebFetchTool.classifyContent(data: text, declaredMimeType: nil) == .text)
+    }
+
+    @Test("deriveFilename: keeps a URL filename with an extension; synthesizes otherwise")
+    func filenames() throws {
+        let named = try #require(URL(string: "https://a.com/pics/cat.png"))
+        #expect(WebFetchTool.deriveFilename(from: named, mimeType: "image/png", kind: .image) == "cat.png")
+        let noExt = try #require(URL(string: "https://a.com/download"))
+        #expect(WebFetchTool.deriveFilename(from: noExt, mimeType: "image/jpeg", kind: .image) == "fetched-image.jpg")
+        let root = try #require(URL(string: "https://a.com/"))
+        #expect(WebFetchTool.deriveFilename(from: root, mimeType: "application/pdf", kind: .pdf) == "fetched-document.pdf")
+    }
 }
 
 /// Network-backed `web_fetch` tests. Each test uses its own `URLProtocolStub` session (the canned
@@ -132,6 +178,69 @@ struct WebFetchNetworkTests {
         let result = try await tool.execute(arguments: ["url": .string("https://a.com")], context: TestToolContext.make())
         #expect(!result.succeeded)
         #expect(result.output.contains("404"))
+    }
+
+    @Test("image URL: sniffed from bytes, ingested, and staged for the next turn")
+    func imageFetchStages() async throws {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02])
+        let recorder = TestToolContext.StagedAttachmentRecorder()
+        let ctx = TestToolContext.make(stagedAttachmentRecorder: recorder)
+        let tool = WebFetchTool(session: URLProtocolStub.makeSession(statusCode: 200, body: png))
+        let result = try await tool.execute(arguments: ["url": .string("https://a.com/pic.png")], context: ctx)
+        #expect(result.succeeded)
+        #expect(result.output.lowercased().contains("image"))
+        #expect(result.output.contains("id="))
+        let staged = recorder.all()
+        #expect(staged.count == 1)
+        #expect(staged.first?.attachments.first?.mimeType == "image/png")
+        #expect(staged.first?.attachments.first?.filename == "pic.png")
+        #expect(staged.first?.detail == "standard")
+    }
+
+    @Test("image via declared Content-Type when the bytes carry no known signature")
+    func imageFetchByContentType() async throws {
+        let bytes = Data([0x01, 0x02, 0x03, 0x04, 0x05])
+        let session = URLProtocolStub.makeSession(statusCode: 200, body: bytes, headerFields: ["Content-Type": "image/webp"])
+        let tool = WebFetchTool(session: session)
+        let result = try await tool.execute(arguments: ["url": .string("https://a.com/x")], context: TestToolContext.make())
+        #expect(result.succeeded)
+        #expect(result.output.contains("image/webp"))
+    }
+
+    @Test("PDF URL: saved as an attachment and pointed at file_read")
+    func pdfFetch() async throws {
+        let pdf = Data("%PDF-1.7\nfake pdf body".utf8)
+        let recorder = TestToolContext.StagedAttachmentRecorder()
+        let ctx = TestToolContext.make(stagedAttachmentRecorder: recorder)
+        let tool = WebFetchTool(session: URLProtocolStub.makeSession(statusCode: 200, body: pdf))
+        let result = try await tool.execute(arguments: ["url": .string("https://a.com/doc.pdf")], context: ctx)
+        #expect(result.succeeded)
+        #expect(result.output.lowercased().contains("pdf"))
+        #expect(result.output.contains("file_read"))
+        #expect(recorder.all().first?.attachments.first?.mimeType == "application/pdf")
+    }
+
+    @Test("image fetch with a prompt: stages the image and tells Brown to answer from it")
+    func imageFetchWithPrompt() async throws {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let tool = WebFetchTool(session: URLProtocolStub.makeSession(statusCode: 200, body: png))
+        let result = try await tool.execute(
+            arguments: ["url": .string("https://a.com/p.png"), "prompt": .string("what color is the logo?")],
+            context: TestToolContext.make()
+        )
+        #expect(result.succeeded)
+        #expect(result.output.contains("what color is the logo?"))
+    }
+
+    @Test("other binary content is refused with its content-type, not lossy-decoded")
+    func binaryRefused() async throws {
+        let bytes = Data([0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x00])
+        let session = URLProtocolStub.makeSession(statusCode: 200, body: bytes, headerFields: ["Content-Type": "application/zip"])
+        let tool = WebFetchTool(session: session)
+        let result = try await tool.execute(arguments: ["url": .string("https://a.com/a.zip")], context: TestToolContext.make())
+        #expect(!result.succeeded)
+        #expect(result.output.contains("application/zip"))
+        #expect(result.output.lowercased().contains("refused"))
     }
 
     @Test("Brown's live agent loop invokes web_fetch and receives content")

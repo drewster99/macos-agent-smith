@@ -1148,6 +1148,19 @@ final class AppViewModel {
         }
     }
 
+    /// Bulk variant of `setTaskToolOverride` — applies one `enabled` value across many tools in a
+    /// single write. Backs the per-MCP-server Auto/On/Off shortcut in the task-detail Tools editor.
+    func setTaskToolOverrides(taskID: UUID, tools: [String], enabled: Bool?) {
+        guard !tools.isEmpty else { return }
+        Task {
+            if let runtime {
+                await runtime.setTaskToolOverrides(taskID: taskID, tools: tools, enabled: enabled)
+            } else {
+                await taskStore?.setUserToolOverrides(id: taskID, tools: tools, enabled: enabled)
+            }
+        }
+    }
+
     /// "Run Again" from a completed task's context menu. Creates a brand-new, independent
     /// task rather than reopening the original — the completed task is preserved as-is. The
     /// message is phrased to override Smith's usual reuse bias (it would otherwise treat
