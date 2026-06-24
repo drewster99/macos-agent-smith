@@ -972,7 +972,7 @@ public actor AgentActor {
                         name: toolName,
                         arguments: "{}"
                     )
-                    conversationHistory.append(.assistant(toolCalls: [syntheticCall]))
+                    conversationHistory.append(.assistant(from: LLMResponse(toolCalls: [syntheticCall])))
                     let result = await directExecute(syntheticCall, tool: tool)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: syntheticCall.id))
                     if configuration.role == .brown && toolName == "task_acknowledged" {
@@ -1425,7 +1425,7 @@ public actor AgentActor {
                 // provider re-feeds the stale prompt back to the model — exactly how three of
                 // four task-scoped wakes silently dropped on 2026-04-25. Append a synthetic
                 // marker so each new injection starts a fresh turn.
-                conversationHistory.append(.assistant(text: "(no response)"))
+                conversationHistory.append(.assistant(from: LLMResponse(text: "(no response)")))
                 pushLiveContext()
                 Self.agentLogger.debug(
                     "Agent \(self.configuration.role.displayName, privacy: .public) returned an empty response; closing turn with synthetic marker."
@@ -1496,10 +1496,11 @@ public actor AgentActor {
             } else {
                 assistantTurn.content = .toolCalls(callsToExecute)
             }
-            // Clear Gemini parts (would replay full set verbatim) but keep
-            // Anthropic thinking blocks (still valid).
-            if let cont = assistantTurn.continuation,
-               cont.geminiResponseParts != nil || cont.geminiThoughtSignatures != nil {
+            // Clear the Gemini continuation (it would replay the full functionCall
+            // set verbatim) but keep the Anthropic thinking blocks (still valid).
+            // Rebuilding from only `anthropicThinkingBlocks` drops both Gemini fields;
+            // when there were none to begin with the rebuilt continuation is identical.
+            if let cont = assistantTurn.continuation {
                 assistantTurn.continuation = ProviderContinuation(
                     anthropicThinkingBlocks: cont.anthropicThinkingBlocks
                 )
