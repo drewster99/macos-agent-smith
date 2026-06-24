@@ -31,7 +31,7 @@ final class FileReadTracker: Sendable {
     private let paths = Mutex<Set<String>>([])
 
     func record(_ path: String) {
-        paths.withLock { $0.insert(path) }
+        paths.withLock { _ = $0.insert(path) }
     }
 
     func contains(_ path: String) -> Bool {
