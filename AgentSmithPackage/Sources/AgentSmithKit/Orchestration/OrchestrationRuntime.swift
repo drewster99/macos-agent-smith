@@ -274,7 +274,7 @@ public actor OrchestrationRuntime {
         }
 
         guard let blocker = inFlight else {
-            await restartForNewTask(taskID: taskID)
+            restartForNewTask(taskID: taskID)
             return
         }
 
@@ -299,7 +299,7 @@ public actor OrchestrationRuntime {
                     "blockingTaskTitle": .string(blocker.title)
                 ]
             ))
-            await restartForNewTask(taskID: taskID)
+            restartForNewTask(taskID: taskID)
         } else {
             pendingScheduledRunQueue.append(taskID)
             await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
@@ -338,7 +338,7 @@ public actor OrchestrationRuntime {
             guard let task = await taskStore.task(id: next), task.status.isRunnable else {
                 continue
             }
-            await restartForNewTask(taskID: next)
+            restartForNewTask(taskID: next)
             return true
         }
         return false
@@ -370,7 +370,7 @@ public actor OrchestrationRuntime {
             .sorted { $0.createdAt < $1.createdAt }
             .first
         guard let next = oldestPending else { return }
-        await restartForNewTask(taskID: next.id)
+        restartForNewTask(taskID: next.id)
     }
 
     /// Builds the user-role message that seeds Brown's conversation history at task spawn.
