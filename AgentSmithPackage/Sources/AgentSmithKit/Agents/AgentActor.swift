@@ -664,6 +664,38 @@ public actor AgentActor {
         }
     }
 
+    /// Awaits `operation`, but gives up after `seconds` and returns `false` WITHOUT
+    /// structurally awaiting it past the deadline. Needed because `withTaskGroup`
+    /// awaits every child at scope exit — so an observer parked in a
+    /// cancellation-ignoring `await` (e.g. `await runTask.value` for a run loop wedged
+    /// inside a hung MCP/LLM call) would hang the very timeout it's meant to enforce.
+    /// Here the observer and the timer are unstructured tasks; we resume on whichever
+    /// finishes first and abandon the loser.
+    private static func completesWithin(
+        seconds: Double,
+        _ operation: @escaping @Sendable () async -> Void
+    ) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            @Sendable func resumeOnce(with value: Bool) {
+                let shouldResume = resumed.withLock { done -> Bool in
+                    if done { return false }
+                    done = true
+                    return true
+                }
+                if shouldResume { continuation.resume(returning: value) }
+            }
+            Task {
+                await operation()
+                resumeOnce(with: true)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                resumeOnce(with: false)
+            }
+        }
+    }
+
     /// Stops the agent and waits (up to a bounded grace period) for its run loop
     /// to actually exit before returning.
     ///
@@ -691,24 +723,15 @@ public actor AgentActor {
         task.cancel()
         Self.stopLogger.notice("AgentActor.stop task.cancel called role=\(role, privacy: .public) agent=\(agentID, privacy: .public)")
 
-        // Race the run loop's exit against a grace timeout. Whichever finishes
-        // first wins; the other is cancelled. The `runTask.value` branch runs
-        // on the cooperative thread pool, not on this actor, so actor reentrancy
-        // lets the run loop continue processing the cancellation while stop()
-        // is suspended here.
-        let cleanExit = await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                _ = await task.value
-                return true
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(5))
-                return false
-            }
-            let result = await group.next() ?? false
-            group.cancelAll()
-            return result
-        }
+        // Wait for the run loop to actually exit, but never block on it past a grace
+        // period. `withTaskGroup` is unusable here: it awaits EVERY child at scope exit,
+        // so the `await task.value` child hangs the whole group when the run loop is
+        // parked in a cancellation-ignoring `await` (a hung MCP/LLM call) — which
+        // silently wedged `stop()`, and with it every Escape/Pause/Stop path. The helper
+        // abandons the observer if the timer wins, so stop always returns. `isRunning =
+        // false` above guarantees the abandoned run loop breaks out as soon as its stuck
+        // await finally returns.
+        let cleanExit = await Self.completesWithin(seconds: 5) { _ = await task.value }
         let elapsedMs = Int(Date().timeIntervalSince(stopStart) * 1000)
         if cleanExit {
             Self.stopLogger.notice("AgentActor.stop runTask exited role=\(role, privacy: .public) agent=\(agentID, privacy: .public) elapsedMs=\(elapsedMs, privacy: .public)")
