@@ -38,6 +38,13 @@ enum ProcessRunner {
             case cancelled
             case completed
         }
+        // Output buffer + close flag, mutated by the readability/termination handlers
+        // (which fire on independent queues). Held behind a lock so accesses are
+        // serialized and the compiler can verify the captured state is concurrency-safe.
+        struct PipeReadState {
+            var buffer = Data()
+            var pipeIsClosed = false
+        }
         let stateBox = OSAllocatedUnfairLock<State>(initialState: .pending)
         // Whether `setpgid` succeeded. When it does, kill the whole process group (`-pid`)
         // so backgrounded descendants die too; when it doesn't (it appears to fail
@@ -75,10 +82,12 @@ enum ProcessRunner {
                         process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
                     }
 
-                    // Serial queue to serialize all pipe reads (FileHandle is not thread-safe).
-                    let readQueue = DispatchQueue(label: "process-runner-read")
-                    var buffer = Data()
-                    var pipeIsClosed = false
+                    // Lock serializes all pipe reads + the output buffer. FileHandle is not
+                    // thread-safe, and the readability/termination handlers fire on independent
+                    // queues; holding the lock across each FileHandle access keeps them from
+                    // racing (replaces the prior serial DispatchQueue and lets the compiler
+                    // verify the captured state is concurrency-safe).
+                    let readState = OSAllocatedUnfairLock(initialState: PipeReadState())
 
                     let done = DispatchSemaphore(value: 0)
                     let didTimeout = OSAllocatedUnfairLock(initialState: false)
@@ -86,11 +95,11 @@ enum ProcessRunner {
                     // Read output incrementally as it arrives. This prevents the pipe buffer
                     // (~64KB) from filling up and blocking the process on write.
                     pipe.fileHandleForReading.readabilityHandler = { handle in
-                        readQueue.sync {
-                            guard !pipeIsClosed else { return }
+                        readState.withLock { state in
+                            guard !state.pipeIsClosed else { return }
                             let chunk = handle.availableData
                             if !chunk.isEmpty {
-                                buffer.append(chunk)
+                                state.buffer.append(chunk)
                             }
                         }
                     }
@@ -100,13 +109,13 @@ enum ProcessRunner {
                     // their next write — they won't hold us open.
                     process.terminationHandler = { _ in
                         pipe.fileHandleForReading.readabilityHandler = nil
-                        readQueue.sync {
-                            guard !pipeIsClosed else { return }
+                        readState.withLock { state in
+                            guard !state.pipeIsClosed else { return }
                             let remaining = pipe.fileHandleForReading.availableData
                             if !remaining.isEmpty {
-                                buffer.append(remaining)
+                                state.buffer.append(remaining)
                             }
-                            pipeIsClosed = true
+                            state.pipeIsClosed = true
                             // close() can throw if the fd is already closed (e.g., process never started).
                             // This is expected and safe to ignore — we're done with the pipe.
                             do { try pipe.fileHandleForReading.close() } catch { /* fd already closed */ }
@@ -190,7 +199,7 @@ enum ProcessRunner {
                         return previous
                     }
 
-                    let data = readQueue.sync { buffer }
+                    let data = readState.withLock { $0.buffer }
                     let output = String(data: data, encoding: .utf8)
                         ?? "Error: output could not be decoded as UTF-8 (\(data.count) bytes)"
                     let status = process.terminationStatus
