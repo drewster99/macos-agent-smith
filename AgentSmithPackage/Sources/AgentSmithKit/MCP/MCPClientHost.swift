@@ -260,8 +260,36 @@ public actor MCPClientHost {
             throw MCPError.connectionClosed
         }
         let mcpArgs = MCPValueConversion.values(from: arguments)
-        let (content, isError): ([Tool.Content], Bool?) = try await client.callTool(name: toolName, arguments: mcpArgs)
-        return normalize(content: content, isError: isError ?? false)
+        // Cancellation-aware path. The simple `client.callTool(name:arguments:)` ignores
+        // Task cancellation — it just awaits the server's reply — so a stopped/paused Brown
+        // (or the per-tool timeout in `runToolWithTimeout`) cannot unblock an in-flight call;
+        // it hangs until the server answers, possibly never. Sending via a RequestContext
+        // lets us forward cancellation as an MCP `notifications/cancelled`, which asks the
+        // server to stop work and resumes our await with CancellationError.
+        let context: RequestContext<CallTool.Result> = try await client.callTool(
+            name: toolName,
+            arguments: mcpArgs
+        )
+        // `client.send` registers the pending request asynchronously (a hop later, on the
+        // Client actor), so a cancel that fires in the gap between getting the context and
+        // that registration would `removePendingRequest` nothing — leaving the call to go
+        // out and hang anyway. Re-issue cancellation until the await actually finishes
+        // (`callCompleted`), which closes that race. `cancelRequest` is idempotent
+        // (`removePendingRequest` returns nil once resumed), so the extra notifications are
+        // harmless no-ops, and the loop ends as soon as the call resolves.
+        let callCompleted = OSAllocatedUnfairLock(initialState: false)
+        let result = try await withTaskCancellationHandler(operation: {
+            defer { callCompleted.withLock { $0 = true } }
+            return try await context.value
+        }, onCancel: {
+            Task {
+                while !(callCompleted.withLock { $0 }) {
+                    try? await client.cancelRequest(context.requestID, reason: "Agent stopped")
+                    try? await Task.sleep(for: .milliseconds(25))
+                }
+            }
+        })
+        return normalize(content: result.content, isError: result.isError ?? false)
     }
 
     private func normalize(content: [Tool.Content], isError: Bool) -> MCPToolCallResult {

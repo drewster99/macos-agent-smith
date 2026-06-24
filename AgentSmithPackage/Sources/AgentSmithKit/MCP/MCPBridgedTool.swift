@@ -30,9 +30,14 @@ struct MCPBridgedTool: AgentTool {
 
     var name: String { prefixedName }
 
-    /// MCP servers can run longer than in-process tools (network calls, spawned work),
-    /// so allow more headroom than the 120 s default.
-    var executionTimeout: Duration { .seconds(180) }
+    /// MCP servers can run far longer than in-process tools (network calls, spawned work,
+    /// long builds that legitimately take tens of minutes). This cap only became enforceable
+    /// once `MCPClientHost.callTool` honored cancellation (before that, `runToolWithTimeout`
+    /// couldn't actually cancel a hung MCP call), so keep it very generous — a 4-hour
+    /// backstop for a truly-wedged call, not a budget for normal work; the old 180 s would
+    /// have chopped off legitimate long-running tools. A hung call is recoverable any time
+    /// via Stop/Pause, and finer per-server / progress-aware limits are future work.
+    var executionTimeout: Duration { .seconds(14400) }  // 4 hours
 
     /// Fail-closed: an MCP tool that doesn't declare `destructiveHint` is assumed destructive.
     /// Untrusted — surfaced to Jones as a server-claimed hint, never used to grant access.
