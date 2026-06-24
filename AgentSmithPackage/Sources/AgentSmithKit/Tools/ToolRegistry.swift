@@ -60,7 +60,7 @@ struct ToolRegistry: Sendable {
         for entry in entries { previousByName[entry.name] = entry }
 
         entries = candidates.map { tool in
-            if var existing = previousByName[tool.name] {
+            if let existing = previousByName[tool.name] {
                 // Preserve flags but refresh the tool reference (its description/schema may have
                 // changed) so dispatch and definitions use the current candidate.
                 return Entry(
