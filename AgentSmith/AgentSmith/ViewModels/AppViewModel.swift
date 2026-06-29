@@ -208,7 +208,7 @@ final class AppViewModel {
     }
     /// Per-session: maps each agent role to a `ModelConfiguration.id`.
     var agentAssignments: [AgentRole: UUID] = [:] {
-        didSet { persistSessionStateAsync() }
+        didSet { persistSessionStateAsync(); scheduleProviderRefresh() }
     }
     /// Per-session tool allowlist. Missing/true = enabled. Currently no UI; data model only.
     var toolsEnabled: [String: Bool] = [:] {
@@ -218,6 +218,9 @@ final class AppViewModel {
     private let logger = Logger(subsystem: "com.agentsmith", category: "AppViewModel")
     private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
     private var runtime: OrchestrationRuntime?
+    /// Debounces provider rebuilds so a burst of Settings edits (every model field commits) results
+    /// in a single `makeProvider`/keychain pass once editing settles, not one per keystroke.
+    private var providerRefreshTask: Task<Void, Never>?
     /// Per-session MCP client host. Created once on first `start()` and reused across
     /// runtime restarts so its subprocesses survive task restarts; torn down when the
     /// session is closed (`shutdownMCP()`).
@@ -606,6 +609,11 @@ final class AppViewModel {
         // each start() replaces any prior closure for this session.
         shared.registerToolSecurityObserver(session.id) { [weak self] in
             self?.pushToolSecurity()
+        }
+        // Rebuild + push this session's LLM providers when an assigned model config changes, so a
+        // model swap takes effect on the next task without a session restart.
+        shared.registerModelAssignmentObserver(session.id) { [weak self] in
+            self?.scheduleProviderRefresh()
         }
 
         // Per-session MCP host: create once and reuse across runtime restarts so a task
@@ -1133,6 +1141,49 @@ final class AppViewModel {
         let per = shared.enablePerToolCheck
         let pol = shared.globalToolPolicies
         Task { await runtime?.setToolSecurity(preflightScoping: pre, perCallCheck: per, globalPolicy: pol) }
+    }
+
+    /// Debounced trigger for a provider rebuild. A single model-field edit fires `updateAgentConfig`
+    /// repeatedly (every field commits), so coalesce the burst into one rebuild ~400ms after editing
+    /// settles — avoiding a `makeProvider`/keychain pass per keystroke. No-op when not running.
+    private func scheduleProviderRefresh() {
+        guard isRunning else { return }
+        providerRefreshTask?.cancel()
+        providerRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await self?.pushUpdatedProviders()
+        }
+    }
+
+    /// Rebuilds this session's per-role LLM providers from the current model assignments and pushes
+    /// them to the live runtime, so a model swap in Settings takes effect on the next task (Brown and
+    /// Jones re-read the providers at spawn; Smith/summarizer on the next runtime restart) without a
+    /// session restart. A per-role build failure is logged and skipped — the runtime keeps that role's
+    /// existing provider — so one misconfigured model can't break the others.
+    private func pushUpdatedProviders() async {
+        guard isRunning, let runtime else { return }
+        var providers: [AgentRole: any LLMProvider] = [:]
+        var configurations: [AgentRole: ModelConfiguration] = [:]
+        var apiTypes: [AgentRole: ProviderAPIType] = [:]
+        for role in AgentRole.allCases {
+            guard let configID = agentAssignments[role] else { continue }
+            do {
+                providers[role] = try shared.llmKit.makeProvider(for: configID)
+            } catch {
+                logger.error("Provider refresh: failed to rebuild \(role.displayName, privacy: .public) provider: \(error.localizedDescription, privacy: .public)")
+                continue
+            }
+            if let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) {
+                configurations[role] = modelConfig
+                if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
+                    apiTypes[role] = modelProvider.apiType
+                }
+            }
+        }
+        guard !providers.isEmpty else { return }
+        await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes)
+        logger.info("Refreshed LLM providers for roles: \(providers.keys.map(\.displayName).sorted().joined(separator: ", "), privacy: .public)")
     }
 
     /// Sets (or clears, with `enabled == nil`) a per-task user tool override from the task-detail UI.

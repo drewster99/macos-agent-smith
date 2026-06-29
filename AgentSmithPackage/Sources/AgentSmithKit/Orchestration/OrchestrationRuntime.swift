@@ -636,6 +636,25 @@ public actor OrchestrationRuntime {
         mcpHost = host
     }
 
+    /// Replaces the per-role LLM providers / model configs / API types after construction, so a
+    /// model change in Settings takes effect without tearing down the session. Merges by role —
+    /// roles absent from the passed dictionaries keep their current provider.
+    ///
+    /// Timing: Brown and its `SecurityEvaluator` (Jones) read `llmProviders`/`llmConfigs` at spawn,
+    /// so they pick up the new model on the **next task**. The long-lived Smith and the
+    /// `TaskSummarizer` are rebuilt from these same dicts on the next runtime restart
+    /// (`restartForNewTask`). An in-flight agent keeps the provider it started with — a model swap
+    /// never yanks a call mid-flight.
+    public func setProviders(
+        providers: [AgentRole: any LLMProvider],
+        configurations: [AgentRole: ModelConfiguration],
+        apiTypes: [AgentRole: ProviderAPIType]
+    ) {
+        for (role, provider) in providers { llmProviders[role] = provider }
+        for (role, config) in configurations { llmConfigs[role] = config }
+        for (role, apiType) in apiTypes { providerAPITypes[role] = apiType }
+    }
+
     /// Updates the global tool-security configuration (user Settings). Applied to each Brown at its
     /// next spawn (the per-call flag and pre-flight flag are read at spawn; the global policy too).
     public func setToolSecurity(preflightScoping: Bool, perCallCheck: Bool, globalPolicy: [String: ToolPolicy]) async {

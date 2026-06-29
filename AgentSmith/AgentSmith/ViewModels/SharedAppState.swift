@@ -142,6 +142,20 @@ final class SharedAppState {
     private func notifyToolSecurityChanged() {
         for observer in toolSecurityObservers.values { observer() }
     }
+
+    /// Observers (one per active session) that rebuild and push per-role LLM providers down to their
+    /// runtime when an assigned model configuration changes — so swapping an agent's model in Settings
+    /// takes effect on the next task with no session restart.
+    private var modelAssignmentObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerModelAssignmentObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        modelAssignmentObservers[id] = observer
+    }
+    func removeModelAssignmentObserver(_ id: UUID) {
+        modelAssignmentObservers.removeValue(forKey: id)
+    }
+    private func notifyModelAssignmentsChanged() {
+        for observer in modelAssignmentObservers.values { observer() }
+    }
     private static func loadToolPolicies() -> [String: ToolPolicy] {
         guard let data = UserDefaults.standard.data(forKey: "globalToolPolicies"),
               let decoded = try? JSONDecoder().decode([String: ToolPolicy].self, from: data) else { return [:] }
@@ -600,6 +614,9 @@ final class SharedAppState {
     func updateAgentConfig(_ config: ModelConfiguration, undoManager: UndoManager? = nil) {
         let previous = llmKit.configurations.first { $0.id == config.id }
         llmKit.updateConfiguration(config)
+        // Push the edited config to any running session that uses it (debounced on the VM side), so a
+        // model/provider change reaches the live runtime instead of stranding it on the prior provider.
+        if previous != config { notifyModelAssignmentsChanged() }
         guard let previous, let undoManager, previous != config else { return }
         undoManager.registerUndo(withTarget: self) { target in
             target.updateAgentConfig(previous, undoManager: undoManager)
