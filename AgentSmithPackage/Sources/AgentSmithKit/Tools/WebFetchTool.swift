@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Brown tool: fetches a URL, converts the page to readable markdown, and (optionally) runs a
 /// prompt against that content to extract just what was asked for.
@@ -17,12 +18,33 @@ struct WebFetchTool: AgentTool {
     /// flooding the agent's context. The extractor sees more (capped separately in TaskSummarizer).
     private static let maxMarkdownChars = 50_000
 
+    /// Floor for the per-fetch download ceiling. The effective ceiling is
+    /// `max(this, ToolContext.maxAttachmentBytesPerMessage())`, so web_fetch never rejects a page
+    /// the attachment layer would accept (and tracks the user's configured attachment limit), while
+    /// still bounding memory for a plain text page even if that limit were set very low. Content
+    /// past the effective ceiling is rejected, not truncated — this is the unbounded-memory guard.
+    static let minFetchByteCeiling = 25 * 1024 * 1024
+
+    /// Cap on the HTML fed to `htmlToMarkdown`. Set far above the `maxMarkdownChars` output window,
+    /// so it never alters a real page's visible output (the markdown we keep is always drawn from
+    /// the front of the document), but it bounds the conversion's regex passes on pathological input.
+    static let maxHTMLConversionChars = 2_000_000
+
+    /// Wall-clock budget for the synchronous HTML→markdown conversion. Real pages finish in
+    /// milliseconds; a crafted page that would otherwise wedge the uncancellable regex passes is
+    /// abandoned and reported as a clean failure instead of hanging the tool.
+    static let conversionDeadline: Duration = .seconds(12)
+
     private static let userAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
         "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    /// A dedicated session (not `.shared`) so the per-task download delegate's callbacks — which
+    /// enforce the byte cap and the redirect guard — are reliably delivered.
+    private static let defaultSession = URLSession(configuration: .default)
+
+    init(session: URLSession? = nil) {
+        self.session = session ?? Self.defaultSession
     }
 
     /// Fetching plus an extraction LLM call can run longer than the default; give it headroom.
@@ -97,10 +119,31 @@ struct WebFetchTool: AgentTool {
         request.setValue("text/html,application/xhtml+xml,application/pdf,image/*;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 30
 
+        // Cap the download at the configured attachment limit (never below our floor), so a fetched
+        // image/PDF that the attachment layer would accept is never rejected here first, while an
+        // unbounded/oversized body is still refused before it can exhaust memory.
+        let fetchCeiling = max(Self.minFetchByteCeiling, await context.maxAttachmentBytesPerMessage())
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await WebFetchDownloader(maxBytes: fetchCeiling)
+                .download(request, using: session)
+        } catch let error as WebFetchDownloader.DownloadError {
+            switch error {
+            case .redirectBlocked(let blockedURL):
+                return .failure(
+                    "Refused: \(urlString) redirected to a non-public address " +
+                    "(\(blockedURL.absoluteString)). web_fetch does not follow redirects into " +
+                    "loopback / link-local / private network ranges. If you genuinely need that " +
+                    "address, request it directly."
+                )
+            case .tooLarge(let limit):
+                let limitString = ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)
+                return .failure(
+                    "Refused: \(urlString) exceeds web_fetch's \(limitString) size limit. " +
+                    "Download large files with `bash` (e.g. `curl -L -o <path> \"\(urlString)\"`) instead."
+                )
+            }
         } catch {
             return .failure("Failed to fetch \(urlString): \(error.localizedDescription)")
         }
@@ -132,7 +175,17 @@ struct WebFetchTool: AgentTool {
 
         // Lossy UTF-8 decode so an unusual page encoding can't fail the whole fetch.
         let html = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
-        let markdown = Self.htmlToMarkdown(html)
+        // Cap the HTML before conversion (bounds the regex passes) and run conversion under a
+        // wall-clock deadline so pathological markup can't wedge the tool.
+        let cappedHTML = html.count > Self.maxHTMLConversionChars
+            ? String(html.prefix(Self.maxHTMLConversionChars))
+            : html
+        guard let markdown = await Self.htmlToMarkdownBounded(cappedHTML, deadline: Self.conversionDeadline) else {
+            return .failure(
+                "Fetched \(urlString) but converting it to readable text took too long — the page " +
+                "may be extremely large or malformed. Try a more specific URL, or pass a `prompt`."
+            )
+        }
         guard !markdown.isEmpty else {
             return .failure("Fetched \(urlString) but found no readable text content.")
         }
@@ -206,8 +259,10 @@ struct WebFetchTool: AgentTool {
         replace("</(p|div|section|article|tr|ul|ol|table|header|footer|main|blockquote)>", "\n\n")
 
         // Strip all remaining tags, then decode entities (after tag-strip so entity text isn't
-        // mistaken for a tag).
-        replace("<[^>]+>", "")
+        // mistaken for a tag). Linear scan rather than a `<[^>]+>` regex: identical result, but a
+        // single pass so adversarial markup (many `<` with no `>`) can't trigger quadratic
+        // backtracking.
+        text = stripRemainingTags(text)
         text = DuckDuckGoHTMLSearchBackend.decodeEntities(text)
 
         // Normalize whitespace: trim each line, collapse runs of blank lines to one.
@@ -225,6 +280,65 @@ struct WebFetchTool: AgentTool {
             }
         }
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Removes residual `<...>` tags, matching the previous `<[^>]+>` regex exactly (a `<` with at
+    /// least one non-`>` char before the next `>`), but in a single linear pass. A `<` with no
+    /// following `>`, or an empty `<>`, is left in place — identical to the regex. The point is to
+    /// avoid the quadratic backtracking the regex suffers on adversarial markup (many `<`, no `>`).
+    static func stripRemainingTags(_ s: String) -> String {
+        var result = ""
+        result.reserveCapacity(s.count)
+        var i = s.startIndex
+        let end = s.endIndex
+        while i < end {
+            if s[i] == "<" {
+                let afterLt = s.index(after: i)
+                if let gt = s[afterLt...].firstIndex(of: ">") {
+                    if gt > afterLt {
+                        // `<…>` with ≥1 inner char → drop the whole tag, resume after `>`.
+                        i = s.index(after: gt)
+                    } else {
+                        // `<>` — no inner char, not a tag; keep the `<` and continue.
+                        result.append("<")
+                        i = afterLt
+                    }
+                } else {
+                    // No `>` anywhere after this `<` → no further tag can match; keep the rest as-is.
+                    result.append(contentsOf: s[i...])
+                    break
+                }
+            } else {
+                result.append(s[i])
+                i = s.index(after: i)
+            }
+        }
+        return result
+    }
+
+    /// Runs the synchronous, potentially-expensive `htmlToMarkdown` off the caller and bounds it by
+    /// wall clock. The regex passes are synchronous and uncancellable, so on a pathological page the
+    /// conversion task may keep running after we return `nil` — but it's bounded by the input cap and
+    /// never blocks the caller past `deadline`. Mirrors `AgentActor.completesWithin`'s once-resume.
+    static func htmlToMarkdownBounded(_ html: String, deadline: Duration) async -> String? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            @Sendable func resumeOnce(with value: String?) {
+                let shouldResume = resumed.withLock { done -> Bool in
+                    if done { return false }
+                    done = true
+                    return true
+                }
+                if shouldResume { continuation.resume(returning: value) }
+            }
+            Task.detached(priority: .utility) {
+                resumeOnce(with: WebFetchTool.htmlToMarkdown(html))
+            }
+            Task {
+                try? await Task.sleep(for: deadline)
+                resumeOnce(with: nil)
+            }
+        }
     }
 
     // MARK: - Content classification (pure, testable)
@@ -373,5 +487,110 @@ struct WebFetchTool: AgentTool {
             .joined(separator: "_")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "fetched" : String(cleaned.prefix(180))
+    }
+}
+
+/// Downloads a URL into memory for `web_fetch` with two protections the default `data(for:)` lacks:
+/// a hard byte ceiling (so a huge or chunked/dishonest response can't exhaust memory) and a redirect
+/// guard that refuses 30x hops into non-public address space (so a benign URL can't be silently
+/// redirected onto the local machine or LAN, bypassing the security agent). **Direct** requests are
+/// never gated — only redirect hops. Delegate-driven so reads are chunked and the transfer is
+/// cancelled the instant a limit is hit. Single-use: create one per fetch.
+final class WebFetchDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+
+    enum DownloadError: Error {
+        case tooLarge(limit: Int)
+        case redirectBlocked(URL)
+    }
+
+    private let maxBytes: Int
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var response: URLResponse?
+    private var settled = false
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+
+    init(maxBytes: Int) {
+        self.maxBytes = maxBytes
+    }
+
+    func download(_ request: URLRequest, using session: URLSession) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            let task: URLSessionDataTask = lock.withLock {
+                self.continuation = continuation
+                return session.dataTask(with: request)
+            }
+            task.delegate = self
+            task.resume()
+        }
+    }
+
+    /// Resolves the download's continuation at most once; later settle attempts (e.g. the
+    /// `didComplete` that follows a cap-triggered `cancel`) are no-ops.
+    private func settle(_ result: Result<(Data, URLResponse), Error>) {
+        let cont: CheckedContinuation<(Data, URLResponse), Error>? = lock.withLock {
+            if settled { return nil }
+            settled = true
+            let c = continuation
+            continuation = nil
+            return c
+        }
+        cont?.resume(with: result)
+    }
+
+    // MARK: URLSessionTaskDelegate
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        guard let target = request.url else { return nil }
+        if await EgressPolicy.destinationIsNonPublic(target) {
+            settle(.failure(DownloadError.redirectBlocked(target)))
+            return nil   // do not follow the redirect
+        }
+        return request
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            settle(.failure(error))
+            return
+        }
+        let snapshot: (Data, URLResponse?) = lock.withLock { (buffer, response) }
+        if let resp = snapshot.1 {
+            settle(.success((snapshot.0, resp)))
+        } else {
+            settle(.failure(URLError(.badServerResponse)))
+        }
+    }
+
+    // MARK: URLSessionDataDelegate
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse
+    ) async -> URLSession.ResponseDisposition {
+        lock.withLock { self.response = response }
+        if response.expectedContentLength > Int64(maxBytes) {
+            settle(.failure(DownloadError.tooLarge(limit: maxBytes)))
+            return .cancel
+        }
+        return .allow
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let overflow: Bool = lock.withLock {
+            if settled { return false }
+            buffer.append(data)
+            return buffer.count > maxBytes
+        }
+        if overflow {
+            dataTask.cancel()
+            settle(.failure(DownloadError.tooLarge(limit: maxBytes)))
+        }
     }
 }

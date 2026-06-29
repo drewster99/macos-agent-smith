@@ -38,6 +38,50 @@ struct WebFetchTests {
         #expect(WebFetchTool.htmlToMarkdown("<html><head></head><body></body></html>").isEmpty)
     }
 
+    @Test("stripRemainingTags is byte-identical to the old <[^>]+> regex across edge cases")
+    func stripRemainingTagsEquivalence() {
+        func regexStrip(_ s: String) -> String {
+            s.replacingOccurrences(of: "<[^>]+>", with: "", options: [.regularExpression, .caseInsensitive])
+        }
+        let cases = [
+            "", "<a>", "<a", "<>", "<a><b>", "a<b>c", "< >", "<<<", "<<a>>",
+            "text with no tags", "trailing<no close", "a<b<c>d",   // first '>' closes "<b<c>"
+            "1 < 2 and 3 > 4", "<DIV class=\"x\">hi</DIV>",
+            "<a href=\"x\">link</a> then <unclosed",
+            "lots of < < < < with no closer at all",
+            "mixed <p>para</p> < stray < and <span>span</span>"
+        ]
+        for input in cases {
+            #expect(WebFetchTool.stripRemainingTags(input) == regexStrip(input), "mismatch for: \(input)")
+        }
+    }
+
+    @Test("htmlToMarkdownBounded returns the same markdown as the sync path for a normal page")
+    func boundedConversionMatchesSync() async {
+        let sync = WebFetchTool.htmlToMarkdown(Self.sampleHTML)
+        let bounded = await WebFetchTool.htmlToMarkdownBounded(Self.sampleHTML, deadline: .seconds(10))
+        #expect(bounded == sync)
+    }
+
+    @Test("redirect guard blocks a hop to a private host and allows a public one")
+    func redirectGuardDecision() async throws {
+        let from = try #require(URL(string: "https://example.com/start"))
+        let resp = try #require(HTTPURLResponse(url: from, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": "x"]))
+        let dummyTask = URLSession.shared.dataTask(with: from)   // never resumed; only needed as the unused `task:` arg
+
+        // Redirect into loopback → refused (delegate returns nil so URLSession won't follow it).
+        let privateReq = URLRequest(url: try #require(URL(string: "http://127.0.0.1:9200/admin")))
+        let blocked = await WebFetchDownloader(maxBytes: 1_000_000)
+            .urlSession(URLSession.shared, task: dummyTask, willPerformHTTPRedirection: resp, newRequest: privateReq)
+        #expect(blocked == nil)
+
+        // Redirect to a public IP literal → followed (delegate returns the request unchanged).
+        let publicReq = URLRequest(url: try #require(URL(string: "http://93.184.216.34/page")))
+        let allowed = await WebFetchDownloader(maxBytes: 1_000_000)
+            .urlSession(URLSession.shared, task: dummyTask, willPerformHTTPRedirection: resp, newRequest: publicReq)
+        #expect(allowed?.url == publicReq.url)
+    }
+
     @Test("formatMarkdown truncates very long content and notes it")
     func truncation() {
         let huge = String(repeating: "x", count: 80_000)
