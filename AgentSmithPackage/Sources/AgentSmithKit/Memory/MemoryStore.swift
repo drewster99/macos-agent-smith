@@ -409,7 +409,13 @@ public actor MemoryStore {
     /// the embedding cosine separates gold from noise. Values are from the prompt-sweep eval, measured
     /// WITH the per-pool instructions below (which shift cosines): task gold≈0.72/FP≈0.64, memory
     /// gold≈0.68/FP≈0.51. Tunable via `RetrievalEvalRunner`.
-    public static let taskInjectionCosineGate: Double = 0.62
+    ///
+    /// The task gate sits *between* its FP and gold figures (like the memory gate does, 0.58 between
+    /// 0.51 and 0.68): 0.62 was *below* the task FP figure (≈0.64), so it admitted more than half of
+    /// the strongest false-positive prior tasks. 0.66 trims that FP noise while staying well under
+    /// gold≈0.72 so genuinely-relevant prior tasks still inject. Re-confirm with a `RetrievalEvalRunner`
+    /// gate sweep if the embedding model or eval corpus changes.
+    public static let taskInjectionCosineGate: Double = 0.66
     public static let memoryInjectionCosineGate: Double = 0.58
 
     /// Per-pool Qwen3 retrieval instructions, applied query-side at the context-injection sites
