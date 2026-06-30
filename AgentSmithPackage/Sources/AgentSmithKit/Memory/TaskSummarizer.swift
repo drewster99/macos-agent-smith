@@ -83,6 +83,7 @@ actor TaskSummarizer {
         var lastError: Error?
 
         for attempt in 0...Self.maxRetries {
+            if Task.isCancelled { return nil }
             if attempt > 0 {
                 let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
                 await postToChannel(ChannelMessage(
@@ -118,6 +119,7 @@ actor TaskSummarizer {
             }
         }
 
+        if Task.isCancelled { return nil }   // cancelled mid-call: don't post a spurious failure
         let latencyMs = Int(Date().timeIntervalSince(startTime) * 1000)
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
@@ -176,6 +178,7 @@ actor TaskSummarizer {
 
         var lastError: Error?
         for attempt in 0...Self.maxRetries {
+            if Task.isCancelled { return nil }
             if attempt > 0 {
                 let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
                 do { try await Task.sleep(for: .seconds(delay)) } catch { break }
@@ -213,6 +216,7 @@ actor TaskSummarizer {
             }
         }
 
+        if Task.isCancelled { return nil }   // cancelled mid-call: don't post a spurious failure
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
             content: "Memory merge failed: \(lastError?.localizedDescription ?? "unknown error")",
@@ -243,6 +247,7 @@ actor TaskSummarizer {
 
         var lastError: Error?
         for attempt in 0...Self.maxRetries {
+            if Task.isCancelled { return nil }
             if attempt > 0 {
                 let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
                 do { try await Task.sleep(for: .seconds(delay)) } catch { break }
@@ -280,6 +285,7 @@ actor TaskSummarizer {
             }
         }
 
+        if Task.isCancelled { return nil }   // cancelled mid-call: don't post a spurious failure
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
             content: "Web content extraction failed: \(lastError?.localizedDescription ?? "unknown error")",
