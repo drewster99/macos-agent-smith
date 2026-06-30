@@ -53,10 +53,13 @@ struct SearchMemoryTool: AgentTool {
         // The agent asked, so a miss is worse than mild noise — return the RRF top-K and let the
         // agent judge relevance from the similarity scores. The gates are for the push sites
         // (CreateTaskTool / Smith's auto-context injection) where unrequested noise is the problem.
+        // For the same reason `excludeDeletedTasks: false`: the agent explicitly asked, so deleted
+        // tasks still surface here (they're hidden only from the unrequested auto-context push).
         let results = try await context.memoryStore.searchAll(
             query: query,
             memoryLimit: limit,
-            taskLimit: limit
+            taskLimit: limit,
+            excludeDeletedTasks: false
         )
 
         if results.isEmpty {

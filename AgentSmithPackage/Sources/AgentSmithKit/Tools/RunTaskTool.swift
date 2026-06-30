@@ -62,7 +62,10 @@ struct RunTaskTool: AgentTool {
             return .failure(await Self.missingTaskIDFailure(context: context))
         }
         let taskID = resolvedTaskID
-        guard var task = await context.taskStore.task(id: taskID) else {
+        // Resolve across active + global inactive: a completed task older than 4h is auto-archived
+        // into the global store, and the agent is still shown it via list_tasks/get_task_details, so
+        // "redo that one" must be able to find it here too.
+        guard var task = await context.taskStore.taskAnyDisposition(id: taskID) else {
             return .failure("""
                 No task found with ID \(taskID). \
                 \(await Self.candidateTaskList(context: context))
@@ -72,6 +75,16 @@ struct RunTaskTool: AgentTool {
             // Surface the auto-pick so the user sees it in the success banner and
             // a future log search can identify when this fallback fired.
             runTaskLogger.notice("auto-resolved missing task_id → \(taskID.uuidString, privacy: .public) (\(task.title, privacy: .public))")
+        }
+        // If the task lives in the global archived/deleted store, pull it back into this session's
+        // active list before reopening — the reset/reopen paths operate on the active store, and
+        // run_task means "redo this one here" (lands in the current session).
+        if task.disposition != .active {
+            await context.taskStore.restoreToActive(id: taskID)
+            guard let restored = await context.taskStore.task(id: taskID) else {
+                return .failure("Could not restore task '\(task.title)' to the active list to run it.")
+            }
+            task = restored
         }
         // Allow pending/paused/interrupted directly. For failed, reset the task back to
         // pending first so the retry runs on the same task ID (preserving history and prior

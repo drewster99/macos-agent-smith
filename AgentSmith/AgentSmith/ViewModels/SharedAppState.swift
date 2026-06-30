@@ -236,6 +236,14 @@ final class SharedAppState {
     /// All stored task summaries, refreshed when the memory store changes.
     var storedTaskSummaries: [TaskSummaryEntry] = []
 
+    /// Global archived tasks (across all sessions), newest first. Mirrors `inactiveTaskStore`'s
+    /// `.archived` bucket so every window's sidebar updates live. Active tasks stay per-session
+    /// on each `AppViewModel`; only archived/deleted are global.
+    private(set) var archivedTasks: [AgentTask] = []
+    /// Global deleted ("Recently Deleted") tasks (across all sessions), newest first. Mirrors
+    /// `inactiveTaskStore`'s `.recentlyDeleted` bucket.
+    private(set) var deletedTasks: [AgentTask] = []
+
     /// User-edited model overrides cache, keyed by `"providerID/modelID"`. Mirrors what
     /// `llmKit` was last `setUserOverrides`'d with so the Settings UI can read individual
     /// entries without going through `LLMKitManager`'s private state. Writes flow through
@@ -272,6 +280,25 @@ final class SharedAppState {
     /// invariant. Without this, each tab would get a different store, writes would
     /// diverge, and `memories.json` persistence would be last-writer-wins.
     private var memoryStoreTask: Task<MemoryStore, Error>?
+
+    /// Shared global store of archived + recently-deleted tasks — one instance per process,
+    /// injected into every session's runtime. Created lazily in `ensureInactiveTaskStore()`,
+    /// which also runs the one-time per-session → global migration.
+    private(set) var inactiveTaskStore: InactiveTaskStore?
+    /// Tracks the in-flight `ensureInactiveTaskStore()` call so concurrent windows share a
+    /// single creation (and a single migration run), mirroring `memoryStoreTask`.
+    private var inactiveTaskStoreTask: Task<InactiveTaskStore, Error>?
+    /// Set false when the global inactive store must NOT be persisted this launch — a corrupt
+    /// `inactive_tasks.json` we refuse to overwrite, or a migration save that failed. While false,
+    /// mutations aren't written and per-session files aren't stripped, so no archived/deleted task
+    /// is ever lost by clobbering a recoverable file or stripping before a durable global save.
+    private var inactiveTasksPersistable = true
+
+    /// Tracks the in-flight one-time attachment migration so concurrent windows run it once.
+    private var attachmentsMigrationTask: Task<Void, Never>?
+    /// True once attachments have been migrated to the global store (or were already).
+    private var hasMigratedAttachments = false
+    private static let attachmentsMigratedKey = "didMigrateAttachmentsToGlobalStore"
 
     /// Default agent assignments (from bundled defaults) — used when creating a new session.
     private(set) var defaultAgentAssignments: [AgentRole: UUID] = [:]
@@ -325,6 +352,7 @@ final class SharedAppState {
     private let memoriesWriter: SerialPersistenceWriter<[MemoryEntry]>
     private let taskSummariesWriter: SerialPersistenceWriter<[TaskSummaryEntry]>
     private let mcpServersWriter: SerialPersistenceWriter<[MCPServerConfig]>
+    private let inactiveTasksWriter: SerialPersistenceWriter<[AgentTask]>
 
     init() {
         let pm = PersistenceManager()
@@ -341,6 +369,9 @@ final class SharedAppState {
         }
         self.mcpServersWriter = SerialPersistenceWriter(label: "mcpServers") { snapshot in
             try await pm.saveMCPServerConfigs(snapshot)
+        }
+        self.inactiveTasksWriter = SerialPersistenceWriter(label: "inactiveTasks") { snapshot in
+            try await pm.saveInactiveTasks(snapshot)
         }
     }
 
@@ -597,8 +628,225 @@ final class SharedAppState {
         }
 
         memoryStore = store
+        // Seed the deleted-task exclusion set if the global inactive store already exists (it's
+        // created at session load, usually before this). If it doesn't yet, the inactive store
+        // seeds the memory store itself when it's created.
+        await syncDeletedTaskIDsToMemory()
         await refreshMemories(from: store)
         return store
+    }
+
+    // MARK: - Inactive task store (global archived + deleted)
+
+    /// Returns the shared global store of archived + recently-deleted tasks, creating it (and
+    /// running the one-time per-session → global migration) on first call. Concurrent windows
+    /// share a single in-flight creation via `inactiveTaskStoreTask`, so every session's runtime
+    /// is injected with the same instance.
+    func ensureInactiveTaskStore() async throws -> InactiveTaskStore {
+        if let store = inactiveTaskStore { return store }
+        if let existing = inactiveTaskStoreTask {
+            return try await existing.value
+        }
+        let task = Task { @MainActor [weak self] () -> InactiveTaskStore in
+            guard let self else { throw CancellationError() }
+            return try await self.performEnsureInactiveTaskStore()
+        }
+        inactiveTaskStoreTask = task
+        defer { inactiveTaskStoreTask = nil }
+        return try await task.value
+    }
+
+    private func performEnsureInactiveTaskStore() async throws -> InactiveTaskStore {
+        if let store = inactiveTaskStore { return store }
+        let store = InactiveTaskStore()
+
+        // `loadInactiveTasks()` returns nil only when `inactive_tasks.json` is absent → the
+        // one-time per-session → global migration hasn't run. It *throws* when the file exists
+        // but can't be decoded (corrupt): in that case we must NOT migrate, because migration
+        // would overwrite the (recoverable) file with a fresh union built from session files that
+        // a prior migration already stripped — i.e. it would wipe all archived/deleted tasks. So
+        // we leave the file untouched and start empty for this launch.
+        do {
+            if let loaded = try await basePersistence.loadInactiveTasks() {
+                await store.restore(loaded)
+            } else {
+                // File absent → run migration. Persist the union and ONLY strip the per-session
+                // files once that save has durably succeeded — otherwise a failed save followed by
+                // a strip would lose the inactive tasks on the next launch. On save failure we keep
+                // the per-session copies (the AppViewModel load split is the backstop) and retry the
+                // whole migration next launch. Either way the tasks are live in memory this launch.
+                let migrated = await collectInactiveFromSessions()
+                await store.restore(migrated)
+                do {
+                    try await basePersistence.saveInactiveTasks(migrated)
+                    await stripInactiveFromSessionFiles()
+                    if !migrated.isEmpty {
+                        logger.notice("Migrated \(migrated.count) archived/deleted tasks from per-session files into the global store")
+                    }
+                } catch {
+                    // Couldn't durably persist the global file — disable persistence so the
+                    // per-session copies are kept (not stripped) and the corrupt/failed file isn't
+                    // overwritten. Migration retries next launch. Tasks stay live in memory now.
+                    inactiveTasksPersistable = false
+                    logger.error("Failed to persist migrated inactive_tasks.json (\(error.localizedDescription, privacy: .public)) — keeping per-session copies; migration retries next launch")
+                }
+            }
+        } catch {
+            // The file exists but couldn't be decoded. Move it aside (never deleted — preserved for
+            // manual recovery) and start a fresh, healthy store, so the app keeps working and a task
+            // archived this session still persists. If it can't be moved aside, disable persistence
+            // so we never overwrite the recoverable-but-corrupt file.
+            do {
+                let quarantined = try await basePersistence.quarantineCorruptInactiveTasksFile()
+                logger.error("inactive_tasks.json was unreadable (\(error.localizedDescription, privacy: .public)); moved aside to \(quarantined?.lastPathComponent ?? "n/a", privacy: .public) and started a fresh archive")
+            } catch {
+                inactiveTasksPersistable = false
+                logger.error("inactive_tasks.json unreadable and could not be quarantined (\(error.localizedDescription, privacy: .public)) — not overwriting it; archived/deleted tasks unavailable this launch")
+            }
+        }
+
+        // Wire persistence + UI mirror AFTER the initial restore so loading doesn't trigger a
+        // redundant write. The writer enqueue is gated on `inactiveTasksPersistable` so a corrupt
+        // or unwritable file is never clobbered by an in-session mutation.
+        let writer = inactiveTasksWriter
+        await store.setOnChange { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let snapshot = await store.snapshot()
+                self.refreshInactiveTaskBuckets(from: snapshot)
+                await self.syncDeletedTaskIDsToMemory(snapshot: snapshot)
+                if self.inactiveTasksPersistable {
+                    await writer.enqueue(snapshot)
+                }
+            }
+        }
+
+        inactiveTaskStore = store
+        let snapshot = await store.snapshot()
+        refreshInactiveTaskBuckets(from: snapshot)
+        await syncDeletedTaskIDsToMemory(snapshot: snapshot)
+        return store
+    }
+
+    /// Splits the inactive snapshot into the two published, sorted buckets the sidebars observe.
+    private func refreshInactiveTaskBuckets(from snapshot: [AgentTask]) {
+        archivedTasks = snapshot
+            .filter { $0.disposition == .archived }
+            .sorted { $0.createdAt > $1.createdAt }
+        deletedTasks = snapshot
+            .filter { $0.disposition == .recentlyDeleted }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// Pushes the current recently-deleted task IDs into the memory store so semantic search
+    /// excludes deleted tasks. No-op until the memory store exists. Pass a snapshot to avoid
+    /// re-reading the inactive actor when one is already in hand.
+    private func syncDeletedTaskIDsToMemory(snapshot: [AgentTask]? = nil) async {
+        guard let mem = memoryStore else { return }
+        let deletedIDs: Set<UUID>
+        if let snapshot {
+            deletedIDs = Set(snapshot.lazy.filter { $0.disposition == .recentlyDeleted }.map(\.id))
+        } else if let store = inactiveTaskStore {
+            deletedIDs = await store.deletedIDs()
+        } else {
+            return
+        }
+        await mem.setExcludedTaskSummaryIDs(deletedIDs)
+    }
+
+    /// Reads every session's `tasks.json` and returns the union of their non-active tasks, keeping
+    /// the newer copy on id collisions. Read-only — does not modify any session file.
+    private func collectInactiveFromSessions() async -> [AgentTask] {
+        let sessions = (try? await basePersistence.loadSessionList()) ?? []
+        var union: [UUID: AgentTask] = [:]
+        for session in sessions {
+            let pm = PersistenceManager(sessionID: session.id)
+            guard let tasks = try? await pm.loadTasks() else { continue }
+            for task in tasks where task.disposition != .active {
+                if let existing = union[task.id], existing.updatedAt >= task.updatedAt { continue }
+                union[task.id] = task
+            }
+        }
+        return Array(union.values)
+    }
+
+    /// Rewrites every session's `tasks.json` to contain only its active tasks. Run only after the
+    /// global inactive file is durably saved, so inactive tasks are never removed before being
+    /// preserved globally.
+    private func stripInactiveFromSessionFiles() async {
+        let sessions = (try? await basePersistence.loadSessionList()) ?? []
+        for session in sessions {
+            let pm = PersistenceManager(sessionID: session.id)
+            guard let tasks = try? await pm.loadTasks() else { continue }
+            let active = tasks.filter { $0.disposition == .active }
+            if active.count != tasks.count {
+                try? await pm.saveTasks(active)
+            }
+        }
+    }
+
+    /// Runs the one-time migration of per-session attachment files into the global attachments
+    /// store. Deduped so concurrent windows trigger it once; guarded by a UserDefaults marker set
+    /// only after a clean run, so a partial failure retries next launch. Idempotent regardless.
+    func ensureAttachmentsMigrated() async {
+        if hasMigratedAttachments { return }
+        if let existing = attachmentsMigrationTask { await existing.value; return }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            if UserDefaults.standard.bool(forKey: SharedAppState.attachmentsMigratedKey) {
+                self.hasMigratedAttachments = true
+                return
+            }
+            do {
+                let result = try await self.basePersistence.migrateSessionAttachmentsToGlobalStore()
+                if result.failed == 0 {
+                    UserDefaults.standard.set(true, forKey: SharedAppState.attachmentsMigratedKey)
+                    self.hasMigratedAttachments = true
+                }
+                if result.moved > 0 {
+                    let note = result.failed > 0 ? "; \(result.failed) failed (will retry next launch)" : ""
+                    logger.notice("Migrated \(result.moved) attachment file(s) to the global store\(note)")
+                }
+            } catch {
+                logger.error("Attachment migration failed (\(error.localizedDescription, privacy: .public)) — will retry next launch")
+            }
+        }
+        attachmentsMigrationTask = task
+        await task.value
+        attachmentsMigrationTask = nil
+    }
+
+    /// Permanently removes a task's summary from the semantic corpus — called when a task is
+    /// permanently deleted, so it never resurfaces in search. Recently-deleted tasks only *hide*
+    /// their summary (via the excluded-ID set); permanent delete erases it.
+    func purgeTaskSummary(id: UUID) async {
+        await memoryStore?.removeTaskSummary(id: id)
+    }
+
+    /// Flushes the global inactive-task store to disk on app termination. No-op when persistence is
+    /// disabled (corrupt/unwritable file) so termination never overwrites a recoverable file.
+    public func flushInactiveTasks() async {
+        guard inactiveTasksPersistable, let store = inactiveTaskStore else { return }
+        let snapshot = await store.snapshot()
+        await inactiveTasksWriter.enqueue(snapshot)
+        await inactiveTasksWriter.flush()
+    }
+
+    /// Durably writes the global inactive store to disk right now (bypassing the coalescing writer),
+    /// returning whether the write succeeded. Callers use this to guarantee an archived/deleted task
+    /// is durably in the global file BEFORE they strip it from a per-session file — so a crash can
+    /// never leave a task removed from the session file but absent from the global file. Returns
+    /// false (without writing) when persistence is disabled, so callers keep the per-session copies.
+    func persistInactiveTasksNow() async -> Bool {
+        guard inactiveTasksPersistable, let store = inactiveTaskStore else { return false }
+        let snapshot = await store.snapshot()
+        do {
+            try await basePersistence.saveInactiveTasks(snapshot)
+            return true
+        } catch {
+            logger.error("Failed to durably persist inactive_tasks.json: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     // MARK: - Nickname

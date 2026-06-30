@@ -61,7 +61,10 @@ extension AppViewModel {
         fallbackResult: String?,
         fallbackTimestamp: Date
     ) async {
-        let task = tasks.first { $0.id == taskID } ?? AgentTask(
+        // Resolve across active + global archived/deleted (the task may have been auto-archived by
+        // the time the banner's export action fires); fall back to the banner's own fields only if
+        // the task was permanently deleted.
+        let task = anyTask(id: taskID) ?? AgentTask(
             id: taskID,
             title: fallbackTitle,
             description: "",

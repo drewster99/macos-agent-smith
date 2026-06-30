@@ -169,6 +169,8 @@ public struct ToolContext: Sendable {
     public let agentID: UUID
     public let agentRole: AgentRole
     public let channel: MessageChannel
+    /// This session's task store. Holds only *active* tasks; the archived + deleted buckets are
+    /// global and reached through `taskStore.allInactiveTasks()` / `taskStore.taskAnyDisposition(id:)`.
     public let taskStore: TaskStore
     /// Full snapshot of the ModelConfiguration the owning agent is using at spawn
     /// time. Used to stamp channel messages with provider/model/config provenance.

@@ -50,7 +50,9 @@ struct ManageTaskDispositionTool: AgentTool {
             throw ToolCallError.missingRequiredArgument("action")
         }
 
-        guard let task = await context.taskStore.task(id: taskID) else {
+        // Active tasks live in the per-session store; archived + deleted in the global store.
+        // Look across both so unarchive/undelete (whose targets are global) resolve correctly.
+        guard let task = await context.taskStore.taskAnyDisposition(id: taskID) else {
             return .failure("Task not found: \(taskIDString)")
         }
 

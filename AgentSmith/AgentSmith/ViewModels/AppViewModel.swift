@@ -33,11 +33,14 @@ final class AppViewModel {
     var tasks: [AgentTask] = [] {
         didSet { rebucketTasks() }
     }
-    /// Pre-bucketed view of `tasks` for the sidebar. Maintained by `rebucketTasks()`
-    /// so the sidebar's body never re-runs three filters per render.
+    /// Active tasks for this session's sidebar. Maintained by `rebucketTasks()` so the sidebar's
+    /// body never re-filters per render. Archived + deleted are global (below), not per-session.
     private(set) var activeTaskList: [AgentTask] = []
-    private(set) var archivedTaskList: [AgentTask] = []
-    private(set) var recentlyDeletedTaskList: [AgentTask] = []
+    /// Archived tasks — global across all sessions, sourced from `SharedAppState` so every window
+    /// shows the same set and updates live when any window archives or restores a task.
+    var archivedTaskList: [AgentTask] { shared.archivedTasks }
+    /// Deleted ("Recently Deleted") tasks — global across all sessions, sourced from `SharedAppState`.
+    var recentlyDeletedTaskList: [AgentTask] { shared.deletedTasks }
     /// Active scheduled wakes (timers) for this session. Refreshed via runtime callbacks
     /// and on demand from the View → Timers window.
     var activeTimers: [ScheduledWake] = [] {
@@ -97,23 +100,22 @@ final class AppViewModel {
         logger.notice("\(name, privacy: .public) \(old, privacy: .public) -> \(new, privacy: .public) (session=\(self.session.name, privacy: .public))\n  \(stack, privacy: .public)")
     }
 
-    /// Splits `tasks` into the three sidebar buckets in a single pass. Called from
-    /// the `tasks` didSet so the sidebar's body never re-runs three filters per render.
+    /// Recomputes the active sidebar bucket from `tasks`. Called from the `tasks` didSet so the
+    /// sidebar's body never re-filters per render. `tasks` holds only this session's active tasks
+    /// now — archived/deleted are global (read from `SharedAppState` via the computed lists above)
+    /// — but we still filter defensively in case a stray non-active task slips in before the load
+    /// split moves it out.
     private func rebucketTasks() {
-        var active: [AgentTask] = []
-        var archived: [AgentTask] = []
-        var deleted: [AgentTask] = []
-        active.reserveCapacity(tasks.count)
-        for task in tasks {
-            switch task.disposition {
-            case .active: active.append(task)
-            case .archived: archived.append(task)
-            case .recentlyDeleted: deleted.append(task)
-            }
-        }
-        activeTaskList = active
-        archivedTaskList = archived
-        recentlyDeletedTaskList = deleted
+        activeTaskList = tasks.filter { $0.disposition == .active }
+    }
+
+    /// Resolves a task by ID across this session's active tasks and the global archived + deleted
+    /// buckets. Detail/timer views target tasks by ID and a task may now be in the global buckets
+    /// (archived/deleted) rather than this session's active list.
+    func anyTask(id: UUID) -> AgentTask? {
+        tasks.first { $0.id == id }
+            ?? shared.archivedTasks.first { $0.id == id }
+            ?? shared.deletedTasks.first { $0.id == id }
     }
 
     /// Builds `pendingWakesByTaskID` from `activeTimers`, dropping wakes whose fire time
@@ -332,6 +334,10 @@ final class AppViewModel {
         agentMaxToolCalls = shared.defaultAgentMaxToolCalls
         agentMessageDebounceIntervals = shared.defaultAgentMessageDebounceIntervals
 
+        // Migrate per-session attachment files into the global store before loading anything that
+        // references attachments (channel log, tasks). Deduped + idempotent across windows.
+        await shared.ensureAttachmentsMigrated()
+
         // Load per-session settings (assignments, tunings, flags) if they exist.
         do {
             if let state = try await persistenceManager.loadSessionState() {
@@ -440,7 +446,13 @@ final class AppViewModel {
 
         // Load tasks with status corrections.
         do {
+            // The global archived/deleted store. First call runs the one-time per-session →
+            // global migration; later calls return the shared instance.
+            let inactiveStore = try await shared.ensureInactiveTaskStore()
+
             var savedTasks = try await persistenceManager.loadTasks()
+
+            // Running tasks didn't survive the last quit — mark them interrupted.
             var anyStatusChanged = false
             for i in savedTasks.indices {
                 if savedTasks[i].status == .running {
@@ -449,20 +461,44 @@ final class AppViewModel {
                     anyStatusChanged = true
                 }
             }
-            let cutoff = Date().addingTimeInterval(-4 * 3600)
-            var anyArchived = false
-            for i in savedTasks.indices {
-                if savedTasks[i].status == .completed,
-                   savedTasks[i].disposition == .active,
-                   savedTasks[i].updatedAt < cutoff {
-                    savedTasks[i].disposition = .archived
-                    anyArchived = true
-                }
-            }
-            tasks = savedTasks
-            if anyArchived || anyStatusChanged { persistTasks() }
 
-            let standaloneStore = TaskStore()
+            // Migration backstop: any archived/deleted tasks still in this session's file (a
+            // session the one-time sweep didn't rewrite, or a crash mid-migration) move to the
+            // global store. `merge` dedupes by id, so this is idempotent and never duplicates.
+            let strayInactive = savedTasks.filter { $0.disposition != .active }
+            if !strayInactive.isEmpty {
+                await inactiveStore.merge(strayInactive)
+                savedTasks.removeAll { $0.disposition != .active }
+            }
+
+            // Auto-archive stale completed tasks (older than 4h) out to the global store.
+            let cutoff = Date().addingTimeInterval(-4 * 3600)
+            var staleArchived: [AgentTask] = []
+            savedTasks.removeAll { task in
+                guard task.status == .completed, task.disposition == .active, task.updatedAt < cutoff else { return false }
+                var archived = task
+                archived.disposition = .archived
+                staleArchived.append(archived)
+                return true
+            }
+            if !staleArchived.isEmpty {
+                await inactiveStore.merge(staleArchived)
+            }
+
+            // Before stripping these inactive tasks from this session's file, make sure the global
+            // file durably has them. If the global store can't be persisted (corrupt/failed file),
+            // KEEP the per-session copies — don't strip — so nothing is lost. The status-change-only
+            // case (no inactive moved) always persists.
+            let movedToGlobal = !strayInactive.isEmpty || !staleArchived.isEmpty
+            let canStripSessionFile = movedToGlobal ? await shared.persistInactiveTasksNow() : true
+
+            // `tasks` now holds only this session's active tasks.
+            tasks = savedTasks
+            if canStripSessionFile && (movedToGlobal || anyStatusChanged) {
+                persistTasks()
+            }
+
+            let standaloneStore = TaskStore(inactiveStore: inactiveStore)
             taskStore = standaloneStore
             await standaloneStore.restore(savedTasks)
             await standaloneStore.setOnChange { [weak self, weak standaloneStore] in
@@ -571,6 +607,18 @@ final class AppViewModel {
             return
         }
 
+        // Shared global store of archived + deleted tasks. Normally already created during
+        // loadPersistedState; re-ensure here so a failed earlier load still yields a valid store.
+        let sharedInactiveStore: InactiveTaskStore
+        do {
+            sharedInactiveStore = try await shared.ensureInactiveTaskStore()
+        } catch {
+            let msg = "Failed to prepare archived/deleted task store: \(error.localizedDescription)"
+            logger.error("\(msg, privacy: .public)")
+            shared.startupError = msg
+            return
+        }
+
         let newRuntime = OrchestrationRuntime(
             providers: providers,
             configurations: configurations,
@@ -580,7 +628,8 @@ final class AppViewModel {
             usageStore: shared.usageStore,
             autoAdvanceEnabled: autoRunNextTask,
             autoRunInterruptedTasks: autoRunInterruptedTasks,
-            memoryStore: sharedMemoryStore
+            memoryStore: sharedMemoryStore,
+            inactiveTaskStore: sharedInactiveStore
         )
         // Bridge per-session attachment persistence into the runtime so the new
         // attachment-aware tools (create_task / task_update / task_complete) can
@@ -1087,7 +1136,11 @@ final class AppViewModel {
         // No Smith notification here: a permanently-deleted task was already soft-deleted (Smith
         // was notified then), so it's already out of Smith's working set.
         let succeeded = await taskStore.permanentlyDelete(id: id)
-        if !succeeded {
+        if succeeded {
+            // The task is gone for good — purge its summary from the semantic corpus so it can
+            // never resurface in search (recently-deleted only *hides* the summary; this erases it).
+            await shared.purgeTaskSummary(id: id)
+        } else {
             taskActionError = "This task is in progress and cannot be permanently deleted."
         }
     }

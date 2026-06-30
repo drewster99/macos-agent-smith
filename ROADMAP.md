@@ -237,6 +237,53 @@ Why temporary matters: HTML scraping is brittle (breaks when DuckDuckGo reshuffl
 
 **Replacement plan (re-evaluate week of 2026-06-30):** pick a permanent keyed JSON provider — leading candidates **Brave Search API** or **Tavily** (clean JSON, domain filters, recency, SLA) — implement it as another `WebSearchBackend`, store its key in Keychain (mirror `MCPSecretStore` / SwiftLLMKit `KeychainService`), and switch the default in `BrownBehavior.tools()`. `WebSearchTool` and Brown's wiring (and the domain-filter/cap logic, which is backend-agnostic) should not need to change. Google CSE is rejected (closed to new signups + sunsetting). The DDG-scrape backend can stay as a keyless fallback if desired.
 
+### Global archived/deleted tasks + global attachments ✅
+Archived and deleted tasks are now a single **global** set shared across all sessions/windows
+(previously each session had its own archived/deleted buckets); **active tasks stay per-session**.
+Attachments were made global at the same time so an archived/deleted task — which any window can now
+display — resolves its files regardless of which session created them.
+
+**Implemented (2026-06-30):**
+- New `InactiveTaskStore` actor (one per process, owned by `SharedAppState`) holds the `.archived` +
+  `.recentlyDeleted` tasks, persisted to a global `inactive_tasks.json`. Per-session `TaskStore` now
+  holds only `.active` tasks and is injected with the global store; its disposition methods
+  (`archive` / `softDelete` / `unarchive` / `undelete` / `permanentlyDelete` / `archiveStaleCompleted`)
+  MOVE tasks across the boundary. New read-throughs `taskAnyDisposition(id:)` / `allInactiveTasks()`
+  keep the agent tools working (`list_tasks` inactive/all, `get_task_details`, `manage_task_disposition`,
+  and `run_task`'s reopen path) — Smith still sees archived+deleted, now globally. No `ToolContext`
+  change (the global store is reached through `taskStore`), so every existing tool/test call site is
+  untouched.
+- **Restore lands in the current window's session** (a global task has to reactivate somewhere).
+- UI sidebars read archived/deleted from `@Observable` mirror arrays on `SharedAppState`, so all
+  windows update live; `TaskDetailWindow` / `TimersWindow` resolve via `AppViewModel.anyTask(id:)`.
+  The expanded "Recently Deleted" header was renamed to "Deleted" to match the toggle button.
+- **Attachments are global**: `PersistenceManager(sessionID:)` now points its attachments dir at the
+  root `AgentSmith/attachments/` (files are UUID-named → no collisions); saved/loaded/resolved there
+  for every session.
+- **Semantic search**: deleted tasks are excluded from PUSHED auto-context (`create_task`'s
+  relevant-prior-tasks + Smith's auto-memory inject) via a pushed `excludedTaskSummaryIDs` set in
+  `MemoryStore`, but still returned by the EXPLICIT `search_memory` pull (`excludeDeletedTasks: false`).
+  Permanent delete purges the summary (`removeTaskSummary`).
+
+**One-time migrations (crash-safe, never delete data):**
+- Tasks: read every session's `tasks.json`, union the non-active tasks, save the global file FIRST,
+  then strip them from session files. A corrupt `inactive_tasks.json` is *quarantined* (renamed
+  `inactive_tasks.corrupt-…`, never overwritten); a failed global save disables persistence for the
+  launch so session files aren't stripped. The `AppViewModel` load split is an idempotent backstop
+  that durably persists the global file before stripping any session file.
+- Attachments: move every `sessions/<id>/attachments/*` into the global dir (move, never delete; a
+  file already at the destination is left as-is), deduped + idempotent, UserDefaults-marked.
+
+Verified (2026-06-30) on real data: 163 tasks (141 archived + 22 deleted) migrated to the global file,
+all session files left active-only, 6 attachment files pooled, app launches clean. Covered by
+`InactiveTaskStoreMoveTests` + `AttachmentMigrationTests`, plus a 3-reviewer (codex / agy / Claude)
+pass whose data-loss findings (corrupt-file overwrite on flush, session strip before a durable global
+save, `run_task`/PDF-export failing on auto-archived tasks) were fixed.
+
+**Deferred:** attachments now live in one flat global dir with no GC when a task is permanently
+deleted (orphaned files accumulate — harmless but unbounded). Add attachment GC if disk grows. The
+cross-window wake-routing note elsewhere in this file is unaffected.
+
 ### Instant Answer tool ✅
 `instant_answer` (`InstantAnswerTool`) — Brown tool wrapping DuckDuckGo's keyless Instant Answer JSON API (`api.duckduckgo.com`). Complements `web_search`: it returns a Wikipedia-style **entity** summary — abstract, infobox key facts, source URL, official site, related topics — for a recognized person/place/org/technology/concept, not a list of web pages.
 

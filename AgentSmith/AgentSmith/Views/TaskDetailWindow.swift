@@ -52,7 +52,9 @@ struct TaskDetailWindow: View {
     /// only the @State copy, so unrelated task mutations don't force this window to
     /// re-render.
     private func syncTask() {
-        let next = viewModel.tasks.first { $0.id == taskID }
+        // Resolve across active + global archived/deleted: a detail window can be opened from any
+        // bucket, and a task may move buckets while its window is open.
+        let next = viewModel.anyTask(id: taskID)
         if next != task {
             task = next
         }
@@ -82,6 +84,14 @@ struct TaskDetailWindow: View {
         .onChange(of: viewModel.tasks) { _, _ in
             // Per project rule: @State writes inside `.onChange` must be deferred to the
             // next runloop tick to avoid "Modifying state during view update" warnings.
+            DispatchQueue.main.async { syncTask() }
+        }
+        // The archived/deleted buckets are global; re-resolve when they change so a task that
+        // moves into (or within) them while this window is open keeps rendering.
+        .onChange(of: viewModel.archivedTaskList) { _, _ in
+            DispatchQueue.main.async { syncTask() }
+        }
+        .onChange(of: viewModel.recentlyDeletedTaskList) { _, _ in
             DispatchQueue.main.async { syncTask() }
         }
         .alert(

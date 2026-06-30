@@ -67,7 +67,7 @@ private struct ActiveTimersList: View {
 
     private func taskTitle(for taskID: UUID?) -> String? {
         guard let taskID else { return nil }
-        return viewModel.tasks.first(where: { $0.id == taskID })?.title
+        return viewModel.anyTask(id: taskID)?.title
     }
 }
 

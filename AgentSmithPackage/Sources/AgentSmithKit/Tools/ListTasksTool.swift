@@ -67,7 +67,18 @@ struct ListTasksTool: AgentTool {
             return .failure("Invalid disposition_filter: '\(dispositionFilter)'. Valid values: active, inactive, all")
         }
 
-        var tasks = await context.taskStore.allTasks().filter { allowedDispositions.contains($0.disposition) }
+        // Active tasks are per-session (`taskStore`); archived + recently-deleted are global
+        // (`inactiveTaskStore`). Pull from whichever store(s) the disposition filter needs.
+        var pool: [AgentTask] = []
+        if allowedDispositions.contains(.active) {
+            pool += await context.taskStore.allTasks()
+        }
+        if allowedDispositions.contains(.archived) || allowedDispositions.contains(.recentlyDeleted) {
+            pool += await context.taskStore.allInactiveTasks()
+        }
+        var tasks = pool
+            .filter { allowedDispositions.contains($0.disposition) }
+            .sorted { $0.createdAt > $1.createdAt }
 
         // Optional status filter applied after disposition.
         if case .string(let filterValue) = arguments["status_filter"] {

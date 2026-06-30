@@ -1,14 +1,25 @@
 import Foundation
 
-/// Thread-safe storage for all tasks in the system.
+/// Thread-safe storage for one session's *active* tasks.
+///
+/// Archived and recently-deleted tasks are global — they live in the shared
+/// `InactiveTaskStore`, not here. The disposition-changing methods move tasks between this
+/// per-session store and that global store: archiving/deleting pushes a task out to the
+/// global store; unarchiving/undeleting pulls it back into this (the current) session's
+/// active list. When `inactiveStore` is nil (standalone/test construction) the disposition
+/// methods fall back to changing the disposition in place, preserving legacy behavior.
 public actor TaskStore {
     private var tasks: [UUID: AgentTask] = [:]
     private var onChange: (@Sendable () -> Void)?
     /// Fired the first time a task transitions to a terminal status (`.completed` or `.failed`).
     /// Used by `OrchestrationRuntime` to cancel any scheduled wakes pinned to the task.
     private var onTaskTerminated: (@Sendable (UUID) -> Void)?
+    /// The shared global store for archived + recently-deleted tasks. See the type doc.
+    private let inactiveStore: InactiveTaskStore?
 
-    public init() {}
+    public init(inactiveStore: InactiveTaskStore? = nil) {
+        self.inactiveStore = inactiveStore
+    }
 
     /// Registers a callback fired whenever tasks change.
     public func setOnChange(_ handler: @escaping @Sendable () -> Void) {
@@ -25,9 +36,24 @@ public actor TaskStore {
         tasks.values.sorted { $0.createdAt > $1.createdAt }
     }
 
-    /// Retrieves a single task by ID.
+    /// Retrieves a single active task by ID (this session only). Archived/deleted tasks live in
+    /// the global store — use `taskAnyDisposition(id:)` to look across both.
     public func task(id: UUID) -> AgentTask? {
         tasks[id]
+    }
+
+    /// Looks up a task by ID across this session's active list and the global inactive store
+    /// (archived + deleted). Used by tools that operate on a task regardless of disposition.
+    public func taskAnyDisposition(id: UUID) async -> AgentTask? {
+        if let active = tasks[id] { return active }
+        return await inactiveStore?.task(id: id)
+    }
+
+    /// All globally-inactive tasks (archived + recently-deleted), across every session. Empty
+    /// when no inactive store is wired (legacy/test construction).
+    public func allInactiveTasks() async -> [AgentTask] {
+        guard let inactiveStore else { return [] }
+        return await inactiveStore.all()
     }
 
     /// Adds a new task and returns it. Also archives any completed tasks older than 4 hours.
@@ -40,8 +66,8 @@ public actor TaskStore {
         description: String,
         scheduledRunAt: Date? = nil,
         descriptionAttachments: [Attachment] = []
-    ) -> AgentTask {
-        archiveStaleCompleted()
+    ) async -> AgentTask {
+        await archiveStaleCompleted()
         let initialStatus: AgentTask.Status = (scheduledRunAt.map { $0 > Date() } ?? false) ? .scheduled : .pending
         let task = AgentTask(
             title: title,
@@ -68,18 +94,27 @@ public actor TaskStore {
         return true
     }
 
-    /// Archives all active completed tasks whose `updatedAt` is older than `interval` seconds.
-    /// Called automatically on task creation and on app startup.
-    public func archiveStaleCompleted(olderThan interval: TimeInterval = 4 * 3600) {
+    /// Archives all active completed tasks whose `updatedAt` is older than `interval` seconds,
+    /// moving them out to the global inactive store. Called automatically on task creation and
+    /// on app startup. `updatedAt` is intentionally not bumped, so the original completion time
+    /// drives the archive sort order.
+    public func archiveStaleCompleted(olderThan interval: TimeInterval = 4 * 3600) async {
         let cutoff = Date().addingTimeInterval(-interval)
-        var changed = false
-        for (id, task) in tasks where task.status == .completed && task.disposition == .active && task.updatedAt < cutoff {
-            var updated = task
-            updated.disposition = .archived
-            tasks[id] = updated
-            changed = true
+        let stale = tasks.values.filter {
+            $0.status == .completed && $0.disposition == .active && $0.updatedAt < cutoff
         }
-        if changed { onChange?() }
+        guard !stale.isEmpty else { return }
+        for task in stale {
+            var moved = task
+            moved.disposition = .archived
+            if let inactiveStore {
+                tasks.removeValue(forKey: task.id)
+                await inactiveStore.insert(moved)
+            } else {
+                tasks[task.id] = moved
+            }
+        }
+        onChange?()
     }
 
     /// Updates a task's status.
@@ -491,42 +526,99 @@ public actor TaskStore {
 
     // MARK: - Disposition management
 
-    /// Moves a task to the archive bucket.
-    /// Returns false without making changes if the task is currently in progress.
+    /// Moves a task to the (global) archive bucket.
+    /// Returns false without making changes if the task is currently in progress, or if the
+    /// task can't be found in either this session's active list or the global inactive store.
     @discardableResult
-    public func archive(id: UUID) -> Bool {
-        guard let task = tasks[id], !task.status.isInProgress else { return false }
-        setDisposition(id: id, disposition: .archived)
-        return true
+    public func archive(id: UUID) async -> Bool {
+        if let task = tasks[id] {
+            guard !task.status.isInProgress else { return false }
+            guard let inactiveStore else {
+                setDisposition(id: id, disposition: .archived)
+                return true
+            }
+            var moved = task
+            moved.disposition = .archived
+            moved.updatedAt = Date()
+            tasks.removeValue(forKey: id)
+            await inactiveStore.insert(moved)
+            onChange?()
+            return true
+        }
+        // Already out in the global store (e.g. re-archiving, or archiving a deleted task).
+        if let inactiveStore { return await inactiveStore.setDisposition(id: id, to: .archived) }
+        return false
     }
 
-    /// Soft-deletes a task by moving it to Recently Deleted.
-    /// Returns false without making changes if the task is currently in progress.
+    /// Soft-deletes a task by moving it to the (global) Deleted bucket.
+    /// Returns false without making changes if the task is currently in progress, or if the
+    /// task can't be found in either this session's active list or the global inactive store.
     @discardableResult
-    public func softDelete(id: UUID) -> Bool {
-        guard let task = tasks[id], !task.status.isInProgress else { return false }
-        setDisposition(id: id, disposition: .recentlyDeleted)
-        return true
+    public func softDelete(id: UUID) async -> Bool {
+        if let task = tasks[id] {
+            guard !task.status.isInProgress else { return false }
+            guard let inactiveStore else {
+                setDisposition(id: id, disposition: .recentlyDeleted)
+                return true
+            }
+            var moved = task
+            moved.disposition = .recentlyDeleted
+            moved.updatedAt = Date()
+            tasks.removeValue(forKey: id)
+            await inactiveStore.insert(moved)
+            onChange?()
+            return true
+        }
+        // Already out in the global store (e.g. deleting an archived task).
+        if let inactiveStore { return await inactiveStore.setDisposition(id: id, to: .recentlyDeleted) }
+        return false
     }
 
-    /// Returns an archived task to the active list.
-    public func unarchive(id: UUID) {
-        setDisposition(id: id, disposition: .active)
+    /// Returns an archived task to this (the current) session's active list.
+    public func unarchive(id: UUID) async {
+        await restoreFromInactive(id: id)
     }
 
-    /// Recovers a recently-deleted task back to the active list.
-    public func undelete(id: UUID) {
-        setDisposition(id: id, disposition: .active)
+    /// Recovers a recently-deleted task back to this (the current) session's active list.
+    public func undelete(id: UUID) async {
+        await restoreFromInactive(id: id)
     }
 
-    /// Permanently removes a task from the store. Unrecoverable.
-    /// Returns false without making changes if the task is currently in progress.
-    @discardableResult
-    public func permanentlyDelete(id: UUID) -> Bool {
-        guard let task = tasks[id], !task.status.isInProgress else { return false }
-        tasks.removeValue(forKey: id)
+    /// Restores a task from the global inactive store to this (the current) session's active list,
+    /// regardless of whether it was archived or deleted. Used by `run_task` to "redo" a task the
+    /// agent referenced by ID that has since been auto-archived (or deleted).
+    public func restoreToActive(id: UUID) async {
+        await restoreFromInactive(id: id)
+    }
+
+    /// Pulls a task out of the global inactive store and into this session's active list.
+    /// No-op when there's no inactive store (legacy in-place fallback) or the task isn't there.
+    private func restoreFromInactive(id: UUID) async {
+        guard let inactiveStore else {
+            setDisposition(id: id, disposition: .active)
+            return
+        }
+        guard var task = await inactiveStore.remove(id: id) else { return }
+        task.disposition = .active
+        task.updatedAt = Date()
+        task.assigneeIDs.removeAll()
+        tasks[task.id] = task
         onChange?()
-        return true
+    }
+
+    /// Permanently removes a task. Unrecoverable. Looks in this session's active list first,
+    /// then the global inactive store (the usual case — only deleted tasks get permanently
+    /// deleted). Returns false without making changes if an active task is currently in progress.
+    @discardableResult
+    public func permanentlyDelete(id: UUID) async -> Bool {
+        if let task = tasks[id] {
+            guard !task.status.isInProgress else { return false }
+            tasks.removeValue(forKey: id)
+            onChange?()
+            return true
+        }
+        if let inactiveStore { return await inactiveStore.permanentlyDelete(id: id) }
+        return false
     }
 
     /// Sets a running task to paused.

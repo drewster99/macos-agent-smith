@@ -130,6 +130,11 @@ public struct RelevantPriorTask: Codable, Sendable, Equatable {
 public actor MemoryStore {
     private var memories: [UUID: MemoryEntry] = [:]
     private var taskSummaries: [UUID: TaskSummaryEntry] = [:]
+    /// Task IDs whose summaries must be excluded from search — the recently-deleted tasks. Kept
+    /// as a pushed set (updated by the app layer when the global deleted bucket changes) rather
+    /// than recomputed per search, and rather than physically removing the summaries, so undelete
+    /// restores searchability for free. See `setExcludedTaskSummaryIDs`.
+    private var excludedTaskSummaryIDs: Set<UUID> = []
     private let engine: SemanticSearchEngine
     private var onChange: (@Sendable () -> Void)?
     /// Set when `searchAll` bumps retrieval stats. Decoupled from `onChange?()` so reads don't
@@ -294,6 +299,21 @@ public actor MemoryStore {
         taskSummaries[task.id] = entry
         onChange?()
         return entry
+    }
+
+    /// Sets the task IDs whose summaries are excluded from search (the recently-deleted bucket).
+    /// Pushed by the app layer whenever the global deleted set changes. Pure read-side filter —
+    /// does not mutate the corpus, so it never fires `onChange`.
+    public func setExcludedTaskSummaryIDs(_ ids: Set<UUID>) {
+        excludedTaskSummaryIDs = ids
+    }
+
+    /// Permanently removes a task's summary from the corpus. Called when a task is permanently
+    /// deleted (it's gone forever) — distinct from recently-deleted, which only hides the summary.
+    public func removeTaskSummary(id: UUID) {
+        guard taskSummaries.removeValue(forKey: id) != nil else { return }
+        excludedTaskSummaryIDs.remove(id)
+        onChange?()
     }
 
     /// Re-embeds any stored memory or task summary whose `embeddingModelID` differs from the current
@@ -605,7 +625,8 @@ public actor MemoryStore {
     public func searchTaskSummaries(
         query: String,
         limit: Int = 5,
-        threshold: Double = 0.10
+        threshold: Double = 0.10,
+        excludeDeletedTasks: Bool = true
     ) async throws -> [TaskSummarySearchResult] {
         let start = Date()
         let queryVector = try await engine.embed(query)
@@ -615,7 +636,8 @@ public actor MemoryStore {
             queryVector: queryVector,
             queryTokens: queryTokens,
             limit: limit,
-            threshold: threshold
+            threshold: threshold,
+            excludeDeleted: excludeDeletedTasks
         )
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         memoryStoreLogger.debug("searchTaskSummaries: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
@@ -627,12 +649,17 @@ public actor MemoryStore {
         queryTokens: Set<String>,
         limit: Int,
         threshold: Double,
-        cosineGate: Double? = nil
+        cosineGate: Double? = nil,
+        excludeDeleted: Bool = true
     ) -> [TaskSummarySearchResult] {
         var entryRefs: [TaskSummaryEntry] = []
         var semanticScores: [Double] = []
         var textScores: [Double] = []
-        for entry in taskSummaries.values {
+        // When `excludeDeleted` is set (the pushed auto-context sites), skip summaries for
+        // recently-deleted tasks — kept in the corpus so undelete restores them, but hidden from
+        // unrequested context. Explicit `search_memory` pulls pass `excludeDeleted: false` so the
+        // agent that asked still sees deleted tasks. The check happens before any vector math.
+        for entry in taskSummaries.values where !(excludeDeleted && excludedTaskSummaryIDs.contains(entry.id)) {
             let semantic: Double
             if entry.embedding.count == queryVector.count, !entry.embedding.isEmpty {
                 semantic = Double(VectorMath.dotProduct(queryVector, entry.embedding))
@@ -684,7 +711,8 @@ public actor MemoryStore {
         memoryCosineGate: Double? = nil,
         taskCosineGate: Double? = nil,
         memoryInstruction: String? = nil,
-        taskInstruction: String? = nil
+        taskInstruction: String? = nil,
+        excludeDeletedTasks: Bool = true
     ) async throws -> SemanticSearchResults {
         let start = Date()
         // Each pool gets its own (optionally instruction-prefixed) query embedding. Reuse the
@@ -714,7 +742,8 @@ public actor MemoryStore {
             queryTokens: Self.queryTokenSet(from: taskQuery),
             limit: taskLimit,
             threshold: threshold,
-            cosineGate: taskCosineGate
+            cosineGate: taskCosineGate,
+            excludeDeleted: excludeDeletedTasks
         )
 
         // Retrieval-stat bumps for the memories we actually return. Marked dirty (not flushed) so we

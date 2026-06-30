@@ -61,7 +61,8 @@ struct GetTaskDetailsTool: AgentTool {
                 invalidIDs.append(idString)
                 continue
             }
-            guard let task = await context.taskStore.task(id: taskID) else {
+            // Active tasks live in the per-session store; archived/deleted in the global one.
+            guard let task = await context.taskStore.taskAnyDisposition(id: taskID) else {
                 notFoundIDs.append(taskID)
                 continue
             }

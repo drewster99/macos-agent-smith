@@ -51,7 +51,7 @@ struct TaskListView: View {
                     }
 
                     if showDeleted && !deletedTasks.isEmpty {
-                        TaskSectionHeader(title: "Recently Deleted")
+                        TaskSectionHeader(title: "Deleted")
                         ForEach(deletedTasks) { task in
                             TaskListRow(task: task, style: .recentlyDeleted, viewModel: viewModel)
                         }

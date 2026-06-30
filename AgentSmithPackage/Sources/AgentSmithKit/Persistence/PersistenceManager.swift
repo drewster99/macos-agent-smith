@@ -9,9 +9,11 @@ private let logger = Logger(subsystem: "com.agentsmith", category: "Persistence"
 /// There are two flavors:
 /// * `init()` — base manager. Used for shared resources that are never session-scoped
 ///   (memories, task summaries, usage records, model overrides, session list).
-/// * `init(sessionID:)` — session-scoped manager. Channel / task / attachment / state methods
-///   read and write `AgentSmith/sessions/<id>/…`. Shared methods always use the root
-///   `AgentSmith/` dir regardless of which flavor was used to construct the manager.
+/// * `init(sessionID:)` — session-scoped manager. Channel / task / state methods read and write
+///   `AgentSmith/sessions/<id>/…`. Shared methods (memories, summaries, usage, model overrides,
+///   session list, inactive tasks, AND attachments) always use the root `AgentSmith/` dir
+///   regardless of which flavor was used. Attachments are global so an archived/deleted task (which
+///   is global) resolves its files from any session's window.
 ///
 /// The `preconditionFailure` in `appSupportURL()` guards against truly exceptional platform
 /// breakage (e.g., a sandboxing misconfiguration) where no recovery is possible.
@@ -42,7 +44,11 @@ public actor PersistenceManager {
         sessionDirectory = baseDirectory
             .appendingPathComponent("sessions", isDirectory: true)
             .appendingPathComponent(sessionID.uuidString, isDirectory: true)
-        attachmentsDirectory = sessionDirectory.appendingPathComponent("attachments", isDirectory: true)
+        // Attachments are GLOBAL (shared across sessions), like archived/deleted tasks — files are
+        // UUID-named so pooling them can't collide. A task that's archived in one session and
+        // viewed/restored in another must still resolve its attachments. (Was session-scoped; see
+        // `migrateSessionAttachmentsToGlobalStore`.)
+        attachmentsDirectory = baseDirectory.appendingPathComponent("attachments", isDirectory: true)
     }
 
     /// Test-only init that routes all reads/writes under a caller-supplied root URL,
@@ -104,6 +110,41 @@ public actor PersistenceManager {
         let data = try JSONEncoder().encode(sessions)
         let url = baseDirectory.appendingPathComponent("sessions.json")
         try data.write(to: url, options: .atomic)
+    }
+
+    // MARK: - Inactive tasks (shared)
+
+    /// Loads the global archived + recently-deleted task list. Returns nil when the file is
+    /// absent — the caller uses that to detect "the one-time per-session → global migration
+    /// hasn't run yet" (distinct from an empty-but-migrated `[]`).
+    public func loadInactiveTasks() throws -> [AgentTask]? {
+        let url = baseDirectory.appendingPathComponent("inactive_tasks.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode([AgentTask].self, from: data)
+    }
+
+    /// Saves the global archived + recently-deleted task list. Writing this file is what marks
+    /// the one-time migration as complete, so callers must persist it before stripping inactive
+    /// tasks from the per-session files.
+    public func saveInactiveTasks(_ tasks: [AgentTask]) throws {
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(tasks)
+        let url = baseDirectory.appendingPathComponent("inactive_tasks.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    /// Moves an unreadable `inactive_tasks.json` aside to a timestamped `.corrupt-…` name so a fresh
+    /// one can be written without destroying the original — the user can attempt manual recovery.
+    /// Returns the destination URL, or nil if there was no file to move. Throws on filesystem failure
+    /// (the caller then refuses to overwrite the original). Never deletes data.
+    public func quarantineCorruptInactiveTasksFile() throws -> URL? {
+        let url = baseDirectory.appendingPathComponent("inactive_tasks.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let dest = baseDirectory.appendingPathComponent("inactive_tasks.corrupt-\(stamp)-\(UUID().uuidString.prefix(8)).json")
+        try FileManager.default.moveItem(at: url, to: dest)
+        return dest
     }
 
     /// Deletes this session's subdirectory (channel_log, tasks, attachments, state).
@@ -302,7 +343,39 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([String: ModelMetadataOverride].self, from: data)
     }
 
-    // MARK: - Attachments (per-session)
+    // MARK: - Attachments (global)
+
+    /// One-time migration: moves every session's attachment files into the global attachments dir.
+    /// Attachment files are uniquely named (UUID prefix), so pooling them can't collide. Files are
+    /// MOVED (never deleted); a file already at the destination is left as-is. Returns the counts of
+    /// files moved and files that failed to move. Idempotent — after a clean run the session
+    /// attachment dirs are empty, so re-running is a cheap no-op.
+    public func migrateSessionAttachmentsToGlobalStore() throws -> (moved: Int, failed: Int) {
+        let fm = FileManager.default
+        let sessionsRoot = baseDirectory.appendingPathComponent("sessions", isDirectory: true)
+        guard fm.fileExists(atPath: sessionsRoot.path) else { return (0, 0) }
+        try fm.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
+        var moved = 0
+        var failed = 0
+        let sessionDirs = (try? fm.contentsOfDirectory(at: sessionsRoot, includingPropertiesForKeys: nil)) ?? []
+        for sessionDir in sessionDirs {
+            let src = sessionDir.appendingPathComponent("attachments", isDirectory: true)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            let files = (try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)) ?? []
+            for file in files {
+                let dest = attachmentsDirectory.appendingPathComponent(file.lastPathComponent)
+                if fm.fileExists(atPath: dest.path) { continue }
+                do {
+                    try fm.moveItem(at: file, to: dest)
+                    moved += 1
+                } catch {
+                    failed += 1
+                    logger.error("Failed to migrate attachment \(file.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+        return (moved, failed)
+    }
 
     public func saveAttachment(_ attachment: Attachment) throws {
         guard let fileData = attachment.data else { return }
@@ -329,7 +402,7 @@ public actor PersistenceManager {
 
     /// Returns the on-disk URL where an attachment is (or would be) stored. Does NOT
     /// check that the file exists — the URL is computed deterministically from the
-    /// per-session attachments directory and the sanitized filename. Callers that want
+    /// global attachments directory and the sanitized filename. Callers that want
     /// to load bytes should use `loadAttachmentData(id:filename:)` and check for nil;
     /// callers that just want a stable `file://` reference for LLM-facing text (e.g.
     /// the briefing builder) can pass this URL straight into a markdown link.

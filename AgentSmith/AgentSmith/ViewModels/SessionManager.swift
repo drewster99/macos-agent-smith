@@ -183,6 +183,7 @@ final class SessionManager {
         }
         await shared.usageStore.flush()
         await shared.flushMemories()
+        await shared.flushInactiveTasks()
     }
 
     /// Is any session currently running?
