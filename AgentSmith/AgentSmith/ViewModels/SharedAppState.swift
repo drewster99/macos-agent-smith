@@ -580,9 +580,16 @@ final class SharedAppState {
                     migrationInProgress = true
                 }
                 let migrated = await store.reembedStaleEntries()
+                // Durably flush the re-embedded vectors before clearing the migration flag, so an
+                // interrupted next launch doesn't re-run a migration that already completed (the
+                // store's onChange persist is a detached Task whose completion we can't otherwise
+                // await; flushMemories drains the writers). Pass `store` explicitly — `memoryStore`
+                // isn't assigned until after this block, so the no-arg flush would be a no-op here.
+                await flushMemories(store)
                 migrationInProgress = false
-                if migrated.memories > 0 || migrated.taskSummaries > 0 {
-                    logger.notice("Re-embedded \(migrated.memories) memories + \(migrated.taskSummaries) task summaries after embedding-model change")
+                if migrated.memories > 0 || migrated.taskSummaries > 0 || migrated.failed > 0 {
+                    let failedNote = migrated.failed > 0 ? ", \(migrated.failed) failed (will retry next launch)" : ""
+                    logger.notice("Re-embed migration: \(migrated.memories) memories + \(migrated.taskSummaries) task summaries re-embedded\(failedNote) after embedding-model change")
                 }
             }
         } catch {
@@ -705,6 +712,13 @@ final class SharedAppState {
     /// final snapshot and drains both memory writers so no buffered writes are lost on quit.
     public func flushMemories() async {
         guard let store = memoryStore else { return }
+        await flushMemories(store)
+    }
+
+    /// Flushes a specific store's pending writes and drains both writers. Takes the store explicitly
+    /// so it also works during initial store creation — before `memoryStore` is assigned — e.g. the
+    /// re-embed migration flushes the freshly-built store before it's installed.
+    private func flushMemories(_ store: MemoryStore) async {
         // Persist any read-stat bumps that were withheld from the hot path. This fires
         // onChange?(), routing through the normal persist path (which enqueues a snapshot).
         await store.persistRetrievalStatsIfNeeded()

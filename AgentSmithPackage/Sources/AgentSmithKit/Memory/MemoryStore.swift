@@ -313,10 +313,19 @@ public actor MemoryStore {
         return mem + task
     }
 
-    public func reembedStaleEntries() async -> (memories: Int, taskSummaries: Int) {
+    /// Checkpoint cadence: persist progress every this many re-embedded entries so an interrupted
+    /// migration resumes from where it left off instead of restarting from scratch each launch.
+    private static let reembedCheckpointInterval = 32
+
+    public func reembedStaleEntries() async -> (memories: Int, taskSummaries: Int, failed: Int) {
         let signature = engine.model.identifier
         let start = Date()
-        var memCount = 0, taskCount = 0
+        var memCount = 0, taskCount = 0, failed = 0
+        // Each onChange enqueues a snapshot write of what's been re-embedded so far, so a kill
+        // mid-migration doesn't discard completed work.
+        func checkpointIfNeeded() {
+            if (memCount + taskCount) % Self.reembedCheckpointInterval == 0 { onChange?() }
+        }
 
         for id in memories.filter({ $0.value.embeddingModelID != signature }).map(\.key) {
             guard let entry = memories[id], entry.embeddingModelID != signature, !entry.content.isEmpty else { continue }
@@ -333,7 +342,9 @@ public actor MemoryStore {
                     embeddingModelID: signature
                 )
                 memCount += 1
+                checkpointIfNeeded()
             } catch {
+                failed += 1
                 memoryStoreLogger.error("reembedStaleEntries: memory \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             }
         }
@@ -352,7 +363,9 @@ public actor MemoryStore {
                     embeddingModelID: signature
                 )
                 taskCount += 1
+                checkpointIfNeeded()
             } catch {
+                failed += 1
                 memoryStoreLogger.error("reembedStaleEntries: task summary \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             }
         }
@@ -360,10 +373,10 @@ public actor MemoryStore {
         if memCount > 0 || taskCount > 0 {
             let elapsed = Date().timeIntervalSince(start)
             let perDoc = elapsed * 1000 / Double(max(1, memCount + taskCount))
-            memoryStoreLogger.notice("reembedStaleEntries: re-embedded \(memCount, privacy: .public) memories + \(taskCount, privacy: .public) task summaries to model \(signature, privacy: .public) in \(String(format: "%.1f", elapsed), privacy: .public)s (\(String(format: "%.0f", perDoc), privacy: .public) ms/doc)")
+            memoryStoreLogger.notice("reembedStaleEntries: re-embedded \(memCount, privacy: .public) memories + \(taskCount, privacy: .public) task summaries (\(failed, privacy: .public) failed) to model \(signature, privacy: .public) in \(String(format: "%.1f", elapsed), privacy: .public)s (\(String(format: "%.0f", perDoc), privacy: .public) ms/doc)")
             onChange?()
         }
-        return (memCount, taskCount)
+        return (memCount, taskCount, failed)
     }
 
     /// All task summaries, newest first.
