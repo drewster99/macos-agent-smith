@@ -18,10 +18,10 @@ struct MCPBridgedTool: AgentTool {
     let toolDescription: String
     let parameters: [String: AnyCodable]
     /// `readOnlyHint` from the server's tool annotations, surfaced to Jones. These are
-    /// hints from a third party and are never trusted for access decisions.
+    /// hints from the user-provided server and are never trusted for access decisions.
     let isReadOnlyHint: Bool?
     /// `destructiveHint` / `openWorldHint` from the server's tool annotations. Like
-    /// `isReadOnlyHint`, these are untrusted third-party claims — advisory context for Jones
+    /// `isReadOnlyHint`, these are untrusted claims from the user-provided server — advisory context for Jones
     /// only, never a grant mechanism. Absent hint → fail-closed `true` via the computed
     /// `isDestructive` / `isOpenWorld` below.
     let destructiveHint: Bool?

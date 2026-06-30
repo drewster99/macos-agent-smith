@@ -39,7 +39,7 @@ enum JonesBehavior {
                   "toolGroupID": { "type": "string", "description": "Unique id of this group." },
                   "name":        { "type": "string", "description": "Group name (the MCP server name, or 'Built-in tools')." },
                   "description": { "type": "string", "description": "A description of this group of tools - provided by the tool itself" },
-                  "source":      { "enum": ["builtIn", "externalUserAdded", "externalAutoDiscovered"], "description": "builtIn = provided and vetted by the system; externalUserAdded = a third-party MCP server the user installed; externalAutoDiscovered = external, not explicitly installed by the user." }
+                  "source":      { "enum": ["builtIn", "externalUserAdded", "externalAutoDiscovered"], "description": "builtIn = provided and vetted by the system; externalUserAdded = a user-provided MCP server the USER installed - since the user installed it, they generally expect it to be available; externalAutoDiscovered = external, not explicitly installed by the user." }
                 }
               }
             },
@@ -136,7 +136,7 @@ enum JonesBehavior {
         user **does** want to get the work/task done.
         
         2. The other consideration is that the worker agent has NO WAY to request additional access
-        or additional tools once you make these decisions.
+        or additional tools once you make these decisions. *You can always deny individual tool calls later.*
         
         3. Every time the worker agent tries to make a tool call, the full tool call and its arguments
         will be provided to you to adjudicate. So, if you say 'yes' now, you can still say 'no' later.
