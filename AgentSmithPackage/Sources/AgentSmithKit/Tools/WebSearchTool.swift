@@ -30,7 +30,7 @@ struct WebSearchTool: AgentTool {
         Search the web and get back a ranked list of results — each with a title, URL, and a \
         short snippet. Use this to FIND pages (documentation, articles, repos, current \
         information) when you have a query but not a specific URL. Once you have a promising \
-        URL from the results, read it with the `bash` tool (e.g. `curl -sL <url>`). \
+        URL from the results, read it with the `web_fetch` tool. \
         Optionally restrict results with `allowed_domains` (keep only results whose host is, \
         or is a subdomain of, one of these) and/or `blocked_domains` (drop results from these \
         hosts). Domains are matched on the host only — pass `apple.com`, not `https://apple.com/x`. \
