@@ -1,5 +1,8 @@
 import SwiftUI
 import AgentSmithKit
+import os
+
+private let mcpEditorLogger = Logger(subsystem: "com.agentsmith", category: "MCPEditor")
 
 /// Add/edit form for a single MCP server. Secret env values and secret-flagged args
 /// are stored in the Keychain; the rest is persisted via `SharedAppState`.
@@ -249,16 +252,20 @@ struct MCPServerEditorSheet: View {
             }
         }
 
-        // Phase 3: delete Keychain accounts that are no longer referenced. Only run
-        // this if all writes succeeded — otherwise we'd lose old secrets we can no
-        // longer reconstruct.
+        // Phase 3: delete Keychain accounts that are no longer referenced (renamed/removed args or
+        // env vars). Only run this if all writes succeeded — otherwise we'd lose old secrets we can no
+        // longer reconstruct. A cleanup delete that fails leaves a harmless *orphaned* secret; it must
+        // NOT block the save: the new secrets are already written (Phases 1–2), so failing here would
+        // strand the Keychain and the on-disk config in inconsistent states. Collect cleanup failures
+        // separately, log them, and let the save proceed.
+        var cleanupFailures: [String] = []
         if keychainFailures.isEmpty {
             for index in indicesToDelete.sorted() {
                 let account = MCPSecretStore.argAccount(serverID: id, index: index)
                 do {
                     try shared.mcpSecretStore.delete(account: account)
                 } catch {
-                    keychainFailures.append("argument #\(index + 1) (cleanup)")
+                    cleanupFailures.append("argument #\(index + 1)")
                 }
             }
             for envName in envNamesToDelete.sorted() {
@@ -266,7 +273,7 @@ struct MCPServerEditorSheet: View {
                 do {
                     try shared.mcpSecretStore.delete(account: account)
                 } catch {
-                    keychainFailures.append("environment variable \"\(envName)\" (cleanup)")
+                    cleanupFailures.append("environment variable \"\(envName)\"")
                 }
             }
         }
@@ -274,6 +281,9 @@ struct MCPServerEditorSheet: View {
         if !keychainFailures.isEmpty {
             validationError = "Failed to save secret(s) to the Keychain: \(keychainFailures.joined(separator: ", ")). The configuration was not updated; please retry."
             return
+        }
+        if !cleanupFailures.isEmpty {
+            mcpEditorLogger.warning("Failed to remove orphaned Keychain secret(s): \(cleanupFailures.joined(separator: ", "), privacy: .public). Saved the configuration anyway; the orphaned secret(s) are unused.")
         }
 
         let config = MCPServerConfig(
