@@ -114,13 +114,13 @@ struct InstantAnswerTool: AgentTool {
                 lines.append("Definition: \(truncated(answer.definition, maxFieldChars))")
             }
 
-            if !answer.abstractURL.isEmpty {
+            if let abstractURL = validatedHTTPURL(answer.abstractURL) {
                 let source = answer.abstractSource.isEmpty ? "source" : answer.abstractSource
                 lines.append("")
-                lines.append("Source: \(source) — \(answer.abstractURL)")
+                lines.append("Source: \(source) — \(abstractURL)")
             }
-            if let official = answer.officialSiteURL {
-                lines.append("Official site: \(official)")
+            if let official = answer.officialSiteURL, let officialURL = validatedHTTPURL(official) {
+                lines.append("Official site: \(officialURL)")
             }
 
             if !answer.infobox.isEmpty {
@@ -146,7 +146,11 @@ struct InstantAnswerTool: AgentTool {
             let headingLine = answer.heading.isEmpty ? query : answer.heading
             var lines = ["\"\(headingLine)\" is ambiguous — related topics:"]
             for topic in answer.relatedTopics.prefix(maxRelated) {
-                lines.append("- \(truncated(topic.text, maxValueChars)) — \(topic.url)")
+                if let url = validatedHTTPURL(topic.url) {
+                    lines.append("- \(truncated(topic.text, maxValueChars)) — \(url)")
+                } else {
+                    lines.append("- \(truncated(topic.text, maxValueChars))")
+                }
             }
             lines.append("")
             lines.append("Use `web_search` to search the web for a specific one.")
@@ -158,5 +162,18 @@ struct InstantAnswerTool: AgentTool {
             recognized entities/topics (sourced mainly from Wikipedia); it returns nothing for \
             open-ended queries. Use `web_search` to find web pages instead.
             """
+    }
+
+    /// Returns `raw` only if it parses to an absolute http(s) URL with a host; otherwise nil. The
+    /// Instant Answer API's URLs are untrusted, so we never echo a `javascript:` / `data:` / relative
+    /// or otherwise non-http(s) link to the agent (mirrors `web_search`'s URL sanitization).
+    static func validatedHTTPURL(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else { return nil }
+        return trimmed
     }
 }

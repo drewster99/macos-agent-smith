@@ -123,6 +123,18 @@ struct InstantAnswerTests {
         #expect(out.contains("No instant answer for \"best laptop 2026\""))
         #expect(out.contains("web_search"))
     }
+
+    @Test("validatedHTTPURL keeps http(s) URLs and drops non-http / relative ones the agent could be tricked by")
+    func validatesEchoedURLs() {
+        #expect(InstantAnswerTool.validatedHTTPURL("https://example.com/x") == "https://example.com/x")
+        #expect(InstantAnswerTool.validatedHTTPURL("http://example.com") == "http://example.com")
+        #expect(InstantAnswerTool.validatedHTTPURL("  https://example.com/y  ") == "https://example.com/y")
+        #expect(InstantAnswerTool.validatedHTTPURL("javascript:alert(1)") == nil)
+        #expect(InstantAnswerTool.validatedHTTPURL("data:text/html,<b>x</b>") == nil)
+        #expect(InstantAnswerTool.validatedHTTPURL("ftp://example.com/f") == nil)
+        #expect(InstantAnswerTool.validatedHTTPURL("/relative/path") == nil)
+        #expect(InstantAnswerTool.validatedHTTPURL("") == nil)
+    }
 }
 
 /// Live network tests for the Instant Answer service — gated behind `WEB_SEARCH_LIVE=1` (same
