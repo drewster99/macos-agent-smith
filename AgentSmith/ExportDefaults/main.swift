@@ -125,7 +125,7 @@ let bundledTuning: [AgentRole: AgentTuningDefaults]? = {
 let fallbackTuning: [AgentRole: AgentTuningDefaults] = [
     .smith: AgentTuningDefaults(pollInterval: 20, maxToolCalls: 100, messageDebounceInterval: 1),
     .brown: AgentTuningDefaults(pollInterval: 25, maxToolCalls: 100, messageDebounceInterval: 1),
-    .jones: AgentTuningDefaults(pollInterval: 13, maxToolCalls: 100, messageDebounceInterval: 1)
+    .securityAgent: AgentTuningDefaults(pollInterval: 13, maxToolCalls: 100, messageDebounceInterval: 1)
 ]
 
 let agentTuning = bundledTuning ?? fallbackTuning

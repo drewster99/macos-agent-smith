@@ -3,7 +3,7 @@ import Foundation
 /// Smith tool: schedules a future timer that will tell Smith to perform a specific action on
 /// an existing task at the scheduled time. The action is *not* auto-executed — instead, the
 /// timer fires with a pre-rendered imperative ("Call run_task on <id> to start the task")
-/// that Smith reads and executes via the matching tool. This keeps Jones in the loop on
+/// that Smith reads and executes via the matching tool. This keeps Security Agent in the loop on
 /// every actual side effect without duplicating its evaluation surface for timer-driven
 /// actions.
 ///

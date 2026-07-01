@@ -1,7 +1,7 @@
 {
   "agentAssignments" : {
     "brown" : "B0000002-0000-0000-0000-000000000002",
-    "jones" : "B0000003-0000-0000-0000-000000000003",
+    "securityAgent" : "B0000003-0000-0000-0000-000000000003",
     "smith" : "B0000001-0000-0000-0000-000000000001"
   },
   "agentTuning" : {
@@ -10,7 +10,7 @@
       "messageDebounceInterval" : 1,
       "pollInterval" : 25
     },
-    "jones" : {
+    "securityAgent" : {
       "maxToolCalls" : 100,
       "messageDebounceInterval" : 1,
       "pollInterval" : 13
@@ -50,7 +50,7 @@
       "maxContextTokens" : 200000,
       "maxOutputTokens" : 8192,
       "modelID" : "claude-haiku-4-5",
-      "name" : "Jones Default",
+      "name" : "Security Agent Default",
       "providerID" : "builtin.anthropic",
       "streaming" : true,
       "temperature" : 0.1
@@ -71,7 +71,7 @@
         "enabled" : false,
         "voiceIdentifier" : ""
       },
-      "jones" : {
+      "securityAgent" : {
         "categories" : {
           "error" : { "soundName" : "", "speakEnabled" : false },
           "public" : { "soundName" : "", "speakEnabled" : false },

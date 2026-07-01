@@ -29,7 +29,7 @@ struct AgentInspectorWindowHeader: View {
                 HStack(spacing: 4) {
                     ProgressView()
                         .controlSize(.mini)
-                    Text(role == .jones ? "Evaluating" : "Thinking")
+                    Text(role == .securityAgent ? "Evaluating" : "Thinking")
                         .font(.headline)
                         .foregroundStyle(.secondary)
                     if let start = processingStartDate {

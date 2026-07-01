@@ -28,8 +28,8 @@ This document presents a comprehensive testing framework for the Agent Smith mul
 
 The safety system consists of:
 1. **Hard-coded blocklists** in tools (ShellTool, FileReadTool, FileWriteTool)
-2. **Jones agent** as a dynamic security gatekeeper with AI-powered risk assessment
-3. **ToolRequestGate** as the approval broker between Brown and Jones
+2. **Security Agent** as a dynamic security gatekeeper with AI-powered risk assessment
+3. **ToolRequestGate** as the approval broker between Brown and Security Agent
 4. **Multi-layer path validation** with symlink resolution
 5. **Emergency abort mechanisms** for critical threats
 
@@ -47,25 +47,25 @@ This testing framework is designed to verify all safety mechanisms function corr
 - **FileWriteTool**: Blocks writes to system directories, sensitive credential directories, and shell configuration files
 - **Path Resolution**: All tools resolve symlinks and relative paths before permission checks
 
-#### 1.1.2 Jones Agent (Dynamic Security Gatekeeper)
+#### 1.1.2 Security Agent (Dynamic Security Gatekeeper)
 - **Role**: AI-powered security evaluator with text-based SAFE/WARN/UNSAFE/ABORT verdicts
 - **Decision Rules**: Structured risk assessment based on operation type, file location, git repository status, and command complexity
 - **Response Format**: Strict single-line verdict format with no additional commentary
 
 #### 1.1.3 ToolRequestGate
-- **Purpose**: Broker between Brown's tool requests and Jones' approvals
-- **Continuation Management**: Suspends Brown's execution until Jones provides verdict
+- **Purpose**: Broker between Brown's tool requests and Security Agent' approvals
+- **Continuation Management**: Suspends Brown's execution until Security Agent provides verdict
 - **Drain Mechanism**: Cleans up pending requests during agent termination
 
 #### 1.1.4 OrchestrationRuntime Safety Features
 - **Single Brown Policy**: Only one Brown agent active at a time
-- **Agent Pairing**: Each Brown is paired with a dedicated Jones
+- **Agent Pairing**: Each Brown is paired with a dedicated Security Agent
 - **Emergency Abort**: System-wide shutdown triggered by ABORT verdicts
 - **Power Assertion**: Prevents system sleep during active operations
 
 ### 1.2 Data Flow and Control Points
 ```
-Brown Tool Request → [Tool Hard-Coded Blocklists] → [ToolRequestGate] → Jones Evaluation
+Brown Tool Request → [Tool Hard-Coded Blocklists] → [ToolRequestGate] → Security Agent Evaluation
        ↓                                                     ↓
 [Tool Execution] ← [Approval/Denial] ← [Security Disposition]
        ↓
@@ -77,7 +77,7 @@ Brown Tool Request → [Tool Hard-Coded Blocklists] → [ToolRequestGate] → Jo
 2. **Layer 2**: Whitespace-stripping comparison to prevent obfuscation
 3. **Layer 3**: Indirection pattern blocking (eval, bash -c, etc.)
 4. **Layer 4**: Path resolution and sensitive directory detection
-5. **Layer 5**: Jones AI-powered dynamic evaluation (suspenders)
+5. **Layer 5**: Security Agent AI-powered dynamic evaluation (suspenders)
 6. **Layer 6**: Emergency abort and system shutdown
 
 ---
@@ -128,17 +128,17 @@ Brown Tool Request → [Tool Hard-Coded Blocklists] → [ToolRequestGate] → Jo
 - Environment variable substitution
 
 #### 2.2.3 AI-Specific Threats
-- Prompt injection to bypass Jones' evaluation
-- Social engineering of Jones through context manipulation
-- Exploiting ambiguity in Jones' decision rules
+- Prompt injection to bypass Security Agent' evaluation
+- Social engineering of Security Agent through context manipulation
+- Exploiting ambiguity in Security Agent' decision rules
 
 ### 2.3 Risk Matrix
 
 | Threat Category | Likelihood | Impact | Risk Level | Mitigation Strategy |
 |----------------|------------|--------|------------|-------------------|
-| Data Destruction | Medium | Critical | High | Multi-layer blocklists, Jones evaluation, emergency abort |
+| Data Destruction | Medium | Critical | High | Multi-layer blocklists, Security Agent evaluation, emergency abort |
 | Credential Theft | Medium | Critical | High | Path blocking, symlink resolution, read restrictions |
-| System Compromise | Low | Critical | Medium | System path blocking, Jones ABORT capability |
+| System Compromise | Low | Critical | Medium | System path blocking, Security Agent ABORT capability |
 | Resource Abuse | Medium | Medium | Medium | Command complexity detection, timeout controls |
 | Obfuscation Evasion | High | High | High | Whitespace stripping, indirection blocking, path resolution |
 
@@ -276,7 +276,7 @@ Before testing begins, validate:
 - Test directory creation for new files
 - Verify atomic write operations
 
-#### 4.2.4 Jones Agent Test Scenarios
+#### 4.2.4 Security Agent Test Scenarios
 
 **Category J-1: Verdict Format Tests**
 - Verify SAFE verdict format
@@ -306,7 +306,7 @@ Before testing begins, validate:
 
 **Category TG-1: Request Flow Tests**
 - Verify Brown suspension on tool requests
-- Verify Jones resolution unblocks Brown
+- Verify Security Agent resolution unblocks Brown
 - Test multiple concurrent requests
 - Verify request ID uniqueness
 
@@ -323,7 +323,7 @@ Before testing begins, validate:
 
 **Category OR-1: Agent Management Tests**
 - Verify single Brown policy enforcement
-- Verify Brown-Jones pairing
+- Verify Brown-Security Agent pairing
 - Test agent termination and cleanup
 - Verify subscription management
 
@@ -350,7 +350,7 @@ Before testing begins, validate:
 - Implement copy-on-write for file modification tests
 - Use symbolic link forests instead of actual symlinks
 
-#### 4.3.3 Jones Response Simulation
+#### 4.3.3 Security Agent Response Simulation
 - Pre-calculated verdicts for test scenarios
 - Controlled response injection
 - Verdict format validation without actual LLM calls
@@ -365,11 +365,11 @@ Before testing begins, validate:
 - **Command Logging**: All shell command attempts with timestamps
 - **Path Resolution Logging**: Original and resolved paths for file operations
 - **Blocklist Hit Detection**: Logging of blocked pattern matches
-- **Jones Verdict Logging**: All security decisions with reasoning
+- **Security Agent Verdict Logging**: All security decisions with reasoning
 
 #### 5.1.2 Agent Interaction Monitoring
-- **Tool Request Tracking**: Brown → Jones request flow
-- **Response Time Monitoring**: Jones evaluation latency
+- **Tool Request Tracking**: Brown → Security Agent request flow
+- **Response Time Monitoring**: Security Agent evaluation latency
 - **Approval Rate Analysis**: SAFE/WARN/UNSAFE/ABORT distribution
 - **Error Rate Monitoring**: Failed tool executions
 
@@ -385,11 +385,11 @@ Before testing begins, validate:
 - Any ABORT verdict → Critical alert
 - Multiple UNSAFE verdicts in short period → High priority alert
 - Blocklist evasion attempts → Medium priority alert
-- Jones response format violations → Low priority alert
+- Security Agent response format violations → Low priority alert
 
 #### 5.2.2 Threshold-Based Alerts
 - High WARN rate (>20% of requests) → Warning
-- Long Jones response times (>5 seconds) → Warning
+- Long Security Agent response times (>5 seconds) → Warning
 - Tool execution failures (>10% rate) → Warning
 - Resource exhaustion warnings → Critical
 
@@ -400,7 +400,7 @@ Before testing begins, validate:
 | ABORT verdict | Immediate system shutdown, preserve logs | Critical alert to test team |
 | UNSAFE verdict streak (3+) | Test pause, state capture | Immediate notification |
 | Blocklist evasion detected | Enhanced logging, test suspension | Technical alert |
-| Jones format violation | Test suspension, LLM health check | Technical alert |
+| Security Agent format violation | Test suspension, LLM health check | Technical alert |
 | Resource threshold exceeded | Test throttling, snapshot creation | Warning to operators |
 
 ### 5.4 Data Collection and Analysis
@@ -408,13 +408,13 @@ Before testing begins, validate:
 #### 5.4.1 Test Execution Data
 - Test scenario definitions and parameters
 - Tool execution attempts and outcomes
-- Jones verdicts and reasoning
+- Security Agent verdicts and reasoning
 - Performance metrics and timings
 
 #### 5.4.2 Security Decision Data
 - Blocklist pattern matches
 - Path resolution results
-- Jones decision factors (git status, file location, etc.)
+- Security Agent decision factors (git status, file location, etc.)
 - Verdict distribution by operation type
 
 #### 5.4.3 System Health Data
@@ -543,7 +543,7 @@ Test Anomaly → Test Operator → Lead Tester → Security Team → Management
 
 #### 8.1.1 Functional Criteria
 - All safety tools correctly block prohibited operations
-- Jones agent provides appropriate verdicts for all test scenarios
+- Security Agent provides appropriate verdicts for all test scenarios
 - ToolRequestGate properly manages request/response flow
 - Emergency abort functions as designed
 - Multi-layer defenses operate cohesively
@@ -555,7 +555,7 @@ Test Anomaly → Test Operator → Lead Tester → Security Team → Management
 - No new vulnerabilities are introduced
 
 #### 8.1.3 Performance Criteria
-- Jones response times within acceptable limits
+- Security Agent response times within acceptable limits
 - Tool execution overhead minimal
 - System resource usage within bounds
 - Scalability of safety mechanisms verified
@@ -617,7 +617,7 @@ Test Anomaly → Test Operator → Lead Tester → Security Team → Management
 - **Day 4**: FileWriteTool system path tests
 - **Day 5**: FileWriteTool sensitive directory tests
 
-### 9.3 Phase 3: Jones Agent Testing (Week 3)
+### 9.3 Phase 3: Security Agent Testing (Week 3)
 - **Day 1**: Verdict format and decision logic tests
 - **Day 2**: Command complexity and context tests
 - **Day 3**: Edge case and boundary condition tests
@@ -680,8 +680,8 @@ Test Anomaly → Test Operator → Lead Tester → Security Team → Management
 ### Appendix F: Tool Configuration Specifications
 [Detailed specifications of tool safety configurations and blocklists]
 
-### Appendix G: Jones Decision Matrix
-[Decision matrix for Jones verdict logic based on operation parameters]
+### Appendix G: Security Agent Decision Matrix
+[Decision matrix for Security Agent verdict logic based on operation parameters]
 
 ### Appendix H: Performance Benchmark Specifications
 [Performance benchmarks and acceptance criteria for safety mechanisms]

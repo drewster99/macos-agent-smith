@@ -38,7 +38,7 @@ public protocol AgentTool: Sendable {
     /// success/failure flag. Tools that wrap external processes (bash, gh) MUST mark the
     /// result as failed when the underlying process exited non-zero or timed out; tools
     /// that detect their own domain failures (file-not-found, invalid input, etc.) should
-    /// likewise return `.failure(...)` so Jones's recent-tool-calls context is accurate.
+    /// likewise return `.failure(...)` so Security Agent's recent-tool-calls context is accurate.
     func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult
 
     /// Whether this tool should be included in the LLM's tool definitions for this turn.
@@ -56,14 +56,14 @@ public protocol AgentTool: Sendable {
     var executionTimeout: Duration { get }
 
     /// Whether invoking this tool can cause destructive or hard-to-reverse effects (data loss,
-    /// irreversible state change). Surfaced to the security agent (Jones) when scoping a task's
+    /// irreversible state change). Surfaced to the security agent (Security Agent) when scoping a task's
     /// tool set. Defaults to the central `ToolSafetyClassification`, which is fail-closed —
     /// an unrecognized name is treated as destructive. MCP tools override this from the
     /// server's (untrusted) `destructiveHint`.
     var isDestructive: Bool { get }
 
     /// Whether the tool reaches an open/external world beyond a closed local system (arbitrary
-    /// network access, external app control, the internet). Surfaced to Jones when scoping.
+    /// network access, external app control, the internet). Surfaced to Security Agent when scoping.
     /// Same fail-closed default as `isDestructive`; MCP tools override from `openWorldHint`.
     var isOpenWorld: Bool { get }
 
@@ -180,7 +180,7 @@ public struct ToolContext: Sendable {
     /// Provider API type (e.g. "anthropic", "openAICompatible") for the owning
     /// agent's current configuration. Not derivable from ModelConfiguration alone.
     public let currentProviderType: String?
-    /// Callback to request spawning a new Brown+Jones pair. Returns the Brown agent's ID.
+    /// Callback to request spawning a new Brown+Security Agent pair. Returns the Brown agent's ID.
     public let spawnBrown: @Sendable () async -> UUID?
     /// Callback to terminate an agent by ID. Second parameter is the caller's agent ID.
     public let terminateAgent: @Sendable (UUID, UUID) async -> Bool
@@ -196,8 +196,8 @@ public struct ToolContext: Sendable {
     public let onSelfTerminate: @Sendable () async -> Void
     /// Called with `true` when the agent begins an LLM API call, and `false` when it completes.
     public let onProcessingStateChange: @Sendable (Bool) -> Void
-    /// Called with `true` when Jones begins a security evaluation LLM call, `false` when it completes.
-    public let onJonesProcessingStateChange: @Sendable (Bool) -> Void
+    /// Called with `true` when Security Agent begins a security evaluation LLM call, `false` when it completes.
+    public let onSecurityAgentProcessingStateChange: @Sendable (Bool) -> Void
     /// Called when a tool execution starts or finishes. `started == true` adds the tool's
     /// name to the in-flight set for this agent; `started == false` removes it. Allows the
     /// UI to show a "Working" / "Tool: <name>" indicator distinct from the LLM "Thinking"
@@ -306,7 +306,7 @@ public struct ToolContext: Sendable {
         agentIDForRole: @escaping @Sendable (AgentRole) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
-        onJonesProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
+        onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onToolExecutionStateChange: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
         scheduleWake: @escaping @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome = { _, _, _, _, _, _ in .error("Scheduling not configured.") },
         listScheduledWakes: @escaping @Sendable () async -> [ScheduledWake] = { [] },
@@ -360,7 +360,7 @@ public struct ToolContext: Sendable {
         self.agentIDForRole = agentIDForRole
         self.onSelfTerminate = onSelfTerminate
         self.onProcessingStateChange = onProcessingStateChange
-        self.onJonesProcessingStateChange = onJonesProcessingStateChange
+        self.onSecurityAgentProcessingStateChange = onSecurityAgentProcessingStateChange
         self.onToolExecutionStateChange = onToolExecutionStateChange
         self.scheduleWake = scheduleWake
         self.listScheduledWakes = listScheduledWakes

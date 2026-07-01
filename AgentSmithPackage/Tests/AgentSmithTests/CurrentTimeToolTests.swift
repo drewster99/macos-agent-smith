@@ -78,6 +78,6 @@ struct CurrentTimeToolTests {
         for role in [AgentRole.smith, .brown] {
             #expect(tool.isAvailable(in: ToolAvailabilityContext(agentRole: role)))
         }
-        #expect(!tool.isAvailable(in: ToolAvailabilityContext(agentRole: .jones)))
+        #expect(!tool.isAvailable(in: ToolAvailabilityContext(agentRole: .securityAgent)))
     }
 }

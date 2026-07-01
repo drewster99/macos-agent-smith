@@ -4,7 +4,7 @@ import Foundation
 
 /// Tests for `AmendTaskTool`'s live-delivery behavior.
 ///
-/// `amend_task` mutates the stored task description (so Jones, which reads the live
+/// `amend_task` mutates the stored task description (so Security Agent, which reads the live
 /// description on every approval, sees the new intent) but Brown's briefing is a
 /// one-time spawn snapshot. To keep a running Brown in sync — rather than relying on
 /// Smith to remember a follow-up `message_brown` — the tool injects the amendment
@@ -57,7 +57,7 @@ struct AmendTaskDeliveryTests {
         #expect(result.succeeded)
         #expect(result.output.contains("delivered to the running Brown"))
 
-        // Stored description carries the amendment so Jones sees it on the next approval.
+        // Stored description carries the amendment so Security Agent sees it on the next approval.
         let updated = await taskStore.task(id: task.id)
         #expect(updated?.description.contains("Here is the transcript") == true)
 

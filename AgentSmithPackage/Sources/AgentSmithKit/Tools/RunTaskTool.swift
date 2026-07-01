@@ -10,7 +10,7 @@ nonisolated private let runTaskLogger = Logger(subsystem: "com.agentsmith", cate
 /// that" means "rerun on the same task ID", not "create a new one."
 struct RunTaskTool: AgentTool {
     let name = "run_task"
-    let toolDescription = "Run an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context and auto-spawns Brown+Jones. Failed and completed tasks are auto-reset (prior result/commentary cleared, status flipped back to pending) before running — this is how you reopen a completed task without creating a duplicate. The `instructions` field is REQUIRED — include any updates, permissions, scope changes, or clarifications from the user. These are appended to the task description and survive the restart.\nIMPORTANT: Only one task can run at a time. Calling `run_task` will STOP any currently executing task."
+    let toolDescription = "Run an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context and auto-spawns Brown+Security Agent. Failed and completed tasks are auto-reset (prior result/commentary cleared, status flipped back to pending) before running — this is how you reopen a completed task without creating a duplicate. The `instructions` field is REQUIRED — include any updates, permissions, scope changes, or clarifications from the user. These are appended to the task description and survive the restart.\nIMPORTANT: Only one task can run at a time. Calling `run_task` will STOP any currently executing task."
 
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
@@ -21,7 +21,7 @@ struct RunTaskTool: AgentTool {
             ]),
             "instructions": .dictionary([
                 "type": .string("string"),
-                "description": .string("Instructions to append to the task description. Include any new permissions, scope changes, or clarifications from the user. If the user said nothing new, summarize their confirmation (e.g. 'User confirmed: proceed as described'). These survive the restart and are visible to Brown and Jones.")
+                "description": .string("Instructions to append to the task description. Include any new permissions, scope changes, or clarifications from the user. If the user said nothing new, summarize their confirmation (e.g. 'User confirmed: proceed as described'). These survive the restart and are visible to Brown and Security Agent.")
             ])
         ]),
         "required": .array([.string("task_id"), .string("instructions")])
@@ -158,7 +158,7 @@ struct RunTaskTool: AgentTool {
         }()
 
         // Amend the task with the instructions before restarting, so they survive
-        // the context reset and are visible to the new Smith, Brown, and Jones.
+        // the context reset and are visible to the new Smith, Brown, and Security Agent.
         let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             await context.taskStore.amendDescription(id: taskID, amendment: trimmed)

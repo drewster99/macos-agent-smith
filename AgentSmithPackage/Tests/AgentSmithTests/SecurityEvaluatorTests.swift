@@ -149,7 +149,7 @@ struct SecurityEvaluatorTests {
         _ = await evaluate(evaluator)
         let calls = await abortInvocations.calls
         #expect(calls.count == 1)
-        #expect(calls.first?.role == .jones)
+        #expect(calls.first?.role == .securityAgent)
     }
 
     @Test("bare ABORT with no reason still triggers the abort closure")
@@ -168,7 +168,7 @@ struct SecurityEvaluatorTests {
         _ = await evaluate(evaluator)
         let calls = await abortInvocations.calls
         #expect(calls.count == 1)
-        #expect(calls.first?.role == .jones)
+        #expect(calls.first?.role == .securityAgent)
     }
 
     @Test("ABORT after preamble still triggers the abort closure")
@@ -260,7 +260,7 @@ struct SecurityEvaluatorTests {
 
     @Test("per-call evaluation floors max-output-tokens (never starves the verdict)")
     func tokenBudgetFloored() async {
-        // A FLOOR, not a cap: the evaluator raises a too-small (here: unset → 0) configured Jones
+        // A FLOOR, not a cap: the evaluator raises a too-small (here: unset → 0) configured Security Agent
         // max_tokens to a safe minimum so a verbose/thinking model still has room for the verdict,
         // while a larger configured value would still win. (A prior hard 200-token override
         // collided with extended thinking — this is the opposite: a minimum, well above the
@@ -463,7 +463,7 @@ struct SecurityEvaluatorTests {
 
     // MARK: - file_edit unified-diff in prompt
 
-    @Test("file_edit prompt fed to Jones contains the unified diff section")
+    @Test("file_edit prompt fed to Security Agent contains the unified diff section")
     func fileEditPromptIncludesUnifiedDiff() async {
         let provider = PromptCapturingProvider(responses: [textResponse("SAFE diff confirmed")])
         let channel = MessageChannel()

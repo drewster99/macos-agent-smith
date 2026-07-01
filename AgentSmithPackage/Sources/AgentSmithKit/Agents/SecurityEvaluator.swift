@@ -12,7 +12,7 @@ public struct SecurityDisposition: Sendable, Equatable {
     public let isAutoApproval: Bool
     /// True when the evaluation was cancelled mid-flight (user stop/abort/escape). The
     /// tool was not actually deemed unsafe — the surrounding agent was just torn down
-    /// before Jones could finish. Inspector rendering treats this as a neutral
+    /// before Security Agent could finish. Inspector rendering treats this as a neutral
     /// "CANCELLED" label rather than red UNSAFE.
     public let isCancelled: Bool
 
@@ -47,9 +47,9 @@ public struct EvaluationRecord: Sendable, Identifiable, Equatable {
     public let toolParams: String
     /// The title of the task the tool call was made under, if any.
     public let taskTitle: String?
-    /// The full evaluation prompt sent to the Jones LLM.
+    /// The full evaluation prompt sent to the Security Agent LLM.
     public let prompt: String
-    /// The raw text response from the Jones LLM.
+    /// The raw text response from the Security Agent LLM.
     public let response: String
     /// The parsed security disposition (approved/denied, warning status, etc.).
     public let disposition: SecurityDisposition
@@ -105,9 +105,9 @@ public struct ToolScopingResult: Sendable {
     }
 }
 
-/// Direct security evaluator that replaces the Jones agent actor.
+/// Direct security evaluator that replaces the Security Agent actor.
 ///
-/// Makes LLM calls using Jones's model configuration to evaluate tool requests.
+/// Makes LLM calls using Security Agent's model configuration to evaluate tool requests.
 /// Thread-safe — can be called concurrently for parallel tool call batches.
 /// Each Brown agent gets its own evaluator instance; state dies with Brown.
 actor SecurityEvaluator {
@@ -119,7 +119,7 @@ actor SecurityEvaluator {
     /// Ring buffer of recent tool requests for evaluation context. Each entry
     /// retains the originating tool call ID so the prompt can annotate the
     /// summary with the actual execution outcome (succeeded / failed / unknown)
-    /// — without that, Jones sees only "verdict: SAFE" and assumes the tool
+    /// — without that, Security Agent sees only "verdict: SAFE" and assumes the tool
     /// actually ran successfully, which leads to false denials of legitimate
     /// retries after a tool error.
     private struct RecentToolRequest {
@@ -149,23 +149,23 @@ actor SecurityEvaluator {
     private static let maxConsecutiveFailures = 20
     /// Cap on parse-failure retries within a single evaluation. Each unparseable verdict
     /// costs one retry; LLM call errors also cost one retry. File_read rounds are NOT
-    /// capped — Jones may read as many files as it needs before committing to a verdict;
+    /// capped — Security Agent may read as many files as it needs before committing to a verdict;
     /// the loop ends only on a parsed verdict, parse-retry exhaustion, or task
     /// cancellation. (A pathological model that never stops reading is bounded only by
     /// task cancellation — revisit if that ever shows up in practice.)
     private static let maxRetries = 5
 
-    /// Output-token floors (a minimum, not a cap — the configured Jones `max_tokens` still wins
+    /// Output-token floors (a minimum, not a cap — the configured Security Agent `max_tokens` still wins
     /// when larger). A per-call verdict is short; a per-task scoping pass emits an allow/block
     /// line for every candidate tool and usually reasons through them first, so it needs much
     /// more headroom.
     private static let perCallEvalMaxTokensFloor = 1500
     private static let toolScopingMaxTokensFloor = 25000
 
-    /// Tool definition for file_read, presented to Jones's LLM.
+    /// Tool definition for file_read, presented to Security Agent's LLM.
     private static let fileReadToolDef: LLMToolDefinition = {
         let tool = FileReadTool()
-        return tool.definition(for: .jones)
+        return tool.definition(for: .securityAgent)
     }()
 
     /// Evaluation history for inspector display.
@@ -174,14 +174,14 @@ actor SecurityEvaluator {
 
     /// Fires after each evaluation is recorded, pushing the record to the UI layer.
     private var onEvaluationRecorded: (@Sendable (EvaluationRecord) -> Void)?
-    /// Fires after each Jones LLM call so the inspector's per-agent token/cost view for the
-    /// security agent is populated (Jones is a SecurityEvaluator, not an AgentActor, so without
+    /// Fires after each Security Agent LLM call so the inspector's per-agent token/cost view for the
+    /// security agent is populated (Security Agent is a SecurityEvaluator, not an AgentActor, so without
     /// this it never produced turn records and showed 0 tokens / $0.00).
     private var onTurnRecorded: (@Sendable (LLMTurnRecord) -> Void)?
 
     /// Token usage store for persistent analytics.
     private let usageStore: UsageStore?
-    /// Full snapshot of the ModelConfiguration used for Jones's LLM calls. Carried
+    /// Full snapshot of the ModelConfiguration used for Security Agent's LLM calls. Carried
     /// directly so UsageRecords get the full config — context size, temperature, etc. —
     /// embedded as immutable historical truth.
     private let configuration: ModelConfiguration?
@@ -205,7 +205,7 @@ actor SecurityEvaluator {
         configuration: ModelConfiguration? = nil,
         providerType: String = "",
         sessionID: UUID? = nil,
-        // Forgetting to wire these causes Jones to misclassify failed-then-retried calls as
+        // Forgetting to wire these causes Security Agent to misclassify failed-then-retried calls as
         // duplicates (the original 394bbbc bug). `assertionFailure` surfaces the wiring
         // mistake loudly in debug/tests; a release build degrades to `false` (the neutral
         // "no recorded outcome" state) rather than crashing. Production callers
@@ -237,7 +237,7 @@ actor SecurityEvaluator {
     }
 
     /// Posts a channel message stamped with the evaluator's provider/model/config
-    /// context. Use this instead of `channel.post(...)` for any Jones-originated
+    /// context. Use this instead of `channel.post(...)` for any Security Agent-originated
     /// message so it carries full provenance for downstream rollups. `taskID`
     /// can be passed explicitly for messages tied to a specific evaluation.
     private func postToChannel(_ message: ChannelMessage, taskID: UUID? = nil) async {
@@ -254,13 +254,13 @@ actor SecurityEvaluator {
         onEvaluationRecorded = handler
     }
 
-    /// Registers a callback fired after each Jones LLM call, carrying a turn record so the
+    /// Registers a callback fired after each Security Agent LLM call, carrying a turn record so the
     /// inspector can show the security agent's per-session token usage and cost.
     public func setOnTurnRecorded(_ handler: @escaping @Sendable (LLMTurnRecord) -> Void) {
         onTurnRecorded = handler
     }
 
-    /// Builds and emits a turn record for one Jones LLM call.
+    /// Builds and emits a turn record for one Security Agent LLM call.
     private func emitTurnRecord(response: LLMResponse, latencyMs: Int, messageCount: Int) {
         guard let onTurnRecorded else { return }
         onTurnRecorded(LLMTurnRecord(
@@ -327,13 +327,13 @@ actor SecurityEvaluator {
         var lastError: Error?
         // Only parse-failure retries bound this loop. A file_read round (the model
         // returned tool_calls) does NOT consume the retry budget and is not otherwise
-        // capped — Jones reads as many files as it needs, then commits to a verdict.
+        // capped — Security Agent reads as many files as it needs, then commits to a verdict.
         while retryCount < Self.maxRetries {
             let response: LLMResponse
             let callLatencyMs: Int
             do {
                 let callStart = Date()
-                // Floor the output budget so a small configured Jones max_tokens can't starve
+                // Floor the output budget so a small configured Security Agent max_tokens can't starve
                 // the verdict (the model may reason a little before committing). The configured
                 // value still wins when it's larger; the floor only raises it. A FLOOR, never a
                 // cap — an earlier hard 200-token cap here collided with extended thinking.
@@ -354,35 +354,35 @@ actor SecurityEvaluator {
                 continue
             }
 
-            // LLM call succeeded. Execute any file_reads Jones requested, accumulating
+            // LLM call succeeded. Execute any file_reads Security Agent requested, accumulating
             // per-turn tool execution stats for the UsageRecord below.
             var turnToolExecutionMs = 0
             var turnToolResultChars = 0
             if !response.toolCalls.isEmpty {
                 // `.assistant(from:)` preserves reasoning + provider
                 // continuation (Anthropic thinking signatures / Gemini
-                // thoughtSignatures) so Jones's multi-turn file-read loop
+                // thoughtSignatures) so Security Agent's multi-turn file-read loop
                 // keeps thinking continuity. Manual construction silently
                 // broke thinkingBudget > 0 runs and Gemini 2.5.
                 conversationMessages.append(.assistant(from: response))
                 // Execute each file_read and append tool results, timing each one.
                 for call in response.toolCalls {
-                    await postJonesFileReadToChannel(call)
+                    await postSecurityAgentFileReadToChannel(call)
                     let execStart = Date()
-                    let result = executeJonesFileRead(call)
+                    let result = executeSecurityAgentFileRead(call)
                     turnToolExecutionMs += Int(Date().timeIntervalSince(execStart) * 1000)
                     turnToolResultChars += result.count
                     conversationMessages.append(.toolResult(result, callID: call.id))
                 }
             }
 
-            // Capture Jones's token usage for analytics — tool stats folded in.
+            // Capture Security Agent's token usage for analytics — tool stats folded in.
             if let usageStore {
                 let taskUUID = taskID.flatMap { UUID(uuidString: $0) }
                 await UsageRecorder.record(
                     response: response,
                     context: LLMCallContext(
-                        agentRole: .jones,
+                        agentRole: .securityAgent,
                         taskID: taskUUID,
                         modelID: configuration?.model ?? "",
                         providerType: providerType,
@@ -412,8 +412,8 @@ actor SecurityEvaluator {
                 if retryCount >= 3 {
                     await postToChannel(ChannelMessage(
                         sender: .system,
-                        content: "Agent Jones error (\(retryCount)/\(Self.maxRetries)): failed to parse security response",
-                        metadata: ["isError": .bool(true), "agentRole": .string(AgentRole.jones.rawValue)]
+                        content: "Security Agent error (\(retryCount)/\(Self.maxRetries)): failed to parse security response",
+                        metadata: ["isError": .bool(true), "agentRole": .string(AgentRole.securityAgent.rawValue)]
                     ))
                 }
                 continue
@@ -438,10 +438,10 @@ actor SecurityEvaluator {
                     content: "Security review: ABORT — \(msg)",
                     metadata: [
                         "securityDisposition": .string("abort"),
-                        "agentRole": .string(AgentRole.jones.rawValue)
+                        "agentRole": .string(AgentRole.securityAgent.rawValue)
                     ]
                 ))
-                await abort(msg, .jones)
+                await abort(msg, .securityAgent)
             }
 
             return disposition
@@ -454,7 +454,7 @@ actor SecurityEvaluator {
         let lastErrorDescription = lastError?.localizedDescription
 
         if consecutiveEvaluationFailures >= Self.maxConsecutiveFailures {
-            var abortContent = "Jones produced \(consecutiveEvaluationFailures) consecutive failed evaluations — aborting. Check Jones model configuration."
+            var abortContent = "The Security Agent produced \(consecutiveEvaluationFailures) consecutive failed evaluations — aborting. Check the Security Agent's model configuration."
             if let desc = lastErrorDescription {
                 abortContent += "\nLast error: \(desc)"
             }
@@ -463,8 +463,8 @@ actor SecurityEvaluator {
                 content: abortContent
             ))
             await abort(
-                "Jones security gatekeeper failed to produce valid output after \(consecutiveEvaluationFailures) consecutive evaluations",
-                .jones
+                "The Security Agent failed to produce valid output after \(consecutiveEvaluationFailures) consecutive evaluations",
+                .securityAgent
             )
         }
 
@@ -485,7 +485,7 @@ actor SecurityEvaluator {
     // MARK: - Tool scoping (per-task)
 
     /// Per-task tool scoping pass: presents the full candidate tool list to the security agent
-    /// (Jones), in the context of the task, and returns the subset it approves. Stateless — it
+    /// (Security Agent), in the context of the task, and returns the subset it approves. Stateless — it
     /// does not consult or store prior approvals; the caller re-runs it whenever the candidate
     /// set changes. Fail-closed: a tool not explicitly allowed is blocked, and an unparseable
     /// response after retries returns `succeeded == false` so the caller can hard-stop.
@@ -511,7 +511,7 @@ actor SecurityEvaluator {
             taskDescription: taskDescription
         )
         let messages: [LLMMessage] = [
-            .system(JonesBehavior.toolScopingSystemPrompt),
+            .system(SecurityAgentBehavior.toolScopingSystemPrompt),
             .user(prompt)
         ]
 
@@ -545,7 +545,7 @@ actor SecurityEvaluator {
                 await UsageRecorder.record(
                     response: response,
                     context: LLMCallContext(
-                        agentRole: .jones,
+                        agentRole: .securityAgent,
                         taskID: UUID(uuidString: taskID),
                         modelID: configuration?.model ?? "",
                         providerType: providerType,
@@ -832,14 +832,14 @@ actor SecurityEvaluator {
         }
     }
 
-    /// Extracts the verdict keyword and reasoning from Jones's raw response text,
+    /// Extracts the verdict keyword and reasoning from Security Agent's raw response text,
     /// stripping the WARN retry boilerplate that is only relevant to Brown.
     ///
     /// Mirrors `parseDisposition`'s preamble-tolerance: scans all lines for the last
     /// one beginning with a verdict keyword so responses with chain-of-thought
     /// preceding the verdict still produce a useful one-line summary.
     ///
-    /// Verdict matching is case-sensitive — Jones's prompt mandates ALL-CAPS. A lowercase
+    /// Verdict matching is case-sensitive — Security Agent's prompt mandates ALL-CAPS. A lowercase
     /// `"abort, this is risky"` in conversational text must NOT trip a system-wide ABORT.
     private static func verdictSummary(from responseText: String) -> String {
         let trimmed = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -916,7 +916,7 @@ actor SecurityEvaluator {
 
         if !recentToolRequests.isEmpty {
             // Annotate each entry with the actual execution outcome of the
-            // approved tool call. Without this Jones cannot tell that a SAFE
+            // approved tool call. Without this Security Agent cannot tell that a SAFE
             // verdict still produced an error at execution time, and
             // (incorrectly) refuses legitimate retry attempts as duplicates.
             var renderedLines: [String] = []
@@ -960,7 +960,7 @@ actor SecurityEvaluator {
 
             """
         // MCP tools are user-provided, server-defined capabilities with no built-in
-        // vetting. Flag them so Jones treats the description/behavior as untrusted and
+        // vetting. Flag them so Security Agent treats the description/behavior as untrusted and
         // leans cautious — especially for anything that exfiltrates data or mutates state.
         if toolName.hasPrefix(MCPToolNaming.prefix) {
             requestSection += """
@@ -983,7 +983,7 @@ actor SecurityEvaluator {
 
         // When the task description and the tool call refer to paths that resolve
         // through symlinks to the same canonical location (e.g. `~/cursor/x` is a
-        // symlink to `~/Documents/.../cursor/x`), surface the resolutions so Jones
+        // symlink to `~/Documents/.../cursor/x`), surface the resolutions so Security Agent
         // does not flag a working-directory match as a directory escape.
         if let pathNote = Self.pathResolutionAppendix(taskDescription: taskDescription, toolName: toolName, toolParams: toolParams) {
             requestSection += "\n\(pathNote)\n"
@@ -991,7 +991,7 @@ actor SecurityEvaluator {
 
         // For `file_edit`, render the actual change as a unified-style diff alongside
         // the raw arguments. The literal `new_string` includes anchor context (the
-        // existing line being modified) which Jones can otherwise misread as "the
+        // existing line being modified) which Security Agent can otherwise misread as "the
         // agent is adding both lines" — leading to spurious ABORT verdicts on
         // legitimate single-line additions. The diff (computed via the same
         // `DiffGenerator` the channel-log UI uses) shows what *actually changes*.
@@ -1049,7 +1049,7 @@ actor SecurityEvaluator {
         return sections.joined(separator: "\n\n")
     }
 
-    /// Parses Jones's text response into a SecurityDisposition.
+    /// Parses Security Agent's text response into a SecurityDisposition.
     /// Returns nil on parse failure (caller should retry).
     ///
     /// Robust to models that emit preamble or chain-of-thought before the verdict
@@ -1058,7 +1058,7 @@ actor SecurityEvaluator {
     /// and list bullets — is SAFE/WARN/UNSAFE/ABORT. The last match wins so a model
     /// that reasons about "UNSAFE" earlier and concludes "SAFE" ends up approved.
     ///
-    /// Verdict matching is **case-sensitive**: Jones's prompt mandates ALL-CAPS keywords,
+    /// Verdict matching is **case-sensitive**: Security Agent's prompt mandates ALL-CAPS keywords,
     /// and conversational lowercase ("abort, this is risky") must not trip a system-wide
     /// ABORT. If the model violates the prompt and writes a lowercase verdict, we let the
     /// retry path catch it — preferable to silently letting a chatty model trigger an abort.
@@ -1201,10 +1201,10 @@ actor SecurityEvaluator {
     /// canonical form differs from its as-written form — in that case the
     /// appendix would be pure noise.
     ///
-    /// Without this, Jones compares raw strings: a task that says
+    /// Without this, Security Agent compares raw strings: a task that says
     /// `~/cursor/foo/` and a tool call under
     /// `~/Documents/ncc_source/cursor/foo/...` (the symlink target) get flagged
-    /// as a directory escape. The appendix shows the canonical paths so Jones
+    /// as a directory escape. The appendix shows the canonical paths so Security Agent
     /// can recognize the equivalence.
     static func pathResolutionAppendix(taskDescription: String?, toolName: String, toolParams: String) -> String? {
         var asWrittenInOrder: [String] = []
@@ -1313,10 +1313,10 @@ actor SecurityEvaluator {
     }
 
     /// Returns the canonical absolute path for `path` via POSIX `realpath`.
-    /// Used in preference to `URL.resolvingSymlinksInPath()` for Jones's
+    /// Used in preference to `URL.resolvingSymlinksInPath()` for Security Agent's
     /// equivalence checks because the URL-based call does not resolve macOS's
     /// well-known aliases (`/tmp → /private/tmp`, `/var → /private/var`),
-    /// which would cause Jones to miss legitimate equivalences. Returns nil
+    /// which would cause Security Agent to miss legitimate equivalences. Returns nil
     /// when realpath fails (e.g. path no longer exists).
     static func canonicalizeViaRealpath(_ path: String) -> String? {
         var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
@@ -1343,8 +1343,8 @@ actor SecurityEvaluator {
         return nil
     }
 
-    /// Posts a tool_request message to the channel so Jones's file reads appear in the transcript.
-    private func postJonesFileReadToChannel(_ call: LLMToolCall) async {
+    /// Posts a tool_request message to the channel so Security Agent's file reads appear in the transcript.
+    private func postSecurityAgentFileReadToChannel(_ call: LLMToolCall) async {
         let path: String = {
             guard let data = call.arguments.data(using: .utf8),
                   let dict = try? JSONDecoder().decode([String: AnyCodable].self, from: data),
@@ -1355,7 +1355,7 @@ actor SecurityEvaluator {
         }()
 
         await postToChannel(ChannelMessage(
-            sender: .agent(.jones),
+            sender: .agent(.securityAgent),
             content: "file_read: \(path)",
             metadata: [
                 "messageKind": .string("tool_request"),
@@ -1368,9 +1368,9 @@ actor SecurityEvaluator {
         ))
     }
 
-    /// Executes a file_read tool call for Jones without recording the read.
-    /// Jones's reads must NOT count toward Brown's file_write gating.
-    private func executeJonesFileRead(_ call: LLMToolCall) -> String {
+    /// Executes a file_read tool call for Security Agent without recording the read.
+    /// Security Agent's reads must NOT count toward Brown's file_write gating.
+    private func executeSecurityAgentFileRead(_ call: LLMToolCall) -> String {
         guard call.name == "file_read" else {
             return "Error: Unknown tool '\(call.name)'"
         }

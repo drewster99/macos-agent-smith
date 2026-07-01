@@ -83,7 +83,7 @@ struct FileEditTool: AgentTool {
         // that exact old_string matching is an implicit guard — but content can leak
         // into context via `bash cat`, `grep -A`, or attachments without ever
         // tracking the path, so an "implicit guard" lets edits skip the explicit
-        // read trail Jones depends on. Match file_write's gate for consistency.
+        // read trail Security Agent depends on. Match file_write's gate for consistency.
         if !context.hasFileBeenRead(filePath) && !context.hasFileBeenRead(resolvedPath) {
             return .failure("Error: file_edit requires a prior file_read on '\(filePath)' in this session.")
         }

@@ -106,13 +106,13 @@ struct FileReadToolTests {
         #expect(tracker.has(path))
     }
 
-    @Test("Smith and Jones reads do not record (only Brown's reads gate file_write)")
+    @Test("Smith and Security Agent reads do not record (only Brown's reads gate file_write)")
     func nonBrownReadsDontRecord() async throws {
         let dir = TempDir()
         defer { dir.cleanup() }
         let path = try dir.write("hi", to: "fixture.txt")
 
-        for role in [AgentRole.smith, .jones] {
+        for role in [AgentRole.smith, .securityAgent] {
             let tracker = TestToolContext.FileReadTrackerStub()
             _ = try await FileReadTool().execute(
                 arguments: ["path": .string(path)],

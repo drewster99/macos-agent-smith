@@ -17,7 +17,7 @@ struct AgentInspectorWindow: View {
         switch role {
         case .smith: return "Agent Smith"
         case .brown: return "Agent Brown"
-        case .jones: return "Security Agent"
+        case .securityAgent: return "Security Agent"
         case .summarizer: return "Summarizer"
         }
     }
@@ -58,7 +58,7 @@ struct AgentInspectorWindow: View {
                 roleColor: roleColor,
                 hasActivity: hasActivity,
                 isProcessing: isProcessing,
-                isTerminated: role != .jones && isTerminated,
+                isTerminated: role != .securityAgent && isTerminated,
                 executingTools: executingTools,
                 processingStartDate: processingStartDate,
                 toolExecutingStartDate: toolExecutingStartDate,

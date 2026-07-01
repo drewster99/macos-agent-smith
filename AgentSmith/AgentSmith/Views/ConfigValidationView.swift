@@ -27,7 +27,7 @@ struct ConfigValidationView: View {
             VStack(spacing: 8) {
                 agentRow(role: .smith, label: "Agent Smith (Orchestrator)", color: AppColors.smithAgent)
                 agentRow(role: .brown, label: "Agent Brown (Executor)", color: AppColors.brownAgent)
-                agentRow(role: .jones, label: "Agent Jones (Safety Monitor)", color: AppColors.jonesAgent)
+                agentRow(role: .securityAgent, label: "Security Agent (Safety Monitor)", color: AppColors.securityAgent)
                 agentRow(role: .summarizer, label: "Task Summarizer", color: .secondary)
             }
 

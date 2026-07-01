@@ -2,17 +2,17 @@ import Foundation
 
 /// Allows Smith to amend a task's description with additional context from the user.
 ///
-/// Amendments are appended to the task description with a clear label so Jones (who
+/// Amendments are appended to the task description with a clear label so Security Agent (who
 /// reads `taskDescription` on every tool-approval request) sees the updated intent.
 /// When a Brown is actively running the amended task, the amendment is also delivered
 /// directly into that live Brown's conversation. Brown's briefing is a one-time spawn
 /// snapshot, so without this the running Brown would never see post-spawn amendments —
-/// while Jones keeps citing them — which is exactly the desync that sends Brown
+/// while Security Agent keeps citing them — which is exactly the desync that sends Brown
 /// hunting for content it can't see. Delivery is automatic and deterministic; Smith
 /// does not need to follow up with `message_brown`.
 struct AmendTaskTool: AgentTool {
     let name = "amend_task"
-    let toolDescription = "Add a clarification or updated instruction to a task's description. Use this when the user provides new context, corrections, or additional requirements for an in-progress task. The amendment is appended to the description (visible to Jones on every security check) and, if a Brown is currently running this task, delivered to that live Brown automatically — you do NOT need to message_brown afterward. Optionally attach files via `attachment_ids`; they're added to the task's description attachments and forwarded to the live Brown with the amendment (and re-injected into Brown's briefing on any future respawn)."
+    let toolDescription = "Add a clarification or updated instruction to a task's description. Use this when the user provides new context, corrections, or additional requirements for an in-progress task. The amendment is appended to the description (visible to Security Agent on every security check) and, if a Brown is currently running this task, delivered to that live Brown automatically — you do NOT need to message_brown afterward. Optionally attach files via `attachment_ids`; they're added to the task's description attachments and forwarded to the live Brown with the amendment (and re-injected into Brown's briefing on any future respawn)."
 
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
@@ -90,7 +90,7 @@ struct AmendTaskTool: AgentTool {
 
     /// Injects the amendment into a running Brown's conversation so the live agent sees
     /// post-spawn changes immediately. Gated on Brown actually running THIS task —
-    /// matching how Jones locates the task it evaluates against — so amending a queued or
+    /// matching how Security Agent locates the task it evaluates against — so amending a queued or
     /// unrelated task never interrupts a Brown working something else. Sent as a private
     /// `.system` message (not attributed to Smith) so Brown treats it as authoritative
     /// task content rather than optional supervisor chatter. Returns whether it delivered.

@@ -8,7 +8,7 @@ Agent Smith is a macOS app (Swift 6 / SwiftUI, macOS 15+) that orchestrates a sm
 
 - **Smith** — orchestrator. Talks to the user, creates tasks, spawns/supervises Brown, reviews Brown's results. Never does work itself.
 - **Brown** — single worker spawned per task. Holds the bash/file/process tools.
-- **Jones** — silent security gatekeeper that runs alongside Brown. Returns plain-text `SAFE/WARN/UNSAFE/ABORT` verdicts on Brown's tool calls (text-based, *not* tool calls — see `JonesBehavior.swift` and `SecurityEvaluator.swift`).
+- **Security Agent** — silent security gatekeeper that runs alongside Brown. Returns plain-text `SAFE/WARN/UNSAFE/ABORT` verdicts on Brown's tool calls (text-based, *not* tool calls — see `SecurityAgentBehavior.swift` and `SecurityEvaluator.swift`).
 - **Summarizer** — summarizes completed/failed tasks (`TaskSummarizer`).
 
 The full design history, rationale, and completed/planned features live in `ROADMAP.md` at the repo root — read it before proposing architectural changes. Per the global rules, completed roadmap items stay in the file; mark them ✅ rather than deleting.
@@ -71,12 +71,12 @@ The runtime fires `@Sendable` callbacks (`onAbort`, `onProcessingStateChange`, `
 
 ### Tool model
 
-`AgentTool` is the protocol every tool implements. Each role gets a fixed tool list assembled in its `*Behavior.swift` file (`SmithBehavior`, `BrownBehavior`, `JonesBehavior`). When adding a tool:
+`AgentTool` is the protocol every tool implements. Each role gets a fixed tool list assembled in its `*Behavior.swift` file (`SmithBehavior`, `BrownBehavior`, `SecurityAgentBehavior`). When adding a tool:
 
 1. Implement it under `AgentSmithKit/Tools/`.
 2. Add it to the appropriate behavior's `tools()` list — that's the only thing that grants access.
 3. If it touches files, integrate with the per-agent `FileReadTracker` (FileEditTool requires a prior FileReadTool call on the same path).
-4. If it's a destructive/side-effecting tool, expect `SecurityEvaluator` (Jones) to gate the call.
+4. If it's a destructive/side-effecting tool, expect `SecurityEvaluator` (Security Agent) to gate the call.
 
 Brown's `BashTool` shells out via `/bin/bash -c` (sources the user profile — full PATH). There is no separate `shell` tool anymore.
 
@@ -96,13 +96,13 @@ Every `UsageRecord` and `ChannelMessage` is stamped with `OrchestrationRuntime.c
 
 ### Inspector / archive of terminated agents
 
-When an agent terminates, its conversation history, LLM turn records, and Jones evaluations are snapshotted into `terminatedAgentArchive` / `archivedEvaluationRecords` on `OrchestrationRuntime` before the actor is dropped. The `AgentInspectorWindow` UI reads both live and archived agents through this surface — keep it intact when refactoring agent lifecycle code.
+When an agent terminates, its conversation history, LLM turn records, and Security Agent evaluations are snapshotted into `terminatedAgentArchive` / `archivedEvaluationRecords` on `OrchestrationRuntime` before the actor is dropped. The `AgentInspectorWindow` UI reads both live and archived agents through this surface — keep it intact when refactoring agent lifecycle code.
 
 ## Conventions specific to this repo
 
 - All actor state mutation must happen inside the actor; UI observers run via the `@Sendable` callbacks listed above. Don't add `MainActor` reach-ins from inside actors.
 - Smith's prompt explicitly forbids it from answering the user — every request becomes a task assigned to Brown. Don't add tools that let Smith do work directly.
-- Jones uses **text-based verdicts** (`SAFE/WARN/UNSAFE/ABORT`), not tool calls. This is deliberate (see memory/roadmap). Don't "improve" it by giving Jones tool-call evaluation.
+- Security Agent uses **text-based verdicts** (`SAFE/WARN/UNSAFE/ABORT`), not tool calls. This is deliberate (see memory/roadmap). Don't "improve" it by giving Security Agent tool-call evaluation.
 - Debug/recovery/sanitize utilities should be manually triggered (CLI/menu), never wired into normal startup or hot paths.
 - `__PUBLIC_REPO` (an empty file at the repo root) marks this as a public repo. Don't commit secrets, internal hostnames, or customer data.
 - `SessionManager.loadSessions()` no longer migrates legacy single-session data — that migration was retired in 2026-04 once the install base had moved over. An empty session list now bootstraps a single "Default" session via `bootstrapDefaultSession()`. Preserved here so anyone reading old commit messages doesn't try to revert.

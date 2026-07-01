@@ -347,7 +347,7 @@ public actor TaskStore {
 
     /// Appends a clearly-labeled amendment to a task's description, optionally adding
     /// attachments to the task's `descriptionAttachments`. Used by Smith to relay user
-    /// clarifications so that Jones (which reads the live description on every approval)
+    /// clarifications so that Security Agent (which reads the live description on every approval)
     /// sees the updated context. This only mutates the stored task — delivering the
     /// amendment to a running Brown is `AmendTaskTool`'s responsibility, since Brown's
     /// briefing is a one-time spawn snapshot. Attachments appended here are also

@@ -324,8 +324,8 @@ CI machines don't grant AX.
    Expect `permission_required` failure, channel banner appears, Settings
    button works. Re-grant, click Recheck, retry succeeds.
 
-Read-only AX calls (1–3) should pass `SafeBySheer` Jones evaluation. Test 4
-(perform) is where Jones evaluation matters; verify the UNSAFE/WARN/SAFE path
+Read-only AX calls (1–3) should pass `SafeBySheer` Security Agent evaluation. Test 4
+(perform) is where Security Agent evaluation matters; verify the UNSAFE/WARN/SAFE path
 lights up.
 
 ## 7. Risks / open questions
@@ -338,15 +338,15 @@ lights up.
    sandboxed builds. **Decision needed:** confirm Agent Smith ships
    unsandboxed (likely yes — bash tool, process killer, AppleScript) or scope
    AX features that won't survive sandboxing.
-2. **Jones evaluation policy for UI control.** `perform_ax_action` is
-   destructive — can click buttons, including ones that delete things. Jones
+2. **Security Agent evaluation policy for UI control.** `perform_ax_action` is
+   destructive — can click buttons, including ones that delete things. Security Agent
    currently reviews tool *args*. A bare `{action:"press", path:[...]}`
-   doesn't tell Jones whether the button says "Delete All." Either (a) have
+   doesn't tell Security Agent whether the button says "Delete All." Either (a) have
    `perform_ax_action` first read the target's title/role into the args
    before submission, or (b) read-then-decide internally and put resolved
    target description into the tool result. Recommend (a): the resolver runs
    a read pass and rewrites the args with `_resolvedTitle`/`_resolvedRole`
-   before Jones sees it. **Decision needed.**
+   before Security Agent sees it. **Decision needed.**
 3. **Streaming vs. windowed event capture.** v1 plan uses `watch_ax_events`
    as a fixed-duration capture. Real interactive use ("watch until you see
    X") needs streaming or polling. Per CLAUDE.md, tools are one-shot. Defer.

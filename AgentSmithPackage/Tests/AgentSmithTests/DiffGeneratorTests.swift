@@ -3,7 +3,7 @@ import Testing
 @testable import AgentSmithKit
 
 /// Tests for `DiffGenerator.renderAsText` — the plain-text rendering used to feed
-/// Jones a diff representation of `file_edit` calls. Verifies the same output the
+/// Security Agent a diff representation of `file_edit` calls. Verifies the same output the
 /// channel-log UI would show (`+1 -0`, `+ ` / `- ` line prefixes) is produced.
 @Suite("DiffGenerator text rendering")
 struct DiffGeneratorTests {

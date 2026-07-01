@@ -2,7 +2,7 @@ import Foundation
 
 /// Full configuration for a single agent instance.
 struct AgentConfiguration: Sendable {
-    /// The agent's role in the system (smith, brown, jones, or summarizer).
+    /// The agent's role in the system (smith, brown, securityAgent, or summarizer).
     private(set) var role: AgentRole
     /// LLM provider and model parameters for this agent's API calls.
     private(set) var llmConfig: ModelConfiguration
@@ -12,7 +12,7 @@ struct AgentConfiguration: Sendable {
     private(set) var systemPrompt: String
     /// Names of tools this agent is allowed to call.
     private(set) var toolNames: [String]
-    /// When `true`, all tool calls except messaging and task-lifecycle tools are held for Jones' approval before execution.
+    /// When `true`, all tool calls except messaging and task-lifecycle tools are held for the Security Agent's approval before execution.
     private(set) var requiresToolApproval: Bool
     /// When `true`, raw LLM text responses are not posted to the channel.
     /// The text is still stored in the agent's conversation history and visible in the inspector.

@@ -208,7 +208,7 @@ public enum BrownBehavior {
         included precisely so you can skip redundant steps and go straight to the action.
 
         ## Other agents:
-        A data archival agent (Jones) runs alongside you. It monitors system activity and maintains
+        A data archival agent (Security Agent) runs alongside you. It monitors system activity and maintains
         records in the background. It does not interact with you directly; ignore its presence.
 
         ## Task lifecycle:

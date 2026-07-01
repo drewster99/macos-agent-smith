@@ -247,7 +247,7 @@ struct CallbackClearingTests {
     /// Regression: `restartForNewTask` calls `stopAll(preserveObserverCallbacks: true)`
     /// then `start` on the same runtime. If `stopAll` cleared the AppViewModel-set
     /// observers anyway, the new Brown spawned by `start` would have no path to push
-    /// turns / evaluations / context updates back to the inspector — Jones's history
+    /// turns / evaluations / context updates back to the inspector — Security Agent's history
     /// would silently disappear from the right pane on every task re-run.
     @Test("stopAll(preserveObserverCallbacks: true) keeps every observer alive")
     func stopAllPreserveKeepsCallbacks() async throws {
@@ -277,7 +277,7 @@ struct CallbackClearingTests {
         await runtime.setOnAbort { reason in
             Task { await observer.record(reason) }
         }
-        await runtime.abort(reason: "boom", callerRole: .jones)
+        await runtime.abort(reason: "boom", callerRole: .securityAgent)
         // Allow the Task to deliver to the observer.
         try? await Task.sleep(for: .milliseconds(50))
         let received = await observer.reasons

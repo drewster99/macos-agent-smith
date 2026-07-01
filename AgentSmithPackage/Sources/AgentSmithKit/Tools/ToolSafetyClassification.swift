@@ -2,7 +2,7 @@ import Foundation
 
 /// Central, authoritative safety classification for our **built-in** tools, used to provide
 /// the default `AgentTool.isDestructive` / `AgentTool.isOpenWorld` values that the security
-/// agent (Jones) sees when scoping a task's tool set.
+/// agent (Security Agent) sees when scoping a task's tool set.
 ///
 /// Design notes:
 /// - **Fail-closed.** Any tool name not recognized here is treated as both destructive and
@@ -11,7 +11,7 @@ import Foundation
 ///   back to their (untrusted) server-supplied hints via `MCPBridgedTool`.
 /// - These are *facts* about tools we author, not hints. Unlike MCP annotations, the security
 ///   agent may rely on them as accurate.
-/// - Only `destructive` / `openWorld` are surfaced to Jones (per design); `readOnly` and
+/// - Only `destructive` / `openWorld` are surfaced to Security Agent (per design); `readOnly` and
 ///   `idempotent` are deliberately not modeled here.
 enum ToolSafetyClassification {
     /// Every built-in tool name we recognize. A name absent from this set is unknown

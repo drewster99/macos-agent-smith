@@ -115,8 +115,8 @@ struct SettingsView: View {
             Text("Security")
                 .font(AppFonts.sectionHeader)
 
-            Toggle("Pre-flight tool scoping (Jones picks each task's tools)", isOn: $shared.enablePreflightScoping)
-            Toggle("Per-tool-call security check (Jones reviews every tool call)", isOn: $shared.enablePerToolCheck)
+            Toggle("Pre-flight tool scoping (Security Agent picks each task's tools)", isOn: $shared.enablePreflightScoping)
+            Toggle("Per-tool-call security check (Security Agent reviews every tool call)", isOn: $shared.enablePerToolCheck)
 
             Text("Pre-flight scoping has the security agent choose which tools the worker may use for a task before it starts. The per-call check reviews each individual tool call (SAFE/WARN/UNSAFE/ABORT). Turning either off reduces oversight. Per-tool Always/Never overrides live in the Tools tab. Changes apply immediately to active sessions.")
                 .font(.caption)

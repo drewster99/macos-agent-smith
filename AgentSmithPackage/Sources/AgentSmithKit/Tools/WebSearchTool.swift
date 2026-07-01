@@ -9,7 +9,7 @@ import Foundation
 /// filtering and the result cap uniformly, so a future backend swap needs no change here.
 ///
 /// Note Brown can already reach arbitrary URLs via the `bash` tool (`curl`); this tool exists to
-/// give it *search* (find candidate URLs) through a single structured, Jones-gated call instead
+/// give it *search* (find candidate URLs) through a single structured, Security Agent-gated call instead
 /// of hand-rolled SERP scraping in bash.
 struct WebSearchTool: AgentTool {
     let name = "web_search"

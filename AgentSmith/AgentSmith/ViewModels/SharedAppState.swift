@@ -69,7 +69,7 @@ final class SharedAppState {
     }
 
     /// When true, transient lifecycle rows from agent restarts ("All agents stopped",
-    /// "Smith agent <id> is online", "Jones security evaluator online") are rendered. Off
+    /// "Smith agent <id> is online", "Security Agent online") are rendered. Off
     /// by default — these are mostly noise inside an active session and only useful when
     /// debugging spawn/stop flow. The runtime always emits the messages; this flag only
     /// gates whether the channel log surfaces them.
@@ -114,13 +114,13 @@ final class SharedAppState {
     /// that no overlay is shown — it just blocks briefly during startup.
     static let migrationOverlayThreshold = 8
 
-    /// Security: whether Jones runs the per-task pre-flight tool-scoping pass. Off ⇒ Brown starts
+    /// Security: whether Security Agent runs the per-task pre-flight tool-scoping pass. Off ⇒ Brown starts
     /// with all candidate tools (subject to global policy + per-task overrides). Takes effect on the
     /// next session start. Persisted.
     var enablePreflightScoping: Bool = SharedAppState.boolDefault(key: "enablePreflightScoping", default: true) {
         didSet { UserDefaults.standard.set(enablePreflightScoping, forKey: "enablePreflightScoping"); notifyToolSecurityChanged() }
     }
-    /// Security: whether Jones evaluates each individual Brown tool call (SAFE/WARN/UNSAFE/ABORT).
+    /// Security: whether Security Agent evaluates each individual Brown tool call (SAFE/WARN/UNSAFE/ABORT).
     /// Off ⇒ Brown's approved tools run without per-call review. Applied immediately to active sessions.
     var enablePerToolCheck: Bool = SharedAppState.boolDefault(key: "enablePerToolCheck", default: true) {
         didSet { UserDefaults.standard.set(enablePerToolCheck, forKey: "enablePerToolCheck"); notifyToolSecurityChanged() }
@@ -304,13 +304,13 @@ final class SharedAppState {
     private(set) var defaultAgentAssignments: [AgentRole: UUID] = [:]
     /// Default agent tunings (from bundled defaults) — used when creating a new session.
     private(set) var defaultAgentPollIntervals: [AgentRole: TimeInterval] = [
-        .smith: 20, .brown: 25, .jones: 13
+        .smith: 20, .brown: 25, .securityAgent: 13
     ]
     private(set) var defaultAgentMaxToolCalls: [AgentRole: Int] = [
-        .smith: 100, .brown: 100, .jones: 100
+        .smith: 100, .brown: 100, .securityAgent: 100
     ]
     private(set) var defaultAgentMessageDebounceIntervals: [AgentRole: TimeInterval] = [
-        .smith: 1, .brown: 1, .jones: 1
+        .smith: 1, .brown: 1, .securityAgent: 1
     ]
 
     /// Base-path persistence manager for shared files (memories, usage, overrides, sessions list).

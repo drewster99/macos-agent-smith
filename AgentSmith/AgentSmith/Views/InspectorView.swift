@@ -25,13 +25,13 @@ struct InspectorView: View {
     let viewModel: AppViewModel
 
     // Per-role message slices. Populated once when `viewModel.messages` ticks; each card
-    // watches only its own slice, so a Brown-only message doesn't dirty Smith or Jones.
+    // watches only its own slice, so a Brown-only message doesn't dirty Smith or Security Agent.
     // The summarizer slice is also bucketed here so SummarizerAgentCard doesn't need to
     // run its own `viewModel.messages` watcher — having two watchers on the same source
     // array led to SwiftUI's "tried to update multiple times per frame" warnings.
     @State private var smithMessages: [ChannelMessage] = []
     @State private var brownMessages: [ChannelMessage] = []
-    @State private var jonesMessages: [ChannelMessage] = []
+    @State private var securityAgentMessages: [ChannelMessage] = []
     @State private var summarizerMessages: [ChannelMessage] = []
 
     /// Buckets channel messages by their sending agent role in one pass.
@@ -62,7 +62,7 @@ struct InspectorView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     RoleAgentCard(viewModel: viewModel, role: .smith, roleMessages: smithMessages)
                     RoleAgentCard(viewModel: viewModel, role: .brown, roleMessages: brownMessages)
-                    RoleAgentCard(viewModel: viewModel, role: .jones, roleMessages: jonesMessages)
+                    RoleAgentCard(viewModel: viewModel, role: .securityAgent, roleMessages: securityAgentMessages)
                     SummarizerAgentCard(viewModel: viewModel, summarizerMessages: summarizerMessages)
                 }
             }
@@ -87,12 +87,12 @@ struct InspectorView: View {
         let buckets = Self.bucketMessagesByRole(viewModel.messages)
         let nextSmith = buckets[.smith] ?? []
         let nextBrown = buckets[.brown] ?? []
-        let nextJones = buckets[.jones] ?? []
+        let nextSecurityAgent = buckets[.securityAgent] ?? []
         let nextSummarizer = buckets[.summarizer] ?? []
         DispatchQueue.main.async {
             if smithMessages != nextSmith { smithMessages = nextSmith }
             if brownMessages != nextBrown { brownMessages = nextBrown }
-            if jonesMessages != nextJones { jonesMessages = nextJones }
+            if securityAgentMessages != nextSecurityAgent { securityAgentMessages = nextSecurityAgent }
             if summarizerMessages != nextSummarizer { summarizerMessages = nextSummarizer }
         }
     }
@@ -168,7 +168,7 @@ private struct RoleAgentCard: View {
         .onChange(of: roleMessages)                                                  { _, _ in recompute() }
         .onChange(of: viewModel.inspectorStore.turnsByRole[role])                    { _, _ in recompute() }
         .onChange(of: viewModel.inspectorStore.liveContexts[role])                   { _, _ in recompute() }
-        .onChange(of: role == .jones ? viewModel.inspectorStore.evaluationRecords.count : 0)
+        .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationRecords.count : 0)
                                                                                      { _, _ in recompute() }
         .onChange(of: viewModel.processingRoles.contains(role))                      { _, _ in recompute() }
         .onChange(of: viewModel.toolExecutingByRole[role])                           { _, _ in recompute() }
@@ -246,7 +246,7 @@ private struct RoleAgentCard: View {
             currentSystemPrompt: store.systemPrompt(for: role),
             hasActivity: !roleMessages.isEmpty,
             availableTools: viewModel.agentToolNames[role] ?? [],
-            evaluationRecords: role == .jones ? store.evaluationRecords : [],
+            evaluationRecords: role == .securityAgent ? store.evaluationRecords : [],
             isProcessing: viewModel.processingRoles.contains(role),
             executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[role]),
             modelConfig: viewModel.resolvedAgentConfigs[role]
@@ -367,7 +367,7 @@ private struct AgentCard: View {
     @State private var showingConfig = false
     @State private var expandedTurnIDs: Set<UUID> = []
 
-    /// Smith and Brown open in a separate window; Jones expands inline.
+    /// Smith and Brown open in a separate window; Security Agent expands inline.
     private var opensInWindow: Bool { role == .smith || role == .brown }
 
     private var roleColor: Color { AppColors.color(for: .agent(role)) }
@@ -378,7 +378,7 @@ private struct AgentCard: View {
         switch role {
         case .smith: return "Agent Smith"
         case .brown: return "Agent Brown"
-        case .jones: return "Security Agent"
+        case .securityAgent: return "Security Agent"
         case .summarizer: return "Summarizer"
         }
     }
@@ -425,8 +425,8 @@ private struct AgentCard: View {
                         AgentCardStatusBadge(
                             isProcessing: isProcessing,
                             hasActivity: hasActivity,
-                            isJones: role == .jones,
-                            isTerminated: role != .jones && isTerminated,
+                            isSecurityAgent: role == .securityAgent,
+                            isTerminated: role != .securityAgent && isTerminated,
                             executingTools: executingTools,
                             processingStartDate: processingStartDate,
                             toolExecutingStartDate: toolExecutingStartDate

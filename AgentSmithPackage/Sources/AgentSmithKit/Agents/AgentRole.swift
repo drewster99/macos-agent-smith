@@ -5,7 +5,7 @@ import Synchronization
 public enum AgentRole: String, Codable, Sendable, CaseIterable, CodingKeyRepresentable {
     case smith
     case brown
-    case jones
+    case securityAgent
     case summarizer
 
     /// Thread-safe storage for the user's preferred nickname.
@@ -18,14 +18,14 @@ public enum AgentRole: String, Codable, Sendable, CaseIterable, CodingKeyReprese
     }
 
     /// Roles that must be configured for the system to start.
-    public static let requiredRoles: [AgentRole] = [.smith, .brown, .jones, .summarizer]
+    public static let requiredRoles: [AgentRole] = [.smith, .brown, .securityAgent, .summarizer]
 
     /// Human-readable name for display.
     public var displayName: String {
         switch self {
         case .smith: return "Smith"
         case .brown: return "Brown"
-        case .jones: return "Jones"
+        case .securityAgent: return "Security Agent"
         case .summarizer: return "Summarizer"
         }
     }

@@ -9,7 +9,7 @@ import SwiftUI
 struct AgentCardStatusBadge: View {
     let isProcessing: Bool
     let hasActivity: Bool
-    let isJones: Bool
+    let isSecurityAgent: Bool
     /// True when the agent has activity history but no live tools — i.e. it has been
     /// terminated. Driven by `availableTools.isEmpty && !contextMessages.isEmpty`.
     let isTerminated: Bool
@@ -25,7 +25,7 @@ struct AgentCardStatusBadge: View {
                 HStack(spacing: 4) {
                     ProgressView()
                         .controlSize(.mini)
-                    Text(isJones ? "Evaluating" : "Thinking")
+                    Text(isSecurityAgent ? "Evaluating" : "Thinking")
                         .font(AppFonts.inspectorLabel)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

@@ -1,9 +1,9 @@
 import SwiftUI
 import AgentSmithKit
 
-/// All sections that appear under an `AgentCard` when it is expanded inline (Jones, the
+/// All sections that appear under an `AgentCard` when it is expanded inline (Security Agent, the
 /// only role that doesn't open in a separate window). Drives `Available Tools`, security
-/// `Evaluations` (Jones only), `Recent Tool Calls`, `Recent Messages`, `Context`, the
+/// `Evaluations` (Security Agent only), `Recent Tool Calls`, `Recent Messages`, `Context`, the
 /// `LLM Turns` disclosure list, and the per-agent `Direct Message` input.
 struct AgentCardExpandedSections: View {
     let role: AgentRole
@@ -24,8 +24,8 @@ struct AgentCardExpandedSections: View {
                 }
             }
 
-            // Jones: evaluations are the primary work product, surface above tool calls.
-            if role == .jones && !evaluationRecords.isEmpty {
+            // Security Agent: evaluations are the primary work product, surface above tool calls.
+            if role == .securityAgent && !evaluationRecords.isEmpty {
                 InspectorSection(title: "Security Evaluations (\(evaluationRecords.count))") {
                     ForEach(Array(evaluationRecords.suffix(10).reversed())) { record in
                         EvaluationRecordRow(record: record)
@@ -85,8 +85,8 @@ struct AgentCardExpandedSections: View {
                 // Security Agent's turn list churn open messily.)
             }
 
-            // Direct message input — hidden for Jones since its filter drops private messages.
-            if role != .jones {
+            // Direct message input — hidden for Security Agent since its filter drops private messages.
+            if role != .securityAgent {
                 InspectorSection(title: "Direct Message") {
                     DirectMessageInputRow(
                         placeholder: "Message \(role.displayName) privately…",

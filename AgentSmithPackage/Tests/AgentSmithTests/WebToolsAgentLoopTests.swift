@@ -5,10 +5,10 @@ import SwiftLLMKit
 
 /// Closes the "in-app behavior" requirement WITHOUT the GUI: it drives a REAL Brown `AgentActor`
 /// through the live agent loop (via `MockLLMProvider`) so the agent actually *invokes*
-/// `web_search` / `instant_answer` and receives their results, and it exercises the REAL Jones
+/// `web_search` / `instant_answer` and receives their results, and it exercises the REAL Security Agent
 /// `SecurityEvaluator` gating those same tools (approve on SAFE, deny on UNSAFE). No network
 /// (stub backend / `URLProtocolStub`), no LLM credits, no window automation — the substance of
-/// "Brown calls the tools through the live loop and Jones gates them," made deterministic.
+/// "Brown calls the tools through the live loop and Security Agent gates them," made deterministic.
 @Suite("Web tools agent loop", .serialized)
 struct WebToolsAgentLoopTests {
 
@@ -105,9 +105,9 @@ struct WebToolsAgentLoopTests {
         #expect(result?.contains("Swift") == true)
     }
 
-    // MARK: - Jones gates the tools (real SecurityEvaluator)
+    // MARK: - Security Agent gates the tools (real SecurityEvaluator)
 
-    private func makeJones(verdict: String) -> SecurityEvaluator {
+    private func makeSecurityAgent(verdict: String) -> SecurityEvaluator {
         SecurityEvaluator(
             provider: MockLLMProvider(responses: [LLMResponse(text: verdict)]),
             systemPrompt: "You are a security gatekeeper. Reply SAFE/WARN/UNSAFE/ABORT.",
@@ -118,8 +118,8 @@ struct WebToolsAgentLoopTests {
         )
     }
 
-    private func evaluate(_ jones: SecurityEvaluator, tool: any AgentTool, params: String) async -> SecurityDisposition {
-        await jones.evaluate(
+    private func evaluate(_ securityAgent: SecurityEvaluator, tool: any AgentTool, params: String) async -> SecurityDisposition {
+        await securityAgent.evaluate(
             toolName: tool.name,
             toolParams: params,
             toolDescription: tool.toolDescription,
@@ -133,21 +133,21 @@ struct WebToolsAgentLoopTests {
         )
     }
 
-    @Test("Jones approves web_search on a SAFE verdict")
-    func jonesApprovesWebSearch() async {
-        let disposition = await evaluate(makeJones(verdict: "SAFE"), tool: WebSearchTool(), params: #"{"query":"swift"}"#)
+    @Test("Security Agent approves web_search on a SAFE verdict")
+    func securityAgentApprovesWebSearch() async {
+        let disposition = await evaluate(makeSecurityAgent(verdict: "SAFE"), tool: WebSearchTool(), params: #"{"query":"swift"}"#)
         #expect(disposition.approved)
     }
 
-    @Test("Jones denies web_search on an UNSAFE verdict")
-    func jonesDeniesWebSearch() async {
-        let disposition = await evaluate(makeJones(verdict: "UNSAFE: not allowed"), tool: WebSearchTool(), params: #"{"query":"swift"}"#)
+    @Test("Security Agent denies web_search on an UNSAFE verdict")
+    func securityAgentDeniesWebSearch() async {
+        let disposition = await evaluate(makeSecurityAgent(verdict: "UNSAFE: not allowed"), tool: WebSearchTool(), params: #"{"query":"swift"}"#)
         #expect(!disposition.approved)
     }
 
-    @Test("Jones approves instant_answer on a SAFE verdict")
-    func jonesApprovesInstantAnswer() async {
-        let disposition = await evaluate(makeJones(verdict: "SAFE"), tool: InstantAnswerTool(), params: #"{"query":"Swift"}"#)
+    @Test("Security Agent approves instant_answer on a SAFE verdict")
+    func securityAgentApprovesInstantAnswer() async {
+        let disposition = await evaluate(makeSecurityAgent(verdict: "SAFE"), tool: InstantAnswerTool(), params: #"{"query":"Swift"}"#)
         #expect(disposition.approved)
     }
 }

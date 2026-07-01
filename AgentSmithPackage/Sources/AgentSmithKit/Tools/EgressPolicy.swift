@@ -4,7 +4,7 @@ import Foundation
 /// RFC1918 private, CGNAT (RFC 6598), IPv6 ULA, IPv4-mapped-private, or the unspecified address.
 ///
 /// Used only by `web_fetch`'s redirect guard: a *direct* request is never gated here (the security
-/// agent, Jones, evaluates the URL the model explicitly chose), but a silent 30x redirect into
+/// agent, Security Agent, evaluates the URL the model explicitly chose), but a silent 30x redirect into
 /// private space bypasses that review entirely, so those hops are refused. Hostnames are resolved
 /// before classification so a public name that points at a private IP is still caught.
 enum EgressPolicy {

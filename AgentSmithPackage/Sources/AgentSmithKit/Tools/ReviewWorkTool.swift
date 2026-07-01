@@ -6,7 +6,7 @@ struct ReviewWorkTool: AgentTool {
     let name = "review_work"
     let toolDescription = """
         Review Brown's submitted work on a task (must be in awaitingReview status). \
-        Set `accepted` to `true` to mark the task completed and terminate Brown + Jones. \
+        Set `accepted` to `true` to mark the task completed and terminate Brown + Security Agent. \
         Set `accepted` to `false` to return the task to running and send feedback to Brown. \
         `feedback` is required when `accepted` is `false`.
         

@@ -11,17 +11,17 @@ struct MCPBridgedTool: AgentTool {
     let serverName: String
     let serverID: UUID
     /// The server's own `instructions` from the MCP handshake (a server-level description),
-    /// surfaced to Jones as the tool group's description during scoping. nil when the server
+    /// surfaced to Security Agent as the tool group's description during scoping. nil when the server
     /// provided none.
     let serverInstructions: String?
     let originalToolName: String
     let toolDescription: String
     let parameters: [String: AnyCodable]
-    /// `readOnlyHint` from the server's tool annotations, surfaced to Jones. These are
+    /// `readOnlyHint` from the server's tool annotations, surfaced to Security Agent. These are
     /// hints from the user-provided server and are never trusted for access decisions.
     let isReadOnlyHint: Bool?
     /// `destructiveHint` / `openWorldHint` from the server's tool annotations. Like
-    /// `isReadOnlyHint`, these are untrusted claims from the user-provided server — advisory context for Jones
+    /// `isReadOnlyHint`, these are untrusted claims from the user-provided server — advisory context for Security Agent
     /// only, never a grant mechanism. Absent hint → fail-closed `true` via the computed
     /// `isDestructive` / `isOpenWorld` below.
     let destructiveHint: Bool?
@@ -40,7 +40,7 @@ struct MCPBridgedTool: AgentTool {
     var executionTimeout: Duration { .seconds(14400) }  // 4 hours
 
     /// Fail-closed: an MCP tool that doesn't declare `destructiveHint` is assumed destructive.
-    /// Untrusted — surfaced to Jones as a server-claimed hint, never used to grant access.
+    /// Untrusted — surfaced to Security Agent as a server-claimed hint, never used to grant access.
     var isDestructive: Bool { destructiveHint ?? true }
 
     /// Fail-closed: an MCP tool that doesn't declare `openWorldHint` is assumed open-world.

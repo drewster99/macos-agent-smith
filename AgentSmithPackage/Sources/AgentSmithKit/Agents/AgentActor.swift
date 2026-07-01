@@ -21,7 +21,7 @@ public actor AgentActor {
     private var toolRegistry = ToolRegistry()
     /// When true (Brown only), this agent's tools are security-scoped per task: candidates are
     /// seeded *disabled* and only `approvedToolNames` (plus forced lifecycle tools) are
-    /// available. When false (Smith/Jones), every candidate is seeded approved (no scoping).
+    /// available. When false (Smith/Security Agent), every candidate is seeded approved (no scoping).
     private var toolScopingEnabled = false
     /// The current security-approved tool names (the scoping verdict). Drives `isApproved`.
     private var approvedToolNames: Set<String> = []
@@ -38,11 +38,11 @@ public actor AgentActor {
     /// AFTER the global policy (so they win) and re-applied every refresh, so a re-scope can't
     /// clobber the user's choice.
     private var userToolOverrides: [String: Bool] = [:]
-    /// Whether Jones pre-flight scoping is active for this worker. When false, the base approved set
+    /// Whether Security Agent pre-flight scoping is active for this worker. When false, the base approved set
     /// is "every current candidate" (no scoping verdict, no mid-task re-scope); global policy and
     /// per-task overrides still apply on top.
     private var preflightScopingActive = true
-    /// Whether the per-tool-call security evaluation (Jones SAFE/WARN/UNSAFE/ABORT) is active. When
+    /// Whether the per-tool-call security evaluation (Security Agent SAFE/WARN/UNSAFE/ABORT) is active. When
     /// false, Brown's approved tools execute without per-call review. Live-toggleable from Settings.
     private var perCallApprovalEnabled = true
     /// Fired when the approved tool set changes (initial scope already happened in the runtime;
@@ -59,7 +59,7 @@ public actor AgentActor {
     private var isRunning = false
     private var runTask: Task<Void, Never>?
 
-    /// Direct security evaluator for tool approval (replaces Jones agent + ToolRequestGate).
+    /// Direct security evaluator for tool approval (replaces Security Agent + ToolRequestGate).
     private var securityEvaluator: SecurityEvaluator?
     /// Token usage store for persistent analytics. Set via `setUsageStore(_:)`.
     private var usageStore: UsageStore?
@@ -255,7 +255,7 @@ public actor AgentActor {
     private var onAutoRunTask: (@Sendable (UUID) async -> Void)?
 
     private var maxToolCallsPerIteration: Int
-    /// Maximum concurrent Jones security evaluations to prevent overwhelming the LLM backend.
+    /// Maximum concurrent Security Agent evaluations to prevent overwhelming the LLM backend.
     private static let maxConcurrentEvaluations = 5
 
     /// Worst-case character overhead for tool definitions and per-turn suffixes
@@ -471,7 +471,7 @@ public actor AgentActor {
         userToolOverrides = overrides
     }
 
-    /// Whether Jones pre-flight scoping is active (false ⇒ base set is all candidates, no re-scope).
+    /// Whether Security Agent pre-flight scoping is active (false ⇒ base set is all candidates, no re-scope).
     public func setPreflightScopingActive(_ active: Bool) {
         preflightScopingActive = active
     }
@@ -747,7 +747,7 @@ public actor AgentActor {
         // orphaned the call. Without this, the agent shows "Thinking"/"Evaluating" indefinitely
         // after being paused/stopped. Firing `false` here is idempotent with the eventual defer.
         toolContext.onProcessingStateChange(false)
-        toolContext.onJonesProcessingStateChange(false)
+        toolContext.onSecurityAgentProcessingStateChange(false)
 
         // Drop UI/runtime observer callbacks now that the agent has shut down.
         // Releases the strong references those closures hold against the app
@@ -846,7 +846,7 @@ public actor AgentActor {
         let candidates = tools + dynamic
 
         guard toolScopingEnabled else {
-            // Unscoped agents (Smith/Jones): every candidate approved → activeTools == all
+            // Unscoped agents (Smith/Security Agent): every candidate approved → activeTools == all
             // candidates, identical to the pre-registry behavior.
             toolRegistry.rebuild(candidates: candidates, defaultApproved: true)
             activeTools = toolRegistry.availableTools()
@@ -912,8 +912,8 @@ public actor AgentActor {
     private func rescopeToolsStateless() async {
         guard let evaluator = securityEvaluator,
               let task = await currentTaskForScoping() else { return }
-        // Light the Security Agent card while it re-scopes (a real Jones LLM call).
-        toolContext.onJonesProcessingStateChange(true)
+        // Light the Security Agent card while it re-scopes (a real Security Agent LLM call).
+        toolContext.onSecurityAgentProcessingStateChange(true)
         //TODO: CLAUDE RIGHT HERE
         // TEMP DEBUG — complete tool-registry dump (remove me).
         do {
@@ -949,10 +949,10 @@ public actor AgentActor {
             taskID: task.id.uuidString,
             taskDescription: task.description
         )
-        toolContext.onJonesProcessingStateChange(false)
+        toolContext.onSecurityAgentProcessingStateChange(false)
         guard result.succeeded else { return }
         // Only act when the *approved* set actually changed. A candidate-set change that
-        // leaves Brown's usable tools identical (e.g. a new MCP tool that Jones blocks) must
+        // leaves Brown's usable tools identical (e.g. a new MCP tool that Security Agent blocks) must
         // not persist a redundant record or nag Brown.
         guard result.approvedNames != approvedToolNames else { return }
         approvedToolNames = result.approvedNames
@@ -1641,7 +1641,7 @@ public actor AgentActor {
                 let parallelCount = segment.calls.count
 
                 var entries: [ParallelEntry] = []
-                // Calls rejected before Jones evaluation (unavailable for role / unknown tool).
+                // Calls rejected before Security Agent evaluation (unavailable for role / unknown tool).
                 // Tracked alongside evaluated results so we can keep tool_result ordering aligned
                 // with the assistant message's tool_use ordering.
                 var preRejections: [(batchIndex: Int, callID: String, result: String)] = []
@@ -1668,7 +1668,7 @@ public actor AgentActor {
                     let callID: String
                     let result: String
                     /// Wall-clock ms spent inside `tool.execute(...)`. Zero for denied
-                    /// calls (which skip execute entirely). Does NOT include the Jones
+                    /// calls (which skip execute entirely). Does NOT include the Security Agent
                     /// security-evaluation LLM call — that gets its own UsageRecord.
                     let executionMs: Int
                 }
@@ -1678,8 +1678,8 @@ public actor AgentActor {
                 let ctx = toolContext
                 let agentIDPrefix = String(id.uuidString.prefix(8))
 
-                let jonesActiveCount = OSAllocatedUnfairLock(initialState: 0)
-                let jonesCallback = ctx.onJonesProcessingStateChange
+                let securityAgentActiveCount = OSAllocatedUnfairLock(initialState: 0)
+                let securityAgentCallback = ctx.onSecurityAgentProcessingStateChange
 
                 // Evaluate + execute a single entry. Extracted so the sliding
                 // window doesn't duplicate the task body.
@@ -1687,11 +1687,11 @@ public actor AgentActor {
                     let toolDef = entry.tool.definition(for: role)
                     let toolParamDefs = AgentActor.formatToolParameterDefinitions(toolDef.parameters)
 
-                    let shouldSignalStart = jonesActiveCount.withLock { count -> Bool in
+                    let shouldSignalStart = securityAgentActiveCount.withLock { count -> Bool in
                         count += 1
                         return count == 1
                     }
-                    if shouldSignalStart { jonesCallback(true) }
+                    if shouldSignalStart { securityAgentCallback(true) }
 
                     let disposition = await evaluator.evaluate(
                         toolName: entry.call.name,
@@ -1706,11 +1706,11 @@ public actor AgentActor {
                         toolCallID: entry.call.id
                     )
 
-                    let shouldSignalEnd = jonesActiveCount.withLock { count -> Bool in
+                    let shouldSignalEnd = securityAgentActiveCount.withLock { count -> Bool in
                         count -= 1
                         return count == 0
                     }
-                    if shouldSignalEnd { jonesCallback(false) }
+                    if shouldSignalEnd { securityAgentCallback(false) }
 
                     await AgentActor.postSecurityReviewToChannel(
                         disposition: disposition, call: entry.call, role: role, roleName: roleName, context: ctx
@@ -1725,7 +1725,7 @@ public actor AgentActor {
                         result = outcome.result
                         executionMs = outcome.executionMs
                         // Mirror the sequential `directExecute` path: record the outcome on the
-                        // shared tracker so Jones's recent-tool-calls context shows whether this
+                        // shared tracker so Security Agent's recent-tool-calls context shows whether this
                         // approved call actually succeeded or failed. Without this, parallel
                         // batches of approval-needing calls (e.g., file_read fan-out) leave
                         // every entry tagged "[executed: not yet recorded]" and a legitimate
@@ -1755,7 +1755,7 @@ public actor AgentActor {
                     )
                 }
 
-                // Sliding window: at most maxConcurrentEvaluations Jones calls in flight.
+                // Sliding window: at most maxConcurrentEvaluations Security Agent calls in flight.
                 let results: [ParallelToolResult] = await withTaskGroup(
                     of: ParallelToolResult.self,
                     returning: [ParallelToolResult].self
@@ -1968,7 +1968,7 @@ public actor AgentActor {
         }
 
         let siblings = siblingCallSummaries.isEmpty ? nil : siblingCallSummaries.joined(separator: "\n")
-        toolContext.onJonesProcessingStateChange(true)
+        toolContext.onSecurityAgentProcessingStateChange(true)
         let disposition = await evaluator.evaluate(
             toolName: call.name,
             toolParams: call.arguments,
@@ -1981,7 +1981,7 @@ public actor AgentActor {
             agentRoleName: configuration.role.displayName,
             toolCallID: call.id
         )
-        toolContext.onJonesProcessingStateChange(false)
+        toolContext.onSecurityAgentProcessingStateChange(false)
 
         // Post approval/denial status.
         await Self.postSecurityReviewToChannel(
@@ -2204,14 +2204,14 @@ public actor AgentActor {
             statusContent = "Auto-approved (WARN retry)"
             securityDisposition = "autoApproved"
         } else if disposition.approved {
-            statusContent = "Jones → \(roleName): SAFE\(disposition.message.map { " \($0)" } ?? "")"
+            statusContent = "Security Agent → \(roleName): SAFE\(disposition.message.map { " \($0)" } ?? "")"
             securityDisposition = "approved"
         } else if disposition.isWarning {
             let warnSummary = disposition.message?.components(separatedBy: "\n").first ?? ""
-            statusContent = "Jones → \(roleName): WARN: \(warnSummary)"
+            statusContent = "Security Agent → \(roleName): WARN: \(warnSummary)"
             securityDisposition = "warning"
         } else {
-            statusContent = "Jones → \(roleName): UNSAFE: \(disposition.message ?? "no reason given")"
+            statusContent = "Security Agent → \(roleName): UNSAFE: \(disposition.message ?? "no reason given")"
             securityDisposition = "denied"
         }
         var reviewMetadata: [String: AnyCodable] = [

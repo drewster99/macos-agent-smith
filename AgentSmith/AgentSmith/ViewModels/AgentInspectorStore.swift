@@ -23,7 +23,7 @@ final class AgentInspectorStore {
     /// Live conversation history for each agent, pushed on every material change.
     var liveContexts: [AgentRole: [LLMMessage]] = [:]
 
-    /// Security evaluation records from Jones/SecurityEvaluator.
+    /// Security evaluation records from Security Agent/SecurityEvaluator.
     var evaluationRecords: [EvaluationRecord] = []
 
     // MARK: - Push API (called from runtime callbacks)

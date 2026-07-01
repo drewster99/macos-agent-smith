@@ -143,7 +143,7 @@ struct ToolRegistryTests {
 
     @Test("built-in safety classification: read-only vs destructive vs open-world")
     func safetyClassification() {
-        // Sanity-check the central classification that feeds Jones.
+        // Sanity-check the central classification that feeds Security Agent.
         #expect(ToolSafetyClassification.isDestructive(toolName: "bash") == true)
         #expect(ToolSafetyClassification.isOpenWorld(toolName: "bash") == true)
         #expect(ToolSafetyClassification.isDestructive(toolName: "file_write") == true)

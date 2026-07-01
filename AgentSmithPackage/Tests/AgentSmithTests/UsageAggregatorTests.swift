@@ -270,7 +270,7 @@ struct UsageAggregatorTests {
             makeRecord(agentRole: .brown, inputTokens: 100),
             makeRecord(agentRole: .smith, inputTokens: 200),
             makeRecord(agentRole: .brown, inputTokens: 300),
-            makeRecord(agentRole: .jones, inputTokens: 50),
+            makeRecord(agentRole: .securityAgent, inputTokens: 50),
         ]
         let grouped = testAggregator.byAgent(records)
 
@@ -279,8 +279,8 @@ struct UsageAggregatorTests {
         #expect(grouped[.brown]?.totalInputTokens == 400)
         #expect(grouped[.smith]?.callCount == 1)
         #expect(grouped[.smith]?.totalInputTokens == 200)
-        #expect(grouped[.jones]?.callCount == 1)
-        #expect(grouped[.jones]?.totalInputTokens == 50)
+        #expect(grouped[.securityAgent]?.callCount == 1)
+        #expect(grouped[.securityAgent]?.totalInputTokens == 50)
     }
 
     // MARK: - Group by provider

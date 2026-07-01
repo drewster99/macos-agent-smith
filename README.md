@@ -20,13 +20,13 @@ Four fixed roles, each with one job:
 | --- | --- |
 | **Smith** | Orchestrator. Talks to you, breaks requests into tasks, supervises the work, reviews results. Never touches the tools itself. |
 | **Brown** | Worker. Spawned per task with the bash, file, and process tools to actually get things done. |
-| **Jones** | Security gatekeeper. Silently rates every one of Brown's tool calls — `SAFE` / `WARN` / `UNSAFE` / `ABORT` — and can stop the line. |
+| **Security Agent** | Security gatekeeper. Silently rates every one of Brown's tool calls — `SAFE` / `WARN` / `UNSAFE` / `ABORT` — and can stop the line. |
 | **Summarizer** | Distills finished tasks into memory the team can draw on later. |
 
 ## Highlights
 
 - **Real tools, real shell** — Brown runs `bash`, reads and edits files, manages processes. Not a sandbox toy.
-- **Security built in, not bolted on** — Jones gates destructive actions before they run. Separation of duties by design.
+- **Security built in, not bolted on** — Security Agent gates destructive actions before they run. Separation of duties by design.
 - **Multi-session** — run independent jobs side by side in their own tabs and windows.
 - **Persistent memory** — semantic-search-backed memory so the team remembers what it learned.
 - **Agent inspector** — open any agent's full conversation, tool calls, and security verdicts, live or after the fact.

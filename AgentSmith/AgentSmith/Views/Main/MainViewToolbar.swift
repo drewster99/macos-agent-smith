@@ -56,7 +56,7 @@ struct MainViewToolbar: ToolbarContent {
             }
             .disabled(viewModel.messages.isEmpty)
 
-            // Jones-visibility chip — surfaces the silent gatekeeper. Total reviews
+            // Security Agent-visibility chip — surfaces the silent gatekeeper. Total reviews
             // and any flagged ones (denied / WARN that didn't auto-approve on retry).
             // Hidden until at least one review has happened so the toolbar doesn't
             // carry a "0" pre-first-task. Click opens the inspector where the full
@@ -72,8 +72,8 @@ struct MainViewToolbar: ToolbarContent {
                 })
                 .foregroundStyle(safetyFlagged > 0 ? .orange : .secondary)
                 .help(safetyFlagged > 0
-                      ? "Jones safety reviews — \(safetyTotal) total, \(safetyFlagged) flagged. Click to open the inspector."
-                      : "Jones safety reviews — \(safetyTotal) total. Click to open the inspector.")
+                      ? "Security Agent safety reviews — \(safetyTotal) total, \(safetyFlagged) flagged. Click to open the inspector."
+                      : "Security Agent safety reviews — \(safetyTotal) total. Click to open the inspector.")
             }
 
             Button(viewModel.showInspector ? "Hide Inspector" : "Show Inspector",

@@ -32,7 +32,7 @@ struct MCPServerManagementView: View {
                 })
             }
 
-            Text("Brown can call tools exposed by these local MCP servers. Every call is gated by Jones, the security reviewer. Servers run per session and start when a session starts.")
+            Text("Brown can call tools exposed by these local MCP servers. Every call is gated by Security Agent, the security reviewer. Servers run per session and start when a session starts.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

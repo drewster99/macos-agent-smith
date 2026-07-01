@@ -115,9 +115,9 @@ public enum DiffGenerator {
 
     /// Renders an existing `[DiffLine]` array into a unified-diff-style plain-text
     /// block — `+ ` for additions, `- ` for removals, `  ` for unchanged context
-    /// lines, plus a leading summary like `+1 -0`. Used to feed Jones (the security
+    /// lines, plus a leading summary like `+1 -0`. Used to feed Security Agent (the security
     /// evaluator) a representation of a `file_edit` call that's identical in shape
-    /// to what the UI displays, so Jones reasons about the *actual change* rather
+    /// to what the UI displays, so Security Agent reasons about the *actual change* rather
     /// than about the literal `new_string` parameter (which includes anchor context
     /// and is easy to misread as "two added items" when only one is being added).
     public static func renderAsText(lines: [DiffLine]) -> String {

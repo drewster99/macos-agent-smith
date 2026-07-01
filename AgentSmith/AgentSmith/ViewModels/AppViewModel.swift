@@ -192,19 +192,19 @@ final class AppViewModel {
 
     /// Per-session idle poll intervals for each agent role (seconds).
     var agentPollIntervals: [AgentRole: TimeInterval] = [
-        .smith: 20, .brown: 25, .jones: 13
+        .smith: 20, .brown: 25, .securityAgent: 13
     ] {
         didSet { persistSessionStateAsync() }
     }
     /// Per-session maximum tool calls per LLM response for each agent role.
     var agentMaxToolCalls: [AgentRole: Int] = [
-        .smith: 100, .brown: 100, .jones: 100
+        .smith: 100, .brown: 100, .securityAgent: 100
     ] {
         didSet { persistSessionStateAsync() }
     }
     /// Per-session message debounce intervals for each agent role (seconds).
     var agentMessageDebounceIntervals: [AgentRole: TimeInterval] = [
-        .smith: 1, .brown: 1, .jones: 1
+        .smith: 1, .brown: 1, .securityAgent: 1
     ] {
         didSet { persistSessionStateAsync() }
     }
@@ -1211,7 +1211,7 @@ final class AppViewModel {
 
     /// Rebuilds this session's per-role LLM providers from the current model assignments and pushes
     /// them to the live runtime, so a model swap in Settings takes effect on the next task (Brown and
-    /// Jones re-read the providers at spawn; Smith/summarizer on the next runtime restart) without a
+    /// Security Agent re-read the providers at spawn; Smith/summarizer on the next runtime restart) without a
     /// session restart. A per-role build failure is logged and skipped — the runtime keeps that role's
     /// existing provider — so one misconfigured model can't break the others.
     private func pushUpdatedProviders() async {

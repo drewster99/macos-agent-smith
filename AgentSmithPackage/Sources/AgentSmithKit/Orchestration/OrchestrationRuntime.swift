@@ -53,8 +53,8 @@ public actor OrchestrationRuntime {
     private var smithID: UUID?
     private var agents: [UUID: AgentActor] = [:]
     /// Global tool-security configuration (user Settings); applied to each Brown at spawn.
-    /// `preflightScopingEnabled` gates the Jones pre-flight scoping pass; `perCallCheckEnabled`
-    /// gates the per-tool-call Jones evaluation; `globalToolPolicy` is the per-tool Always/Never map.
+    /// `preflightScopingEnabled` gates the Security Agent pre-flight scoping pass; `perCallCheckEnabled`
+    /// gates the per-tool-call Security Agent evaluation; `globalToolPolicy` is the per-tool Always/Never map.
     private var preflightScopingEnabled = true
     private var perCallCheckEnabled = true
     private var globalToolPolicy: [String: ToolPolicy] = [:]
@@ -108,7 +108,7 @@ public actor OrchestrationRuntime {
     /// by session without having to join timestamps to a separate session log.
     public private(set) var currentSessionID: UUID?
 
-    /// Set by Jones abort — prevents restart until user clears it.
+    /// Set by Security Agent abort — prevents restart until user clears it.
     private var aborted = false
     /// Callback to notify the app layer when abort is triggered.
     private var onAbort: (@Sendable (String) -> Void)?
@@ -567,7 +567,7 @@ public actor OrchestrationRuntime {
         autoAdvanceEnabled = enabled
     }
 
-    /// Registers a callback fired when Jones triggers an abort.
+    /// Registers a callback fired when Security Agent triggers an abort.
     public func setOnAbort(_ handler: @escaping @Sendable (String) -> Void) {
         onAbort = handler
     }
@@ -641,7 +641,7 @@ public actor OrchestrationRuntime {
     /// model change in Settings takes effect without tearing down the session. Merges by role —
     /// roles absent from the passed dictionaries keep their current provider.
     ///
-    /// Timing: Brown and its `SecurityEvaluator` (Jones) read `llmProviders`/`llmConfigs` at spawn,
+    /// Timing: Brown and its `SecurityEvaluator` (Security Agent) read `llmProviders`/`llmConfigs` at spawn,
     /// so they pick up the new model on the **next task**. The long-lived Smith and the
     /// `TaskSummarizer` are rebuilt from these same dicts on the next runtime restart
     /// (`restartForNewTask`). An in-flight agent keeps the provider it started with — a model swap
@@ -724,7 +724,7 @@ public actor OrchestrationRuntime {
         onContextChanged = handler
     }
 
-    /// Whether the system has been aborted by Jones.
+    /// Whether the system has been aborted by Security Agent.
     public var isAborted: Bool { aborted }
 
     /// Clears the abort state so the system can be restarted.
@@ -853,7 +853,7 @@ public actor OrchestrationRuntime {
         let followUpScheduler = FollowUpScheduler()
         let context = makeToolContext(agentID: id, role: .smith, followUpScheduler: followUpScheduler, currentResumingTaskID: resumingTaskID)
 
-        // Smith only wakes for: private messages (user/Brown/Jones→Smith), system termination notices.
+        // Smith only wakes for: private messages (user/Brown/Security Agent→Smith), system termination notices.
         // Public Brown messages, tool_request/tool execution messages, and security review notices
         // are completely filtered out — they generate too much noise and don't need Smith's attention.
         let smithMessageFilter: @Sendable (ChannelMessage) -> Bool = { message in
@@ -862,12 +862,12 @@ public actor OrchestrationRuntime {
             if case .agent(let role) = message.sender, role == .smith {
                 return false
             }
-            // Drop all public messages from Brown, Jones, or Summarizer, except online
+            // Drop all public messages from Brown, Security Agent, or Summarizer, except online
             // announcements which Smith needs for coordination. Summarizer results are
             // persisted to the memory store and task record — Smith doesn't need them
             // in its conversation history (and they can distract from pending user messages).
             if case .agent(let role) = message.sender, message.recipientID == nil,
-               role == .brown || role == .jones || role == .summarizer {
+               role == .brown || role == .securityAgent || role == .summarizer {
                 guard case .string(let kind) = message.metadata?["messageKind"],
                       kind == "agent_online" else { return false }
             }
@@ -1080,7 +1080,7 @@ public actor OrchestrationRuntime {
                     // New Task banner's description in the user's transcript. The briefing
                     // is mechanically `task.title + task.description` plus optional resume
                     // context — all already in the task store; Brown is the only consumer
-                    // (Jones reads task.description directly). Direct seeding keeps the
+                    // (Security Agent reads task.description directly). Direct seeding keeps the
                     // data flow clean and stays symmetric with `rebuildContextFromTask`.
                     let briefing = await composeBrownTaskBriefing(for: resumingTask)
                     let attachmentsForBrown = await collectTaskAttachments(resumingTask)
@@ -1427,7 +1427,7 @@ public actor OrchestrationRuntime {
         // `start` on the same runtime, and the AppViewModel-set observers are the only
         // wiring that pushes turn / evaluation / context updates to the inspector.
         // Clearing them mid-restart left every Brown after the first one with no
-        // observability — Jones's evaluation history disappeared from the right pane,
+        // observability — Security Agent's evaluation history disappeared from the right pane,
         // turn records stopped accumulating, and timer-event channel posts went silent.
         if !preserveObserverCallbacks {
             clearObserverCallbacks()
@@ -1491,7 +1491,7 @@ public actor OrchestrationRuntime {
         abortHandler?("ABORT triggered by \(callerName): \(reason)")
     }
 
-    /// Spawns a Brown+Jones pair. Terminates any existing Brown first (single Brown policy).
+    /// Spawns a Brown+Security Agent pair. Terminates any existing Brown first (single Brown policy).
     public func spawnBrown(for task: AgentTask? = nil) async -> UUID? {
         guard !aborted else { return nil }
 
@@ -1505,32 +1505,32 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(sender: .system, content: "No Brown provider configured — cannot spawn."))
             return nil
         }
-        guard let jonesProvider = llmProviders[.jones] else {
-            await channel.post(ChannelMessage(sender: .system, content: "No Jones provider configured — Brown requires a security evaluator."))
+        guard let securityAgentProvider = llmProviders[.securityAgent] else {
+            await channel.post(ChannelMessage(sender: .system, content: "No Security Agent provider configured — Brown requires a security evaluator."))
             return nil
         }
 
         let brownID = UUID()
 
         // Tool-execution tracker shared between Brown's tool context (writer) and the
-        // SecurityEvaluator's Jones prompt (reader) so Jones can see whether an approved
+        // SecurityEvaluator's Security Agent prompt (reader) so Security Agent can see whether an approved
         // tool call actually succeeded or failed. Without this shared instance, retries
         // after a tool error would be misread as duplicate operations and denied.
         let executionTracker = ToolExecutionTracker()
 
-        // Create SecurityEvaluator with Jones's LLM config — replaces the Jones agent.
-        let jonesConfig = llmConfigs[.jones]
+        // Create SecurityEvaluator with Security Agent's LLM config — replaces the Security Agent.
+        let securityAgentConfig = llmConfigs[.securityAgent]
         let evaluator = SecurityEvaluator(
-            provider: jonesProvider,
-            systemPrompt: JonesBehavior.systemPrompt,
+            provider: securityAgentProvider,
+            systemPrompt: SecurityAgentBehavior.systemPrompt,
             channel: channel,
             abort: { [weak self] reason, callerRole in
                 guard let self else { return }
                 await self.abort(reason: reason, callerRole: callerRole)
             },
             usageStore: usageStore,
-            configuration: jonesConfig,
-            providerType: providerAPITypes[.jones]?.rawValue ?? "",
+            configuration: securityAgentConfig,
+            providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
             sessionID: currentSessionID,
             hasToolSucceeded: { [executionTracker] toolCallID in
                 await executionTracker.hasSucceeded(toolCallID: toolCallID)
@@ -1546,11 +1546,11 @@ public actor OrchestrationRuntime {
         if let evalCallback = onEvaluationRecorded {
             await evaluator.setOnEvaluationRecorded(evalCallback)
         }
-        // Forward Jones's LLM turn records so the inspector shows the security agent's per-session
-        // token usage and cost (previously empty — Jones produced no turn records, so its card
+        // Forward Security Agent's LLM turn records so the inspector shows the security agent's per-session
+        // token usage and cost (previously empty — Security Agent produced no turn records, so its card
         // always read 0 tokens / $0.00 even though its usage was in the global UsageStore).
         if let turnCallback = onTurnRecorded {
-            await evaluator.setOnTurnRecorded { turn in turnCallback(.jones, turn) }
+            await evaluator.setOnTurnRecorded { turn in turnCallback(.securityAgent, turn) }
         }
 
         // Brown's message filter: drop security review messages and tool execution trace messages.
@@ -1589,7 +1589,7 @@ public actor OrchestrationRuntime {
             mcpToolsProvider = nil
         }
 
-        // Per-task tool scoping: before the worker starts, let the security agent (Jones) pick
+        // Per-task tool scoping: before the worker starts, let the security agent (Security Agent) pick
         // the subset of tools it may use for THIS task. Skipped when there's no task context
         // (e.g. the post-review re-spawn path), which falls back to the unscoped tool set.
         var scopedApprovedNames: Set<String>?
@@ -1610,23 +1610,23 @@ public actor OrchestrationRuntime {
             let mcpTools = mcpHost != nil ? await mcpHost!.currentBridgedTools() : []
             let candidateNames = Set((builtIns + mcpTools).map(\.name))
             if preflightScopingEnabled {
-                // Light the Security Agent card while it scopes — this is a real (often slow) Jones
+                // Light the Security Agent card while it scopes — this is a real (often slow) Security Agent
                 // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
-                await notifyProcessingStateChange(role: .jones, isProcessing: true)
+                await notifyProcessingStateChange(role: .securityAgent, isProcessing: true)
                 let scoping = await evaluator.scopeTools(
                     candidateTools: builtIns + mcpTools,
                     taskTitle: task.title,
                     taskID: task.id.uuidString,
                     taskDescription: task.description
                 )
-                await notifyProcessingStateChange(role: .jones, isProcessing: false)
+                await notifyProcessingStateChange(role: .securityAgent, isProcessing: false)
                 guard scoping.succeeded else {
                     // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
                     // a worker; surface to the user.
                     securityEvaluators.removeValue(forKey: brownID)
                     await channel.post(ChannelMessage(
                         sender: .system,
-                        content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Jones's model configuration.",
+                        content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Security Agent's model configuration.",
                         metadata: ["isError": .bool(true)]
                     ))
                     return nil
@@ -1711,13 +1711,13 @@ public actor OrchestrationRuntime {
         }
         agentSubscriptions[brownID] = [brownSubID]
 
-        // Announce Jones is online (evaluator is ready) for UI consistency.
+        // Announce Security Agent is online (evaluator is ready) for UI consistency.
         await channel.post(ChannelMessage(
-            sender: .agent(.jones),
-            content: "Jones security evaluator online.",
+            sender: .agent(.securityAgent),
+            content: "Security Agent online.",
             metadata: ["messageKind": .string("agent_online")]
         ))
-        onAgentStarted?(.jones, JonesBehavior.toolNames)
+        onAgentStarted?(.securityAgent, SecurityAgentBehavior.toolNames)
 
         await brownAgent.start()
         onAgentStarted?(.brown, brownAgent.toolNames)
@@ -1910,7 +1910,7 @@ public actor OrchestrationRuntime {
     ) -> ToolContext {
         // Strong-capture the tracker so it survives beyond this stack frame. Callers that
         // also need to read tool-execution outcomes (e.g. SecurityEvaluator) must pass the
-        // same instance via this parameter so writer (tool execute) and reader (Jones prompt)
+        // same instance via this parameter so writer (tool execute) and reader (Security Agent prompt)
         // share state. When unset, a fresh tracker is created for this agent only — that
         // agent's writes/reads stay consistent, but no one else can observe them.
         let tracker = executionTracker ?? ToolExecutionTracker()
@@ -1951,9 +1951,9 @@ public actor OrchestrationRuntime {
                 guard let self else { return }
                 Task { await self.notifyProcessingStateChange(role: role, isProcessing: isProcessing) }
             },
-            onJonesProcessingStateChange: { [weak self] isProcessing in
+            onSecurityAgentProcessingStateChange: { [weak self] isProcessing in
                 guard let self else { return }
-                Task { await self.notifyProcessingStateChange(role: .jones, isProcessing: isProcessing) }
+                Task { await self.notifyProcessingStateChange(role: .securityAgent, isProcessing: isProcessing) }
             },
             onToolExecutionStateChange: { [weak self] toolName, started in
                 guard let self else { return }
@@ -2185,7 +2185,7 @@ public actor OrchestrationRuntime {
     ///
     /// Iteration is bounded to messages in `[since, now]` via the channel's binary-search
     /// `messages(since:)` lookup so this is cheap even when the channel holds the full
-    /// 10K-message backlog. Jones denial breadcrumbs are detected via the structured
+    /// 10K-message backlog. Security Agent denial breadcrumbs are detected via the structured
     /// `securityDisposition` metadata key (set by `SecurityEvaluator.postToChannel` on
     /// ABORT messages) rather than by substring-matching the rendered content.
     static func assembleBrownActivityDigest(channel: MessageChannel, since: Date) async -> String? {
@@ -2199,7 +2199,7 @@ public actor OrchestrationRuntime {
         var toolBuckets: [String: Int] = [:]
         var lastUpdate: String?
         var lastUpdateAt: Date?
-        var jonesDenials = 0
+        var securityAgentDenials = 0
         var lastDenial: String?
         var msgFromBrownToSmith: [(Date, String)] = []
 
@@ -2226,13 +2226,13 @@ public actor OrchestrationRuntime {
                     msgFromBrownToSmith.append((msg.timestamp, String(msg.content.prefix(120))))
                 }
             }
-            // Jones denial breadcrumbs: structured metadata key set by
+            // Security Agent denial breadcrumbs: structured metadata key set by
             // `AgentActor.postSecurityReviewToChannel` ("denied") and `SecurityEvaluator`
             // ("abort"). Substring-matching the content was unreliable — Smith log lines
             // often quote denial reasons and would have been counted as denials themselves.
             if case .string(let dispo) = msg.metadata?["securityDisposition"],
                dispo == "abort" || dispo == "denied" {
-                jonesDenials += 1
+                securityAgentDenials += 1
                 lastDenial = msg.content
             }
         }
@@ -2244,7 +2244,7 @@ public actor OrchestrationRuntime {
         // woke Smith into a self-sustaining text-only loop. Suppress on the absence of actual
         // Brown activity instead.
         let noBrownActivity = toolCallCount == 0 && taskUpdateCount == 0
-            && jonesDenials == 0 && msgFromBrownToSmith.isEmpty
+            && securityAgentDenials == 0 && msgFromBrownToSmith.isEmpty
         guard !noBrownActivity else { return nil }
 
         var lines: [String] = []
@@ -2263,8 +2263,8 @@ public actor OrchestrationRuntime {
         } else {
             lines.append("- No task_update from Brown in this window — likely deep in tool work or stuck.")
         }
-        if jonesDenials > 0 {
-            lines.append("- Jones denied \(jonesDenials) call(s). Latest reason snippet: \((lastDenial ?? "").prefix(160))")
+        if securityAgentDenials > 0 {
+            lines.append("- Security Agent denied \(securityAgentDenials) call(s). Latest reason snippet: \((lastDenial ?? "").prefix(160))")
         }
         for (_, text) in msgFromBrownToSmith.prefix(3) {
             lines.append("- Brown→Smith: \(text)")

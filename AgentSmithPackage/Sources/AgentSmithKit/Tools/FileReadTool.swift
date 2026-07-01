@@ -62,7 +62,7 @@ struct FileReadTool: AgentTool {
     }
 
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown || context.agentRole == .smith || context.agentRole == .jones
+        context.agentRole == .brown || context.agentRole == .smith || context.agentRole == .securityAgent
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
@@ -106,7 +106,7 @@ struct FileReadTool: AgentTool {
         // actually delivered content. Metadata-only reads (image/binary/PDF) and any
         // failure must NOT gate Brown's later file_write — otherwise an edit could follow
         // a read that never surfaced the file's contents. Only Brown's reads count; Smith
-        // and Jones reads must not gate Brown's file_write.
+        // and Security Agent reads must not gate Brown's file_write.
         if context.agentRole == .brown && outcome.contentBearingTextRead {
             context.recordFileRead(resolvedPath)
             context.recordFileRead(path)
@@ -395,7 +395,7 @@ struct FileReadTool: AgentTool {
     // MARK: - Shared Read (for SecurityEvaluator)
 
     /// Reads a text file and returns its content with line numbers.
-    /// Used by both the tool's execute method and SecurityEvaluator's Jones file reads.
+    /// Used by both the tool's execute method and SecurityEvaluator's Security Agent file reads.
     static func readFileContent(at path: String, offset: Int = 1, limit: Int = defaultLineLimit) -> String {
         if let rejection = checkPathRestriction(path) {
             return rejection

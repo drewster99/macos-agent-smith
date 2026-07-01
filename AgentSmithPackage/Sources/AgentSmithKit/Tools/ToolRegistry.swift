@@ -12,8 +12,8 @@ import CryptoKit
 /// ```
 /// isAvailable = isForcedAvailableBySystem || (isApproved && !isUnavailableDueToContext)
 /// ```
-/// - `isApproved` — security permission. Set *only* from the security agent's (Jones) scoping
-///   verdict. For Smith/Jones and for the interim "reproduce today's behavior" wiring, tools
+/// - `isApproved` — security permission. Set *only* from the security agent's (Security Agent) scoping
+///   verdict. For Smith/Security Agent and for the interim "reproduce today's behavior" wiring, tools
 ///   are seeded approved.
 /// - `isUnavailableDueToContext` — transient orchestration context (e.g. a tool that's off
 ///   until the user has messaged, or while a worker is awaiting review). Set by orchestration

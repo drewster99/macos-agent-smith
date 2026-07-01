@@ -11,7 +11,7 @@
 1. [ShellTool Safety Analysis](#shelltool-safety-analysis)
 2. [FileReadTool Safety Analysis](#filereadtool-safety-analysis)
 3. [FileWriteTool Safety Analysis](#filewritetool-safety-analysis)
-4. [Jones Decision Logic Analysis](#jones-decision-logic-analysis)
+4. [Security Agent Decision Logic Analysis](#security-agent-decision-logic-analysis)
 5. [Security Architecture Assessment](#security-architecture-assessment)
 6. [Potential Vulnerabilities Identified](#potential-vulnerabilities-identified)
 7. [Test Coverage Recommendations](#test-coverage-recommendations)
@@ -167,7 +167,7 @@
 
 ---
 
-## 4. Jones Decision Logic Analysis
+## 4. Security Agent Decision Logic Analysis
 
 ### 4.1 Verdict Categories
 
@@ -256,7 +256,7 @@
 - **Strength**: Comprehensive path safety
 - **Limitation**: Race conditions possible
 
-#### Layer 5: Jones AI-Powered Evaluation
+#### Layer 5: Security Agent AI-Powered Evaluation
 - **Coverage**: Context-aware risk assessment
 - **Strength**: Adaptable, considers intent and context
 - **Limitation**: Subject to AI limitations and inconsistencies
@@ -278,7 +278,7 @@
 
 1. **Tool-specific implementations**: Each tool implements safety separately
 2. **No centralized policy engine**: Hard to maintain consistency
-3. **Jones as single point of failure**: If Jones is compromised, safety is reduced
+3. **Security Agent as single point of failure**: If Security Agent is compromised, safety is reduced
 4. **Limited update mechanism**: Blocklists require code changes
 5. **No behavioral analysis**: Doesn't detect suspicious patterns over time
 
@@ -291,14 +291,14 @@
 #### 6.1.1 Command Splitting Attack
 - **Description**: Split dangerous command across multiple tool calls
 - **Example**: `echo "malicious" > script.sh` followed by `bash script.sh`
-- **Current Mitigation**: None - Jones evaluates each request independently
-- **Risk**: High - Could bypass both tool blocklists and Jones evaluation
+- **Current Mitigation**: None - Security Agent evaluates each request independently
+- **Risk**: High - Could bypass both tool blocklists and Security Agent evaluation
 
 #### 6.1.2 Alternative Syntax Bypass
 - **Description**: Use alternative command syntax not in blocklists
 - **Example**: `rm --recursive --force /` instead of `rm -rf /`
-- **Current Mitigation**: None in tool blocklists, relies on Jones
-- **Risk**: Medium - Jones should catch but depends on parsing
+- **Current Mitigation**: None in tool blocklists, relies on Security Agent
+- **Risk**: Medium - Security Agent should catch but depends on parsing
 
 #### 6.1.3 Environment Variable Expansion
 - **Description**: Use environment variables not expanded in path checking
@@ -318,7 +318,7 @@
 - **Description**: Use command substitution to generate commands
 - **Example**: `` `echo rm -rf /` `` or `$(echo rm -rf /)`
 - **Current Mitigation**: None in tool blocklists
-- **Risk**: Medium - Jones should evaluate actual command
+- **Risk**: Medium - Security Agent should evaluate actual command
 
 #### 6.2.3 TOCTOU Race Conditions
 - **Description**: Change target between check and use
@@ -346,13 +346,13 @@
 
 #### 7.1.1 Command Splitting Tests
 - Test sequences of commands that individually appear safe but together are dangerous
-- Verify Jones evaluates context across multiple requests
+- Verify Security Agent evaluates context across multiple requests
 - Test incremental file creation and execution
 
 #### 7.1.2 Alternative Syntax Tests
 - Test all variations of dangerous commands
 - Verify blocklist coverage of common alternatives
-- Test Jones' ability to parse different command formats
+- Test Security Agent' ability to parse different command formats
 
 #### 7.1.3 Environment Variable Tests
 - Test all home directory variable expansions
@@ -371,7 +371,7 @@
 - Test relative path variations
 - Test bind mount and filesystem boundary cases
 
-#### 7.2.3 Jones Consistency Tests
+#### 7.2.3 Security Agent Consistency Tests
 - Test verdict consistency for same operations
 - Test context awareness across sequences
 - Test git repository status detection
@@ -418,4 +418,4 @@ Immediate testing should focus on command splitting vulnerabilities and alternat
 
 ### Security Posture Assessment:
 **Overall Security Rating**: Good (7/10)
-The system provides strong protection against common threats but has gaps in coverage for advanced evasion techniques. The multi-layer approach provides good redundancy, and the AI-powered Jones agent adds adaptive security that can handle novel threats.
+The system provides strong protection against common threats but has gaps in coverage for advanced evasion techniques. The multi-layer approach provides good redundancy, and the AI-powered Security Agent adds adaptive security that can handle novel threats.

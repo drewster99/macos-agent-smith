@@ -34,7 +34,7 @@ struct InspectorRecomputeCacheTests {
         #expect(byRole[.smith]?.count == 1)
         #expect(byRole[.brown]?.count == 1)
         #expect(byRole[.summarizer]?.count == 1)
-        #expect(byRole[.jones]?.isEmpty ?? true)
+        #expect(byRole[.securityAgent]?.isEmpty ?? true)
         // user messages are NOT in any role bucket — important for the inspector's
         // "agent activity" counter, which excludes user input.
         #expect(byRole.values.flatMap(\.self).count == 3)
