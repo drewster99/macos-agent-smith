@@ -1518,7 +1518,8 @@ public actor OrchestrationRuntime {
         // after a tool error would be misread as duplicate operations and denied.
         let executionTracker = ToolExecutionTracker()
 
-        // Create SecurityEvaluator with Security Agent's LLM config — replaces the Security Agent.
+        // Create the SecurityEvaluator with the Security Agent's LLM config — this evaluator
+        // IS the Security Agent (it runs as a lightweight evaluator, not a full agent actor).
         let securityAgentConfig = llmConfigs[.securityAgent]
         let evaluator = SecurityEvaluator(
             provider: securityAgentProvider,

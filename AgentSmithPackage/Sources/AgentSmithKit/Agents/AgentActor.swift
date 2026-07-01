@@ -59,7 +59,8 @@ public actor AgentActor {
     private var isRunning = false
     private var runTask: Task<Void, Never>?
 
-    /// Direct security evaluator for tool approval (replaces Security Agent + ToolRequestGate).
+    /// Direct security evaluator for tool approval. The Security Agent role runs as this
+    /// lightweight evaluator rather than a full agent actor with a separate approval gate.
     private var securityEvaluator: SecurityEvaluator?
     /// Token usage store for persistent analytics. Set via `setUsageStore(_:)`.
     private var usageStore: UsageStore?

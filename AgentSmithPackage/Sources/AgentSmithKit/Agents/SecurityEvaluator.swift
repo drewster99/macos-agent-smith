@@ -105,9 +105,10 @@ public struct ToolScopingResult: Sendable {
     }
 }
 
-/// Direct security evaluator that replaces the Security Agent actor.
+/// Direct security evaluator implementing the Security Agent role. Unlike the other agents,
+/// the Security Agent runs as this lightweight evaluator rather than a full `AgentActor`.
 ///
-/// Makes LLM calls using Security Agent's model configuration to evaluate tool requests.
+/// Makes LLM calls using the Security Agent's model configuration to evaluate tool requests.
 /// Thread-safe — can be called concurrently for parallel tool call batches.
 /// Each Brown agent gets its own evaluator instance; state dies with Brown.
 actor SecurityEvaluator {
