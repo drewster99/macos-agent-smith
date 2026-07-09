@@ -197,7 +197,7 @@ struct TaskDetailWindow: View {
         switch status {
         case .pending, .scheduled:
             return [.description, .relatedContext]
-        case .running, .paused, .interrupted, .awaitingReview:
+        case .running, .paused, .interrupted, .awaitingReview, .validating:
             return [.updates, .description, .relatedContext]
         case .completed:
             return [.summary, .result, .updates, .description, .relatedContext]

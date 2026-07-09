@@ -373,6 +373,125 @@ public actor TaskStore {
     /// reusing the review wait/slot machinery. `helpRequest` marks it as a blocker (not a
     /// result), so `review_work` refuses it and Smith answers via `provide_help`. Deliberately
     /// does NOT touch `result` — there is no completed work to deliver.
+    // MARK: - Acceptance criteria (requester-owned)
+
+    /// Replaces the task's acceptance criteria. Any criterion whose text, waivable flag,
+    /// or validator CHANGED — and any new criterion — loses its sticky verdict (its
+    /// records stay in the audit ledger; only the "settled" reading resets, because the
+    /// contract it was judged against no longer exists). Unchanged criteria keep their
+    /// verdicts.
+    public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) {
+        guard var task = tasks[id] else { return }
+        let previousByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var changedIDs: Set<UUID> = []
+        for criterion in criteria {
+            if let previous = previousByID[criterion.id] {
+                if previous != criterion { changedIDs.insert(criterion.id) }
+            } else {
+                changedIDs.insert(criterion.id)
+            }
+        }
+        task.acceptanceCriteria = criteria
+        if !changedIDs.isEmpty, var validation = task.validation {
+            // Reset stickiness by appending a neutral marker? No — simplest correct form:
+            // drop the changed criteria's records from the LIVE reading by filtering the
+            // ledger. The audit trail for unchanged criteria is preserved verbatim.
+            validation.verdictRecords.removeAll { changedIDs.contains($0.criterionID) }
+            task.validation = validation
+        }
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
+    // MARK: - Steps (worker-owned, tombstone semantics)
+
+    /// Replaces the task's step list wholesale — used by Smith's initial seeding at
+    /// creation. Worker mutations go through `applyStepAction`.
+    public func setSteps(id: UUID, steps: [TaskStep]) {
+        guard var task = tasks[id] else { return }
+        task.steps = steps
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
+    /// One worker mutation of the step list. Removal is a TOMBSTONE (status `.removed`,
+    /// note required) — the underlying record is append-only so the validator always
+    /// sees what was skipped or removed and why. Returns a human-readable error, or nil
+    /// on success.
+    @discardableResult
+    public func applyStepAction(taskID: UUID, action: TaskStepAction) -> String? {
+        guard var task = tasks[taskID] else { return "Task not found." }
+        switch action {
+        case .add(let text):
+            task.steps.append(TaskStep(text: text, origin: .worker))
+        case .update(let stepID, let newText):
+            guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
+            guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be edited." }
+            task.steps[index].text = newText
+        case .setStatus(let stepID, let status, let note):
+            guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
+            guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be changed." }
+            if (status == .skipped || status == .removed) && (note ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
+                return "Skipping or removing a step requires a note explaining why."
+            }
+            task.steps[index].status = status
+            if let note { task.steps[index].note = note }
+        }
+        task.updatedAt = Date()
+        tasks[taskID] = task
+        onChange?()
+        return nil
+    }
+
+    // MARK: - Validation ledger
+
+    /// Begins the next validation round and returns its number (1-based).
+    public func beginValidationRound(id: UUID) -> Int? {
+        guard var task = tasks[id] else { return nil }
+        var validation = task.validation ?? TaskValidationState()
+        validation.round += 1
+        task.validation = validation
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+        return validation.round
+    }
+
+    /// Appends verdict records to the task's audit ledger.
+    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord]) {
+        guard var task = tasks[id], !records.isEmpty else { return }
+        var validation = task.validation ?? TaskValidationState()
+        validation.verdictRecords.append(contentsOf: records)
+        task.validation = validation
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
+    /// Pins a definition body on the task at first use — later registry edits apply to
+    /// future tasks, never to rounds already in flight. No-op if already pinned.
+    public func pinValidatorDefinition(id: UUID, definition: EvaluatorDefinition) {
+        guard var task = tasks[id] else { return }
+        var validation = task.validation ?? TaskValidationState()
+        guard validation.pinnedDefinitions[definition.name] == nil else { return }
+        validation.pinnedDefinitions[definition.name] = definition
+        task.validation = validation
+        tasks[id] = task
+        onChange?()
+    }
+
+    /// Materializes the implicit default criterion for a criterion-less task at first
+    /// validation, making the contract visible to the user like any other criterion.
+    public func materializeImplicitCriterion(id: UUID, criterion: AcceptanceCriterion) {
+        guard var task = tasks[id], task.acceptanceCriteria.isEmpty else { return }
+        task.acceptanceCriteria = [criterion]
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
     public func requestHelp(id: UUID, request: String) {
         guard var task = tasks[id] else { return }
         task.helpRequest = request

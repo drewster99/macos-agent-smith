@@ -589,7 +589,7 @@ public actor OrchestrationRuntime {
     private func dispatchAutoRunWake(taskID: UUID) async {
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let inFlight = activeTasks.first {
-            $0.status == .running || $0.status == .awaitingReview
+            $0.status == .running || $0.status == .awaitingReview || $0.status == .validating
         }
 
         guard let blocker = inFlight else {
@@ -659,7 +659,7 @@ public actor OrchestrationRuntime {
             return false
         }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview }
+        let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview || $0.status == .validating }
         guard !stillBusy else { return false }
 
         while let next = pendingScheduledRunQueue.first {
@@ -704,7 +704,7 @@ public actor OrchestrationRuntime {
             return
         }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview }
+        let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview || $0.status == .validating }
         guard !stillBusy else { return }
 
         let oldestPending = activeTasks

@@ -51,6 +51,18 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// `task_complete`. Surfaced to Smith with the awaitingReview banner.
     public var resultAttachments: [Attachment]
 
+    /// The acceptance contract: criteria judged by evaluators when the task enters
+    /// `.validating`. Requester-owned (user/Smith/system); the worker never edits these.
+    /// Empty means the implicit default-acceptance criterion is materialized at first
+    /// validation.
+    public var acceptanceCriteria: [AcceptanceCriterion]
+    /// The worker's plan. Worker-owned, tombstone semantics (see `TaskStep`); Smith may
+    /// seed initial steps at creation.
+    public var steps: [TaskStep]
+    /// The validation ledger: rounds, append-only verdict audit, pinned definitions.
+    /// Nil until the first validation begins.
+    public var validation: TaskValidationState?
+
     /// The most recent set of tool names the security agent approved for the worker on this
     /// task (per-task tool scoping). A **record**, not the gate — the live registry is the
     /// source of truth for enforcement. `nil` for legacy/unscoped tasks. Replaced wholesale
@@ -122,6 +134,11 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         /// and `run_task` refuses to start them until the runtime promotes the task to
         /// `.pending` at fire time.
         case scheduled
+        /// The submitted result is being judged against the task's acceptance criteria
+        /// by evaluators. Entered from `task_complete`; exits to `.completed` (all
+        /// criteria accepted/waived), back to `.running` (rejections → worker punch
+        /// list, bounded rounds), or `.awaitingReview` (escalation).
+        case validating
 
         /// Forward-compatibility fallback: a status rawValue this build doesn't know
         /// (written by a NEWER build — e.g. a future `validating` case) must not brick
@@ -135,7 +152,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
 
         /// Whether this status represents work that is actively running — prevents archiving or deletion.
         public var isInProgress: Bool {
-            self == .running || self == .paused || self == .awaitingReview
+            self == .running || self == .paused || self == .awaitingReview || self == .validating
         }
 
         /// Whether this status is a terminal outcome — the task's `UsageRecord`s
@@ -163,7 +180,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             switch self {
             case .pending, .paused, .interrupted, .scheduled, .completed, .failed:
                 return true
-            case .running, .awaitingReview:
+            case .running, .awaitingReview, .validating:
                 return false
             }
         }
@@ -203,7 +220,10 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         resultAttachments: [Attachment] = [],
         approvedTools: [String]? = nil,
         userToolOverrides: [String: Bool]? = nil,
-        helpRequest: String? = nil
+        helpRequest: String? = nil,
+        acceptanceCriteria: [AcceptanceCriterion] = [],
+        steps: [TaskStep] = [],
+        validation: TaskValidationState? = nil
     ) {
         self.id = id
         self.title = title
@@ -230,12 +250,15 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.approvedTools = approvedTools
         self.userToolOverrides = userToolOverrides
         self.helpRequest = helpRequest
+        self.acceptanceCriteria = acceptanceCriteria
+        self.steps = steps
+        self.validation = validation
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, userToolOverrides, helpRequest
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation
     }
 
     public init(from decoder: Decoder) throws {
@@ -265,6 +288,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         approvedTools = try c.decodeIfPresent([String].self, forKey: .approvedTools)
         userToolOverrides = try c.decodeIfPresent([String: Bool].self, forKey: .userToolOverrides)
         helpRequest = try c.decodeIfPresent(String.self, forKey: .helpRequest)
+        acceptanceCriteria = try c.decodeIfPresent([AcceptanceCriterion].self, forKey: .acceptanceCriteria) ?? []
+        steps = try c.decodeIfPresent([TaskStep].self, forKey: .steps) ?? []
+        validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -302,5 +328,12 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(approvedTools, forKey: .approvedTools)
         try c.encodeIfPresent(userToolOverrides, forKey: .userToolOverrides)
         try c.encodeIfPresent(helpRequest, forKey: .helpRequest)
+        if !acceptanceCriteria.isEmpty {
+            try c.encode(acceptanceCriteria, forKey: .acceptanceCriteria)
+        }
+        if !steps.isEmpty {
+            try c.encode(steps, forKey: .steps)
+        }
+        try c.encodeIfPresent(validation, forKey: .validation)
     }
 }

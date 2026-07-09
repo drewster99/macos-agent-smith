@@ -112,7 +112,7 @@ struct RunTaskTool: AgentTool {
         // Refuse to restart if another task is running or awaiting review.
         // Running: would kill Brown mid-work. AwaitingReview: Smith should review first.
         let allTasks = await context.taskStore.allTasks()
-        if let runningTask = allTasks.first(where: { $0.status == .running && $0.id != taskID }) {
+        if let runningTask = allTasks.first(where: { ($0.status == .running || $0.status == .validating) && $0.id != taskID }) {
             return .failure("""
                 Cannot start '\(task.title)' — task '\(runningTask.title)' is still running. \
                 Wait for the current task to complete (or fail) before calling run_task. \

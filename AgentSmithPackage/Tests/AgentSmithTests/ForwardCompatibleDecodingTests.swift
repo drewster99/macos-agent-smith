@@ -12,7 +12,9 @@ struct ForwardCompatibleDecodingTests {
 
     @Test("Unknown task status decodes to .interrupted")
     func unknownStatusFallsBack() throws {
-        let decoded = try JSONDecoder().decode(AgentTask.Status.self, from: Data("\"validating\"".utf8))
+        // Deliberately fictional — the original fixture used "validating", which became
+        // a real case within the hour and proved the shim by turning this test red.
+        let decoded = try JSONDecoder().decode(AgentTask.Status.self, from: Data("\"someFutureStatusNoBuildKnows\"".utf8))
         #expect(decoded == .interrupted)
     }
 

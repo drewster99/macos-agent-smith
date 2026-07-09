@@ -690,6 +690,7 @@ struct MemoryEditorView: View {
         case .paused: return .secondary
         case .interrupted: return .yellow
         case .scheduled: return .purple
+        case .validating: return .teal
         }
     }
 }

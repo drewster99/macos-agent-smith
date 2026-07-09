@@ -258,6 +258,7 @@ enum TaskStatusBadge {
         case .awaitingReview: return .orange
         case .interrupted: return .yellow
         case .scheduled: return .purple
+        case .validating: return .teal
         }
     }
 
@@ -271,6 +272,7 @@ enum TaskStatusBadge {
         case .awaitingReview: return "eye.circle.fill"
         case .interrupted: return "exclamationmark.circle.fill"
         case .scheduled: return "clock.badge"
+        case .validating: return "checklist"
         }
     }
 }
