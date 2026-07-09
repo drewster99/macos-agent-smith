@@ -138,6 +138,9 @@ struct ReviewWorkTool: AgentTool {
 
             await context.taskStore.updateStatus(id: taskID, status: .running)
             await context.taskStore.clearResult(id: taskID)
+            // A Smith-directed rework cycle gets a fresh validation round budget;
+            // otherwise a post-escalation resubmission insta-escalates on the stale counter.
+            await context.taskStore.resetValidationRound(id: taskID)
 
             // Find an existing Brown, or auto-spawn one if needed (e.g. after app restart)
             var brownID: UUID?
@@ -209,6 +212,7 @@ struct ReviewWorkTool: AgentTool {
 
         await context.taskStore.updateStatus(id: taskID, status: .running)
         await context.taskStore.clearResult(id: taskID)
+        await context.taskStore.resetValidationRound(id: taskID)
 
         var brownID: UUID?
         var brownWasSpawned = false

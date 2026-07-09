@@ -72,8 +72,8 @@ public struct TaskCompleteTool: AgentTool {
 
         // Idempotency guard — a duplicate submission isn't really a failure, but it's
         // not a fresh successful submission either. Return success with a clear message.
-        if task.status == .awaitingReview || task.status == .completed {
-            return .success("Task already submitted for review.")
+        if task.status == .awaitingReview || task.status == .completed || task.status == .validating {
+            return .success("Task already submitted.")
         }
 
         let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context)
@@ -82,24 +82,19 @@ public struct TaskCompleteTool: AgentTool {
         }
         let attachments = resolution.attachments
 
-        // Store result on the task (survives restarts) and transition status
+        // Store result on the task (survives restarts) and hand it to acceptance
+        // validation — the evaluator system, not Smith, judges submissions now. The
+        // "Ready for Review" banner is preserved for the UI via the same task_complete
+        // message kind, posted publicly (Smith's filter drops it; the user sees it).
         await context.taskStore.setResult(id: task.id, result: result, commentary: commentary, attachments: attachments)
-        await context.taskStore.updateStatus(id: task.id, status: .awaitingReview)
+        await context.taskStore.updateStatus(id: task.id, status: .validating)
 
-        // Notify Smith privately
-        guard let smithID = await context.agentIDForRole(.smith) else {
-            return .success("Task submitted for review: \(task.title)")
-        }
-
-        var message = "Task '\(task.title)' is ready for review.\n\nResult:\n\(result)"
+        var message = "Task '\(task.title)' submitted — acceptance validation is running."
         if let commentary {
             message += "\n\nCommentary:\n\(commentary)"
         }
-
         await context.post(ChannelMessage(
             sender: .agent(context.agentRole),
-            recipientID: smithID,
-            recipient: .agent(.smith),
             content: message,
             attachments: attachments,
             metadata: [
@@ -108,11 +103,13 @@ public struct TaskCompleteTool: AgentTool {
             ]
         ))
 
+        await context.beginTaskValidation(task.id)
+
         if attachments.isEmpty {
-            return .success("Task submitted for review: \(task.title)")
+            return .success("Task submitted. Acceptance validation will judge it against the task's criteria; you'll receive a punch list if changes are needed. Wait.")
         }
         let names = attachments.map { $0.filename }.joined(separator: ", ")
-        return .success("Task submitted for review: \(task.title) — with \(attachments.count) attachment(s): \(names)")
+        return .success("Task submitted with \(attachments.count) attachment(s) (\(names)). Acceptance validation will judge it; you'll receive a punch list if changes are needed. Wait.")
     }
 
     /// Posts a system channel message recording an auto-rejection of an empty/missing-result

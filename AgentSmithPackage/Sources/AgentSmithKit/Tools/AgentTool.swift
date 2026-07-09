@@ -194,6 +194,9 @@ public struct ToolContext: Sendable {
     /// Called when the agent's run loop exits naturally (errors or self-termination).
     /// Allows the runtime to clean up subscriptions and registry entries.
     public let onSelfTerminate: @Sendable () async -> Void
+    /// Hands a just-submitted task to the acceptance-validation system. Called by
+    /// `task_complete` after setting the result and the `.validating` status.
+    public let beginTaskValidation: @Sendable (UUID) async -> Void
     /// Liveness lease check: returns true while the runtime still tracks this agent as a
     /// live, current agent. The agent's run loop consults this around every LLM turn and
     /// self-stops on false — the dead-man's switch that kills an agent whose runtime
@@ -311,6 +314,7 @@ public struct ToolContext: Sendable {
         agentRoleForID: @escaping @Sendable (UUID) async -> AgentRole?,
         agentIDForRole: @escaping @Sendable (AgentRole) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
+        beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
         isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
@@ -366,6 +370,7 @@ public struct ToolContext: Sendable {
         self.agentRoleForID = agentRoleForID
         self.agentIDForRole = agentIDForRole
         self.onSelfTerminate = onSelfTerminate
+        self.beginTaskValidation = beginTaskValidation
         self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange
         self.onSecurityAgentProcessingStateChange = onSecurityAgentProcessingStateChange

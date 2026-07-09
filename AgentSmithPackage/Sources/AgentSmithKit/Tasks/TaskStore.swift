@@ -459,6 +459,20 @@ public actor TaskStore {
         return validation.round
     }
 
+    /// Resets the validation round budget for a fresh Smith/user-directed rework cycle
+    /// (`review_work` reject after an escalation). Without this, a resubmission after
+    /// escalation would instantly re-escalate on a stale "rounds exhausted" counter.
+    /// Sticky accepts, the verdict ledger, and pinned definitions all survive — only the
+    /// counter refreshes.
+    public func resetValidationRound(id: UUID) {
+        guard var task = tasks[id], var validation = task.validation else { return }
+        validation.round = 0
+        task.validation = validation
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
     /// Appends verdict records to the task's audit ledger.
     public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord]) {
         guard var task = tasks[id], !records.isEmpty else { return }

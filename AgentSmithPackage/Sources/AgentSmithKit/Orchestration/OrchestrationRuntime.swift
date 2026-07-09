@@ -54,7 +54,7 @@ public actor OrchestrationRuntime {
     /// it is a runtime-confined value rather than a separate actor. The properties below
     /// (`smith`, `smithID`, `currentBrownID`) are read-only views over it; storing copies
     /// alongside it is how registries drift apart and zombies are born.
-    private var supervisor = AgentSupervisor()
+    var supervisor = AgentSupervisor()
 
     private var smith: AgentActor? { supervisor.firstHandle(role: .smith)?.agent }
     private var smithID: UUID? { supervisor.firstHandle(role: .smith)?.id }
@@ -86,9 +86,9 @@ public actor OrchestrationRuntime {
     /// Summarizer for generating task summaries after completion/failure.
     private var taskSummarizer: TaskSummarizer?
 
-    private var llmProviders: [AgentRole: any LLMProvider]
-    private var llmConfigs: [AgentRole: ModelConfiguration]
-    private var providerAPITypes: [AgentRole: ProviderAPIType]
+    var llmProviders: [AgentRole: any LLMProvider]
+    var llmConfigs: [AgentRole: ModelConfiguration]
+    var providerAPITypes: [AgentRole: ProviderAPIType]
     private var agentTuning: [AgentRole: AgentTuningConfig]
     /// Whether Smith should automatically run the next pending task after completing one.
     /// Mutable so the user can toggle it at runtime via `setAutoAdvance(_:)`.
@@ -111,13 +111,13 @@ public actor OrchestrationRuntime {
     public var currentSessionID: UUID? { supervisor.currentGeneration?.sessionID }
 
     /// Set by Security Agent abort — prevents restart until user clears it.
-    private var aborted = false
+    private(set) var aborted = false
     /// Raised by the public `stopAll()` OUTSIDE the queue (mirroring `aborted`) so an
     /// in-flight lifecycle transition bails at its next barrier instead of running to
     /// completion, then consumed by the `performStopAll` that answers it. Without this, a
     /// user Stop was head-of-line blocked behind a start stuck in a slow scoping call
     /// (flagged independently by all three reviews).
-    private var stopRequested = false
+    var stopRequested = false
     /// Callback to notify the app layer when abort is triggered.
     private var onAbort: (@Sendable (String) -> Void)?
     /// Callback to notify the app layer when an agent starts or stops an LLM call.
@@ -304,6 +304,28 @@ public actor OrchestrationRuntime {
     /// re-opened by then (new failures), the skipped drain re-arms it, giving a bounded
     /// once-per-cooldown retry cadence rather than a storm.
     private var breakerRedrainArmed = false
+
+    // MARK: - Validation configuration (Phase: acceptance validation)
+
+    /// Where the user-owned evaluator registry lives. Set by the app layer at startup
+    /// (after seeding shipped defaults). Nil = validation unconfigured → escalates
+    /// visibly, never silently passes.
+    var evaluatorsDirectory: URL?
+    /// Dedicated validator-slot model, once the app configures one. Definitions using
+    /// `.validator` fail visibly until then (no fallback chains).
+    var validatorProvider: (any LLMProvider)?
+    var validatorConfiguration: ModelConfiguration?
+    /// Bounded worker↔validator loop: rejections beyond this many rounds escalate.
+    var maxValidationRounds = 3
+    /// Per-report criterion parallelism cap.
+    var validationParallelism = 3
+    /// Per-task reentrancy guard for validation runs.
+    var tasksBeingValidated: Set<UUID> = []
+
+    /// App-layer wiring for the validation system.
+    public func setEvaluatorConfiguration(directory: URL) {
+        evaluatorsDirectory = directory
+    }
 
     /// Reentrancy guard shared by both task-queue drains (mirroring
     /// `isDrainingUserMessages`): the drains suspend at `taskStore.allTasks()` before
@@ -1668,6 +1690,13 @@ public actor OrchestrationRuntime {
             await taskStore.updateStatus(id: task.id, status: .interrupted)
         }
 
+        // Validation is idempotent and restartable: tasks caught mid-validation by a
+        // quit/crash re-enqueue from their sticky-verdict state (partial rounds were
+        // never persisted as conclusions).
+        for task in activeTasks where task.status == .validating {
+            startTaskValidation(taskID: task.id)
+        }
+
         // Pre-register every persisted task attachment so a fresh Brown spawned during
         // this run can resolve IDs referenced by `task_update` / `task_complete` calls
         // that originally landed in a prior session. Bytes are lazy-loaded on first
@@ -2406,7 +2435,8 @@ public actor OrchestrationRuntime {
             // only), and context-management notices (Smith's compaction is none of the
             // worker's business).
             if case .string(let kind) = message.metadata?["messageKind"],
-               kind == "tool_request" || kind == "tool_output" || kind == "context_management" { return false }
+               kind == "tool_request" || kind == "tool_output" || kind == "context_management"
+                || kind == "validation_report" || kind == "validation_escalation" { return false }
             return true
         }
 
@@ -2799,7 +2829,7 @@ public actor OrchestrationRuntime {
         }
     }
 
-    private func makeToolContext(
+    func makeToolContext(
         agentID: UUID,
         role: AgentRole,
         followUpScheduler: FollowUpScheduler? = nil,
@@ -2845,6 +2875,9 @@ public actor OrchestrationRuntime {
             onSelfTerminate: { [weak self] in
                 guard let self else { return }
                 await self.handleAgentSelfTerminate(id: agentID)
+            },
+            beginTaskValidation: { [weak self] taskID in
+                await self?.startTaskValidation(taskID: taskID)
             },
             // Liveness lease: true only while this exact agent ID is still in the live
             // registry. A deallocated runtime also reads as not-current — an agent whose

@@ -1,0 +1,240 @@
+import Foundation
+import Testing
+import SemanticSearch
+@testable import AgentSmithKit
+
+/// The `.validating` state machine end-to-end against mock providers: acceptance
+/// completes tasks, rejection punch-lists return to the worker, errors and round
+/// exhaustion escalate, and criterion-less tasks get the materialized default.
+
+@Suite("Task validation coordinator", .serialized)
+struct TaskValidationCoordinatorTests {
+
+    /// Runtime whose summarizer mock (the default-acceptance model slot) answers each
+    /// validation call with the next `verdictScript` entry, repeating the last when
+    /// exhausted. Smith/Brown/Security mocks are present so worker respawn paths work.
+    private func makeRuntime(verdictScript: [String]) -> (OrchestrationRuntime, URL) {
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-validation-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        let evaluatorsDirectory = tmpRoot.appendingPathComponent("evaluators", isDirectory: true)
+        EvaluatorDefaults.seed(into: evaluatorsDirectory)
+
+        let testConfiguration = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+        let runtime = OrchestrationRuntime(
+            providers: [
+                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
+                .summarizer: MockLLMProvider(responses: verdictScript.map { LLMResponse(text: $0) })
+            ],
+            configurations: [
+                .smith: testConfiguration,
+                .brown: testConfiguration,
+                .securityAgent: testConfiguration,
+                .summarizer: testConfiguration
+            ],
+            providerAPITypes: [:],
+            agentTuning: [:],
+            semanticSearchEngine: SemanticSearchEngine(),
+            usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
+            autoAdvanceEnabled: false,
+            autoRunInterruptedTasks: false,
+            memoryStore: nil
+        )
+        return (runtime, evaluatorsDirectory)
+    }
+
+    /// Creates a task in `.validating` with a submitted result, as `task_complete`
+    /// leaves it, ready for `startTaskValidation`.
+    private func makeSubmittedTask(
+        on runtime: OrchestrationRuntime,
+        criteria: [AcceptanceCriterion] = []
+    ) async -> AgentTask {
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Validated task", description: "Do the thing properly.")
+        if !criteria.isEmpty {
+            await store.setAcceptanceCriteria(id: task.id, criteria: criteria)
+        }
+        await store.setResult(id: task.id, result: "The thing was done.", commentary: nil, attachments: [])
+        await store.updateStatus(id: task.id, status: .validating)
+        return await store.task(id: task.id) ?? task
+    }
+
+    private func waitForStatusChange(
+        on runtime: OrchestrationRuntime,
+        taskID: UUID,
+        away from: AgentTask.Status,
+        timeoutSeconds: Double = 15
+    ) async -> AgentTask.Status? {
+        let store = await runtime.taskStore
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if let status = await store.task(id: taskID)?.status, status != from {
+                return status
+            }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+        return await store.task(id: taskID)?.status
+    }
+
+    @Test("All criteria accepted → task completes; the implicit criterion is materialized and its definition pinned")
+    func acceptanceCompletesCriterionlessTask() async {
+        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let task = await makeSubmittedTask(on: runtime)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .completed)
+
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.acceptanceCriteria.count == 1, "the implicit default criterion must be materialized")
+        #expect(final?.acceptanceCriteria.first?.origin == .system)
+        #expect(final?.validation?.verdictRecords.count == 1)
+        #expect(final?.validation?.pinnedDefinitions["default-acceptance"] != nil, "the definition body must be pinned to the task")
+    }
+
+    @Test("A rejection returns the task to the worker; resubmission re-validates only the unsettled criterion")
+    func rejectionRoundTripsThroughWorker() async {
+        // Round 1 judges A and B concurrently against a shared mock, so WHICH gets the
+        // REJECT is racy — all assertions are order-agnostic. Round 2 re-judges only
+        // the rejected one and accepts it.
+        let (runtime, directory) = makeRuntime(verdictScript: [
+            "ACCEPT",
+            "REJECT: the log file was never written",
+            "ACCEPT"
+        ])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.start()
+        let criteria = [
+            AcceptanceCriterion(text: "A: code compiles", origin: .user),
+            AcceptanceCriterion(text: "B: log file written", origin: .user)
+        ]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let afterRound1 = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(afterRound1 == .running, "a rejection must return the task to the worker, not escalate")
+
+        let midTask = await runtime.taskStore.task(id: task.id)
+        #expect(midTask?.validation?.settledCriterionIDs().count == 1, "the accepted criterion is sticky")
+        #expect(midTask?.result == nil, "the result is cleared for resubmission")
+
+        // The worker "fixes and resubmits".
+        await runtime.taskStore.setResult(id: task.id, result: "Now with the log file.", commentary: nil, attachments: [])
+        await runtime.taskStore.updateStatus(id: task.id, status: .validating)
+        await runtime.startTaskValidation(taskID: task.id)
+        let afterRound2 = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(afterRound2 == .completed)
+
+        // Exactly 3 verdicts total proves the settled criterion was NOT re-judged.
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.validation?.verdictRecords.count == 3)
+
+        await runtime.stopAll()
+    }
+
+    @Test("Persistent validator errors escalate to awaitingReview, never fake a verdict")
+    func errorsEscalate() async {
+        // Unparseable responses exhaust the runner's parse retries → ERROR, retried once
+        // by the coordinator, then escalation.
+        let (runtime, directory) = makeRuntime(verdictScript: ["I cannot decide, sorry!"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let task = await makeSubmittedTask(on: runtime)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .awaitingReview, "errors park for manual review — they are never rejections")
+    }
+
+    @Test("A WAIVE against a non-waivable criterion escalates as an error")
+    func waiveOnNonWaivableEscalates() async {
+        let (runtime, directory) = makeRuntime(verdictScript: ["WAIVE: does not apply here"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let criteria = [AcceptanceCriterion(text: "must always hold", waivable: false, origin: .user)]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .awaitingReview)
+    }
+
+    @Test("A waivable criterion accepts a WAIVE and settles")
+    func waivableWaives() async {
+        let (runtime, directory) = makeRuntime(verdictScript: ["WAIVE: this task has no UI to screenshot"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let criteria = [AcceptanceCriterion(text: "screenshots attached", waivable: true, origin: .smith)]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .completed)
+    }
+
+    @Test("Unconfigured validation escalates visibly instead of passing silently")
+    func unconfiguredEscalates() async {
+        let (runtime, _) = makeRuntime(verdictScript: ["ACCEPT"])
+        // Deliberately NOT calling setEvaluatorConfiguration.
+        let task = await makeSubmittedTask(on: runtime)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .awaitingReview)
+    }
+
+    @Test("Round exhaustion escalates; a reset round budget lets a post-escalation resubmission validate again")
+    func roundExhaustionEscalatesAndResetRestoresValidation() async {
+        // One criterion rejected three straight rounds → escalation. After the budget
+        // reset (review_work's reject path), a resubmission must get judged again
+        // rather than insta-escalating on the stale counter.
+        let (runtime, directory) = makeRuntime(verdictScript: [
+            "REJECT: round 1 miss",
+            "REJECT: round 2 miss",
+            "REJECT: round 3 miss",
+            "ACCEPT"
+        ])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.start()
+        let criteria = [AcceptanceCriterion(text: "the fix actually works", origin: .user)]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+        let store = await runtime.taskStore
+
+        await runtime.startTaskValidation(taskID: task.id)
+        var status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .running, "round 1 rejection returns to the worker")
+
+        for expectedOutcome in [AgentTask.Status.running, .awaitingReview] {
+            await store.setResult(id: task.id, result: "another attempt", commentary: nil, attachments: [])
+            await store.updateStatus(id: task.id, status: .validating)
+            await runtime.startTaskValidation(taskID: task.id)
+            status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+            #expect(status == expectedOutcome)
+        }
+
+        // Smith review_work-rejects: fresh round budget, worker fixes, resubmits.
+        await store.resetValidationRound(id: task.id)
+        await store.setResult(id: task.id, result: "the real fix", commentary: nil, attachments: [])
+        await store.updateStatus(id: task.id, status: .validating)
+        await runtime.startTaskValidation(taskID: task.id)
+        status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .completed, "after a reset, validation judges again instead of insta-escalating")
+
+        await runtime.stopAll()
+    }
+
+    @Test("A criterion naming a missing registry validator escalates")
+    func missingValidatorEscalates() async {
+        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let criteria = [AcceptanceCriterion(text: "c", origin: .user, validator: .registry("does-not-exist"))]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .awaitingReview)
+    }
+}

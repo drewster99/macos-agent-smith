@@ -870,6 +870,13 @@ final class AppViewModel {
             }
         )
 
+        // Acceptance validation: seed the shipped evaluator definitions on first launch
+        // (never overwrites — the files are the user's to edit) and point the runtime at
+        // the registry. Definitions hot-load per validation round.
+        let evaluatorsDirectory = persistence.evaluatorsDirectory
+        EvaluatorDefaults.seed(into: evaluatorsDirectory)
+        await newRuntime.setEvaluatorConfiguration(directory: evaluatorsDirectory)
+
         // Per-session persistence for the pending-user-message buffer (messages typed while
         // Smith was stopped / starting). Wired before the runtime starts so enqueues persist
         // and a fresh runtime reseeds undelivered messages after a crash.

@@ -19,6 +19,12 @@ private let logger = Logger(subsystem: "com.agentsmith", category: "Persistence"
 /// breakage (e.g., a sandboxing misconfiguration) where no recovery is possible.
 public actor PersistenceManager {
     private let baseDirectory: URL
+
+    /// The user-owned evaluator registry directory (`AppSupport/AgentSmith/evaluators/`).
+    /// Global, not per-session — definitions are shared configuration like memories.
+    public nonisolated var evaluatorsDirectory: URL {
+        baseDirectory.appendingPathComponent("evaluators", isDirectory: true)
+    }
     private let sessionDirectory: URL
     private let attachmentsDirectory: URL
 
