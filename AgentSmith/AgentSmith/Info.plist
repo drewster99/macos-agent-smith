@@ -4,5 +4,10 @@
 <dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Agent Smith uses Apple Events to script and automate other applications on your behalf when you ask it to.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

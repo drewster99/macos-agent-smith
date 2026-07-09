@@ -263,6 +263,26 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([UUID].self, from: data)
     }
 
+    // MARK: - Pending user messages (per-session)
+
+    /// Persists the pending inbound-user-message buffer — messages typed while Smith could not
+    /// accept them (agents stopped / mid-startup). Saved on every mutation so a message typed
+    /// during a slow startup survives app quit and crashes. Stored per-session, next to the
+    /// channel log and scheduled-run queue.
+    public func savePendingUserMessages(_ messages: [PendingUserMessage]) throws {
+        try ensureDirectories()
+        let data = try JSONEncoder().encode(messages)
+        let url = sessionDirectory.appendingPathComponent("pending_user_messages.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadPendingUserMessages() throws -> [PendingUserMessage] {
+        let url = sessionDirectory.appendingPathComponent("pending_user_messages.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode([PendingUserMessage].self, from: data)
+    }
+
     // MARK: - Memories (shared)
 
     public func saveMemories(_ memories: [MemoryEntry]) throws {

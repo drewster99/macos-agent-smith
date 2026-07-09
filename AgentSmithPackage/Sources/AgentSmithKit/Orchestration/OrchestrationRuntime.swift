@@ -173,6 +173,42 @@ public actor OrchestrationRuntime {
     /// failures log to the app's logger but do not block the runtime.
     private var persistPendingScheduledRunQueue: (@Sendable ([UUID]) async -> Void)?
 
+    /// Inbound user messages captured while Smith could not accept them (agents stopped, or
+    /// mid-startup during the "Preparing task — starting MCP servers…" window), in FIFO order.
+    /// Delivered by `drainPendingUserMessages()` once Smith is running. Persisted per-session
+    /// so a message typed during a slow startup survives an app quit or crash. See
+    /// `PendingUserMessage`. Without this buffer, such messages were silently dropped at
+    /// `AgentActor`'s `guard isRunning` while Smith was subscribed-but-not-running.
+    private var pendingUserMessages: [PendingUserMessage] = []
+
+    /// Reentrancy guard for `drainPendingUserMessages()` so concurrent kicks don't
+    /// double-deliver. Deliberately NOT held across `await start()` — doing so would
+    /// self-strand the inline drain that runs at the end of `start()`.
+    private var isDrainingUserMessages = false
+
+    /// `channelMessageID`s of pending user messages that have been delivered to (accepted by)
+    /// the CURRENT Smith but not yet incorporated into its conversation. Prevents the drain
+    /// re-delivering them while they sit in Smith's volatile pending queue. Cleared on
+    /// `stopAll` so the next Smith re-delivers anything still buffered (i.e. accepted but never
+    /// incorporated before teardown). A message leaves `pendingUserMessages` only on the
+    /// incorporation callback — so a teardown or crash before incorporation redelivers it
+    /// rather than losing it.
+    private var deliveredUserMessageChannelIDs: Set<UUID> = []
+
+    /// Soft cap above which we log (never drop) an unusually large pending buffer — e.g. a user
+    /// hammering send during a long startup hang. Kept generous; the goal is observability, not
+    /// data loss.
+    private static let pendingUserMessageSoftCap = 100
+
+    /// Loads the persisted pending-user-message buffer from disk. Consulted at the end of
+    /// `start()` so a fresh runtime (crash recovery / cold launch) inherits undelivered
+    /// messages from the previous lifetime.
+    private var loadPendingUserMessages: (@Sendable () async -> [PendingUserMessage])?
+
+    /// Persists the pending-user-message buffer on every mutation. Fire-and-forget; failures
+    /// log via the app's logger but never block the runtime.
+    private var persistPendingUserMessages: (@Sendable ([PendingUserMessage]) async -> Void)?
+
     /// Per-session attachment registry. Set by the app layer once the runtime is
     /// constructed (the registry needs the per-session `PersistenceManager`, which the
     /// runtime itself doesn't carry). When unset, attachment-aware tools degrade to
@@ -235,6 +271,18 @@ public actor OrchestrationRuntime {
     ) {
         loadPendingScheduledRunQueue = load
         persistPendingScheduledRunQueue = persist
+    }
+
+    /// Wires the per-session persistence for the pending-user-message buffer. Mirrors
+    /// `setPendingScheduledRunQueuePersistence`. Both closures should target the session-scoped
+    /// `PersistenceManager(sessionID:)`. Must be wired before the first `sendUserMessage` /
+    /// `start()` so enqueues persist and a fresh runtime can reseed.
+    public func setPendingUserMessagePersistence(
+        load: @escaping @Sendable () async -> [PendingUserMessage],
+        persist: @escaping @Sendable ([PendingUserMessage]) async -> Void
+    ) {
+        loadPendingUserMessages = load
+        persistPendingUserMessages = persist
     }
 
     public func currentScheduledWakes() async -> [ScheduledWake] {
@@ -786,7 +834,16 @@ public actor OrchestrationRuntime {
                 // newer user message — nothing unhandled to forward.
                 return nil
             }
+            // A task-created banner means Smith already acted on the most recent user message
+            // by turning it into a task; don't re-forward that message as prose (it would
+            // double-process). Reached before any user message means the latest one is handled.
+            if case .string("task_created") = message.metadata?["messageKind"] {
+                return nil
+            }
             if case .user = message.sender {
+                // Buffer-origin echoes are delivered (and turned into tasks) via the
+                // pending-user-message drain, not this prose path — never re-forward them.
+                if case .bool(true) = message.metadata?["bufferOrigin"] { return nil }
                 return message.content
             }
         }
@@ -1009,6 +1066,12 @@ public actor OrchestrationRuntime {
         }
         agentSubscriptions[id] = [subID]
 
+        // Remove a buffered user message from durable storage only when Smith incorporates it
+        // into the conversation — not when it's merely accepted into the volatile pending queue.
+        await smithAgent.setOnInboundUserMessagesIncorporated { [weak self] channelMessageIDs in
+            Task { await self?.handleInboundUserMessagesIncorporated(channelMessageIDs) }
+        }
+
         // Replay persisted wakes onto the freshly-built Smith. Runs on every `start()` —
         // cold launch AND `restartForNewTask` — so wakes survive run_task restarts in
         // addition to app quit. The disk file is kept current via `onTimerEventForChannel`.
@@ -1130,9 +1193,11 @@ public actor OrchestrationRuntime {
                     smithParts.append("""
                         Brown is already working on task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)). \
                         The task description and any prior progress have been delivered to Brown automatically. \
-                        Do NOT call `run_task`, `create_task`, or `message_brown` — Brown is already briefed and working. \
+                        Do NOT call `run_task`, `create_task`, or `message_brown` FOR THIS task — Brown is already briefed and working. \
+                        This restriction applies ONLY to this in-progress task. If the user sends a NEW message, handle it normally: \
+                        create a task for genuine new work, or simply reply if they're answering a question or chatting — use your judgment, and don't force a task for a clarification. \
                         Brown will signal progress via task_update / task_complete; you'll also get an automatic 10-minute Brown-activity digest. Do NOT poll. \
-                        The user is already informed. Don't inform them for a 2nd time.
+                        The user is already informed about THIS task. Don't inform them about it a 2nd time.
                         """)
                 } else {
                     smithParts.append("""
@@ -1346,21 +1411,164 @@ public actor OrchestrationRuntime {
                 await self?.drainPendingScheduledRunQueue()
             }
         }
+
+        // Reseed the pending-user-message buffer from disk (crash / cold-launch recovery) and
+        // deliver any buffered messages now that Smith is running. Union by id so messages
+        // enqueued during this start's window (already in memory) are neither lost nor
+        // duplicated by the disk copy; FIFO restored by receive time. Runs AFTER the
+        // "System online" post above so the transcript ordering is correct. Inline (not
+        // detached) because delivery via `acceptChannelMessage` does not trigger a restart.
+        if let loader = loadPendingUserMessages {
+            let disk = await loader()
+            if !disk.isEmpty {
+                let known = Set(pendingUserMessages.map { $0.id })
+                let merged = pendingUserMessages + disk.filter { !known.contains($0.id) }
+                pendingUserMessages = merged.sorted { $0.receivedAt < $1.receivedAt }
+            }
+        }
+        await drainPendingUserMessages()
     }
 
-    /// Sends a user message (with optional attachments) privately to Smith.
+    /// Sends a user message (with optional attachments) to Smith.
+    ///
+    /// The message is always enqueued into the persisted pending-user-message buffer, a UI-echo
+    /// copy is posted to the channel immediately (marked `bufferOrigin` so the live
+    /// subscription ignores it — the buffer's drain is the sole delivery path), and the drain
+    /// is kicked. This removes the old check-then-act race: previously `sendUserMessage` posted
+    /// directly, and a message landing while Smith was stopped/starting hit `AgentActor`'s
+    /// `guard isRunning` and was silently dropped. Now delivery is deferred until Smith can
+    /// actually accept it, and the message survives an app quit or crash in between.
     public func sendUserMessage(_ text: String, attachments: [Attachment] = []) async {
         await powerManager?.activityOccurred()
         if let registry = attachmentRegistry, !attachments.isEmpty {
             await registry.register(contentsOf: attachments)
         }
+
+        let pending = PendingUserMessage(
+            channelMessageID: UUID(),
+            text: text,
+            attachments: attachments,
+            receivedAt: Date()
+        )
+        pendingUserMessages.append(pending)
+        if pendingUserMessages.count > Self.pendingUserMessageSoftCap {
+            stopLogger.notice("pendingUserMessages large count=\(self.pendingUserMessages.count, privacy: .public)")
+        }
+        await persistPendingUserMessages?(pendingUserMessages)
+
+        // Immediate UI echo so the message appears in the transcript right away even during a
+        // slow startup. `bufferOrigin` keeps the live subscription from delivering it to Smith
+        // (the drain owns delivery, tied to acceptance); `pendingUserMessageID` links it.
+        // Timestamp is the receive time so the transcript stays chronological regardless of
+        // when the drain later runs.
         await channel.post(ChannelMessage(
+            id: pending.channelMessageID,
+            timestamp: pending.receivedAt,
             sender: .user,
             recipientID: smithID,
             recipient: .agent(.smith),
             content: text,
-            attachments: attachments
+            attachments: attachments,
+            metadata: [
+                "bufferOrigin": .bool(true),
+                "pendingUserMessageID": .string(pending.id.uuidString)
+            ]
         ))
+
+        await drainPendingUserMessages()
+    }
+
+    /// The single delivery path for `pendingUserMessages`. Delivers buffered messages to Smith
+    /// in FIFO order once it is running, removing each from the persisted queue only after
+    /// Smith *accepts* it — not merely after the channel post. (The live subscription delivers
+    /// asynchronously via an unstructured `Task`, and Smith can stop before that Task runs, so
+    /// "posted" is not "accepted".) Idempotent and safe to call repeatedly. Re-checks Smith
+    /// liveness after every suspension so a mid-drain teardown leaves the remaining messages
+    /// buffered rather than losing them.
+    public func drainPendingUserMessages() async {
+        guard !isDrainingUserMessages else { return }
+
+        // No Smith yet. Kick a cold start (whose end-of-start drain will deliver) — but ONLY
+        // when a start can actually succeed. Kicking while aborted or without a configured
+        // Smith would spin a start that bails at its early guards, re-kicked forever by each
+        // new message. Route through `restartQueue` so it serializes with `restartForNewTask`.
+        guard let currentSmith = smith, let startSmithID = smithID else {
+            if !startInProgress, !aborted,
+               llmProviders[.smith] != nil, llmConfigs[.smith] != nil,
+               !pendingUserMessages.isEmpty {
+                restartQueue.schedule { [weak self] in
+                    await self?.start()
+                }
+            }
+            return
+        }
+
+        // Not running yet (subscribed-but-not-running startup window). Leave everything
+        // buffered; the in-flight / next `start()`'s end-of-start drain delivers it.
+        guard await currentSmith.running else { return }
+
+        isDrainingUserMessages = true
+        defer { isDrainingUserMessages = false }
+
+        // Deliver every not-yet-delivered buffered message to Smith. Delivery does NOT remove
+        // the message from the persisted buffer — that happens only when Smith incorporates it
+        // (`handleInboundUserMessagesIncorporated`), so a teardown or crash before incorporation
+        // redelivers rather than loses it. `deliveredUserMessageChannelIDs` stops us re-handing
+        // the same message to a Smith that has it queued but hasn't processed it yet. Re-snapshot
+        // each pass so messages appended mid-drain are picked up; stop when a pass delivers none.
+        while !Task.isCancelled {
+            let undelivered = pendingUserMessages.filter { !deliveredUserMessageChannelIDs.contains($0.channelMessageID) }
+            if undelivered.isEmpty { break }
+
+            var deliveredAny = false
+            for pending in undelivered {
+                if Task.isCancelled { break }
+                // Re-verify the same Smith is still current and running after each suspension —
+                // `stopAll`/abort can tear it down while we're awaiting.
+                guard let liveSmith = smith, smithID == startSmithID, await liveSmith.running else { return }
+                // The incorporation callback may have removed/consumed it during an await.
+                guard pendingUserMessages.contains(where: { $0.id == pending.id }),
+                      !deliveredUserMessageChannelIDs.contains(pending.channelMessageID) else { continue }
+
+                var resolved: [Attachment] = []
+                if let registry = attachmentRegistry, !pending.attachments.isEmpty {
+                    // Re-register the (byte-stripped) metadata so a post-crash reseed can resolve;
+                    // `register` won't clobber an in-memory copy that already carries bytes.
+                    await registry.register(contentsOf: pending.attachments)
+                    let (found, _) = await registry.resolve(idStrings: pending.attachments.map { $0.id.uuidString })
+                    resolved = found
+                }
+
+                let delivery = ChannelMessage(
+                    id: pending.channelMessageID,
+                    timestamp: pending.receivedAt,
+                    sender: .user,
+                    recipientID: startSmithID,
+                    recipient: .agent(.smith),
+                    content: pending.text,
+                    attachments: resolved
+                )
+
+                let accepted = await liveSmith.acceptChannelMessage(delivery)
+                guard accepted else { return }
+                deliveredUserMessageChannelIDs.insert(pending.channelMessageID)
+                deliveredAny = true
+            }
+            if !deliveredAny { break }
+        }
+    }
+
+    /// Called (via the Smith incorporation callback) with the `channelMessageID`s of buffered
+    /// user messages that Smith has just taken into its conversation. This is the point at which
+    /// a message is durably handled, so it's finally removed from the persisted buffer.
+    private func handleInboundUserMessagesIncorporated(_ channelMessageIDs: [UUID]) async {
+        let incorporated = Set(channelMessageIDs)
+        let before = pendingUserMessages.count
+        pendingUserMessages.removeAll { incorporated.contains($0.channelMessageID) }
+        deliveredUserMessageChannelIDs.subtract(incorporated)
+        if pendingUserMessages.count != before {
+            await persistPendingUserMessages?(pendingUserMessages)
+        }
     }
 
     /// Stops all agents and the monitoring timer.
@@ -1414,6 +1622,9 @@ public actor OrchestrationRuntime {
         currentBrownID = nil
         smith = nil
         smithID = nil
+        // Drop per-Smith delivery tracking. Anything delivered-but-not-incorporated stays in
+        // `pendingUserMessages` and will be redelivered to the next Smith by its start-drain.
+        deliveredUserMessageChannelIDs.removeAll()
         currentSessionID = nil
         await channel.setCurrentSessionID(nil)
 

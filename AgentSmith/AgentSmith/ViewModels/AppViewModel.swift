@@ -870,6 +870,27 @@ final class AppViewModel {
             }
         )
 
+        // Per-session persistence for the pending-user-message buffer (messages typed while
+        // Smith was stopped / starting). Wired before the runtime starts so enqueues persist
+        // and a fresh runtime reseeds undelivered messages after a crash.
+        await newRuntime.setPendingUserMessagePersistence(
+            load: {
+                do {
+                    return try await persistence.loadPendingUserMessages()
+                } catch {
+                    logger.error("Failed to load pending user messages: \(error.localizedDescription)")
+                    return []
+                }
+            },
+            persist: { messages in
+                do {
+                    try await persistence.savePendingUserMessages(messages)
+                } catch {
+                    logger.error("Failed to persist pending user messages: \(error.localizedDescription)")
+                }
+            }
+        )
+
         await newRuntime.setLoadPersistedWakes {
             do {
                 return try await persistence.loadScheduledWakes()
@@ -1035,12 +1056,20 @@ final class AppViewModel {
             persistMessageHistory()
         }
 
-        for attachment in attachments {
-            Task.detached { [persistenceManager, logger] in
-                do {
-                    try await persistenceManager.saveAttachment(attachment)
-                } catch {
-                    logger.error("Failed to save attachment \(attachment.filename): \(error)")
+        // Persist attachment bytes to disk BEFORE handing the message to the runtime. The
+        // runtime enqueues a persisted pending-user-message that references these bytes by id
+        // and lazy-loads them from disk at delivery; if the save were still in flight (or the
+        // app were killed) the drain could resolve nothing. Saved concurrently, then awaited.
+        if !attachments.isEmpty {
+            await withTaskGroup(of: Void.self) { group in
+                for attachment in attachments {
+                    group.addTask { [persistenceManager, logger] in
+                        do {
+                            try await persistenceManager.saveAttachment(attachment)
+                        } catch {
+                            logger.error("Failed to save attachment \(attachment.filename): \(error)")
+                        }
+                    }
                 }
             }
         }

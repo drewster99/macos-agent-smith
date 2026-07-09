@@ -59,6 +59,20 @@ public actor AgentActor {
     private var isRunning = false
     private var runTask: Task<Void, Never>?
 
+    /// Bounded FIFO of recently-ingested channel-message IDs, used to dedupe delivery. Guards
+    /// against a pending-user-message drain (`acceptChannelMessage`) redelivering a message
+    /// that the live subscription already accepted, or a post-crash replay double-appending.
+    private var recentIngestedMessageIDs: [UUID] = []
+    private static let recentIngestedMessageIDCap = 256
+
+    /// Fired from `drainPendingMessages` with the `ChannelMessage.id`s of user-sender messages
+    /// at the moment they are incorporated into the conversation for a turn. The runtime uses
+    /// this to remove the matching entries from its persisted pending-user-message buffer — so a
+    /// buffered message is dropped from durable storage only once Smith has actually taken it
+    /// in, not merely accepted it into the volatile pending queue (which would lose it if Smith
+    /// were torn down or the app crashed before the run loop processed it).
+    private var onInboundUserMessagesIncorporated: (@Sendable ([UUID]) -> Void)?
+
     /// Direct security evaluator for tool approval. The Security Agent role runs as this
     /// lightweight evaluator rather than a full agent actor with a separate approval gate.
     private var securityEvaluator: SecurityEvaluator?
@@ -769,15 +783,52 @@ public actor AgentActor {
     /// - Public messages are delivered to everyone except the sender's own role.
     /// - System messages are always delivered.
     public func receiveChannelMessage(_ message: ChannelMessage) {
-        guard isRunning else { return }
+        // Buffer-origin messages are the UI-echo copies posted by
+        // `OrchestrationRuntime.sendUserMessage`. They are delivered to the agent EXCLUSIVELY
+        // through the runtime's pending-user-message drain (`acceptChannelMessage`), never the
+        // live subscription — otherwise a message posted for the UI while Smith is running
+        // would be delivered twice (once here, once by the drain).
+        if case .bool(true) = message.metadata?["bufferOrigin"] { return }
+        _ = ingestChannelMessage(message)
+    }
+
+    /// Delivery path used by `OrchestrationRuntime.drainPendingUserMessages()`. Runs the same
+    /// acceptance filters as `receiveChannelMessage` and returns whether the message was
+    /// accepted into the pending queue. Returns `false` when the agent is not running (so the
+    /// drain leaves the message buffered for the next start) or when the message was already
+    /// ingested (idempotent). Unlike the live subscription, this path intentionally delivers
+    /// `bufferOrigin` messages — that is the whole point of the drain.
+    @discardableResult
+    public func acceptChannelMessage(_ message: ChannelMessage) -> Bool {
+        ingestChannelMessage(message)
+    }
+
+    /// Wires the incorporation callback (see `onInboundUserMessagesIncorporated`). Set by the
+    /// runtime on the Smith agent so buffered user messages leave the persisted buffer only
+    /// once they've been taken into the conversation.
+    public func setOnInboundUserMessagesIncorporated(_ handler: @escaping @Sendable ([UUID]) -> Void) {
+        onInboundUserMessagesIncorporated = handler
+    }
+
+    /// Shared acceptance logic for both the live subscription and the pending-user-message
+    /// drain. Returns `true` only when the message was appended to `pendingChannelMessages`
+    /// (i.e. actually accepted for processing), so callers can tie queue removal to acceptance
+    /// rather than to a fire-and-forget channel post.
+    ///
+    /// Delivery rules:
+    /// - Private messages (recipientID != nil) are only delivered to the named recipient.
+    /// - Public messages are delivered to everyone except the sender's own role.
+    @discardableResult
+    private func ingestChannelMessage(_ message: ChannelMessage) -> Bool {
+        guard isRunning else { return false }
 
         if let recipientID = message.recipientID {
             // Private message — only the intended recipient receives it.
-            guard recipientID == id else { return }
+            guard recipientID == id else { return false }
         } else {
             // Public message — ignore our own role to avoid echo loops.
             if case .agent(let role) = message.sender, role == configuration.role {
-                return
+                return false
             }
         }
 
@@ -785,7 +836,7 @@ public actor AgentActor {
         if case .string(let kind) = message.metadata?["messageKind"] {
             switch kind {
             case "task_created", "memory_saved", "memory_searched":
-                return
+                return false
             default:
                 break
             }
@@ -796,11 +847,19 @@ public actor AgentActor {
         // the error is a context overflow (each retry adds the error text, growing
         // the context further).
         if case .bool(true) = message.metadata?["isError"] {
-            return
+            return false
         }
 
         // Optional per-agent content filter — drops messages that shouldn't trigger a wake.
-        if let filter = configuration.messageAcceptFilter, !filter(message) { return }
+        if let filter = configuration.messageAcceptFilter, !filter(message) { return false }
+
+        // Idempotency: never append the same channel message twice. Protects against a drain
+        // redelivery racing the live subscription and against a post-crash replay.
+        if recentIngestedMessageIDs.contains(message.id) { return false }
+        recentIngestedMessageIDs.append(message.id)
+        if recentIngestedMessageIDs.count > Self.recentIngestedMessageIDCap {
+            recentIngestedMessageIDs.removeFirst(recentIngestedMessageIDs.count - Self.recentIngestedMessageIDCap)
+        }
 
         // Track when the user sends a direct message to this agent (for reply_to_user availability)
         if case .user = message.sender, message.recipientID == id {
@@ -824,6 +883,7 @@ public actor AgentActor {
             debouncingForMessages = true
         }
         interruptIdleSleep()
+        return true
     }
 
     /// Whether the agent is currently running.
@@ -2811,7 +2871,16 @@ public actor AgentActor {
 
             allTextParts.append(textParts.joined(separator: "\n"))
         }
+        // Signal the runtime which user messages are being incorporated this turn, so their
+        // durable buffer entries can be dropped now (and not before — see the callback doc).
+        let incorporatedUserMessageIDs: [UUID] = pendingChannelMessages.compactMap { msg in
+            if case .user = msg.sender { return msg.id }
+            return nil
+        }
         pendingChannelMessages.removeAll()
+        if !incorporatedUserMessageIDs.isEmpty {
+            onInboundUserMessagesIncorporated?(incorporatedUserMessageIDs)
+        }
 
         // Drain any attachments staged via `view_attachment`. Image attachments at the
         // requested detail tier go in as image content blocks; non-image attachments
