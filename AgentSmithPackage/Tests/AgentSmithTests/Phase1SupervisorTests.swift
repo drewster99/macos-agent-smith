@@ -266,6 +266,9 @@ struct SmithContextManagementTests {
         await runtime.start()
         let before = await runtime.contextSnapshot(for: .smith)
         #expect(before != nil)
+        // Let Smith's first (instant, mocked) turn complete so its assistant response
+        // can't append AFTER the reset and race the count assertion below.
+        try? await Task.sleep(nanoseconds: 300_000_000)
 
         let result = await runtime.clearSmithContext()
         #expect(result.contains("cleared"))

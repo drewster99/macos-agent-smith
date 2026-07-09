@@ -1502,8 +1502,10 @@ final class AppViewModel {
             return
         }
         let result = await runtime.clearSmithContext()
-        let channel = await runtime.channel
-        await channel.post(ChannelMessage(sender: .system, content: result))
+        // Local append, NOT a channel post: agents must not receive this notice. Smith
+        // learns about the clear from its orientation turn, and Brown mid-task has no
+        // business hearing that Smith's context changed.
+        appendLocalSystemMessage(result)
     }
 
     /// `/compact`: summarizes Smith's conversation and splices its context down to
@@ -1514,8 +1516,8 @@ final class AppViewModel {
             return
         }
         let result = await runtime.compactSmithContext()
-        let channel = await runtime.channel
-        await channel.post(ChannelMessage(sender: .system, content: result))
+        // Local append for the same reason as clearConversation.
+        appendLocalSystemMessage(result)
     }
 
     /// Surfaces a system line in the transcript when there's no runtime (and therefore no
