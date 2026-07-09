@@ -232,6 +232,76 @@ struct TaskValidationCoordinatorTests {
         await runtime.stopAll()
     }
 
+    // MARK: - Registry seeding
+
+    @Test("seed writes when missing, upgrades pristine superseded copies, never touches user edits")
+    func seedUpgradePolicy() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-seed-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let target = directory.appendingPathComponent("default-acceptance.json")
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        // Missing → seeded.
+        EvaluatorDefaults.seed(into: directory)
+        let seeded = try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target))
+        #expect(seeded.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash)
+
+        // Pristine current copy re-seeded → unchanged (not in the superseded set).
+        EvaluatorDefaults.seed(into: directory)
+        #expect(try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target)).contentHash == seeded.contentHash)
+
+        // A pristine SUPERSEDED shipped copy is upgraded in place.
+        let old = Self.defaultVariant(systemPrompt: "an older shipped prompt")
+        try encoder.encode(old).write(to: target, options: .atomic)
+        EvaluatorDefaults.seed(into: directory, supersededHashes: [old.contentHash])
+        let upgraded = try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target))
+        #expect(upgraded.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash, "pristine superseded copies upgrade")
+
+        // A USER-EDITED copy (hash matches nothing shipped) is never overwritten.
+        let edited = Self.defaultVariant(systemPrompt: "the user's customized prompt")
+        try encoder.encode(edited).write(to: target, options: .atomic)
+        EvaluatorDefaults.seed(into: directory)
+        let preserved = try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target))
+        #expect(preserved.systemPrompt == "the user's customized prompt", "user edits are untouchable")
+    }
+
+    /// The shipped default with only the system prompt swapped (fields are immutable).
+    private static func defaultVariant(systemPrompt: String) -> EvaluatorDefinition {
+        let base = EvaluatorDefaults.defaultAcceptanceDefinition
+        return EvaluatorDefinition(
+            name: base.name,
+            description: base.description,
+            kind: base.kind,
+            systemPrompt: systemPrompt,
+            inputTemplate: base.inputTemplate,
+            requiredSlots: base.requiredSlots,
+            outputGrammar: base.outputGrammar,
+            modelSlot: base.modelSlot,
+            toolNames: base.toolNames,
+            maxTurns: base.maxTurns,
+            timeoutSeconds: base.timeoutSeconds,
+            maxOutputTokens: base.maxOutputTokens
+        )
+    }
+
+    @Test("The default validator tells the validator what tools the worker had")
+    func validatorSeesWorkerTools() async {
+        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let task = await makeSubmittedTask(on: runtime)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .completed)
+
+        let record = await runtime.taskStore.task(id: task.id)?.validation?.verdictRecords.first
+        #expect(record?.renderedInput?.contains("Worker's tools") == true)
+        #expect(record?.renderedInput?.contains("bash") == true, "the worker toolset (incl. bash) is in the validator's input")
+    }
+
     // MARK: - Dynamic (prepare/map) criteria
 
     /// Installs a minimal prepare-kind definition into the test registry.

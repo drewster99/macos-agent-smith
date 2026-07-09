@@ -53,12 +53,12 @@ public struct CreateTaskTool: AgentTool {
             "acceptance_criteria": .dictionary([
                 "type": .string("array"),
                 "items": .dictionary(["type": .string("string")]),
-                "description": .string("Optional acceptance criteria — the checklist the automated validation system judges the worker's submission against. Derive them from what the user asked for (including any validation the user explicitly requested); make each one concrete and evidence-checkable. Omit to use the default whole-task acceptance check. Refine later (waivable flags, specific validators) with `set_acceptance_criteria`.")
+                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive 2-5 concrete, evidence-checkable criteria from what the user asked for (including any validation the user explicitly requested). Omit only for trivial reminder-style tasks, where the default whole-task acceptance check suffices. Refine later (waivable flags, specific validators, dynamic prepare) with `set_acceptance_criteria`.")
             ]),
             "steps": .dictionary([
                 "type": .string("array"),
                 "items": .dictionary(["type": .string("string")]),
-                "description": .string("Optional initial step list for the worker, in order. The worker owns and evolves it from there (`manage_steps`); validators see the final list including anything skipped or removed.")
+                "description": .string("Initial step list for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. The worker owns and evolves it from there (`manage_steps`); validators see the final list including anything skipped or removed.")
             ])
         ]),
         "required": .array([.string("title"), .string("description")])

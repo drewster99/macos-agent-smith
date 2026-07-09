@@ -31,10 +31,20 @@ public enum EvaluatorDefaults {
         systemPrompt: """
             You are an acceptance validator for completed work. You are given a task, the worker's \
             submitted result, the worker's step list (including skipped/removed steps and their \
-            reasons), and ONE acceptance criterion. Judge ONLY that criterion, on evidence: if file \
-            paths or artifacts are referenced, verify them with your tools rather than taking the \
-            worker's word. Be strict about completeness, but judge what the criterion asks — not \
-            what you would have asked. Respond with your verdict on the FIRST line:
+            reasons), the worker's tool list, and ONE acceptance criterion. Judge ONLY that \
+            criterion, on evidence.
+
+            Your toolset is NOT the worker's. You hold only read-only evidence tools; the worker \
+            typically has shell access, web access, and more — its actual tool list is in the \
+            input. NEVER conclude that a tool "is not available" or that work was infeasible \
+            because YOU lack the tool. For claims you can check yourself (files, directories, \
+            file contents), verify with your tools rather than taking the worker's word. For \
+            actions you cannot reproduce (shell commands, web fetches, sent messages), judge on \
+            the evidence trail — the step list, progress updates, and the specificity of the \
+            result — not on whether you could perform them.
+
+            Be strict about completeness, but judge what the criterion asks — not what you would \
+            have asked. Respond with your verdict on the FIRST line:
             ACCEPT — the criterion is satisfied.
             REJECT: <specific reason and what is missing — the worker acts on this verbatim>
             WAIVE: <why this criterion does not apply to this task>
@@ -42,6 +52,9 @@ public enum EvaluatorDefaults {
         inputTemplate: """
             ## Task: {{task_title}} (id: {{task_id}})
             {{task_description}}
+
+            ## Worker's tools (its capabilities differ from yours)
+            {{worker_tools}}
 
             ## Worker's step list (statuses + tombstones)
             {{steps}}
@@ -61,7 +74,7 @@ public enum EvaluatorDefaults {
             ## Your previous verdict on this criterion (if any)
             {{previous_verdict}}
             """,
-        requiredSlots: ["task_title", "task_id", "task_description", "steps", "recent_updates", "result", "commentary", "criterion", "previous_verdict"],
+        requiredSlots: ["task_title", "task_id", "task_description", "worker_tools", "steps", "recent_updates", "result", "commentary", "criterion", "previous_verdict"],
         outputGrammar: .verdictLine(allowed: [
             .init(token: "ACCEPT", requiresReason: false),
             .init(token: "REJECT", requiresReason: true),
@@ -78,13 +91,28 @@ public enum EvaluatorDefaults {
     /// validators, and the default toolset for shipped ones.
     public static let validatorEvidenceToolNames = ["file_read", "directory_listing", "grep", "glob"]
 
-    /// Seeds the shipped definitions into the user-owned registry directory if absent.
-    /// Never overwrites: once seeded, the file is the user's to edit.
-    public static func seed(into directory: URL) {
+    /// Content hashes of PREVIOUS shipped revisions of `default-acceptance`. A registry
+    /// file whose definition matches one of these is a pristine older shipped copy and
+    /// gets upgraded in place by `seed(into:)`; anything else — user-edited or
+    /// user-authored — is never touched.
+    public static let supersededShippedContentHashes: Set<String> = [
+        "f3fbf8a16403fce2"  // 2026-07-09 initial revision, before the worker_tools slot
+    ]
+
+    /// Seeds the shipped definitions into the user-owned registry directory. Missing
+    /// files are written; a file that is byte-for-byte a SUPERSEDED shipped revision
+    /// (matched by content hash) is upgraded to the current one; anything the user has
+    /// edited or authored is never overwritten. Undecodable files are also left alone —
+    /// the registry surfaces those as visible load failures.
+    public static func seed(into directory: URL, supersededHashes: Set<String> = supersededShippedContentHashes) {
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let target = directory.appendingPathComponent("default-acceptance.json")
-        guard !fileManager.fileExists(atPath: target.path) else { return }
+        if fileManager.fileExists(atPath: target.path) {
+            guard let data = try? Data(contentsOf: target),
+                  let existing = try? JSONDecoder().decode(EvaluatorDefinition.self, from: data),
+                  supersededHashes.contains(existing.contentHash) else { return }
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(defaultAcceptanceDefinition) {
@@ -479,6 +507,7 @@ extension OrchestrationRuntime {
             "task_id": task.id.uuidString,
             "task_title": task.title,
             "task_description": task.description,
+            "worker_tools": workerToolsDescription(for: task),
             "steps": Self.renderSteps(task.steps),
             "recent_updates": task.updates.suffix(10).map { "- \($0.message)" }.joined(separator: "\n"),
             "result": task.result ?? "(none submitted)",
@@ -514,6 +543,18 @@ extension OrchestrationRuntime {
                 )
             }
         )
+    }
+
+    /// The worker's tool names for the validator's context — the LIVE worker's actual
+    /// (scoped) set when one exists, else the standard worker toolset. Validators never
+    /// share the worker's tools; without this list they misjudge feasibility by their
+    /// own read-only kit ("the gh CLI is not available in this environment").
+    private func workerToolsDescription(for task: AgentTask) -> String {
+        if let liveWorker = liveWorkerHandle(for: task) {
+            return liveWorker.agent.toolNames.joined(separator: ", ")
+        }
+        return BrownBehavior.toolNames.joined(separator: ", ")
+            + " (standard worker toolset; the worker may also have had MCP-provided tools)"
     }
 
     /// V1 model references are role slots only. `.validator` resolves to a dedicated

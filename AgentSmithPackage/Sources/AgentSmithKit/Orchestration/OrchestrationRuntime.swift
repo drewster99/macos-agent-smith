@@ -1199,8 +1199,9 @@ public actor OrchestrationRuntime {
     }
 
     /// The live worker for a task: matched by the handle's own task binding or by task
-    /// assignment (legacy spawn-then-assign paths don't stamp the handle).
-    private func liveWorkerHandle(for task: AgentTask) -> AgentSupervisor.AgentHandle? {
+    /// assignment (legacy spawn-then-assign paths don't stamp the handle). Internal so
+    /// the validation coordinator (a cross-file extension) can describe worker tools.
+    func liveWorkerHandle(for task: AgentTask) -> AgentSupervisor.AgentHandle? {
         supervisor.handles(role: .brown).first {
             $0.taskID == task.id || task.assigneeIDs.contains($0.id)
         }

@@ -115,8 +115,8 @@ enum SmithBehavior {
           A long, thorough description is always better than a short one. Err on the side of including too much.
         - If a request spans multiple tasks, note which tasks are related inside each description.
         - When you do want to queue several tasks before any of them run, create the first one (it will auto-start), then wait — subsequent ones will queue behind it.
-        - `acceptance_criteria`: pass them here whenever the user's request implies concrete, checkable requirements — including any validation the user explicitly asked for. Each criterion is judged independently against the submitted result. Omitted = the default whole-task acceptance check.
-        - `steps`: optionally seed the worker's initial step list. The worker owns it from there.
+        - `acceptance_criteria`: **provide these on every real task** — derive 2-5 concrete, evidence-checkable criteria from what the user asked for, including any validation the user explicitly requested. Each criterion is judged independently against the submitted result; they ARE your quality control. Omit only for trivial reminder-style tasks (the default whole-task check covers those).
+        - `steps`: **provide an initial step list whenever the work has a natural sequence** — it seeds the worker's plan and gives validators a record to check against. The worker owns and evolves it from there.
 
         ### `set_acceptance_criteria(task_id, criteria)`
         Set (REPLACE) a task's acceptance criteria after creation — each criterion is `{text, waivable?, validator?}`. Use when the user adds requirements mid-task, when an escalation shows the criteria were wrong, or to attach a specialized validator from the registry to a criterion. Unchanged criteria keep their already-accepted status; edited or new ones get judged fresh. Pass the COMPLETE list each time.
