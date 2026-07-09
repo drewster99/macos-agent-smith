@@ -49,6 +49,16 @@ public struct CreateTaskTool: AgentTool {
                 "type": .string("array"),
                 "items": .dictionary(["type": .string("string")]),
                 "description": .string("Optional UUID strings of attachments to include with this task. Use when the user attached an image, PDF, or file the worker will need. The IDs are surfaced in the user's incoming message as `[filename](file://…) … id=<UUID>` markdown links. Forward the EXACT id values verbatim. Brown will see image attachments as image content and any non-image attachments as text references with file paths.")
+            ]),
+            "acceptance_criteria": .dictionary([
+                "type": .string("array"),
+                "items": .dictionary(["type": .string("string")]),
+                "description": .string("Optional acceptance criteria — the checklist the automated validation system judges the worker's submission against. Derive them from what the user asked for (including any validation the user explicitly requested); make each one concrete and evidence-checkable. Omit to use the default whole-task acceptance check. Refine later (waivable flags, specific validators) with `set_acceptance_criteria`.")
+            ]),
+            "steps": .dictionary([
+                "type": .string("array"),
+                "items": .dictionary(["type": .string("string")]),
+                "description": .string("Optional initial step list for the worker, in order. The worker owns and evolves it from there (`manage_steps`); validators see the final list including anything skipped or removed.")
             ])
         ]),
         "required": .array([.string("title"), .string("description")])
@@ -131,6 +141,36 @@ public struct CreateTaskTool: AgentTool {
             scheduledRunAt: scheduledRunAt,
             descriptionAttachments: resolvedAttachments
         )
+
+        // Seed acceptance criteria and the initial step list when supplied. Plain
+        // strings here — waivable flags and named validators are refinements made via
+        // set_acceptance_criteria; the step list belongs to the worker from now on.
+        if case .array(let rawCriteria) = arguments["acceptance_criteria"] {
+            let texts = rawCriteria.compactMap { raw -> String? in
+                guard case .string(let s) = raw else { return nil }
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            if !texts.isEmpty {
+                await context.taskStore.setAcceptanceCriteria(
+                    id: task.id,
+                    criteria: texts.map { AcceptanceCriterion(text: $0, origin: .smith) }
+                )
+            }
+        }
+        if case .array(let rawSteps) = arguments["steps"] {
+            let texts = rawSteps.compactMap { raw -> String? in
+                guard case .string(let s) = raw else { return nil }
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            if !texts.isEmpty {
+                await context.taskStore.setSteps(
+                    id: task.id,
+                    steps: texts.map { TaskStep(text: $0, origin: .smith) }
+                )
+            }
+        }
 
         // Search semantic memory for relevant context to attach to this task.
         let searchQuery = title + " " + description

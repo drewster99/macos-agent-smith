@@ -59,7 +59,8 @@ enum TestToolContext {
             (Attachment(filename: filename, mimeType: mimeType, byteCount: data.count, data: data), nil)
         },
         stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
-        maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024
+        maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
+        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil }
     ) -> ToolContext {
         ToolContext(
             agentID: agentID,
@@ -72,6 +73,7 @@ enum TestToolContext {
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
+            loadEvaluatorRegistry: loadEvaluatorRegistry,
             memoryStore: memoryStore,
             extractWebContent: extractWebContent,
             recordFileRead: { path in fileReadTracker.record(path) },

@@ -199,12 +199,17 @@ extension OrchestrationRuntime {
 
         if unjudged == 0 && errored.isEmpty && rejected.isEmpty {
             await completeValidatedTask(taskID: taskID)
-        } else if !errored.isEmpty || unjudged > 0 {
+        } else if !errored.isEmpty {
             let messages = errored.map { record -> String in
                 if case .error(let message) = record.verdict { return message }
                 return "unknown"
             }
-            await escalateValidation(taskID: taskID, reason: "Validation could not be completed: \(errored.count + unjudged) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review.")
+            await escalateValidation(taskID: taskID, reason: "Validation could not be completed: \(errored.count) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review.")
+        } else if unjudged > 0 && rejected.isEmpty {
+            // Smith added criteria mid-round (set_acceptance_criteria) — never-judged
+            // criteria aren't errors OR rejections; they just need the next round. The
+            // round budget still bounds this (a spin hits the round-cap escalation).
+            await performTaskValidation(taskID: taskID)
         } else if round >= maxValidationRounds {
             await escalateValidation(taskID: taskID, reason: "Validation did not converge after \(round) rounds — \(rejected.count) criterion(s) still rejected.")
         } else {

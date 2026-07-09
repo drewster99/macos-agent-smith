@@ -92,7 +92,14 @@ clients.
   Cross-task file conflicts and vLLM load are explicitly out of scope (user-managed).
 
 **Migration order:** decode shims (✅ with this entry) → EvaluatorDefinition +
-EvaluationRunner + registry → validation state machine + default-acceptance + steps →
+EvaluationRunner + registry (✅ `5ea2cae`) → validation state machine +
+default-acceptance + steps (✅ landed 2026-07-09: `4c1b758` model,
+`509a83e` coordinator — task_complete → `.validating`, sticky accepts, punch lists
+direct to the worker, bounded rounds with reset-on-review_work-reject, cold-boot
+re-enqueue, mid-round criterion additions run a follow-on round; agent surface —
+`manage_steps` (worker, tombstone rules), `set_acceptance_criteria` +
+`list_validators` (Smith), create_task criteria/steps seeding, get_task_details
+shows criteria+verdicts+steps, both prompts rewritten around validation) →
 dynamic prepare/map → Security Agent onto the runner LAST (scoper first, per-call
 approver only after soak) → worker pool milestones in parallel. The `/compact` command
 pattern applies: manual validation doubles as the prompt-tuning harness for

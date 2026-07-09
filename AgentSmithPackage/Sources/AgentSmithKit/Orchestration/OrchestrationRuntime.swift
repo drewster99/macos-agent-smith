@@ -2879,6 +2879,10 @@ public actor OrchestrationRuntime {
             beginTaskValidation: { [weak self] taskID in
                 await self?.startTaskValidation(taskID: taskID)
             },
+            loadEvaluatorRegistry: { [weak self] in
+                guard let directory = await self?.evaluatorsDirectory else { return nil }
+                return EvaluatorRegistry.load(from: directory)
+            },
             // Liveness lease: true only while this exact agent ID is still in the live
             // registry. A deallocated runtime also reads as not-current — an agent whose
             // runtime is gone is by definition a zombie.

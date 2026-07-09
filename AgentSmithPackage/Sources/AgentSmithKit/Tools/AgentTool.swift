@@ -197,6 +197,10 @@ public struct ToolContext: Sendable {
     /// Hands a just-submitted task to the acceptance-validation system. Called by
     /// `task_complete` after setting the result and the `.validating` status.
     public let beginTaskValidation: @Sendable (UUID) async -> Void
+    /// A fresh snapshot of the evaluator registry (hot-loaded from disk), or nil when no
+    /// registry directory is configured. Smith's criteria/validator tools use this as
+    /// their selection surface. Defaults to nil for contexts built outside the runtime.
+    public let loadEvaluatorRegistry: @Sendable () async -> EvaluatorRegistry?
     /// Liveness lease check: returns true while the runtime still tracks this agent as a
     /// live, current agent. The agent's run loop consults this around every LLM turn and
     /// self-stops on false — the dead-man's switch that kills an agent whose runtime
@@ -315,6 +319,7 @@ public struct ToolContext: Sendable {
         agentIDForRole: @escaping @Sendable (AgentRole) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
         beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
+        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
         isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
@@ -371,6 +376,7 @@ public struct ToolContext: Sendable {
         self.agentIDForRole = agentIDForRole
         self.onSelfTerminate = onSelfTerminate
         self.beginTaskValidation = beginTaskValidation
+        self.loadEvaluatorRegistry = loadEvaluatorRegistry
         self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange
         self.onSecurityAgentProcessingStateChange = onSecurityAgentProcessingStateChange

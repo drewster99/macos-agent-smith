@@ -1,22 +1,26 @@
 import Foundation
 
-/// Smith tool: reviews Brown's submitted work, either accepting or requesting changes.
-/// Merges AcceptWorkTool and RequestChangesTool into a single decision point.
+/// Smith tool: resolves tasks that acceptance validation escalated to `awaitingReview`,
+/// either accepting or requesting changes. Routine submissions are judged by the
+/// validation system and never reach this tool.
 struct ReviewWorkTool: AgentTool {
     let name = "review_work"
     let toolDescription = """
-        Review Brown's submitted work on a task (must be in awaitingReview status). \
+        Resolve a task that acceptance validation ESCALATED to you (must be in awaitingReview \
+        status — routine submissions are judged automatically and never need this tool). \
         Set `accepted` to `true` to mark the task completed and terminate Brown + Security Agent. \
-        Set `accepted` to `false` to return the task to running and send feedback to Brown. \
+        Set `accepted` to `false` to return the task to running and send feedback to Brown; the \
+        validation round budget resets so the resubmission is machine-validated again. \
         `feedback` is required when `accepted` is `false`.
-        
+
         To perform your review:
-        1. Call `get_task_details` to see the current and latest task description, progress and details
+        1. Call `get_task_details` to see the task description, acceptance criteria with their latest validation verdicts, the worker's step list, progress, and result. The escalation reason tells you why validation could not settle this itself.
         2. Carefully step through every requirement described in the task. For each requirement, review the work submitted by Agent Brown to determine if the requirement has been satisfied. If necessary, call `file_read` to validate the results. Be sure that each requirement is not only satisfied, but has been satisfied in the best most complete way possible.
         3. Compile a list of ALL potential deficiencies in the submitted work.
         4. Re-check the task details again and look for key points that could have been misinterpreted or easily missed. Double check those items are complete.
-        5. If you have previously rejected submitted work, review your earlier rejection response. Anything you rejected previously must be resolved and any questions or concerns expressed in your earlier rejection must be addressed.
-        5. If there are ANY identified deficiencies OR any unaddressed questions OR any concerns, then you MUST REJECT the work, by calling `review_work` with `accepted` = `false`. Include your complete and detailed feedback in the `feedback` field. The feedback must include ALL items identified in any of the steps above, including any outstanding issues from prior rejections you may have sent.
+        5. If the escalation shows the acceptance CRITERIA were the problem (wrong, impossible, or pointing at a missing validator), fix them with `set_acceptance_criteria` before deciding.
+        6. If you have previously rejected submitted work, review your earlier rejection response. Anything you rejected previously must be resolved and any questions or concerns expressed in your earlier rejection must be addressed.
+        7. If there are ANY identified deficiencies OR any unaddressed questions OR any concerns, then you MUST REJECT the work, by calling `review_work` with `accepted` = `false`. Include your complete and detailed feedback in the `feedback` field. The feedback must include ALL items identified in any of the steps above, including any outstanding issues from prior rejections you may have sent.
         """
 
     let parameters: [String: AnyCodable] = [

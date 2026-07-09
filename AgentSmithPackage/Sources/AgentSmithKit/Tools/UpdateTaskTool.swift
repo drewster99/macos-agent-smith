@@ -20,7 +20,7 @@ struct UpdateTaskTool: AgentTool {
                     .string("completed"),
                     .string("failed")
                 ]),
-                "description": .string("The new status for the task. Note: `awaitingReview` is reserved — only Brown's `task_complete` may transition a task into review.")
+                "description": .string("The new status for the task. Note: `awaitingReview` and `validating` are reserved — submissions enter validation via Brown's `task_complete`, and only a validation escalation parks a task in review.")
             ])
         ]),
         "required": .array([.string("task_id"), .string("status")])
@@ -47,7 +47,10 @@ struct UpdateTaskTool: AgentTool {
         }
 
         if status == .awaitingReview {
-            return .failure("`awaitingReview` is reserved — only Brown's `task_complete` may transition a task into review. Wait for Brown to submit, then call `review_work`.")
+            return .failure("`awaitingReview` is reserved — it is where acceptance validation parks a task when it ESCALATES (and where help requests park). You cannot set it directly. If the task needs your review, wait for the escalation notice, then call `review_work`.")
+        }
+        if status == .validating {
+            return .failure("`validating` is reserved — only Brown's `task_complete` submission enters validation. Setting it directly would strand the task with no validation run attached.")
         }
 
         guard await context.taskStore.task(id: taskID) != nil else {

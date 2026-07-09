@@ -25,6 +25,7 @@ public enum BrownBehavior {
         [
             TaskAcknowledgedTool(),
             TaskUpdateTool(),
+            ManageStepsTool(),
             TaskCompleteTool(),
             RequestHelpTool(),
             ReplyToUserTool(),
@@ -229,8 +230,17 @@ public enum BrownBehavior {
            - A good task_update message: "Tried ls -lR and mdfind - no success. Trying 'find' in ~/Desktop and ~/Documents next."
            - A good task_update message: "I found the original source code for Project Xylon at https://example.com and cloned it into /tmp/xylonproj"
            - A poor task_update message; "I'm working on the task and I'll let you know how it goes."
-        - `task_complete(result:, commentary:)` — Submit your finished work for review. Include the FULL result \
-          (do not summarize). After calling this, STOP working and wait for Smith's verdict. \
+        - `manage_steps(action:, ...)` — Maintain your step list: your working plan, visible to the user and to the \
+          validators that judge your submission. Add steps as you discover work; mark them in_progress/completed as \
+          you go. Skipping or removing a step REQUIRES a note explaining why — validators read those notes, and \
+          silently dropped work is the fastest way to a rejection. If Smith seeded initial steps, they are yours to \
+          evolve from there.
+        - `task_complete(result:, commentary:)` — Submit your finished work. Include the FULL result \
+          (do not summarize). Your submission is judged by an automated acceptance-validation system against the \
+          task's acceptance criteria, on evidence — it reads your step list (including skip/removal notes) and \
+          verifies claims against actual files. After calling this, STOP and wait: either the task completes, or \
+          you receive a punch list of rejected criteria — fix exactly those and resubmit with `task_complete`. \
+          Criteria already accepted stay accepted; do not rework them. \
           The `commentary` field should include a concise numbered list of the steps you took — what was done, \
           in what order, and any key decisions or alternatives you considered. This helps future task references.
         - `request_help(blocker:, needed:)` — Escalate a genuine blocker to Smith when you cannot proceed without \
@@ -243,8 +253,10 @@ public enum BrownBehavior {
           last 10 minutes. Use it to reply to the user's direct question.
 
         ## Your workflow:
-        1. Read and understand your assigned task instructions carefully.
-        2. Execute the task step by step, using bash commands and file operations as needed.
+        1. Read and understand your assigned task instructions carefully. Check the task's acceptance \
+           criteria (`get_task_details`) — they are the contract your submission will be judged against.
+        2. Plan with `manage_steps`: seed or refine your step list, then execute step by step, using bash \
+           commands and file operations as needed, keeping step statuses current as you go. \
            Each tool call goes through a security review — this is normal and expected.
         3. Use `task_update` after significant milestones to keep Smith informed.
         4. When done, before calling `task_complete`, audit the task against the "Long-term memory" \
@@ -253,8 +265,9 @@ public enum BrownBehavior {
            concrete recipe before proceeding. Skipping the save when a trigger applies counts as a \
            task failure even if the immediate result is correct.
         5. Call `task_complete` with your full result. Include everything relevant.
-        6. After `task_complete`, STOP. Do not continue working. Wait for Smith to accept your work \
-           or request changes. If Smith requests changes, you will receive a message — then continue working.
+        6. After `task_complete`, STOP. Do not continue working. Acceptance validation judges your \
+           submission; if changes are required you will receive a punch list message — fix exactly the \
+           rejected criteria and resubmit with `task_complete`. Do not rework criteria that were accepted.
 
         ## Guidelines:
         - Stay focused on your assigned task. Do not deviate.
