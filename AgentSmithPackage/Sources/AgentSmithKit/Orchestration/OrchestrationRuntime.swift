@@ -52,8 +52,10 @@ public actor OrchestrationRuntime {
     /// Single owner of agent-lifecycle state: handles, generations, epochs. Every piece of
     /// "which agents exist" data lives here and ONLY here — see `AgentSupervisor` for why
     /// it is a runtime-confined value rather than a separate actor. The properties below
-    /// (`smith`, `smithID`, `currentBrownID`) are read-only views over it; storing copies
-    /// alongside it is how registries drift apart and zombies are born.
+    /// (`smith`, `smithID`) are read-only views over it; storing copies alongside it is
+    /// how registries drift apart and zombies are born. Workers (Brown) are a POOL —
+    /// look them up per task (`liveWorkerHandle(for:)`) or as `handles(role: .brown)`,
+    /// never through a "the Brown" convenience.
     var supervisor = AgentSupervisor()
 
     private var smith: AgentActor? { supervisor.firstHandle(role: .smith)?.agent }
@@ -72,9 +74,6 @@ public actor OrchestrationRuntime {
     /// Smith / monitoring timer / power assertion, orphaning the first. This flag closes that
     /// window within actor isolation.
     private var startInProgress = false
-
-    /// Current Brown agent ID (only one active at a time), resolved through the supervisor.
-    private var currentBrownID: UUID? { supervisor.firstHandle(role: .brown)?.id }
 
     /// Archived snapshots of terminated agents, keyed by role for latest-wins semantics.
     private var terminatedAgentArchive: [AgentRole: AgentArchiveEntry] = [:]
@@ -325,6 +324,20 @@ public actor OrchestrationRuntime {
     /// App-layer wiring for the validation system.
     public func setEvaluatorConfiguration(directory: URL) {
         evaluatorsDirectory = directory
+    }
+
+    // MARK: - Worker pool configuration (M1: runtime core, behind capacity 1)
+
+    /// How many workers (Browns, each 1:1 with a task) may run concurrently. At the
+    /// default of 1 the runtime behaves exactly as the historical single-Brown design:
+    /// spawning a worker evicts the previous one. Raising it requires the M3
+    /// capacity-aware orchestration gates (run_task/create_task/drains) to be in place —
+    /// the runtime core is safe at any value, but the surrounding flow still assumes 1.
+    private(set) var maxConcurrentWorkers = 1
+
+    /// Sets the worker-pool capacity (clamped to at least 1).
+    public func setWorkerCapacity(_ capacity: Int) {
+        maxConcurrentWorkers = max(1, capacity)
     }
 
     /// Reentrancy guard shared by both task-queue drains (mirroring
@@ -1164,9 +1177,11 @@ public actor OrchestrationRuntime {
         preflightScopingEnabled = preflightScoping
         perCallCheckEnabled = perCallCheck
         globalToolPolicy = globalPolicy
-        // Apply to the live worker so changes take effect immediately (no session restart) — picked
-        // up on Brown's next turn (policy / scoping flag) or next tool call (per-call review).
-        if let brown = supervisor.firstHandle(role: .brown)?.agent {
+        // Apply to every live worker so changes take effect immediately (no session restart) —
+        // picked up on the worker's next turn (policy / scoping flag) or next tool call
+        // (per-call review).
+        for workerHandle in supervisor.handles(role: .brown) {
+            let brown = workerHandle.agent
             await brown.setGlobalToolPolicy(globalPolicy)
             await brown.setPreflightScopingActive(preflightScoping)
             await brown.setPerCallApprovalEnabled(perCallCheck)
@@ -1179,10 +1194,16 @@ public actor OrchestrationRuntime {
     public func setTaskToolOverride(taskID: UUID, tool: String, enabled: Bool?) async {
         await taskStore.setUserToolOverride(id: taskID, tool: tool, enabled: enabled)
         guard let task = await taskStore.task(id: taskID),
-              let brownHandle = supervisor.firstHandle(role: .brown),
-              task.assigneeIDs.contains(brownHandle.id) else { return }
-        let brown = brownHandle.agent
-        await brown.setUserToolOverrides(task.userToolOverrides ?? [:])
+              let brownHandle = liveWorkerHandle(for: task) else { return }
+        await brownHandle.agent.setUserToolOverrides(task.userToolOverrides ?? [:])
+    }
+
+    /// The live worker for a task: matched by the handle's own task binding or by task
+    /// assignment (legacy spawn-then-assign paths don't stamp the handle).
+    private func liveWorkerHandle(for task: AgentTask) -> AgentSupervisor.AgentHandle? {
+        supervisor.handles(role: .brown).first {
+            $0.taskID == task.id || task.assigneeIDs.contains($0.id)
+        }
     }
 
     /// Bulk variant of `setTaskToolOverride`: sets the same `enabled` value for many tools at once
@@ -1190,10 +1211,8 @@ public actor OrchestrationRuntime {
     public func setTaskToolOverrides(taskID: UUID, tools: [String], enabled: Bool?) async {
         await taskStore.setUserToolOverrides(id: taskID, tools: tools, enabled: enabled)
         guard let task = await taskStore.task(id: taskID),
-              let brownHandle = supervisor.firstHandle(role: .brown),
-              task.assigneeIDs.contains(brownHandle.id) else { return }
-        let brown = brownHandle.agent
-        await brown.setUserToolOverrides(task.userToolOverrides ?? [:])
+              let brownHandle = liveWorkerHandle(for: task) else { return }
+        await brownHandle.agent.setUserToolOverrides(task.userToolOverrides ?? [:])
     }
 
     /// Registers a callback fired when an agent comes online, with its role and tool names.
@@ -1303,10 +1322,12 @@ public actor OrchestrationRuntime {
             return
         }
 
-        // Save the outgoing worker's context when its task is still resumable (e.g. a
+        // Save each outgoing worker's context when its task is still resumable (e.g. a
         // scheduled-interrupt paused it) — this was stopAll's job on the old full-restart
-        // path; the worker cycle must keep the resume-ability guarantee.
-        if let brownHandle = supervisor.firstHandle(role: .brown) {
+        // path; the worker cycle must keep the resume-ability guarantee. At capacity 1
+        // there is at most one worker; at higher capacities only the evicted worker's
+        // context matters, but saving for every live non-terminal task is harmless.
+        for brownHandle in supervisor.handles(role: .brown) {
             let outgoingTask = await taskStore.taskForAgent(agentID: brownHandle.id)
             if let outgoingTask, !outgoingTask.status.isTerminal {
                 await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
@@ -2361,9 +2382,25 @@ public actor OrchestrationRuntime {
         guard supervisor.currentGeneration != nil else { return nil }
         guard !aborted else { return nil }
 
-        // Enforce single Brown — terminate existing one if present
-        if let existingBrownID = currentBrownID {
-            _ = await performTerminateAgent(id: existingBrownID)
+        // Worker pool policy (M1): a worker is 1:1 with its task, so a respawn for the
+        // same task always cycles that task's existing worker. Beyond that, capacity is
+        // enforced by evicting the OLDEST worker — at the default capacity of 1 this is
+        // byte-for-byte the historical single-Brown policy (spawn evicts the incumbent).
+        // The M3 orchestration gates keep callers from ever hitting eviction at
+        // capacity > 1; this check is the runtime's own invariant, not the UX.
+        if let task {
+            // Match by the handle's task binding AND by task assignment — legacy paths
+            // (review_work respawn) assign via the task store after a task-less spawn.
+            let sameTaskWorkers = supervisor.handles(role: .brown).filter {
+                $0.taskID == task.id || task.assigneeIDs.contains($0.id)
+            }
+            for worker in sameTaskWorkers {
+                _ = await performTerminateAgent(id: worker.id)
+            }
+        }
+        while supervisor.handles(role: .brown).count >= maxConcurrentWorkers,
+              let oldestWorker = supervisor.handles(role: .brown).first {
+            _ = await performTerminateAgent(id: oldestWorker.id)
         }
 
         guard let brownConfig = llmConfigs[.brown],
@@ -2614,7 +2651,7 @@ public actor OrchestrationRuntime {
         // wiring awaits since the post-scoping barrier must not get a registered, started
         // worker (agy review finding).
         guard !aborted, !stopRequested,
-              supervisor.register(id: brownID, role: .brown, agent: brownAgent, evaluator: evaluator) != nil else {
+              supervisor.register(id: brownID, role: .brown, agent: brownAgent, evaluator: evaluator, taskID: task?.id) != nil else {
             await brownAgent.markTerminated()
             stopLogger.warning("spawnBrown: aborted or stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")
             return nil
@@ -2704,6 +2741,8 @@ public actor OrchestrationRuntime {
     }
 
     /// Returns the security evaluation history for the current (or most recent) Brown.
+    /// Worker-pool M2 (per-agent inspector re-key) must make this per-agent; at capacity
+    /// 1 "the first Brown" is the only Brown, so this stays correct until then.
     public func evaluationHistory() async -> [EvaluationRecord] {
         // Try active evaluator first.
         if let evaluator = supervisor.firstHandle(role: .brown)?.evaluator {
@@ -3078,8 +3117,8 @@ public actor OrchestrationRuntime {
 
     /// Extracts Brown's last few assistant messages and saves a compressed context summary
     /// to the task it was working on, enabling better resumability.
-    /// Takes the Brown reference explicitly (rather than reading `currentBrownID` /
-    /// `agents`) so `stopAll` can call it AFTER those registries have been snapshot-and-
+    /// Takes the Brown reference explicitly (rather than resolving through the
+    /// supervisor) so `stopAll` can call it AFTER the registry has been snapshot-and-
     /// cleared at teardown entry.
     private func saveBrownContextToTask(brownID: UUID, brown: AgentActor) async {
         let context = await brown.contextSnapshot()

@@ -97,6 +97,29 @@ struct AgentSupervisorTests {
         #expect(supervisor.firstHandle(role: .smith) == nil)
         #expect(supervisor.role(of: brownID) == .brown)
     }
+
+    @Test("Workers are a pool: multiple Browns coexist, ordered oldest-first, scoped by task")
+    func workerPool() {
+        var supervisor = AgentSupervisor()
+        _ = supervisor.beginGeneration()
+        let taskA = UUID()
+        let taskB = UUID()
+        let workerA = UUID()
+        let workerB = UUID()
+        supervisor.register(id: workerA, role: .brown, agent: makeTestAgent(role: .brown), taskID: taskA)
+        supervisor.register(id: workerB, role: .brown, agent: makeTestAgent(role: .brown), taskID: taskB)
+
+        let workers = supervisor.handles(role: .brown)
+        #expect(workers.map(\.id) == [workerA, workerB], "oldest registration first")
+        #expect(supervisor.firstHandle(role: .brown)?.id == workerA)
+        #expect(supervisor.workerHandle(taskID: taskA)?.id == workerA)
+        #expect(supervisor.workerHandle(taskID: taskB)?.id == workerB)
+        #expect(supervisor.workerHandle(taskID: UUID()) == nil)
+
+        _ = supervisor.remove(id: workerA)
+        #expect(supervisor.handles(role: .brown).map(\.id) == [workerB])
+        #expect(supervisor.workerHandle(taskID: taskA) == nil)
+    }
 }
 
 // MARK: - SerialChainedTaskQueue.run

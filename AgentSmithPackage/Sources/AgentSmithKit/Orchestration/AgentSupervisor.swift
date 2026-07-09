@@ -38,6 +38,13 @@ struct AgentSupervisor {
         let role: AgentRole
         /// The generation epoch this agent was registered under.
         let epoch: UInt64
+        /// Registration order within the supervisor's lifetime — the tiebreaker for
+        /// "oldest worker" decisions (dictionary iteration order is unspecified).
+        let sequence: UInt64
+        /// The task this worker was spawned for (workers are 1:1 with tasks). Nil for
+        /// non-worker roles and for legacy spawn paths that assign via the task store
+        /// after the fact — task-scoped lookups must check `assigneeIDs` as well.
+        let taskID: UUID?
         let agent: AgentActor
         /// The per-Brown security evaluator, owned by the handle so teardown can archive
         /// its history without consulting a side table.
@@ -57,6 +64,7 @@ struct AgentSupervisor {
     private(set) var currentGeneration: AgentGeneration?
     private(set) var handlesByID: [UUID: AgentHandle] = [:]
     private var nextEpoch: UInt64 = 1
+    private var nextSequence: UInt64 = 1
 
     /// Starts a new generation and returns it. Any handles still registered belong to the
     /// previous generation and should have been removed by `endGeneration()` first — the
@@ -87,18 +95,28 @@ struct AgentSupervisor {
         id: UUID,
         role: AgentRole,
         agent: AgentActor,
-        evaluator: SecurityEvaluator? = nil
+        evaluator: SecurityEvaluator? = nil,
+        taskID: UUID? = nil
     ) -> AgentHandle? {
         guard let generation = currentGeneration else { return nil }
-        // Single-agent-per-role invariant: `firstHandle(role:)` picks arbitrarily if two
-        // same-role agents ever coexist, so a break here means silent wrong-agent
-        // selection downstream. The spawn paths uphold this (spawnBrown terminates the
-        // existing Brown first; start guards on smith == nil) — this assertion makes a
-        // future violation loud in debug builds. A deliberate worker pool will replace
-        // `firstHandle(role:)` with `handles(role:)` and delete this.
-        assert(firstHandle(role: role) == nil,
+        // Single-agent-per-role invariant for NON-WORKER roles: `firstHandle(role:)`
+        // picks arbitrarily if two same-role agents ever coexist, so a break here means
+        // silent wrong-agent selection downstream (start guards on smith == nil).
+        // Brown is exempt — workers are a pool, 1:1 with tasks, bounded by the runtime's
+        // capacity check in `performSpawnBrown`; worker lookups go through
+        // `handles(role:)` / task scoping, never `firstHandle`.
+        assert(role == .brown || firstHandle(role: role) == nil,
                "second \(role.rawValue) registered while one is live — single-agent-per-role invariant broken")
-        let handle = AgentHandle(id: id, role: role, epoch: generation.epoch, agent: agent, evaluator: evaluator)
+        let handle = AgentHandle(
+            id: id,
+            role: role,
+            epoch: generation.epoch,
+            sequence: nextSequence,
+            taskID: taskID,
+            agent: agent,
+            evaluator: evaluator
+        )
+        nextSequence += 1
         handlesByID[id] = handle
         return handle
     }
@@ -133,11 +151,25 @@ struct AgentSupervisor {
         handlesByID[id]
     }
 
-    /// The current agent for a role. The runtime maintains a single-agent-per-role
-    /// invariant today; if that ever relaxes (worker pools), callers of this must migrate
-    /// to `handles(role:)`.
+    /// The current agent for a SINGLE-INSTANCE role (smith, summarizer, securityAgent).
+    /// Brown is a pool — worker callers must use `handles(role:)` or a task-scoped
+    /// lookup; at worker capacity 1 this still returns the lone Brown, which is why
+    /// legacy single-worker call sites (message_brown, digests) remain correct until the
+    /// M3 capacity-aware pass migrates them.
     func firstHandle(role: AgentRole) -> AgentHandle? {
-        handlesByID.values.first { $0.role == role }
+        handles(role: role).first
+    }
+
+    /// All live agents of a role, oldest registration first.
+    func handles(role: AgentRole) -> [AgentHandle] {
+        handlesByID.values.filter { $0.role == role }.sorted { $0.sequence < $1.sequence }
+    }
+
+    /// The worker spawned for (or later assigned to) `taskID`, per the handle's own
+    /// task binding. Legacy spawn-then-assign paths don't stamp the handle — callers
+    /// needing full coverage must also consult the task's `assigneeIDs`.
+    func workerHandle(taskID: UUID) -> AgentHandle? {
+        handles(role: .brown).first { $0.taskID == taskID }
     }
 
     func agent(id: UUID) -> AgentActor? {

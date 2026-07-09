@@ -101,6 +101,59 @@ struct Phase2LongLivedSmithTests {
         await runtime.stopAll()
     }
 
+    @Test("spawnBrown for the same task cycles that task's worker; capacity 1 evicts the incumbent")
+    func spawnPolicyCyclesAndEvicts() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        // Same-task respawn: the task's existing worker is replaced, count stays 1.
+        let taskA = await store.addTask(title: "A", description: "d")
+        let workerA1 = await runtime.spawnBrown(for: taskA)
+        let workerA2 = await runtime.spawnBrown(for: taskA)
+        #expect(workerA1 != nil && workerA2 != nil && workerA1 != workerA2)
+        #expect(await runtime.agentIDForRole(.brown) == workerA2)
+
+        // Different task at capacity 1: the incumbent is evicted (historical policy).
+        let taskB = await store.addTask(title: "B", description: "d")
+        let workerB = await runtime.spawnBrown(for: taskB)
+        #expect(workerB != nil)
+        #expect(await runtime.agentIDForRole(.brown) == workerB, "only task B's worker survives at capacity 1")
+
+        await runtime.stopAll()
+    }
+
+    @Test("At capacity 2, workers for two tasks coexist; a third spawn evicts the oldest")
+    func capacityTwoAllowsConcurrentWorkers() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setWorkerCapacity(2)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        let taskA = await store.addTask(title: "A", description: "d")
+        let taskB = await store.addTask(title: "B", description: "d")
+        let taskC = await store.addTask(title: "C", description: "d")
+        guard let workerA = await runtime.spawnBrown(for: taskA),
+              let workerB = await runtime.spawnBrown(for: taskB) else {
+            Issue.record("worker spawns failed")
+            return
+        }
+        #expect(await runtime.isAgentRegistered(workerA), "worker A survives worker B's spawn at capacity 2")
+        #expect(await runtime.isAgentRegistered(workerB))
+
+        guard let workerC = await runtime.spawnBrown(for: taskC) else {
+            Issue.record("third worker spawn failed")
+            return
+        }
+        #expect(!(await runtime.isAgentRegistered(workerA)), "the OLDEST worker is evicted at capacity")
+        #expect(await runtime.isAgentRegistered(workerB))
+        #expect(await runtime.isAgentRegistered(workerC))
+
+        await runtime.stopAll()
+    }
+
     @Test("A worker spawn failure marks the task failed and tells the surviving Smith")
     func spawnFailureNotifiesSmithInContext() async {
         let runtime = makeRuntime(includeBrown: false)
