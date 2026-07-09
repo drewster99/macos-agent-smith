@@ -150,16 +150,19 @@ struct SerialChainedTaskQueueRunTests {
     func cancelCurrentTargetsOnlyRunningWork() async {
         let queue = SerialChainedTaskQueue()
         actor Probe {
+            var firstStarted = false
             var firstSawCancellation: Bool?
             var secondRan = false
+            func markStarted() { firstStarted = true }
             func recordFirst(_ cancelled: Bool) { firstSawCancellation = cancelled }
             func recordSecond() { secondRan = true }
         }
         let probe = Probe()
 
         async let first: Void = queue.run {
+            await probe.markStarted()
             // Simulate a slow, cancellation-aware await (the scoping LLM call shape).
-            for _ in 0..<200 {
+            for _ in 0..<500 {
                 if Task.isCancelled { break }
                 try? await Task.sleep(nanoseconds: 10_000_000)
             }
@@ -169,8 +172,11 @@ struct SerialChainedTaskQueueRunTests {
             await probe.recordSecond()
         }
 
-        // Let the first op get underway, then cancel it.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Deterministic: wait until the first op has actually STARTED (a fixed sleep
+        // raced the queue chain's startup and could cancel into nothing), then cancel.
+        while await !probe.firstStarted {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
         queue.cancelCurrent()
         _ = await (first, second)
 
