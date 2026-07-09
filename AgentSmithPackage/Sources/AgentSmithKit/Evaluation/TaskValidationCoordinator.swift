@@ -227,6 +227,11 @@ extension OrchestrationRuntime {
         }
     }
 
+    /// Hard ceiling on items a prepare function may emit for one criterion. Exceeding it
+    /// is an ERROR, not a truncation — silently validating a subset could pass work that
+    /// fails in the unexamined tail, which is the one thing a validator must never do.
+    static let maxPrepareItems = 50
+
     /// Judges one criterion, retrying a first ERROR once (transient backends, parse
     /// flukes). A WAIVE against a non-waivable criterion is an ERROR — an
     /// author/validator disagreement escalates rather than silently passing or failing.
@@ -236,6 +241,9 @@ extension OrchestrationRuntime {
         registry: EvaluatorRegistry,
         round: Int
     ) async -> CriterionVerdictRecord {
+        if criterion.prepare != nil {
+            return await judgeDynamicCriterion(criterion, task: task, registry: registry, round: round)
+        }
         let resolution = await resolveValidator(for: criterion, taskID: task.id, registry: registry)
         let definition: EvaluatorDefinition
         switch resolution {
@@ -285,6 +293,113 @@ extension OrchestrationRuntime {
         )
     }
 
+    /// Dynamic (prepare/map) judging: the prepare function emits a JSON array of items,
+    /// each judged by the criterion's per-item validator with `{{item}}` bound. The
+    /// criterion passes only when EVERY item passes; an empty item list is an automatic
+    /// ACCEPT (the prepare determined nothing applies — the dynamic analogue of WAIVE).
+    /// One `CriterionVerdictRecord` summarizes the whole map so the ledger shape is
+    /// unchanged.
+    private func judgeDynamicCriterion(
+        _ criterion: AcceptanceCriterion,
+        task: AgentTask,
+        registry: EvaluatorRegistry,
+        round: Int
+    ) async -> CriterionVerdictRecord {
+        func record(_ verdict: CriterionVerdictRecord.Verdict, validator: EvaluatorDefinition? = nil) -> CriterionVerdictRecord {
+            CriterionVerdictRecord(
+                criterionID: criterion.id,
+                verdict: verdict,
+                validatorName: validator?.name ?? (criterion.prepare ?? "-"),
+                validatorHash: validator?.contentHash ?? "-",
+                round: round
+            )
+        }
+
+        // Resolve the prepare definition (pinned-body-first, like validators).
+        guard let prepareName = criterion.prepare else {
+            return record(.error(message: "judgeDynamicCriterion called without a prepare name"))
+        }
+        let prepareDefinition: EvaluatorDefinition
+        if let pinned = (await taskStore.task(id: task.id))?.validation?.pinnedDefinitions[prepareName] {
+            prepareDefinition = pinned
+        } else if let loaded = registry.definition(named: prepareName), loaded.kind == .prepare {
+            await taskStore.pinValidatorDefinition(id: task.id, definition: loaded)
+            prepareDefinition = loaded
+        } else {
+            return record(.error(message: "prepare function '\(prepareName)' not found in the registry (or is not kind=prepare)"))
+        }
+
+        var prepareOutcome = await runValidator(prepareDefinition, criterion: criterion, task: task)
+        if case .error = prepareOutcome {
+            prepareOutcome = await runValidator(prepareDefinition, criterion: criterion, task: task)
+        }
+        let items: [String]
+        switch prepareOutcome {
+        case .items(let raw):
+            // Already rendered by the runner: string elements unwrapped, objects as
+            // compact JSON fragments — bound to {{item}} verbatim.
+            items = raw
+        case .verdict(let token, _):
+            return record(.error(message: "prepare '\(prepareName)' returned verdict '\(token)' where a JSON array was required"), validator: prepareDefinition)
+        case .error(let message):
+            return record(.error(message: "prepare '\(prepareName)' failed: \(message)"), validator: prepareDefinition)
+        }
+
+        guard items.count <= Self.maxPrepareItems else {
+            return record(.error(message: "prepare '\(prepareName)' emitted \(items.count) items (cap \(Self.maxPrepareItems)) — narrow the prepare or split the criterion"), validator: prepareDefinition)
+        }
+        guard !items.isEmpty else {
+            return record(.accepted, validator: prepareDefinition)
+        }
+
+        let resolution = await resolveValidator(for: criterion, taskID: task.id, registry: registry)
+        let perItemDefinition: EvaluatorDefinition
+        switch resolution {
+        case .success(let resolved):
+            perItemDefinition = resolved
+        case .failure(let problem):
+            return record(.error(message: problem))
+        }
+
+        // Items run sequentially: this criterion is already inside the round's parallel
+        // wave, and nesting another fan-out would multiply concurrent LLM calls past
+        // what providers tolerate.
+        var rejections: [String] = []
+        var waives: [String] = []
+        for (index, item) in items.enumerated() {
+            var outcome = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
+            if case .error = outcome {
+                outcome = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
+            }
+            switch outcome {
+            case .verdict("ACCEPT", _):
+                continue
+            case .verdict("REJECT", let reason):
+                rejections.append("item \(index + 1) (\(item)): \(reason ?? "no reason given")")
+            case .verdict("WAIVE", let reason):
+                if criterion.waivable {
+                    waives.append("item \(index + 1) (\(item)): \(reason ?? "")")
+                } else {
+                    return record(.error(message: "validator attempted to WAIVE item \(index + 1) (\(item)) of a non-waivable criterion"), validator: perItemDefinition)
+                }
+            case .verdict(let token, let reason):
+                return record(.error(message: "unexpected verdict token '\(token)' on item \(index + 1) (\(reason ?? ""))"), validator: perItemDefinition)
+            case .items:
+                return record(.error(message: "per-item validator returned items where a verdict was required"), validator: perItemDefinition)
+            case .error(let message):
+                return record(.error(message: "item \(index + 1) (\(item)): \(message)"), validator: perItemDefinition)
+            }
+        }
+
+        if !rejections.isEmpty {
+            return record(.rejected(reason: "\(rejections.count) of \(items.count) item(s) failed:\n" + rejections.joined(separator: "\n")), validator: perItemDefinition)
+        }
+        if waives.count == items.count {
+            return record(.waived(reason: "all \(items.count) item(s) waived:\n" + waives.joined(separator: "\n")), validator: perItemDefinition)
+        }
+        return record(.accepted, validator: perItemDefinition)
+    }
+
     private enum ValidatorResolution {
         case success(EvaluatorDefinition)
         case failure(String)
@@ -330,14 +445,15 @@ extension OrchestrationRuntime {
     private func runValidator(
         _ definition: EvaluatorDefinition,
         criterion: AcceptanceCriterion,
-        task: AgentTask
+        task: AgentTask,
+        extraSlots: [String: String] = [:]
     ) async -> EvaluationRunner.Outcome {
         guard let resolved = providerForModelSlot(definition.modelSlot) else {
             return .error("no model configured for slot '\(definition.modelSlot.rawValue)'")
         }
         let (provider, config, usageRole, providerTypeRawValue) = resolved
         let previousVerdict = (task.validation?.latestVerdict(for: criterion.id)).map(Self.describeVerdict) ?? "none"
-        let slots: [String: String] = [
+        var slots: [String: String] = [
             "task_id": task.id.uuidString,
             "task_title": task.title,
             "task_description": task.description,
@@ -348,6 +464,7 @@ extension OrchestrationRuntime {
             "criterion": criterion.text,
             "previous_verdict": previousVerdict
         ]
+        slots.merge(extraSlots) { _, extra in extra }
         let tools = Self.evidenceTools(named: definition.toolNames)
         let evaluationContext = makeToolContext(agentID: UUID(), role: .securityAgent)
         let sessionID = currentSessionID

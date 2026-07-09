@@ -110,6 +110,7 @@ struct GetTaskDetailsTool: AgentTool {
                 if criterion.waivable { qualifiers.append("waivable") }
                 if case .registry(let name) = criterion.validator { qualifiers.append("validator: \(name)") }
                 if case .inline(let definition) = criterion.validator { qualifiers.append("validator: \(definition.name) (inline)") }
+                if let prepare = criterion.prepare { qualifiers.append("prepare: \(prepare)") }
                 let suffix = qualifiers.isEmpty ? "" : " (\(qualifiers.joined(separator: ", ")))"
                 let verdict = (ledger?.latestVerdict(for: criterion.id)).map { " — \(OrchestrationRuntime.describeVerdict($0))" } ?? ""
                 return "  - \(criterion.text)\(suffix)\(verdict)"

@@ -32,6 +32,10 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                         "validator": .dictionary([
                             "type": .string("string"),
                             "description": .string("Optional registry validator name (from `list_validators`). Omit for the default acceptance validator.")
+                        ]),
+                        "prepare": .dictionary([
+                            "type": .string("string"),
+                            "description": .string("Optional registry name of a prepare-kind evaluator, making this criterion DYNAMIC: the prepare function emits a list of items (e.g. every file in a folder, every step in the plan) and EACH item is judged independently by the criterion's validator. Every item must pass.")
                         ])
                     ]),
                     "required": .array([.string("text")])
@@ -90,7 +94,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         // task — a criterion pointing at a missing validator would escalate every
         // submission until fixed.
         let registry = await context.loadEvaluatorRegistry()
-        var parsed: [(text: String, waivable: Bool, validatorName: String?)] = []
+        var parsed: [(text: String, waivable: Bool, validatorName: String?, prepareName: String?)] = []
         for raw in rawCriteria {
             guard case .dictionary(let fields) = raw, case .string(let text) = fields["text"],
                   !text.trimmingCharacters(in: .whitespaces).isEmpty else {
@@ -109,7 +113,18 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                 }
                 validatorName = named
             }
-            parsed.append((text, waivable, validatorName))
+            var prepareName: String?
+            if case .string(let named) = fields["prepare"], !named.trimmingCharacters(in: .whitespaces).isEmpty {
+                guard let registry else {
+                    return .failure("Cannot name prepare function '\(named)': no evaluator registry is configured.")
+                }
+                guard let definition = registry.definition(named: named), definition.kind == .prepare else {
+                    let available = registry.definitions(ofKind: .prepare).map(\.name).joined(separator: ", ")
+                    return .failure("Prepare function '\(named)' is not in the registry (or is not kind=prepare). Available prepare functions: \(available.isEmpty ? "(none)" : available).")
+                }
+                prepareName = named
+            }
+            parsed.append((text, waivable, validatorName, prepareName))
         }
         // Duplicate texts would both inherit the same existing criterion's identity below,
         // corrupting per-criterion verdict bookkeeping.
@@ -127,9 +142,10 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                 var updated = existing
                 updated.waivable = entry.waivable
                 updated.validator = validator
+                updated.prepare = entry.prepareName
                 return updated
             }
-            return AcceptanceCriterion(text: entry.text, waivable: entry.waivable, origin: .smith, validator: validator)
+            return AcceptanceCriterion(text: entry.text, waivable: entry.waivable, origin: .smith, validator: validator, prepare: entry.prepareName)
         }
 
         await context.taskStore.setAcceptanceCriteria(id: taskID, criteria: criteria)
@@ -139,6 +155,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             var qualifiers: [String] = []
             if criterion.waivable { qualifiers.append("waivable") }
             if case .registry(let name) = criterion.validator { qualifiers.append("validator: \(name)") }
+            if let prepare = criterion.prepare { qualifiers.append("prepare: \(prepare)") }
             if !qualifiers.isEmpty { line += " (\(qualifiers.joined(separator: ", ")))" }
             return line
         }.joined(separator: "\n")

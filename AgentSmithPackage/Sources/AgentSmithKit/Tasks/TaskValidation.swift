@@ -58,19 +58,28 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
     public var waivable: Bool
     public var origin: TaskAuthorship
     public var validator: Validator?
+    /// Registry name of a `prepare`-kind evaluator. When set, the criterion is DYNAMIC:
+    /// the prepare function emits a JSON array of items (over any source — the step
+    /// list arrives via slots, world sources like files via its tools), and EACH item
+    /// is judged by `validator` with the item bound to the `{{item}}` slot. Every item
+    /// must pass for the criterion to pass. Optional-and-synthesized so tasks written
+    /// before this field decode unchanged.
+    public var prepare: String?
 
     public init(
         id: UUID = UUID(),
         text: String,
         waivable: Bool = false,
         origin: TaskAuthorship,
-        validator: Validator? = nil
+        validator: Validator? = nil,
+        prepare: String? = nil
     ) {
         self.id = id
         self.text = text
         self.waivable = waivable
         self.origin = origin
         self.validator = validator
+        self.prepare = prepare
     }
 }
 

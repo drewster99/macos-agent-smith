@@ -100,7 +100,15 @@ re-enqueue, mid-round criterion additions run a follow-on round; agent surface �
 `manage_steps` (worker, tombstone rules), `set_acceptance_criteria` +
 `list_validators` (Smith), create_task criteria/steps seeding, get_task_details
 shows criteria+verdicts+steps, both prompts rewritten around validation) →
-dynamic prepare/map → Security Agent onto the runner LAST (scoper first, per-call
+dynamic prepare/map (✅ 2026-07-09: `AcceptanceCriterion.prepare` names a
+prepare-kind evaluator; items map through the per-item validator via {{item}};
+empty item list auto-accepts, >50 items is a fail-visible ERROR not a silent
+truncation; items run sequentially inside the round's parallel wave) →
+worker pool M1 (✅ `792c656`: taskID+sequence on AgentHandle, handles(role:)/
+workerHandle(taskID:), same-task cycle + oldest-eviction capacity check behind
+maxConcurrentWorkers=1, pool-correct setToolSecurity/overrides/context-save;
+M2 inspector re-key, M3 orchestration gates, M4 polish remain) →
+Security Agent onto the runner LAST (scoper first, per-call
 approver only after soak) → worker pool milestones in parallel. The `/compact` command
 pattern applies: manual validation doubles as the prompt-tuning harness for
 default-acceptance before the automatic gate carries weight.

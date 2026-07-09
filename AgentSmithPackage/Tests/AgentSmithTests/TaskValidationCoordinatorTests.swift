@@ -226,6 +226,105 @@ struct TaskValidationCoordinatorTests {
         await runtime.stopAll()
     }
 
+    // MARK: - Dynamic (prepare/map) criteria
+
+    /// Installs a minimal prepare-kind definition into the test registry.
+    private func installPrepareDefinition(named name: String, in directory: URL) throws {
+        let definition = EvaluatorDefinition(
+            name: name,
+            description: "Emits the items to judge for a dynamic criterion (test double).",
+            kind: .prepare,
+            systemPrompt: "Emit a JSON array of items for the criterion.",
+            inputTemplate: "Criterion: {{criterion}}",
+            requiredSlots: ["criterion"],
+            outputGrammar: .jsonArray,
+            modelSlot: .summarizer,
+            toolNames: [],
+            maxTurns: 3,
+            timeoutSeconds: 60,
+            maxOutputTokens: 1000
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(definition).write(to: directory.appendingPathComponent("\(name).json"), options: .atomic)
+    }
+
+    @Test("A dynamic criterion maps prepare items through the per-item validator; all pass → completed")
+    func dynamicCriterionAllItemsPass() async throws {
+        let (runtime, directory) = makeRuntime(verdictScript: [
+            #"["alpha", "beta"]"#,
+            "ACCEPT",
+            "ACCEPT"
+        ])
+        try installPrepareDefinition(named: "list-items", in: directory)
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let criteria = [AcceptanceCriterion(text: "every item is valid", origin: .user, prepare: "list-items")]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .completed)
+
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.validation?.verdictRecords.count == 1, "one record summarizes the whole map")
+        #expect(final?.validation?.pinnedDefinitions["list-items"] != nil, "the prepare body pins like a validator")
+    }
+
+    @Test("A dynamic criterion with an empty prepare result auto-accepts")
+    func dynamicCriterionEmptyItemsAccepts() async throws {
+        let (runtime, directory) = makeRuntime(verdictScript: ["[]"])
+        try installPrepareDefinition(named: "list-items", in: directory)
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let criteria = [AcceptanceCriterion(text: "every item is valid", origin: .user, prepare: "list-items")]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .completed, "nothing applies → the dynamic analogue of a waive")
+    }
+
+    @Test("A rejected item returns the task to the worker with the per-item reason")
+    func dynamicCriterionItemRejectionPunchLists() async throws {
+        let (runtime, directory) = makeRuntime(verdictScript: [
+            #"["alpha", "beta"]"#,
+            "ACCEPT",
+            "REJECT: beta is missing its header"
+        ])
+        try installPrepareDefinition(named: "list-items", in: directory)
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.start()
+        let criteria = [AcceptanceCriterion(text: "every item is valid", origin: .user, prepare: "list-items")]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .running, "an item rejection is a criterion rejection — punch list to the worker")
+
+        let ledger = await runtime.taskStore.task(id: task.id)?.validation
+        let verdict = ledger?.verdictRecords.last?.verdict
+        if case .rejected(let reason) = verdict {
+            #expect(reason.contains("beta is missing its header"))
+            #expect(reason.contains("1 of 2"))
+        } else {
+            Issue.record("expected a rejected verdict, got \(String(describing: verdict))")
+        }
+
+        await runtime.stopAll()
+    }
+
+    @Test("A dynamic criterion naming a missing prepare function escalates")
+    func dynamicCriterionMissingPrepareEscalates() async throws {
+        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let criteria = [AcceptanceCriterion(text: "c", origin: .user, prepare: "does-not-exist")]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .awaitingReview)
+    }
+
     @Test("A criterion naming a missing registry validator escalates")
     func missingValidatorEscalates() async {
         let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
