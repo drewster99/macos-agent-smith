@@ -90,6 +90,14 @@ struct AgentSupervisor {
         evaluator: SecurityEvaluator? = nil
     ) -> AgentHandle? {
         guard let generation = currentGeneration else { return nil }
+        // Single-agent-per-role invariant: `firstHandle(role:)` picks arbitrarily if two
+        // same-role agents ever coexist, so a break here means silent wrong-agent
+        // selection downstream. The spawn paths uphold this (spawnBrown terminates the
+        // existing Brown first; start guards on smith == nil) — this assertion makes a
+        // future violation loud in debug builds. A deliberate worker pool will replace
+        // `firstHandle(role:)` with `handles(role:)` and delete this.
+        assert(firstHandle(role: role) == nil,
+               "second \(role.rawValue) registered while one is live — single-agent-per-role invariant broken")
         let handle = AgentHandle(id: id, role: role, epoch: generation.epoch, agent: agent, evaluator: evaluator)
         handlesByID[id] = handle
         return handle

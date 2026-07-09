@@ -47,6 +47,26 @@ criteria judged per-criterion with ACCEPT/REJECT/WAIVE verdicts) is designed to 
 the `SecurityEvaluator` pattern — stateless evaluation calls, no run loop, no lifecycle
 surface — and is not blocked on any of this.
 
+Known-accepted behaviors and smaller follow-ups (from the third review pass):
+
+- **Restart coalescing.** Queued restarts run strictly FIFO; N stacked restarts churn
+  through N full stop/start cycles (each with MCP settle + scoping) before the last
+  wins. Correct but wasteful under burst — a queue-level "drop superseded restarts"
+  optimization is available when it matters.
+- **Stop latency behind an in-flight transition.** A user Stop now waits for the
+  current queued transition to finish (bounded by scoping retries + backoff, worst
+  ~1 min against a dead backend) instead of interleaving into it. Correctness over
+  responsiveness; a `cancelCurrent()` on the lifecycle queue is the future fix.
+- **Per-Brown archive growth.** `archivedEvaluationRecords` accumulates one entry per
+  terminated Brown for the app session (each capped at 50 records). Pre-existing;
+  prune to last-N when it matters.
+- **`evaluationHistory()` pull-path gap.** During the pre-registration scoping window
+  the evaluator isn't yet on a handle, so the pull API misses it; the push callback
+  (`onEvaluationRecorded`) still feeds the inspector live.
+- **Worker-pool migration marker.** `AgentSupervisor.register` asserts the
+  single-agent-per-role invariant (debug builds); a deliberate pool replaces
+  `firstHandle(role:)` with `handles(role:)` and deletes the assertion.
+
 ### Attachments — v2 follow-ups
 
 A cluster of deferred items from the v1 attachment work (committed in `a150dae`,

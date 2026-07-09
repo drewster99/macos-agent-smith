@@ -281,6 +281,37 @@ public actor OrchestrationRuntime {
         return Date().timeIntervalSince(lastFailure) < Self.scopingBreakerCooldown
     }
 
+    /// One-shot re-drain armed whenever the open breaker skips a queue drain. The drains
+    /// otherwise run only from task-termination hooks and `start()` — on a fully idle
+    /// system, work deferred during an outage would wait for an unrelated lifecycle event
+    /// that may never come. Fires just after the cooldown expires; if the breaker has
+    /// re-opened by then (new failures), the skipped drain re-arms it, giving a bounded
+    /// once-per-cooldown retry cadence rather than a storm.
+    private var breakerRedrainArmed = false
+
+    private func armBreakerRedrainIfNeeded() {
+        guard !breakerRedrainArmed else { return }
+        breakerRedrainArmed = true
+        let remaining: TimeInterval
+        if let lastFailure = lastScopingFailureAt {
+            remaining = max(1, Self.scopingBreakerCooldown - Date().timeIntervalSince(lastFailure)) + 1
+        } else {
+            remaining = 1
+        }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            await self?.breakerRedrainFired()
+        }
+    }
+
+    private func breakerRedrainFired() async {
+        breakerRedrainArmed = false
+        let kicked = await drainPendingScheduledRunQueue()
+        if !kicked {
+            await drainPendingTaskQueue()
+        }
+    }
+
     public func setOnTimerEventForChannel(_ handler: @escaping @Sendable (TimerEvent) async -> Void) {
         onTimerEventForChannel = handler
     }
@@ -416,10 +447,11 @@ public actor OrchestrationRuntime {
     private func drainPendingScheduledRunQueue() async -> Bool {
         guard !pendingScheduledRunQueue.isEmpty else { return false }
         // Breaker gate: starting a task while the scoping backend is known-dead would just
-        // fail it. Entries stay queued; the drain re-runs on the next task termination or
-        // restart after the cooldown.
+        // fail it. Entries stay queued; a one-shot re-drain is armed for when the
+        // cooldown expires so an otherwise-idle system still resumes the queue.
         guard !isScopingBreakerOpen else {
             stopLogger.notice("drainPendingScheduledRunQueue skipped — scoping breaker open")
+            armBreakerRedrainIfNeeded()
             return false
         }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
@@ -457,9 +489,11 @@ public actor OrchestrationRuntime {
         guard autoAdvanceEnabled else { return }
         // Breaker gate: without this, one spawn-failed task (marked .failed → terminated
         // hook → this drain) would auto-advance into the next pending task, fail it
-        // against the same dead backend, and cascade the entire queue to .failed.
+        // against the same dead backend, and cascade the entire queue to .failed. A
+        // one-shot re-drain is armed so recovery doesn't wait for an unrelated event.
         guard !isScopingBreakerOpen else {
             stopLogger.notice("drainPendingTaskQueue skipped — scoping breaker open")
+            armBreakerRedrainIfNeeded()
             return
         }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
@@ -1837,12 +1871,10 @@ public actor OrchestrationRuntime {
             }
         }
 
-        // Only clear the channel's session stamp if no new generation has started while we
-        // were suspended above — a racing start() owns the stamp now, and nilling it would
-        // mislabel every post the new generation makes.
-        if currentSessionID == nil {
-            await channel.setCurrentSessionID(nil)
-        }
+        // Clear the channel's session stamp. Unconditional: the lifecycle queue means no
+        // start() can have begun a new generation while this teardown was suspended (the
+        // Phase 0 guard against that race is obsolete under serialization).
+        await channel.setCurrentSessionID(nil)
 
         // Drop the observer callbacks now that the runtime is quiescent. They
         // hold strong references to closures captured against the app layer's
