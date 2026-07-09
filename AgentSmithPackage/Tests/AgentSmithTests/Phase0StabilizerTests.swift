@@ -261,6 +261,24 @@ struct WakeReplayFilterTests {
         #expect(rolled.originalID == wake.originalID)
     }
 
+    @Test("A persisted sub-minimum interval recurrence dies on replay, matching the live path")
+    func subMinimumIntervalRecurrenceIsNotResurrected() async {
+        // Recurrence.nextOccurrence returns nil below minimumIntervalSeconds; the O(1)
+        // roll-forward fast path must apply the same floor, or untrusted disk data
+        // (hand-edited, older builds) re-arms a sub-minimum recurring wake.
+        let runtime = makeRuntime()
+        let store = await runtime.taskStore
+        let task = await store.addTask(
+            title: "Too fast", description: "d",
+            scheduledRunAt: Date(timeIntervalSinceNow: -600)
+        )
+        var wake = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: -600))
+        wake.recurrence = .interval(seconds: 10)
+
+        let kept = await runtime.replayableWakes(from: [wake], resumingTaskID: nil)
+        #expect(kept.isEmpty, "sub-minimum intervals must not survive replay")
+    }
+
     @Test("Distinct future run-wakes for the same task all survive")
     func distinctFutureWakesForSameTaskAreKept() async {
         // The dedupe key is (taskID, wakeAt): it must collapse only true duplicates,

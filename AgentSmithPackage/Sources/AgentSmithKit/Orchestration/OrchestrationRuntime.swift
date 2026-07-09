@@ -112,6 +112,12 @@ public actor OrchestrationRuntime {
 
     /// Set by Security Agent abort — prevents restart until user clears it.
     private var aborted = false
+    /// Raised by the public `stopAll()` OUTSIDE the queue (mirroring `aborted`) so an
+    /// in-flight lifecycle transition bails at its next barrier instead of running to
+    /// completion, then consumed by the `performStopAll` that answers it. Without this, a
+    /// user Stop was head-of-line blocked behind a start stuck in a slow scoping call
+    /// (flagged independently by all three reviews).
+    private var stopRequested = false
     /// Callback to notify the app layer when abort is triggered.
     private var onAbort: (@Sendable (String) -> Void)?
     /// Callback to notify the app layer when an agent starts or stops an LLM call.
@@ -275,6 +281,16 @@ public actor OrchestrationRuntime {
     /// task-terminated hook, which drains the queues and would otherwise start the next
     /// pending task into the same dead backend — failing the entire queue task-by-task
     /// in seconds. With the drains gated, the queue simply waits out the cooldown.
+    /// Opens the breaker immediately for spawn failures that retrying cannot fix
+    /// (missing provider configuration). Without this, the terminated-hook auto-advance
+    /// cascaded every pending task to .failed through the door the breaker didn't watch
+    /// (fresh-Opus review finding). `setProviders` — the only way configuration changes —
+    /// closes it again.
+    private func openSpawnBreakerForInfrastructureFailure() {
+        scopingFailureStreak = max(scopingFailureStreak + 1, Self.scopingBreakerThreshold)
+        lastScopingFailureAt = Date()
+    }
+
     private var isScopingBreakerOpen: Bool {
         guard scopingFailureStreak >= Self.scopingBreakerThreshold,
               let lastFailure = lastScopingFailureAt else { return false }
@@ -289,15 +305,19 @@ public actor OrchestrationRuntime {
     /// once-per-cooldown retry cadence rather than a storm.
     private var breakerRedrainArmed = false
 
+    /// Reentrancy guard shared by both task-queue drains (mirroring
+    /// `isDrainingUserMessages`): the drains suspend at `taskStore.allTasks()` before
+    /// mutating their queues, so two concurrent termination hooks could both observe
+    /// "not busy" and double-dequeue — starting a task only for the second drain's
+    /// restart to immediately tear it down (fresh-Opus review finding).
+    private var isDrainingTaskQueues = false
+
     private func armBreakerRedrainIfNeeded() {
-        guard !breakerRedrainArmed else { return }
+        // `lastScopingFailureAt` is always set when the breaker is open (the only callers
+        // are the breaker-gate guards), so nil here means nothing to wait out.
+        guard !breakerRedrainArmed, let lastFailure = lastScopingFailureAt else { return }
         breakerRedrainArmed = true
-        let remaining: TimeInterval
-        if let lastFailure = lastScopingFailureAt {
-            remaining = max(1, Self.scopingBreakerCooldown - Date().timeIntervalSince(lastFailure)) + 1
-        } else {
-            remaining = 1
-        }
+        let remaining = max(1, Self.scopingBreakerCooldown - Date().timeIntervalSince(lastFailure)) + 1
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             await self?.breakerRedrainFired()
@@ -306,6 +326,12 @@ public actor OrchestrationRuntime {
 
     private func breakerRedrainFired() async {
         breakerRedrainArmed = false
+        // A wall-clock timer must never resurrect a runtime the user deliberately
+        // stopped: no generation means no session is supposed to be running, so the
+        // queued work simply waits for the next user-driven start (fresh-Opus review
+        // finding — before this guard, the timer restarted the whole cast two minutes
+        // after a Stop All).
+        guard supervisor.currentGeneration != nil else { return }
         let kicked = await drainPendingScheduledRunQueue()
         if !kicked {
             await drainPendingTaskQueue()
@@ -355,8 +381,13 @@ public actor OrchestrationRuntime {
         persistPendingUserMessages = persist
     }
 
-    public func currentScheduledWakes() async -> [ScheduledWake] {
-        await smith?.listScheduledWakes() ?? []
+    /// Nil when no Smith is live — "no Smith" must be distinguishable from "no wakes":
+    /// persisting `[]` during a restart's teardown window truncated the wake file and
+    /// killed recurring series before the replay filter ever saw them (fresh-Opus review
+    /// finding).
+    public func currentScheduledWakes() async -> [ScheduledWake]? {
+        guard let smith else { return nil }
+        return await smith.listScheduledWakes()
     }
 
     public func cancelScheduledWake(id: UUID) async -> Bool {
@@ -446,6 +477,9 @@ public actor OrchestrationRuntime {
     @discardableResult
     private func drainPendingScheduledRunQueue() async -> Bool {
         guard !pendingScheduledRunQueue.isEmpty else { return false }
+        guard !isDrainingTaskQueues else { return false }
+        isDrainingTaskQueues = true
+        defer { isDrainingTaskQueues = false }
         // Breaker gate: starting a task while the scoping backend is known-dead would just
         // fail it. Entries stay queued; a one-shot re-drain is armed for when the
         // cooldown expires so an otherwise-idle system still resumes the queue.
@@ -487,6 +521,9 @@ public actor OrchestrationRuntime {
     /// has its own cold-launch auto-resume controlled by `autoRunInterruptedTasks`).
     private func drainPendingTaskQueue() async {
         guard autoAdvanceEnabled else { return }
+        guard !isDrainingTaskQueues else { return }
+        isDrainingTaskQueues = true
+        defer { isDrainingTaskQueues = false }
         // Breaker gate: without this, one spawn-failed task (marked .failed → terminated
         // hook → this drain) would auto-advance into the next pending task, fail it
         // against the same dead backend, and cascade the entire queue to .failed. A
@@ -738,7 +775,10 @@ public actor OrchestrationRuntime {
         // 10,000+ steps, which exhausted the iteration-capped loop below and silently
         // killed the series (agy review finding). Number of whole intervals to reach
         // strictly past `now`, computed arithmetically.
-        if case .interval(let seconds) = recurrence, seconds > 0 {
+        // `>= minimumIntervalSeconds` matches `nextOccurrence`'s own floor: a persisted
+        // sub-minimum interval (hand-edited or from an older build) must die here exactly
+        // as it would on the live reschedule path, not get resurrected by the fast path.
+        if case .interval(let seconds) = recurrence, seconds >= Recurrence.minimumIntervalSeconds {
             let interval = TimeInterval(seconds)
             let elapsed = now.timeIntervalSince(wake.wakeAt)
             let steps = max(1, Int(floor(elapsed / interval)) + 1)
@@ -919,6 +959,11 @@ public actor OrchestrationRuntime {
         for (role, provider) in providers { llmProviders[role] = provider }
         for (role, config) in configurations { llmConfigs[role] = config }
         for (role, apiType) in apiTypes { providerAPITypes[role] = apiType }
+        // New configuration is grounds to retry: close a breaker opened by
+        // missing-provider spawn failures (or by scoping failures against a backend the
+        // user may just have fixed).
+        scopingFailureStreak = 0
+        lastScopingFailureAt = nil
     }
 
     /// Updates the global tool-security configuration (user Settings). Applied to each Brown at its
@@ -1113,7 +1158,7 @@ public actor OrchestrationRuntime {
             }
             return
         }
-        guard !aborted else { return }
+        guard !aborted, !stopRequested else { return }
         startInProgress = true
         defer { startInProgress = false }
 
@@ -1466,10 +1511,10 @@ public actor OrchestrationRuntime {
                         The user is already informed about THIS task. Don't inform them about it a 2nd time.
                         """)
                 } else {
-                    // An abort mid-spawn is not the task's failure: leave its status alone
-                    // and stop building this generation — the stopAll queued by abort()
-                    // owns the teardown of whatever exists.
-                    guard !aborted else { return }
+                    // An abort/stop mid-spawn is not the task's failure: leave its status
+                    // alone and stop building this generation — the queued stopAll owns
+                    // the teardown of whatever exists.
+                    guard !aborted, !stopRequested else { return }
                     // A failed spawn must not leave the task looking like ordinary pending
                     // work the user is waiting on — that's what let a stranded reminder be
                     // mistaken for "the task the user means" after the 2026-07-08 outage.
@@ -1667,10 +1712,10 @@ public actor OrchestrationRuntime {
             }
         }
 
-        // Final abort barrier: don't launch Smith's run loop if an abort arrived during
-        // the awaits above. Smith is registered but never started; the stopAll queued by
-        // abort() unsubscribes and drops it (stop() on a never-started agent is a no-op).
-        guard !aborted else { return }
+        // Final barrier: don't launch Smith's run loop if an abort or stop arrived during
+        // the awaits above. Smith is registered but never started; the queued stopAll
+        // unsubscribes and drops it (stop() on a never-started agent is a no-op).
+        guard !aborted, !stopRequested else { return }
         await smithAgent.start(initialInstruction: initialInstruction)
         onAgentStarted?(.smith, smithAgent.toolNames)
 
@@ -1872,6 +1917,12 @@ public actor OrchestrationRuntime {
     /// updates because nothing re-wires them. Default false matches the prior
     /// "stopAll for good" semantics that AppViewModel.stopAll relies on.
     public func stopAll(preserveObserverCallbacks: Bool = false) async {
+        // Raise the flag and cancel the in-flight item BEFORE enqueueing: the flag makes
+        // transitions bail at their barriers; the cancellation reaches into their slow
+        // awaits (the scoping LLM call checks Task.isCancelled, and the retry backoff
+        // sleeps are cancellation-aware). Teardowns ignore cancellation by construction.
+        stopRequested = true
+        lifecycleQueue.cancelCurrent()
         await lifecycleQueue.run { [weak self] in
             await self?.performStopAll(preserveObserverCallbacks: preserveObserverCallbacks)
         }
@@ -1880,6 +1931,8 @@ public actor OrchestrationRuntime {
     /// The actual teardown implementation. Runs ONLY as a lifecycle-queue item (or from
     /// another implementation already inside one).
     private func performStopAll(preserveObserverCallbacks: Bool = false) async {
+        // This stop is the answer to any pending stop request.
+        stopRequested = false
         let entryStart = Date()
         stopLogger.notice("Runtime.stopAll entry agents=\(self.supervisor.count, privacy: .public) preserveCallbacks=\(preserveObserverCallbacks, privacy: .public)")
 
@@ -1999,6 +2052,8 @@ public actor OrchestrationRuntime {
     public func abort(reason: String, callerRole: AgentRole? = nil) async {
         guard !aborted else { return }
         aborted = true
+        // Reach into the in-flight transition's slow awaits too, not just its barriers.
+        lifecycleQueue.cancelCurrent()
 
         // Capture the abort handler BEFORE `stopAll()` runs — `stopAll()` clears
         // every observer callback as part of teardown, so reading `onAbort`
@@ -2024,6 +2079,9 @@ public actor OrchestrationRuntime {
     /// The actual spawn implementation. Runs ONLY as a lifecycle-queue item (or from
     /// `performStart`, which already is one).
     private func performSpawnBrown(for task: AgentTask? = nil) async -> UUID? {
+        // Fail fast on a stopped runtime: without this, the standalone (tool-driven)
+        // spawn path paid a full scoping LLM call before registration failed at the end.
+        guard supervisor.currentGeneration != nil else { return nil }
         guard !aborted else { return nil }
 
         // Enforce single Brown — terminate existing one if present
@@ -2034,10 +2092,12 @@ public actor OrchestrationRuntime {
         guard let brownConfig = llmConfigs[.brown],
               let brownProvider = llmProviders[.brown] else {
             await channel.post(ChannelMessage(sender: .system, content: "No Brown provider configured — cannot spawn."))
+            openSpawnBreakerForInfrastructureFailure()
             return nil
         }
         guard let securityAgentProvider = llmProviders[.securityAgent] else {
             await channel.post(ChannelMessage(sender: .system, content: "No Security Agent provider configured — Brown requires a security evaluator."))
+            openSpawnBreakerForInfrastructureFailure()
             return nil
         }
 
@@ -2205,10 +2265,10 @@ public actor OrchestrationRuntime {
             }
         }
 
-        // Re-check after the (possibly long) scoping LLM call above: an abort raised
-        // mid-scoping must not be answered by minting a fresh worker. The stopAll queued
-        // by abort() owns teardown of anything already built (codex review finding).
-        guard !aborted else { return nil }
+        // Re-check after the (possibly long) scoping LLM call above: an abort or stop
+        // raised mid-scoping must not be answered by minting a fresh worker. The queued
+        // stopAll owns teardown of anything already built (codex review finding).
+        guard !aborted, !stopRequested else { return nil }
 
         let brownAgent = AgentActor(
             id: brownID,
@@ -2266,7 +2326,7 @@ public actor OrchestrationRuntime {
         // The `!aborted` re-check closes the last window: an abort raised during the
         // wiring awaits since the post-scoping barrier must not get a registered, started
         // worker (agy review finding).
-        guard !aborted,
+        guard !aborted, !stopRequested,
               supervisor.register(id: brownID, role: .brown, agent: brownAgent, evaluator: evaluator) != nil else {
             await brownAgent.markTerminated()
             stopLogger.warning("spawnBrown: aborted or stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")

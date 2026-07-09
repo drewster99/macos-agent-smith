@@ -146,6 +146,40 @@ struct SerialChainedTaskQueueRunTests {
         }
     }
 
+    @Test("cancelCurrent cancels only the running operation, not queued ones")
+    func cancelCurrentTargetsOnlyRunningWork() async {
+        let queue = SerialChainedTaskQueue()
+        actor Probe {
+            var firstSawCancellation: Bool?
+            var secondRan = false
+            func recordFirst(_ cancelled: Bool) { firstSawCancellation = cancelled }
+            func recordSecond() { secondRan = true }
+        }
+        let probe = Probe()
+
+        async let first: Void = queue.run {
+            // Simulate a slow, cancellation-aware await (the scoping LLM call shape).
+            for _ in 0..<200 {
+                if Task.isCancelled { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            await probe.recordFirst(Task.isCancelled)
+        }
+        async let second: Void = queue.run {
+            await probe.recordSecond()
+        }
+
+        // Let the first op get underway, then cancel it.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        queue.cancelCurrent()
+        _ = await (first, second)
+
+        let firstCancelled = await probe.firstSawCancellation
+        let secondRan = await probe.secondRan
+        #expect(firstCancelled == true, "the running operation must observe cancellation")
+        #expect(secondRan, "queued operations must be unaffected by cancelCurrent")
+    }
+
     @Test("schedule() and run() share one FIFO order")
     func scheduleAndRunInterleave() async {
         let queue = SerialChainedTaskQueue()

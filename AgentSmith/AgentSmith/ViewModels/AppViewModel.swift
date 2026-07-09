@@ -914,7 +914,11 @@ final class AppViewModel {
             activeTimers = []
             return
         }
-        activeTimers = await runtime.currentScheduledWakes()
+        // Nil = no live Smith (mid-restart) — keep the last known list rather than
+        // flashing the timers panel empty for the teardown window.
+        if let wakes = await runtime.currentScheduledWakes() {
+            activeTimers = wakes
+        }
     }
 
     /// Cancels a scheduled timer by id. Returns true if anything was cancelled.
@@ -1022,7 +1026,11 @@ final class AppViewModel {
     /// Called from the `onTimerEventForChannel` callback on every schedule/fire/cancel.
     private func snapshotAndPersistWakes() async {
         guard let runtime else { return }
-        let wakes = await runtime.currentScheduledWakes()
+        // Nil = no live Smith. A timer event racing a restart's teardown used to read the
+        // wake list as [] here and TRUNCATE the on-disk file — permanently killing
+        // recurring series before the replay filter ever saw them. Never persist a
+        // snapshot taken while no Smith exists.
+        guard let wakes = await runtime.currentScheduledWakes() else { return }
         activeTimers = wakes
         await scheduledWakesWriter.enqueue(wakes)
     }

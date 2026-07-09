@@ -1758,12 +1758,12 @@ public actor AgentActor {
                 // Calls rejected before Security Agent evaluation (unavailable for role / unknown tool).
                 // Tracked alongside evaluated results so we can keep tool_result ordering aligned
                 // with the assistant message's tool_use ordering.
-                var preRejections: [(batchIndex: Int, callID: String, result: String)] = []
+                var preRejections: [(batchIndex: Int, callID: String, toolName: String, result: String)] = []
                 for (batchIndex, call) in segment.calls.enumerated() {
                     guard isRunning else { break }
                     guard let tool = activeTools.first(where: { $0.name == call.name }) else { continue }
                     if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
-                        preRejections.append((batchIndex: batchIndex, callID: call.id, result: rejection))
+                        preRejections.append((batchIndex: batchIndex, callID: call.id, toolName: call.name, result: rejection))
                         continue
                     }
                     let siblings = approvalSummaries.enumerated()
@@ -1780,7 +1780,14 @@ public actor AgentActor {
                 struct ParallelToolResult: Sendable {
                     let batchIndex: Int
                     let callID: String
+                    let toolName: String
                     let result: String
+                    /// Whether the call executed successfully (false for denials, failures,
+                    /// timeouts). Carried out of the @Sendable evaluation closure so the merge
+                    /// loop — back on the actor — can feed `recordToolOutcome`; without this,
+                    /// Brown (the only role with per-call approval) escaped the failure-streak
+                    /// breaker on every multi-call segment (fresh-Opus review finding).
+                    let succeeded: Bool
                     /// Wall-clock ms spent inside `tool.execute(...)`. Zero for denied
                     /// calls (which skip execute entirely). Does NOT include the Security Agent
                     /// security-evaluation LLM call — that gets its own UsageRecord.
@@ -1832,12 +1839,14 @@ public actor AgentActor {
 
                     let result: String
                     var executionMs = 0
+                    var succeeded = false
                     if disposition.approved {
                         let outcome = await AgentActor.runToolWithTimeout(entry.call, tool: entry.tool, context: ctx) { name, seconds in
                             AgentActor.stopLogger.warning("Tool '\(name, privacy: .public)' execution exceeded \(seconds, privacy: .public)s — cancelled (agent=\(agentIDPrefix, privacy: .public))")
                         }
                         result = outcome.result
                         executionMs = outcome.executionMs
+                        succeeded = outcome.succeeded
                         // Mirror the sequential `directExecute` path: record the outcome on the
                         // shared tracker so Security Agent's recent-tool-calls context shows whether this
                         // approved call actually succeeded or failed. Without this, parallel
@@ -1865,7 +1874,8 @@ public actor AgentActor {
 
                     return ParallelToolResult(
                         batchIndex: entry.batchIndex, callID: entry.call.id,
-                        result: result, executionMs: executionMs
+                        toolName: entry.call.name, result: result,
+                        succeeded: succeeded, executionMs: executionMs
                     )
                 }
 
@@ -1897,20 +1907,23 @@ public actor AgentActor {
                 struct MergedEntry {
                     let batchIndex: Int
                     let callID: String
+                    let toolName: String
                     let result: String
+                    let succeeded: Bool
                     let executionMs: Int
                 }
                 var merged: [MergedEntry] = []
                 for r in results {
-                    merged.append(MergedEntry(batchIndex: r.batchIndex, callID: r.callID, result: r.result, executionMs: r.executionMs))
+                    merged.append(MergedEntry(batchIndex: r.batchIndex, callID: r.callID, toolName: r.toolName, result: r.result, succeeded: r.succeeded, executionMs: r.executionMs))
                 }
                 for r in preRejections {
-                    merged.append(MergedEntry(batchIndex: r.batchIndex, callID: r.callID, result: r.result, executionMs: 0))
+                    merged.append(MergedEntry(batchIndex: r.batchIndex, callID: r.callID, toolName: r.toolName, result: r.result, succeeded: false, executionMs: 0))
                 }
                 for r in merged.sorted(by: { $0.batchIndex < $1.batchIndex }) {
                     executedCallIDs.insert(r.callID)
                     turnToolExecutionMs += r.executionMs
                     turnToolResultChars += r.result.count
+                    recordToolOutcome(name: r.toolName, succeeded: r.succeeded)
                     conversationHistory.append(.toolResult(Self.capToolResult(r.result), callID: r.callID))
                 }
                 pushLiveContext()
@@ -2167,13 +2180,20 @@ public actor AgentActor {
         return outcome.result
     }
 
+    /// Tools whose "failure" is the CALLEE's exit status, not a tool malfunction — bash
+    /// returns .failure for any non-zero exit, so a legitimate fix-the-failing-test loop
+    /// (`swift test` → exit 1, edit, retest…) or `grep -q` misses would trip the streak
+    /// breaker and idle the agent mid-task (fresh-Opus review finding). Exempt from
+    /// streak counting; the identical-call breaker still covers true bash loops.
+    private static let toolFailureStreakExemptTools: Set<String> = ["bash"]
+
     /// Feeds the per-tool failure-streak breaker (`toolFailureStreaks`). A success wipes
     /// that tool's streak and re-arms its warning; a failure increments it.
     private func recordToolOutcome(name: String, succeeded: Bool) {
         if succeeded {
             toolFailureStreaks[name] = nil
             toolFailureWarnedTools.remove(name)
-        } else {
+        } else if !Self.toolFailureStreakExemptTools.contains(name) {
             toolFailureStreaks[name, default: 0] += 1
         }
     }

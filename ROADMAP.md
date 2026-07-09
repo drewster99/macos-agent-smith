@@ -53,10 +53,12 @@ Known-accepted behaviors and smaller follow-ups (from the third review pass):
   through N full stop/start cycles (each with MCP settle + scoping) before the last
   wins. Correct but wasteful under burst — a queue-level "drop superseded restarts"
   optimization is available when it matters.
-- **Stop latency behind an in-flight transition.** A user Stop now waits for the
-  current queued transition to finish (bounded by scoping retries + backoff, worst
-  ~1 min against a dead backend) instead of interleaving into it. Correctness over
-  responsiveness; a `cancelCurrent()` on the lifecycle queue is the future fix.
+- **Stop latency behind an in-flight transition — FIXED** after all three independent
+  reviews converged on it: `stopAll()` now raises a `stopRequested` flag outside the
+  queue (mirroring `aborted`) and calls `lifecycleQueue.cancelCurrent()`, which
+  cooperatively cancels the running transition's slow awaits (the scoping LLM call and
+  its backoff sleeps are cancellation-aware). Teardowns ignore cancellation by
+  construction.
 - **Per-Brown archive growth.** `archivedEvaluationRecords` accumulates one entry per
   terminated Brown for the app session (each capped at 50 records). Pre-existing;
   prune to last-N when it matters.
@@ -66,6 +68,17 @@ Known-accepted behaviors and smaller follow-ups (from the third review pass):
 - **Worker-pool migration marker.** `AgentSupervisor.register` asserts the
   single-agent-per-role invariant (debug builds); a deliberate pool replaces
   `firstHandle(role:)` with `handles(role:)` and deletes the assertion.
+- **Worker-pool blockers beyond the supervisor** (fresh-Opus review): the terminated-
+  agent archive is keyed by ROLE (N Browns collapse to one slot; key by agent ID like
+  `archivedEvaluationRecords`); processing/tool-execution UI state is role-keyed (two
+  Browns overwrite each other's Thinking indicator); both queue drains gate on a global
+  "any task running" check (a pool never drains past the first task); and each spawn
+  pays a serial scoping LLM call inside the lifecycle queue — spawn needs to reserve
+  its handle under the queue but scope outside it, commit-or-roll-back.
+- **Per-tool failure-streak exemptions.** `bash` is exempt (its non-zero exits are the
+  callee's semantics — failing tests, `grep -q` — not tool malfunction). If other
+  exit-status-shaped tools are added, add them to
+  `AgentActor.toolFailureStreakExemptTools`.
 
 ### Attachments — v2 follow-ups
 
