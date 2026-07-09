@@ -1069,7 +1069,10 @@ public actor OrchestrationRuntime {
     private func abandonFailedStart() async {
         await powerManager?.shutdown()
         powerManager = nil
-        taskSummarizer = nil
+        // `taskSummarizer` is deliberately KEPT (matching performStopAll): late
+        // summarize calls for tasks that terminated around the stop/start boundary
+        // read it fire-and-forget, and nilling it here would silently skip them.
+        // The next successful start overwrites it anyway.
         _ = supervisor.endGeneration()
         await channel.setCurrentSessionID(nil)
     }
