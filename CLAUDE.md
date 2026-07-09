@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Agent Smith is a macOS app (Swift 6 / SwiftUI, macOS 15+) that orchestrates a small fixed cast of LLM-driven agents working together on user-supplied tasks. The roles are not abstract — they are baked into `AgentRole` and the codebase assumes all four exist:
 
-- **Smith** — orchestrator. Talks to the user, creates tasks, spawns/supervises Brown, reviews Brown's results. Never does work itself.
-- **Brown** — single worker spawned per task. Holds the bash/file/process tools.
+- **Smith** — orchestrator. Talks to the user, creates tasks (with acceptance criteria), spawns/supervises Brown, and resolves validation escalations. Never does work itself, and does NOT review routine submissions — the acceptance-validation system does (see below).
+- **Brown** — single worker spawned per task. Holds the bash/file/process tools and owns the task's step list (`manage_steps`).
 - **Security Agent** — silent security gatekeeper that runs alongside Brown. Returns plain-text `SAFE/WARN/UNSAFE/ABORT` verdicts on Brown's tool calls (text-based, *not* tool calls — see `SecurityAgentBehavior.swift` and `SecurityEvaluator.swift`).
 - **Summarizer** — summarizes completed/failed tasks (`TaskSummarizer`).
 
@@ -16,33 +16,32 @@ The full design history, rationale, and completed/planned features live in `ROAD
 ## Repo layout
 
 - `AgentSmith/` — the Xcode app target (`AgentSmith.xcodeproj`, scheme `AgentSmith`). Contains the SwiftUI layer (`Views/`, `ViewModels/`), the `ExportDefaults` CLI target, and bundled `Resources/defaults.json`.
-- `AgentSmithPackage/` — local Swift package `AgentSmithKit` containing the entire engine: `Agents/`, `Channel/`, `LLM/`, `Memory/`, `Orchestration/`, `Persistence/`, `Tasks/`, `Tools/`, `Usage/`. The app depends on this package; almost all logic lives here.
+- `AgentSmithPackage/` — local Swift package `AgentSmithKit` containing the entire engine: `Agents/`, `Channel/`, `Evaluation/`, `LLM/`, `Memory/`, `Orchestration/`, `Persistence/`, `Tasks/`, `Tools/`, `Usage/`. The app depends on this package; almost all logic lives here.
 - `AgentSmithPackage/Tests/AgentSmithTests/` — Swift Testing (`@Suite` / `@Test`) tests for tools, channel, and usage aggregation.
 - `SafetySystemTesting/` — isolated harness and scripts for exercising the safety/gatekeeper system. Self-contained; has its own README.
 - `scripts/` — one-off Python utilities (e.g. `backfill_tool_calls.py`).
 - `ROADMAP.md` — long-form plan + completed-work log. Authoritative source for "why is it this way."
 - `ROADMAP_implement_tabs.md` — historical sub-plan for the multi-session tab work.
 
-## Sibling package dependencies (path-based)
+## Package dependencies (versioned git)
 
-`AgentSmithPackage/Package.swift` uses local path dependencies on two sibling repos:
+`AgentSmithPackage/Package.swift` depends on versioned git releases (NOT path-based; siblings checkouts are for development of those packages only):
 
-- `../../swift-llm-kit` (SwiftLLMKit — providers, model configs, Keychain API key storage, `LLMKitManager`, `ModelConfiguration`, `ProviderAPIType`)
-- `../../swift-semantic-search` (SemanticSearch — `SemanticSearchEngine` used by `MemoryStore`)
-
-Both must be checked out as siblings of `agent-smith/` for the package to resolve. The intent (per Package.swift comments) is to flip these to versioned git deps before public release.
+- `drewster99/swift-llm-kit` (SwiftLLMKit — providers, model configs, Keychain API key storage, `LLMKitManager`, `ModelConfiguration`, `ProviderAPIType`). Releasing a change there means: change → build → commit → push → tag → push tag → bump the `from:` version here.
+- `drewster99/swift-semantic-search` (SemanticSearch — `SemanticSearchEngine` used by `MemoryStore`)
+- `modelcontextprotocol/swift-sdk` (MCP client support)
 
 ## Building and running
 
 Always build via the xcode-mcp-server tools — never `xcodebuild`, `swift build`, or `swift package build`. The app target requires Xcode (Assets.xcassets, entitlements, Info.plist).
 
-- Build: `mcp__xcode-mcp-server__build_project --project_path /Users/andrew/cursor/agent-smith/AgentSmith/AgentSmith.xcodeproj` (scheme `AgentSmith`).
-- Run with the user driving the UI: `mcp__xcode-mcp-server__run_project_with_user_interaction` against the same project path.
+- Build: `mcp__xcode-mcp-server__build_project --project_path /Users/andrew/cursor/macos-agent-smith/AgentSmith/AgentSmith.xcodeproj` (scheme `AgentSmith`). (The repo is also reachable as `~/Documents/ncc_source/cursor/macos-agent-smith` — same directory.)
+- Run the app: `mcp__xcode-mcp-server__run_project_unmonitored` (or `run_project_until_terminated`) against the same project path, then `stop_project` + `get_runtime_output`. Do NOT use `run_project_with_user_interaction` — it blocks on a dialog click.
 - Run tests: **two commands required, not one.**
   - `mcp__xcode-mcp-server__run_project_tests` against `AgentSmith.xcodeproj` covers any tests that live in the .xcodeproj test bundle. Today there are none here, but it's the right hook if .xcodeproj-side tests ever get added.
   - **Package tests** (everything under `AgentSmithPackage/Tests/AgentSmithTests/` — the bulk of the suite) must be run manually from the terminal:
     ```
-    cd /Users/andrew/cursor/agent-smith/AgentSmithPackage && swift test --skip MemoryStoreIntegrationTests
+    cd /Users/andrew/cursor/macos-agent-smith/AgentSmithPackage && swift test --skip MemoryStoreIntegrationTests
     ```
     Why two commands: the AgentSmith scheme's auto-created test plan does not include the local package's test target (Xcode 16 does not auto-discover test targets from referenced local Swift packages). Adding an explicit `.xctestplan` was attempted and reverted because Xcode's IDE-side index couldn't resolve the package test target reliably; the terminal command sidesteps that entirely.
   - `MemoryStoreIntegrationTests` is skipped above because it requires Xcode's build pipeline to compile MLX Metal shaders (`swift test` alone can't). To run it, run the file's documented `xcodebuild` invocation by hand — but ask the user first; the project rule is xcode-mcp-only for builds.
@@ -79,6 +78,12 @@ The runtime fires `@Sendable` callbacks (`onAbort`, `onProcessingStateChange`, `
 4. If it's a destructive/side-effecting tool, expect `SecurityEvaluator` (Security Agent) to gate the call.
 
 Brown's `BashTool` shells out via `/bin/bash -c` (sources the user profile — full PATH). There is no separate `shell` tool anymore.
+
+### Acceptance validation (replaces Smith's routine review)
+
+`AgentSmithKit/Evaluation/` holds the evaluator framework: `EvaluatorDefinition` (data-defined evaluation functions, hot-loaded from the session's `evaluators/*.json` directory — user-owned, seeded never-overwrite from `EvaluatorDefaults`), `EvaluationRunner` (render slots → LLM → allowlisted tool rounds → grammar parse), `EvaluatorRegistry` (load failures are visible entries, never silent skips), and `TaskValidationCoordinator` (an `OrchestrationRuntime` extension).
+
+The flow: Brown's `task_complete` puts the task in `.validating` and each acceptance criterion is judged independently (`ACCEPT` is sticky; `WAIVE` only when the criterion is waivable; `ERROR` retries once then escalates — never counted as a rejection). Rejections send a punch list DIRECTLY back to Brown, bounded by `maxValidationRounds`; exhaustion/errors/unconfigured escalate to `.awaitingReview` where Smith's `review_work` is the resolution tool (its reject path resets the round budget). Validation is idempotent and restartable — everything lives on the task (`acceptanceCriteria`, `steps`, `validation` ledger with pinned definition bodies); `.validating` tasks re-enqueue at cold boot. Don't hand routine review back to Smith, and don't make validators mutate anything — they hold the read-only evidence quartet (file_read, directory_listing, grep, glob).
 
 ### LLM/provider configuration
 
