@@ -97,6 +97,16 @@ extension OrchestrationRuntime {
 
     // MARK: - Entry points
 
+    /// One-line-per-validator summary baked into `set_acceptance_criteria`'s description
+    /// at Smith's spawn, or nil when no registry is configured. A snapshot by design —
+    /// `list_validators` is the live view.
+    func validatorCatalogSummary() -> String? {
+        guard let directory = evaluatorsDirectory else { return nil }
+        let validators = EvaluatorRegistry.load(from: directory).definitions(ofKind: .validator)
+        guard !validators.isEmpty else { return nil }
+        return validators.map { "- `\($0.name)`: \($0.description)" }.joined(separator: "\n")
+    }
+
     /// Kicks validation for a task that just entered `.validating` (from
     /// `task_complete`), or re-enqueues one found in that state at cold boot. Detached
     /// from the caller; per-task reentrancy-guarded.

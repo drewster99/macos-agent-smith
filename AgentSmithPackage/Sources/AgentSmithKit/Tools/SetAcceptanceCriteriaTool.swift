@@ -7,21 +7,7 @@ import Foundation
 /// validation round.
 public struct SetAcceptanceCriteriaTool: AgentTool {
     public let name = "set_acceptance_criteria"
-    public let toolDescription = """
-        Set a task's acceptance criteria — the checklist the automated validation system \
-        judges the worker's submission against (you do NOT review routine submissions; \
-        validation does). Derive criteria from what the user actually asked for, including any \
-        validation the user explicitly requested. Each criterion is judged independently by a \
-        validator, so make each one concrete and checkable on evidence. \
-        \
-        This REPLACES the task's whole criteria list: pass every criterion that should apply, \
-        not just new ones. Criteria whose text is unchanged keep their already-accepted status; \
-        edited or new ones are judged fresh (from the next round, if validation is mid-round). \
-        \
-        Each criterion may name a `validator` from the registry (see `list_validators`); \
-        omitted means the default acceptance validator. Set `waivable: true` only where the \
-        criterion might genuinely not apply and the validator may say so.
-        """
+    public let toolDescription: String
 
     public let parameters: [String: AnyCodable] = [
         "type": .string("object"),
@@ -56,7 +42,31 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         "required": .array([.string("task_id"), .string("criteria")])
     ]
 
-    public init() {}
+    /// The `validatorCatalogSummary`, when supplied, is baked into the tool description so
+    /// Smith sees the installed validators on every turn without a `list_validators` round
+    /// trip (the GhTool auth-snapshot pattern). Registry edits mid-session still surface
+    /// through `list_validators`; the baked list refreshes at the next Smith spawn.
+    public init(validatorCatalogSummary: String? = nil) {
+        var description = """
+            Set a task's acceptance criteria — the checklist the automated validation system \
+            judges the worker's submission against (you do NOT review routine submissions; \
+            validation does). Derive criteria from what the user actually asked for, including any \
+            validation the user explicitly requested. Each criterion is judged independently by a \
+            validator, so make each one concrete and checkable on evidence. \
+            \
+            This REPLACES the task's whole criteria list: pass every criterion that should apply, \
+            not just new ones. Criteria whose text is unchanged keep their already-accepted status; \
+            edited or new ones are judged fresh (from the next round, if validation is mid-round). \
+            \
+            Each criterion may name a `validator` from the registry (see `list_validators`); \
+            omitted means the default acceptance validator. Set `waivable: true` only where the \
+            criterion might genuinely not apply and the validator may say so.
+            """
+        if let validatorCatalogSummary, !validatorCatalogSummary.isEmpty {
+            description += "\n\nInstalled validators (snapshot at your spawn — `list_validators` for the live list):\n" + validatorCatalogSummary
+        }
+        self.toolDescription = description
+    }
 
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
         context.agentRole == .smith

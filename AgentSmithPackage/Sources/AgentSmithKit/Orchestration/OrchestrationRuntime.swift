@@ -1537,7 +1537,7 @@ public actor OrchestrationRuntime {
                 maxToolCallsPerIteration: agentTuning[.smith]?.maxToolCalls ?? 100
             ),
             provider: provider,
-            tools: SmithBehavior.tools(),
+            tools: SmithBehavior.tools(validatorCatalogSummary: validatorCatalogSummary()),
             toolContext: context
         )
         await followUpScheduler.set(agent: smithAgent)

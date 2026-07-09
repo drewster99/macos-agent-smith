@@ -172,6 +172,22 @@ struct ValidationAgentSurfaceTests {
         #expect(!failed.succeeded)
     }
 
+    // MARK: - Spawn-time validator catalog
+
+    @Test("The validator catalog snapshot is baked into set_acceptance_criteria's description")
+    func validatorCatalogBakedIntoDescription() {
+        let bare = SetAcceptanceCriteriaTool()
+        #expect(!bare.toolDescription.contains("Installed validators"))
+
+        let baked = SetAcceptanceCriteriaTool(validatorCatalogSummary: "- `default-acceptance`: judges the whole task")
+        #expect(baked.toolDescription.contains("Installed validators"))
+        #expect(baked.toolDescription.contains("default-acceptance"))
+
+        let smithTools = SmithBehavior.tools(validatorCatalogSummary: "- `x`: y")
+        let tool = smithTools.first { $0.name == "set_acceptance_criteria" }
+        #expect(tool?.toolDescription.contains("- `x`: y") == true)
+    }
+
     // MARK: - create_task seeding
 
     @Test("create_task seeds acceptance criteria and initial steps")

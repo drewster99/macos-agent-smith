@@ -2,15 +2,17 @@ import Foundation
 
 /// Defines Smith's tool set and enhanced system prompt.
 enum SmithBehavior {
-    /// Tools available to the Smith agent.
-    public static func tools() -> [any AgentTool] {
+    /// Tools available to the Smith agent. `validatorCatalogSummary`, when supplied, is
+    /// baked into `set_acceptance_criteria`'s description so Smith sees the installed
+    /// validators on every turn (the GhTool auth-snapshot pattern).
+    public static func tools(validatorCatalogSummary: String? = nil) -> [any AgentTool] {
         [
             MessageUserTool(),
             MessageBrownTool(),
             ReviewWorkTool(),
             ProvideHelpTool(),
             CreateTaskTool(),
-            SetAcceptanceCriteriaTool(),
+            SetAcceptanceCriteriaTool(validatorCatalogSummary: validatorCatalogSummary),
             ListValidatorsTool(),
             RunTaskTool(),
             UpdateTaskTool(),
