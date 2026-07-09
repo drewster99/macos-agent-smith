@@ -39,13 +39,29 @@ agent. `abort()` sets its flag outside the queue so in-flight transitions bail.
 Deliberately deferred: converting agent run loops to structured-concurrency children
 (the current `stop()` grace-timeout design exists precisely because awaiting a wedged
 child is the hang it dodges); channel-side epoch gating (serialized starts removed the
-cross-stamping race, and the lease blocks stale subscribers from acting). Next phases
-when wanted: long-lived Smith (workers cycle per task, Smith keeps memory across
-transitions — removes the restart-amnesia that produced the double-amendment), then the
-worker pool for many concurrent agents. The acceptance-validator feature (checklist
-criteria judged per-criterion with ACCEPT/REJECT/WAIVE verdicts) is designed to follow
-the `SecurityEvaluator` pattern — stateless evaluation calls, no run loop, no lifecycle
-surface — and is not blocked on any of this.
+cross-stamping race, and the lease blocks stale subscribers from acting). The
+acceptance-validator feature (checklist criteria judged per-criterion with
+ACCEPT/REJECT/WAIVE verdicts) is designed to follow the `SecurityEvaluator` pattern —
+stateless evaluation calls, no run loop, no lifecycle surface — and is not blocked on
+any of this.
+
+**Phase 2 — long-lived Smith + worker cycling ✅.** `restartForNewTask` (name kept for
+its many callers) now cycles the WORKER when Smith is alive: save the outgoing Brown's
+context if its task is resumable, spawn/brief a fresh Brown, and inform Smith with one
+appended turn. The full teardown+boot survives only as the cold path (no live Smith).
+This removes the restart amnesia behind the incident's double-amendment and retires the
+`captureLastUserMessage` hand-off on the warm path — Smith simply remembers. Context
+management: `/clear` resets Smith to system prompt + a task-state orientation rebuilt
+from the task store; `/compact` (manual) and task-boundary auto-compaction (>50
+messages, from the task-terminated hook) summarize via the Summarizer's provider and
+splice to [system + summary + recent turns]. Ctrl-L remains display-only. Notices carry
+the `context_management` kind, dropped by both agent filters. Semantics change:
+`currentSessionID` now spans many tasks within one Smith generation (UsageRecords still
+carry per-call taskIDs). Deferred refinement: provenance-tagged surgical episode
+splicing (per-turn origin tags + homogeneous drain injections + a conservative
+drop-only-what's-attributable rule) if summarizer-based compaction proves lossy; and a
+staleness policy for past-due scheduled tasks. Smith still cold-boots across app
+relaunches by choice — no context persistence.
 
 Known-accepted behaviors and smaller follow-ups (from the third review pass):
 

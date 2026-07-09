@@ -400,6 +400,30 @@ public actor OrchestrationRuntime {
     /// How many of Smith's most recent turns `/compact` preserves verbatim.
     private static let compactionRecentTurnsKept = 6
 
+    /// Message count above which a task termination triggers automatic compaction of the
+    /// long-lived Smith's context. Task boundaries are the natural compaction point (the
+    /// terminated task's play-by-play just became historical), and the Summarizer's
+    /// output preserves the judgment. Manual `/compact` works at any size.
+    private static let smithAutoCompactMessageThreshold = 50
+
+    /// Task-boundary automatic compaction for the long-lived Smith (Phase 2). Runs from
+    /// the task-terminated hook; a no-op below the threshold, during abort/stop, or with
+    /// no live Smith. The notice is posted with the `context_management` kind so both
+    /// agent filters drop it — context maintenance is user-visible but agent-invisible.
+    func autoCompactSmithIfNeeded() async {
+        guard !aborted, !stopRequested else { return }
+        guard let smithAgent = supervisor.firstHandle(role: .smith)?.agent else { return }
+        let messageCount = await smithAgent.contextSnapshot().count
+        guard messageCount > Self.smithAutoCompactMessageThreshold else { return }
+        let result = await compactSmithContext()
+        stopLogger.notice("Auto-compact after task termination: \(result, privacy: .public)")
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Automatic context maintenance: \(result)",
+            metadata: ["messageKind": .string("context_management")]
+        ))
+    }
+
     /// Summarizes Smith's conversation and splices the history down to
     /// `[system prompt] + [summary] + recent turns` — the user-facing `/compact`.
     /// Uses the Summarizer's provider when configured (a compaction summary is exactly
@@ -1206,27 +1230,102 @@ public actor OrchestrationRuntime {
         supervisor.firstHandle(role: role)?.id
     }
 
-    /// Triggers a full system restart for a newly-created task.
+    /// Starts a task. Despite the historical name, this is no longer a full system
+    /// restart when Smith is alive — Phase 2 of the post-incident work made Smith
+    /// LONG-LIVED: starting a task cycles the WORKER (terminate old Brown, spawn a fresh
+    /// one, brief it) while Smith keeps its conversation. That removes the restart
+    /// amnesia that produced the 2026-07-08 double-amendment (each Smith forgot the last
+    /// one's actions) and the lost-user-message hand-off machinery: Smith simply
+    /// remembers. The full teardown+boot survives ONLY as the cold path (no Smith:
+    /// app launch, post-stop).
+    ///
     /// Routed through `lifecycleQueue` so it serializes with every other lifecycle
-    /// transition. Fire-and-forget by design (tools cannot await a restart that will
+    /// transition. Fire-and-forget by design (tools cannot await a transition that may
     /// tear down the very agent making the call).
-    /// Captures the last user message before stopping so it can be forwarded to the new Smith.
     public func restartForNewTask(taskID: UUID) {
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
-            // Capture the most recent user message before stopping — it may contain
-            // permissions or instructions that would be lost across the restart.
+            if await self.hasLiveSmith() {
+                await self.performStartTaskWithLiveSmith(taskID: taskID)
+                return
+            }
+            // Cold path — no Smith to preserve. Capture the most recent user message
+            // before stopping (it may contain permissions or instructions), and the
+            // session ID so Smith's pre-task planning calls get attributed to the task.
             let lastUserMessage = await self.captureLastUserMessage()
-            // Capture session ID before stopAll() clears it — needed to attribute
-            // Smith's pre-task planning calls to the task they produced.
             let priorSessionID = await self.currentSessionID
             await self.performStopAll(preserveObserverCallbacks: true)
-            // Backfill nil-taskID records from the prior session onto the new task.
-            // All agent loops have exited by now, so every record has been written.
             if let priorSessionID {
                 await self.usageStore.backfillTaskID(taskID, forSession: priorSessionID)
             }
             await self.performStart(resumingTaskID: taskID, lastUserMessage: lastUserMessage)
+        }
+    }
+
+    private func hasLiveSmith() -> Bool {
+        supervisor.firstHandle(role: .smith) != nil
+    }
+
+    /// The Phase 2 task-start path: cycle the worker under a surviving Smith. Runs ONLY
+    /// as a lifecycle-queue item. Mirrors `performStart`'s resuming branch for the Brown
+    /// side (spawn → status → assign → briefing → synthetic ack), but Smith is informed
+    /// with one appended turn instead of being rebuilt from scratch.
+    private func performStartTaskWithLiveSmith(taskID: UUID) async {
+        guard !aborted, !stopRequested else { return }
+        guard let task = await taskStore.task(id: taskID) else {
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Could not start task \(taskID.uuidString): it was not found in the task store.",
+                metadata: ["isError": .bool(true)]
+            ))
+            return
+        }
+
+        // Save the outgoing worker's context when its task is still resumable (e.g. a
+        // scheduled-interrupt paused it) — this was stopAll's job on the old full-restart
+        // path; the worker cycle must keep the resume-ability guarantee.
+        if let brownHandle = supervisor.firstHandle(role: .brown) {
+            let outgoingTask = await taskStore.taskForAgent(agentID: brownHandle.id)
+            if let outgoingTask, !outgoingTask.status.isTerminal {
+                await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
+            }
+        }
+
+        guard let brownID = await performSpawnBrown(for: task) else {
+            // An abort/stop mid-spawn is not the task's failure (same rule as performStart).
+            guard !aborted, !stopRequested else { return }
+            await taskStore.updateStatus(id: taskID, status: .failed)
+            if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
+                await smithAgent.appendUserMessage("""
+                    [System: Task "\(task.title)" (ID: \(taskID.uuidString)) could not be started — the worker \
+                    failed to spawn (provider unreachable or tool-scoping failed; details were posted to the \
+                    channel). The task has been marked FAILED. Tell the user briefly what happened; saying \
+                    "retry" will re-run it via `run_task`, which auto-resets failed tasks.]
+                    """)
+            }
+            return
+        }
+
+        await taskStore.updateStatus(id: taskID, status: .running)
+        await taskStore.assignAgent(taskID: taskID, agentID: brownID)
+        let refreshed = await taskStore.task(id: taskID) ?? task
+
+        let briefing = await composeBrownTaskBriefing(for: refreshed)
+        let attachmentsForBrown = await collectTaskAttachments(refreshed)
+        if let brownAgent = supervisor.agent(id: brownID) {
+            await brownAgent.setSyntheticFirstToolCall("task_acknowledged")
+            await brownAgent.appendUserMessage(briefing, attachments: attachmentsForBrown)
+        }
+
+        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
+            await smithAgent.appendUserMessage("""
+                [System: Task "\(refreshed.title)" (ID: \(taskID.uuidString)) has been started. A fresh worker \
+                (Brown) was spawned and briefed automatically. Do NOT call `run_task`, `create_task`, or \
+                `message_brown` FOR THIS task — Brown will signal progress via task_update / task_complete, \
+                and you'll get the periodic Brown-activity digest; do NOT poll. This start came from your own \
+                run_task call or a scheduled timer: if the user doesn't already know it started, tell them in \
+                one short line. Handle any NEW user message normally.]
+                """)
         }
     }
 
@@ -1475,6 +1574,9 @@ public actor OrchestrationRuntime {
                 if !kicked {
                     await self?.drainPendingTaskQueue()
                 }
+                // Task boundaries are the long-lived Smith's compaction points: the
+                // terminated task's play-by-play just became history (Phase 2).
+                await self?.autoCompactSmithIfNeeded()
             }
         }
 
@@ -2300,9 +2402,11 @@ public actor OrchestrationRuntime {
         let brownMessageFilter: @Sendable (ChannelMessage) -> Bool = { message in
             // Drop all security disposition messages (SAFE/WARN/UNSAFE/ABORT).
             if message.metadata?["securityDisposition"] != nil { return false }
-            // Drop tool_request and tool_output echo messages (posted for UI visibility only).
+            // Drop tool_request and tool_output echo messages (posted for UI visibility
+            // only), and context-management notices (Smith's compaction is none of the
+            // worker's business).
             if case .string(let kind) = message.metadata?["messageKind"],
-               kind == "tool_request" || kind == "tool_output" { return false }
+               kind == "tool_request" || kind == "tool_output" || kind == "context_management" { return false }
             return true
         }
 
