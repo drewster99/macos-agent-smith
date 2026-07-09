@@ -99,6 +99,40 @@ struct ReviewWorkTool: AgentTool {
 
         if effectiveAccepted {
             // ---- Accept path ----
+            // Smith accepting an ESCALATED task overrides validation. Make the override
+            // visible and consistent: unsettled criteria get an accepted record
+            // attributed to review_work (a completed task must never show unsettled
+            // criteria), the task's update log records the override, and a channel
+            // message says out loud who accepted and what was overridden — a silent
+            // completion right after rejection rounds reads as a bug, not a decision.
+            let settledCriterionIDs = task.validation?.settledCriterionIDs() ?? []
+            let unsettled = task.acceptanceCriteria.filter { !settledCriterionIDs.contains($0.id) }
+            if !unsettled.isEmpty {
+                let round = task.validation?.round ?? 0
+                await context.taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
+                    CriterionVerdictRecord(
+                        criterionID: $0.id,
+                        verdict: .accepted,
+                        validatorName: "review_work (Smith override)",
+                        validatorHash: "-",
+                        round: round
+                    )
+                })
+                let overriddenList = unsettled.map { "- \($0.text)" }.joined(separator: "\n")
+                await context.taskStore.addUpdate(
+                    id: taskID,
+                    message: "Accepted by Smith via review_work, overriding acceptance validation. Criteria that had not settled:\n\(overriddenList)"
+                )
+                await context.post(ChannelMessage(
+                    sender: .agent(context.agentRole),
+                    content: "Smith reviewed \"\(task.title)\" and ACCEPTED it, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).",
+                    metadata: [
+                        "messageKind": .string("validation_override"),
+                        "taskID": .string(taskID.uuidString),
+                        "taskTitle": .string(task.title)
+                    ]
+                ))
+            }
             await context.taskStore.updateStatus(id: taskID, status: .completed)
 
             // Fetch the updated task to get completedAt/startedAt timestamps.

@@ -221,6 +221,16 @@ struct TaskValidationCoordinatorTests {
             #expect(status == expectedOutcome)
         }
 
+        // The escalation must ALSO tell the worker to stand down — otherwise it never
+        // learns the last round's outcome and flails (re-reasoning, request_help loops).
+        let messages = await runtime.channel.allMessages()
+        #expect(messages.contains { message in
+            if case .string("validation_wait_notice") = message.metadata?["messageKind"] {
+                return message.recipientID != nil
+            }
+            return false
+        }, "the worker gets a private stand-down notice on escalation")
+
         // Smith review_work-rejects: fresh round budget, worker fixes, resubmits.
         await store.resetValidationRound(id: task.id)
         await store.setResult(id: task.id, result: "the real fix", commentary: nil, attachments: [])

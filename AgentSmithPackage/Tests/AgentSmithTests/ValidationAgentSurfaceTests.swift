@@ -172,6 +172,41 @@ struct ValidationAgentSurfaceTests {
         #expect(!failed.succeeded)
     }
 
+    // MARK: - review_work override visibility
+
+    @Test("Accepting an escalated task records the override: ledger settles, update logged, channel told")
+    func reviewWorkAcceptRecordsOverride() async throws {
+        let taskStore = TaskStore()
+        let channel = MessageChannel()
+        let task = await taskStore.addTask(title: "Escalated task", description: "d")
+        let criterion = AcceptanceCriterion(text: "the validator got this wrong", origin: .user)
+        await taskStore.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+        await taskStore.setResult(id: task.id, result: "correct work", commentary: nil, attachments: [])
+        _ = await taskStore.beginValidationRound(id: task.id)
+        await taskStore.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "wrongly rejected"), validatorName: "default-acceptance", validatorHash: "x", round: 1)
+        ])
+        await taskStore.updateStatus(id: task.id, status: .awaitingReview)
+
+        let context = TestToolContext.make(agentRole: .smith, channel: channel, taskStore: taskStore)
+        let result = try await ReviewWorkTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "accepted": .bool(true)],
+            context: context
+        )
+        #expect(result.succeeded)
+
+        let final = await taskStore.task(id: task.id)
+        #expect(final?.status == .completed)
+        #expect(final?.validation?.settledCriterionIDs() == [criterion.id], "the override settles the criterion on the ledger")
+        let overrideRecord = final?.validation?.verdictRecords.last
+        #expect(overrideRecord?.validatorName == "review_work (Smith override)")
+        #expect(final?.updates.contains { $0.message.contains("overriding acceptance validation") } == true)
+
+        let posted = await channel.allMessages()
+        #expect(posted.contains { if case .string("validation_override") = $0.metadata?["messageKind"] { return true }; return false },
+                "the override must be visible in the channel, never a silent completion")
+    }
+
     // MARK: - Spawn-time validator catalog
 
     @Test("The validator catalog snapshot is baked into set_acceptance_criteria's description")

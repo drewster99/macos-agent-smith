@@ -725,6 +725,28 @@ extension OrchestrationRuntime {
                 "isWarning": .bool(true)
             ]
         ))
+        // Tell the WORKER too — without this it never learns the last round's outcome
+        // (punch lists stop at escalation) and flails: re-reasoning about old
+        // rejections, calling request_help into an already-parked task. A distinct
+        // messageKind — the worker's filter drops "validation_escalation" (the public
+        // banner), and this private notice must get through.
+        if let workerID = task.assigneeIDs.first(where: { supervisor.role(of: $0) == .brown }) {
+            await channel.post(ChannelMessage(
+                sender: .system,
+                recipientID: workerID,
+                recipient: .agent(.brown),
+                content: """
+                    [Acceptance validation has ESCALATED your task to Smith: \(reason)] \
+                    Do NOT resubmit, rework anything, or call request_help — the task is already \
+                    in Smith's hands. STOP and wait: Smith will either accept the work as-is or \
+                    send you specific changes.
+                    """,
+                metadata: [
+                    "messageKind": .string("validation_wait_notice"),
+                    "taskID": .string(taskID.uuidString)
+                ]
+            ))
+        }
         if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
             await smithAgent.appendUserMessage("""
                 [System: Task "\(task.title)" (ID: \(taskID.uuidString)) was submitted but acceptance validation \
