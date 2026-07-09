@@ -259,10 +259,10 @@ extension OrchestrationRuntime {
             )
         }
 
-        var outcome = await runValidator(definition, criterion: criterion, task: task)
+        var (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task)
         if case .error = outcome {
             validationLogger.notice("Criterion \(criterion.id.uuidString.prefix(8), privacy: .public) errored — retrying once")
-            outcome = await runValidator(definition, criterion: criterion, task: task)
+            (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task)
         }
 
         let verdict: CriterionVerdictRecord.Verdict
@@ -289,7 +289,9 @@ extension OrchestrationRuntime {
             verdict: verdict,
             validatorName: definition.name,
             validatorHash: definition.contentHash,
-            round: round
+            round: round,
+            renderedInput: Self.capDebugText(transcript.renderedInput, limit: Self.maxPersistedInputChars),
+            responseLog: Self.capDebugText(transcript.turnLog.joined(separator: "\n---\n"), limit: Self.maxPersistedLogChars)
         )
     }
 
@@ -305,13 +307,20 @@ extension OrchestrationRuntime {
         registry: EvaluatorRegistry,
         round: Int
     ) async -> CriterionVerdictRecord {
+        // The accumulated debug log: the prepare exchange, then each item's exchange,
+        // each under a labeled header. Persisted (capped) with the verdict record.
+        var debugLog: [String] = []
+        var prepareRenderedInput = ""
+
         func record(_ verdict: CriterionVerdictRecord.Verdict, validator: EvaluatorDefinition? = nil) -> CriterionVerdictRecord {
             CriterionVerdictRecord(
                 criterionID: criterion.id,
                 verdict: verdict,
                 validatorName: validator?.name ?? (criterion.prepare ?? "-"),
                 validatorHash: validator?.contentHash ?? "-",
-                round: round
+                round: round,
+                renderedInput: Self.capDebugText(prepareRenderedInput, limit: Self.maxPersistedInputChars),
+                responseLog: Self.capDebugText(debugLog.joined(separator: "\n"), limit: Self.maxPersistedLogChars)
             )
         }
 
@@ -329,10 +338,13 @@ extension OrchestrationRuntime {
             return record(.error(message: "prepare function '\(prepareName)' not found in the registry (or is not kind=prepare)"))
         }
 
-        var prepareOutcome = await runValidator(prepareDefinition, criterion: criterion, task: task)
+        var (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task)
         if case .error = prepareOutcome {
-            prepareOutcome = await runValidator(prepareDefinition, criterion: criterion, task: task)
+            (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task)
         }
+        prepareRenderedInput = prepareTranscript.renderedInput
+        debugLog.append("## prepare: \(prepareName)\n" + prepareTranscript.turnLog.joined(separator: "\n---\n"))
+
         let items: [String]
         switch prepareOutcome {
         case .items(let raw):
@@ -367,10 +379,11 @@ extension OrchestrationRuntime {
         var rejections: [String] = []
         var waives: [String] = []
         for (index, item) in items.enumerated() {
-            var outcome = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
+            var (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
             if case .error = outcome {
-                outcome = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
+                (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
             }
+            debugLog.append("## item \(index + 1): \(item.prefix(120))\n" + transcript.turnLog.joined(separator: "\n---\n"))
             switch outcome {
             case .verdict("ACCEPT", _):
                 continue
@@ -442,14 +455,23 @@ extension OrchestrationRuntime {
         }
     }
 
+    /// Caps for the debugging fields persisted on each verdict record — big enough to
+    /// diagnose any verdict, small enough that tasks.json doesn't balloon.
+    static let maxPersistedInputChars = 20_000
+    static let maxPersistedLogChars = 12_000
+
+    static func capDebugText(_ text: String, limit: Int) -> String {
+        text.count <= limit ? text : text.prefix(limit) + "\n…[truncated \(text.count - limit) chars]"
+    }
+
     private func runValidator(
         _ definition: EvaluatorDefinition,
         criterion: AcceptanceCriterion,
         task: AgentTask,
         extraSlots: [String: String] = [:]
-    ) async -> EvaluationRunner.Outcome {
+    ) async -> (outcome: EvaluationRunner.Outcome, transcript: EvaluationRunner.Transcript) {
         guard let resolved = providerForModelSlot(definition.modelSlot) else {
-            return .error("no model configured for slot '\(definition.modelSlot.rawValue)'")
+            return (.error("no model configured for slot '\(definition.modelSlot.rawValue)'"), EvaluationRunner.Transcript())
         }
         let (provider, config, usageRole, providerTypeRawValue) = resolved
         let previousVerdict = (task.validation?.latestVerdict(for: criterion.id)).map(Self.describeVerdict) ?? "none"
@@ -469,7 +491,7 @@ extension OrchestrationRuntime {
         let evaluationContext = makeToolContext(agentID: UUID(), role: .securityAgent)
         let sessionID = currentSessionID
         let usageStore = usageStore
-        return await EvaluationRunner.run(
+        return await EvaluationRunner.runCapturing(
             definition: definition,
             slots: slots,
             provider: provider,

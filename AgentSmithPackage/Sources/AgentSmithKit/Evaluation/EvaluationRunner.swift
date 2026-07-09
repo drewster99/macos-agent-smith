@@ -32,6 +32,22 @@ public enum EvaluationRunner {
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "EvaluationRunner")
 
+    /// The debugging record of one evaluation run: exactly what was sent and what came
+    /// back, so a surprising verdict can be diagnosed after the fact. Persisted (capped)
+    /// on the task's verdict ledger by the validation coordinator.
+    public struct Transcript: Sendable, Equatable {
+        /// The input template with all slots rendered — the user message the model saw.
+        public var renderedInput: String
+        /// One entry per LLM turn: text responses verbatim (including grammar-retry
+        /// nudge rounds), tool rounds summarized as call → result-preview lines.
+        public var turnLog: [String]
+
+        public init(renderedInput: String = "", turnLog: [String] = []) {
+            self.renderedInput = renderedInput
+            self.turnLog = turnLog
+        }
+    }
+
     /// Runs one evaluation. `slots` must cover the definition's `requiredSlots`;
     /// `tools` is the already-resolved allowlist (the caller maps `definition.toolNames`
     /// to live tools — the runner never conjures capabilities). `onResponse` lets the
@@ -44,15 +60,37 @@ public enum EvaluationRunner {
         toolContext: ToolContext,
         onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil
     ) async -> Outcome {
+        await runCapturing(
+            definition: definition,
+            slots: slots,
+            provider: provider,
+            tools: tools,
+            toolContext: toolContext,
+            onResponse: onResponse
+        ).outcome
+    }
+
+    /// `run`, plus the full transcript of the exchange — what the coordinator persists
+    /// so assessments are debuggable.
+    public static func runCapturing(
+        definition: EvaluatorDefinition,
+        slots: [String: String],
+        provider: any LLMProvider,
+        tools: [any AgentTool],
+        toolContext: ToolContext,
+        onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil
+    ) async -> (outcome: Outcome, transcript: Transcript) {
+        var transcript = Transcript()
         let missing = Set(definition.requiredSlots).subtracting(slots.keys)
         guard missing.isEmpty else {
-            return .error("missing required slots: \(missing.sorted().joined(separator: ", "))")
+            return (.error("missing required slots: \(missing.sorted().joined(separator: ", "))"), transcript)
         }
 
         var rendered = definition.inputTemplate
         for (slot, value) in slots {
             rendered = rendered.replacingOccurrences(of: "{{\(slot)}}", with: value)
         }
+        transcript.renderedInput = rendered
 
         var messages: [LLMMessage] = [
             .system(definition.systemPrompt),
@@ -65,10 +103,10 @@ public enum EvaluationRunner {
 
         while turns < definition.maxTurns {
             if Date() > deadline {
-                return .error("timed out after \(Int(definition.timeoutSeconds))s")
+                return (.error("timed out after \(Int(definition.timeoutSeconds))s"), transcript)
             }
             if Task.isCancelled {
-                return .error("cancelled")
+                return (.error("cancelled"), transcript)
             }
             turns += 1
 
@@ -81,13 +119,14 @@ public enum EvaluationRunner {
                     overrides: LLMCallOverrides(maxOutputTokens: definition.maxOutputTokens)
                 )
             } catch {
-                return .error("LLM call failed: \(error.localizedDescription)")
+                return (.error("LLM call failed: \(error.localizedDescription)"), transcript)
             }
             await onResponse?(response, Int(Date().timeIntervalSince(callStart) * 1000))
 
             // Tool round: execute allowlisted calls and loop for the next turn.
             if !response.toolCalls.isEmpty {
                 messages.append(.assistant(from: response))
+                var toolLines: [String] = []
                 for call in response.toolCalls {
                     let result: String
                     if let tool = tools.first(where: { $0.name == call.name }) {
@@ -100,26 +139,29 @@ public enum EvaluationRunner {
                     } else {
                         result = "Tool '\(call.name)' is not permitted for this evaluation."
                     }
+                    toolLines.append("→ \(call.name)(\(call.arguments.prefix(200))) → \(result.prefix(300))")
                     messages.append(.toolResult(Self.capToolResult(result), callID: call.id))
                 }
+                transcript.turnLog.append(toolLines.joined(separator: "\n"))
                 continue
             }
 
             // Text turn: parse against the grammar.
             let text = response.text ?? ""
+            transcript.turnLog.append(text)
             switch parse(text, grammar: definition.outputGrammar) {
             case .success(let outcome):
-                return outcome
+                return (outcome, transcript)
             case .failure(let why):
                 parseRetries += 1
                 guard parseRetries <= Self.maxParseRetries else {
-                    return .error("unparseable after \(parseRetries) attempts: \(why)")
+                    return (.error("unparseable after \(parseRetries) attempts: \(why)"), transcript)
                 }
                 messages.append(.assistant(from: response))
                 messages.append(.user(formatRetryNudge(for: definition.outputGrammar, problem: why)))
             }
         }
-        return .error("exhausted \(definition.maxTurns) turns without a conforming result")
+        return (.error("exhausted \(definition.maxTurns) turns without a conforming result"), transcript)
     }
 
     // MARK: - Parsing

@@ -159,6 +159,14 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
     public let validatorHash: String
     public let round: Int
     public let recordedAt: Date
+    /// The fully rendered input the validator's model actually saw (capped) — with the
+    /// pinned definition body this makes any verdict reproducible and debuggable.
+    /// Optional-and-synthesized: records written before the field decode unchanged.
+    public let renderedInput: String?
+    /// The validator's turn-by-turn output (capped): tool rounds as call→result
+    /// previews, text turns verbatim including grammar-retry rounds. For dynamic
+    /// criteria this is the prepare exchange followed by each item's exchange.
+    public let responseLog: String?
 
     public init(
         id: UUID = UUID(),
@@ -167,7 +175,9 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
         validatorName: String,
         validatorHash: String,
         round: Int,
-        recordedAt: Date = Date()
+        recordedAt: Date = Date(),
+        renderedInput: String? = nil,
+        responseLog: String? = nil
     ) {
         self.id = id
         self.criterionID = criterionID
@@ -176,6 +186,30 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
         self.validatorHash = validatorHash
         self.round = round
         self.recordedAt = recordedAt
+        self.renderedInput = renderedInput
+        self.responseLog = responseLog
+    }
+}
+
+public extension CriterionVerdictRecord.Verdict {
+    /// Short human label for UI chips ("Accepted", "Rejected", …).
+    var displayLabel: String {
+        switch self {
+        case .accepted: return "Accepted"
+        case .rejected: return "Rejected"
+        case .waived: return "Waived"
+        case .error: return "Error"
+        }
+    }
+
+    /// The reason/message text, when the verdict carries one.
+    var detailText: String? {
+        switch self {
+        case .accepted: return nil
+        case .rejected(let reason): return reason
+        case .waived(let reason): return reason
+        case .error(let message): return message
+        }
     }
 }
 

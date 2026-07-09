@@ -94,6 +94,12 @@ struct TaskValidationCoordinatorTests {
         #expect(final?.acceptanceCriteria.first?.origin == .system)
         #expect(final?.validation?.verdictRecords.count == 1)
         #expect(final?.validation?.pinnedDefinitions["default-acceptance"] != nil, "the definition body must be pinned to the task")
+
+        // The debugging transcript persists with the verdict: the rendered input the
+        // validator saw and its raw output.
+        let debugRecord = final?.validation?.verdictRecords.first
+        #expect(debugRecord?.renderedInput?.contains("The thing was done.") == true, "the rendered input embeds the submitted result")
+        #expect(debugRecord?.responseLog?.contains("ACCEPT") == true, "the raw validator output is preserved")
     }
 
     @Test("A rejection returns the task to the worker; resubmission re-validates only the unsettled criterion")
@@ -302,13 +308,17 @@ struct TaskValidationCoordinatorTests {
         #expect(status == .running, "an item rejection is a criterion rejection — punch list to the worker")
 
         let ledger = await runtime.taskStore.task(id: task.id)?.validation
-        let verdict = ledger?.verdictRecords.last?.verdict
-        if case .rejected(let reason) = verdict {
+        let record = ledger?.verdictRecords.last
+        if case .rejected(let reason) = record?.verdict {
             #expect(reason.contains("beta is missing its header"))
             #expect(reason.contains("1 of 2"))
         } else {
-            Issue.record("expected a rejected verdict, got \(String(describing: verdict))")
+            Issue.record("expected a rejected verdict, got \(String(describing: record?.verdict))")
         }
+
+        // The dynamic debug log covers the prepare exchange AND each item's exchange.
+        #expect(record?.responseLog?.contains("## prepare: list-items") == true)
+        #expect(record?.responseLog?.contains("## item 2: beta") == true)
 
         await runtime.stopAll()
     }

@@ -43,6 +43,21 @@ enum AppColors {
     /// "(show more)" / "(show less)" / "Restore full history" inline buttons.
     static let disclosureToggle = Color.blue
 
+    // MARK: - Acceptance validation
+
+    static let verdictAccepted = Color.green
+    static let verdictRejected = Color(red: 0.90, green: 0.35, blue: 0.35)
+    static let verdictWaived = Color.orange
+    static let verdictError = Color.red
+    static let verdictPending = Color.secondary
+
+    // MARK: - Worker step statuses
+
+    static let stepCompleted = Color.green
+    static let stepInProgress = Color.blue
+    static let stepSkipped = Color.orange
+    static let stepRemoved = Color.gray
+
     // MARK: - Security-review dispositions
 
     static let securityApproved = Color.green

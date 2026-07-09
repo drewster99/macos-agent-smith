@@ -33,6 +33,10 @@ struct TaskDetailWindow: View {
     /// would silently bind to a different memory if the array ever changed shape.
     @State private var expandedMemoryContents: Set<String> = []
     @State private var expandedPriorTaskIDs: Set<UUID> = []
+    /// Verdict records whose debug transcript (rendered input + response log) is open.
+    @State private var expandedDebugRecordIDs: Set<UUID> = []
+    /// Criteria whose pinned validator definition (system prompt + input template) is open.
+    @State private var expandedValidatorPromptIDs: Set<UUID> = []
 
     /// Local copy of the current task. Sync'd from `viewModel.tasks` via `.onChange` so
     /// the body reads only @State and SwiftUI can short-circuit re-renders when this
@@ -182,6 +186,8 @@ struct TaskDetailWindow: View {
         case error
         case summary
         case result
+        case acceptance
+        case steps
         case updates
         case description
         case relatedContext
@@ -194,15 +200,17 @@ struct TaskDetailWindow: View {
     }
 
     private func orderedSections(for status: AgentTask.Status) -> [SectionKind] {
+        // `.acceptance` and `.steps` render nothing when the task has no criteria/steps,
+        // so they can be listed unconditionally.
         switch status {
         case .pending, .scheduled:
-            return [.description, .relatedContext]
+            return [.description, .acceptance, .steps, .relatedContext]
         case .running, .paused, .interrupted, .awaitingReview, .validating:
-            return [.updates, .description, .relatedContext]
+            return [.updates, .acceptance, .steps, .description, .relatedContext]
         case .completed:
-            return [.summary, .result, .updates, .description, .relatedContext]
+            return [.summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
         case .failed:
-            return [.error, .summary, .result, .updates, .description, .relatedContext]
+            return [.error, .summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
         }
     }
 
@@ -218,6 +226,13 @@ struct TaskDetailWindow: View {
         case (.description, _):                       return .preview
 
         case (.relatedContext, _):                    return .preview
+
+        // Front-and-center while validation is live or being resolved; compact otherwise.
+        case (.acceptance, .validating), (.acceptance, .awaitingReview):
+            return .expanded
+        case (.acceptance, _):                        return .preview
+
+        case (.steps, _):                             return .preview
 
         case (.updates, .pending), (.updates, .scheduled):
             return .hidden
@@ -255,6 +270,8 @@ struct TaskDetailWindow: View {
             case .error:           errorSection(task)
             case .summary:         summarySection(task, mode: mode)
             case .result:          resultSection(task)
+            case .acceptance:      acceptanceSection(task, mode: mode)
+            case .steps:           stepsSection(task, mode: mode)
             case .updates:         updatesSection(task, mode: mode)
             case .description:     descriptionSection(task, mode: mode)
             case .relatedContext:  relatedContextSection(task)
@@ -374,6 +391,314 @@ struct TaskDetailWindow: View {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(AppColors.aiCommentaryBorder, lineWidth: 0.5)
         )
+    }
+
+    // MARK: - Acceptance criteria + validation
+
+    @ViewBuilder
+    private func acceptanceSection(_ task: AgentTask, mode: SectionMode) -> some View {
+        if !task.acceptanceCriteria.isEmpty {
+            let ledger = task.validation
+            let settled = ledger?.settledCriterionIDs() ?? []
+            VStack(alignment: .leading, spacing: 10) {
+                sectionTitleRow(
+                    title: "Acceptance",
+                    subtitle: acceptanceSubtitle(task: task, settledCount: settled.count),
+                    copyText: Self.formattedAcceptance(task)
+                )
+                VStack(alignment: .leading, spacing: mode == .expanded ? 12 : 6) {
+                    ForEach(task.acceptanceCriteria) { criterion in
+                        criterionRow(criterion, task: task, expanded: mode == .expanded)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                DisclosureMoreLessLink(isExpanded: mode == .expanded) {
+                    toggleSection(.acceptance, for: task.status)
+                }
+            }
+            Divider()
+        }
+    }
+
+    private func acceptanceSubtitle(task: AgentTask, settledCount: Int) -> String {
+        var parts = ["\(settledCount) of \(task.acceptanceCriteria.count) settled"]
+        if let round = task.validation?.round, round > 0 {
+            parts.append("round \(round)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private func criterionRow(_ criterion: AcceptanceCriterion, task: AgentTask, expanded: Bool) -> some View {
+        let latest = task.validation?.latestVerdict(for: criterion.id)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: Self.verdictSymbol(latest?.verdict))
+                    .foregroundStyle(Self.verdictColor(latest?.verdict))
+                    .font(.callout)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(criterion.text)
+                        .font(.body)
+                        .textSelection(.enabled)
+                    if let qualifiers = Self.criterionQualifiers(criterion) {
+                        Text(qualifiers)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let latest, let detail = latest.verdict.detailText {
+                        Text("\(latest.verdict.displayLabel): \(detail)")
+                            .font(.callout)
+                            .foregroundStyle(Self.verdictColor(latest.verdict))
+                            .lineLimit(expanded ? nil : 2)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            if expanded {
+                criterionExpandedDetail(criterion, task: task)
+                    .padding(.leading, 24)
+            }
+        }
+    }
+
+    /// Expanded per-criterion detail: the pinned validator prompt and the full verdict
+    /// history with per-record debug transcripts — the assessment-debugging surface.
+    @ViewBuilder
+    private func criterionExpandedDetail(_ criterion: AcceptanceCriterion, task: AgentTask) -> some View {
+        let records = (task.validation?.verdictRecords ?? []).filter { $0.criterionID == criterion.id }
+        VStack(alignment: .leading, spacing: 6) {
+            if let pinned = Self.pinnedDefinition(for: criterion, in: task) {
+                Button {
+                    if expandedValidatorPromptIDs.contains(criterion.id) {
+                        expandedValidatorPromptIDs.remove(criterion.id)
+                    } else {
+                        expandedValidatorPromptIDs.insert(criterion.id)
+                    }
+                } label: {
+                    Label(
+                        expandedValidatorPromptIDs.contains(criterion.id)
+                            ? "Hide validator prompt (\(pinned.name))"
+                            : "Validator prompt (\(pinned.name))",
+                        systemImage: "text.alignleft"
+                    )
+                    .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(AppColors.disclosureToggle)
+                if expandedValidatorPromptIDs.contains(criterion.id) {
+                    debugTextBox(title: "System prompt", text: pinned.systemPrompt)
+                    debugTextBox(title: "Input template", text: pinned.inputTemplate)
+                }
+            }
+            ForEach(records.reversed()) { record in
+                verdictRecordRow(record)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func verdictRecordRow(_ record: CriterionVerdictRecord) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: Self.verdictSymbol(record.verdict))
+                    .foregroundStyle(Self.verdictColor(record.verdict))
+                    .font(.caption)
+                Text("Round \(record.round) · \(record.verdict.displayLabel) · \(record.validatorName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(record.recordedAt, style: .time)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                if record.renderedInput != nil || record.responseLog != nil {
+                    Button {
+                        if expandedDebugRecordIDs.contains(record.id) {
+                            expandedDebugRecordIDs.remove(record.id)
+                        } else {
+                            expandedDebugRecordIDs.insert(record.id)
+                        }
+                    } label: {
+                        Text(expandedDebugRecordIDs.contains(record.id) ? "hide debug" : "debug")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AppColors.disclosureToggle)
+                }
+            }
+            if let detail = record.verdict.detailText {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(.leading, 18)
+            }
+            if expandedDebugRecordIDs.contains(record.id) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let input = record.renderedInput, !input.isEmpty {
+                        debugTextBox(title: "Rendered input (what the validator saw)", text: input)
+                    }
+                    if let log = record.responseLog, !log.isEmpty {
+                        debugTextBox(title: "Validator output (turn by turn)", text: log)
+                    }
+                }
+                .padding(.leading, 18)
+            }
+        }
+    }
+
+    private func debugTextBox(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                copyButton(text: text, id: title + String(text.prefix(24)))
+            }
+            ScrollView(.vertical) {
+                Text(text)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+            }
+            .frame(maxHeight: 220)
+            .background(AppColors.secondaryBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private static func verdictSymbol(_ verdict: CriterionVerdictRecord.Verdict?) -> String {
+        switch verdict {
+        case .accepted: return "checkmark.circle.fill"
+        case .rejected: return "xmark.circle.fill"
+        case .waived: return "minus.circle.fill"
+        case .error: return "exclamationmark.triangle.fill"
+        case nil: return "circle"
+        }
+    }
+
+    private static func verdictColor(_ verdict: CriterionVerdictRecord.Verdict?) -> Color {
+        switch verdict {
+        case .accepted: return AppColors.verdictAccepted
+        case .rejected: return AppColors.verdictRejected
+        case .waived: return AppColors.verdictWaived
+        case .error: return AppColors.verdictError
+        case nil: return AppColors.verdictPending
+        }
+    }
+
+    private static func criterionQualifiers(_ criterion: AcceptanceCriterion) -> String? {
+        var parts: [String] = []
+        if criterion.waivable { parts.append("waivable") }
+        switch criterion.validator {
+        case .registry(let name): parts.append("validator: \(name)")
+        case .inline(let definition): parts.append("validator: \(definition.name) (inline)")
+        case nil: break
+        }
+        if let prepare = criterion.prepare { parts.append("prepare: \(prepare)") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private static func pinnedDefinition(for criterion: AcceptanceCriterion, in task: AgentTask) -> EvaluatorDefinition? {
+        switch criterion.validator {
+        case .inline(let definition):
+            return definition
+        case .registry(let name):
+            return task.validation?.pinnedDefinitions[name]
+        case nil:
+            return task.validation?.pinnedDefinitions["default-acceptance"]
+        }
+    }
+
+    private static func formattedAcceptance(_ task: AgentTask) -> String {
+        task.acceptanceCriteria.map { criterion in
+            var line = "- \(criterion.text)"
+            if let qualifiers = criterionQualifiers(criterion) { line += " (\(qualifiers))" }
+            if let latest = task.validation?.latestVerdict(for: criterion.id) {
+                line += "\n  \(latest.verdict.displayLabel)"
+                if let detail = latest.verdict.detailText { line += ": \(detail)" }
+            }
+            return line
+        }.joined(separator: "\n")
+    }
+
+    // MARK: - Worker steps
+
+    @ViewBuilder
+    private func stepsSection(_ task: AgentTask, mode: SectionMode) -> some View {
+        if !task.steps.isEmpty {
+            let visible = mode == .expanded ? task.steps : task.steps.filter(\.isActive)
+            let completedCount = task.steps.filter { $0.status == .completed }.count
+            let activeCount = task.steps.filter(\.isActive).count
+            VStack(alignment: .leading, spacing: 8) {
+                sectionTitleRow(
+                    title: "Steps",
+                    subtitle: "\(completedCount) of \(activeCount) completed",
+                    copyText: Self.formattedSteps(task.steps)
+                )
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(visible) { step in
+                        stepRow(step)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if task.steps.contains(where: { !$0.isActive }) || mode == .expanded {
+                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
+                        toggleSection(.steps, for: task.status)
+                    }
+                }
+            }
+            Divider()
+        }
+    }
+
+    private func stepRow(_ step: TaskStep) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: Self.stepSymbol(step.status))
+                .foregroundStyle(Self.stepColor(step.status))
+                .font(.callout)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(step.text)
+                    .font(.body)
+                    .strikethrough(step.status == .removed)
+                    .foregroundStyle(step.status == .removed ? .secondary : .primary)
+                    .textSelection(.enabled)
+                if let note = step.note, !note.isEmpty {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private static func stepSymbol(_ status: TaskStep.Status) -> String {
+        switch status {
+        case .pending: return "circle"
+        case .inProgress: return "circle.lefthalf.filled"
+        case .completed: return "checkmark.circle.fill"
+        case .skipped: return "arrow.uturn.right.circle"
+        case .removed: return "trash.circle"
+        }
+    }
+
+    private static func stepColor(_ status: TaskStep.Status) -> Color {
+        switch status {
+        case .pending: return .secondary
+        case .inProgress: return AppColors.stepInProgress
+        case .completed: return AppColors.stepCompleted
+        case .skipped: return AppColors.stepSkipped
+        case .removed: return AppColors.stepRemoved
+        }
+    }
+
+    private static func formattedSteps(_ steps: [TaskStep]) -> String {
+        steps.map { step in
+            var line = "- [\(step.status.rawValue)] \(step.text)"
+            if let note = step.note, !note.isEmpty { line += " — \(note)" }
+            return line
+        }.joined(separator: "\n")
     }
 
     @ViewBuilder
