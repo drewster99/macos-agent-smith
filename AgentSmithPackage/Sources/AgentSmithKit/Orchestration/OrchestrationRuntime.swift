@@ -2227,16 +2227,23 @@ public actor OrchestrationRuntime {
                 )
                 await notifyProcessingStateChange(role: .securityAgent, isProcessing: false)
                 guard scoping.succeeded else {
+                    // A user-initiated cancellation (Stop/abort during "Preparing…") also
+                    // lands here with the evaluator's cancelled sentinel. That says nothing
+                    // about backend health — don't open the breaker — and the user asked
+                    // for it, so a scary "security agent failed" error would be misleading;
+                    // post a neutral line instead.
+                    guard scoping.rawResponse != ToolScopingResult.cancelledSentinel else {
+                        await channel.post(ChannelMessage(
+                            sender: .system,
+                            content: "Task \"\(task.title)\" start cancelled.",
+                            metadata: ["messageKind": .string("preparing")]
+                        ))
+                        return nil
+                    }
                     // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
                     // a worker; surface to the user.
-                    //
-                    // A user-initiated cancellation (Escape during "Preparing…") also lands
-                    // here with the evaluator's cancelled sentinel — that says nothing
-                    // about backend health, so it must not open the breaker.
-                    if scoping.rawResponse != ToolScopingResult.cancelledSentinel {
-                        scopingFailureStreak += 1
-                        lastScopingFailureAt = Date()
-                    }
+                    scopingFailureStreak += 1
+                    lastScopingFailureAt = Date()
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Security Agent's model configuration.",
