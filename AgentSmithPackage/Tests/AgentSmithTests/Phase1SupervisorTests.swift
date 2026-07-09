@@ -195,6 +195,96 @@ struct SerialChainedTaskQueueRunTests {
     }
 }
 
+// MARK: - Smith context management (/clear and /compact)
+
+@Suite("Smith context management")
+struct SmithContextManagementTests {
+
+    private func makeLiveSmithRuntime() -> OrchestrationRuntime {
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-context-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        return OrchestrationRuntime(
+            providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
+            configurations: [.smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")],
+            providerAPITypes: [:],
+            agentTuning: [:],
+            semanticSearchEngine: SemanticSearchEngine(),
+            usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
+            autoAdvanceEnabled: true,
+            autoRunInterruptedTasks: false,
+            memoryStore: nil
+        )
+    }
+
+    @Test("resetConversationHistory keeps system prompt and injects the orientation")
+    func resetKeepsSystemPromptAndOrientation() async {
+        let agent = makeTestAgent()
+        await agent.appendUserMessage("first")
+        await agent.appendUserMessage("second")
+        await agent.appendUserMessage("third")
+
+        await agent.resetConversationHistory(orientation: "[Context cleared] Current task state: none.")
+
+        let snapshot = await agent.contextSnapshot()
+        #expect(snapshot.count == 2)
+        #expect(snapshot[0].role == .system)
+        #expect(snapshot[1].role == .user)
+        #expect(snapshot[1].content.textValue?.contains("[Context cleared]") == true)
+    }
+
+    @Test("compactConversationHistory splices to system + summary + recent tail")
+    func compactSplicesHistory() async {
+        let agent = makeTestAgent()
+        for index in 1...12 {
+            await agent.appendUserMessage("message \(index)")
+        }
+
+        let counts = await agent.compactConversationHistory(summaryText: "THE SUMMARY", keepingRecentTurns: 3)
+        #expect(counts?.before == 13)
+        #expect(counts?.after == 5, "system + summary + 3 recent turns")
+
+        let snapshot = await agent.contextSnapshot()
+        #expect(snapshot[0].role == .system)
+        #expect(snapshot[1].content.textValue?.contains("THE SUMMARY") == true)
+        #expect(snapshot.last?.content.textValue == "message 12")
+        #expect(snapshot[2].content.textValue == "message 10", "tail must be the most recent turns")
+    }
+
+    @Test("compactConversationHistory declines when the history is already small")
+    func compactDeclinesSmallHistory() async {
+        let agent = makeTestAgent()
+        await agent.appendUserMessage("only one")
+        let counts = await agent.compactConversationHistory(summaryText: "S", keepingRecentTurns: 6)
+        #expect(counts == nil)
+    }
+
+    @Test("clearSmithContext resets a live Smith and re-briefs task state")
+    func clearSmithContextResetsLiveSmith() async {
+        let runtime = makeLiveSmithRuntime()
+        await runtime.start()
+        let before = await runtime.contextSnapshot(for: .smith)
+        #expect(before != nil)
+
+        let result = await runtime.clearSmithContext()
+        #expect(result.contains("cleared"))
+        let after = await runtime.contextSnapshot(for: .smith)
+        #expect(after?.count == 2, "system prompt + orientation only")
+        #expect(after?[1].content.textValue?.contains("cleared your conversation context") == true)
+        await runtime.stopAll()
+    }
+
+    @Test("compactSmithContext declines gracefully with nothing to compact")
+    func compactDeclinesOnFreshSmith() async {
+        let runtime = makeLiveSmithRuntime()
+        await runtime.start()
+        let result = await runtime.compactSmithContext()
+        #expect(result.contains("nothing to compact"))
+        await runtime.stopAll()
+    }
+}
+
 // MARK: - Runtime lifecycle serialization
 
 @Suite("OrchestrationRuntime lifecycle serialization")

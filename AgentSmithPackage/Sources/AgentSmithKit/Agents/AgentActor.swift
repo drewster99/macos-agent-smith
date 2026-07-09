@@ -788,6 +788,58 @@ public actor AgentActor {
         onAutoRunTask = nil
     }
 
+    /// Resets the conversation to `[system prompt]` plus an optional orientation turn —
+    /// the user-facing `/clear` (and toolbar trashcan). The orientation is injected as an
+    /// unprocessed user turn (no immediate LLM call): it rides along with the next real
+    /// input so the agent knows the current task state without re-greeting the user.
+    /// Pending/deferred channel messages are deliberately KEPT — undelivered user input
+    /// must never be a casualty of a display-adjacent action.
+    public func resetConversationHistory(orientation: String?) {
+        pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
+        conversationHistory = [.system(configuration.systemPrompt)]
+        if let orientation, !orientation.isEmpty {
+            conversationHistory.append(.user(orientation))
+        }
+        lastTurnMessageCount = conversationHistory.count
+        toolFailureStreaks.removeAll()
+        toolFailureWarnedTools.removeAll()
+        lastToolCallSignature = nil
+        consecutiveIdenticalToolCalls = 0
+        pushLiveContext()
+    }
+
+    /// Splices the conversation down to `[system prompt] + [summary marker] + recent
+    /// tail` — the user-facing `/compact`. The summary text is produced by the caller
+    /// (runtime → summarizer LLM); this method is a deterministic actor-local splice.
+    /// The tail start skips leading `.tool` results so a tool_use/tool_result pair is
+    /// never separated (both halves land in the compacted region together).
+    /// Returns (before, after) message counts, or nil when the history is too small for
+    /// compaction to help.
+    public func compactConversationHistory(summaryText: String, keepingRecentTurns: Int) -> (before: Int, after: Int)? {
+        let count = conversationHistory.count
+        // system + summary + tail must actually shrink the history to be worth it.
+        guard count > keepingRecentTurns + 3 else { return nil }
+
+        var tailStart = max(1, count - keepingRecentTurns)
+        while tailStart < count, conversationHistory[tailStart].role == .tool {
+            tailStart += 1
+        }
+
+        var compacted: [LLMMessage] = [conversationHistory[0]]
+        compacted.append(.user("""
+            [Context compacted at the user's request. Summary of the conversation so far:]
+            \(summaryText)
+            """))
+        compacted.append(contentsOf: conversationHistory[tailStart...])
+        guard compacted.count < count else { return nil }
+
+        pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
+        conversationHistory = compacted
+        lastTurnMessageCount = conversationHistory.count
+        pushLiveContext()
+        return (before: count, after: compacted.count)
+    }
+
     /// Marks the agent stopped WITHOUT cancelling or awaiting run-loop exit. For teardown
     /// paths that can execute inside the agent's own run task (`onSelfTerminate` → runtime
     /// → back here): calling full `stop()` there would await `runTask.value` — the very

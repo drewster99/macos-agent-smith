@@ -51,10 +51,11 @@ struct MainViewToolbar: ToolbarContent {
 
             Button("Memory Browser", systemImage: "brain", action: onOpenMemoryBrowser)
 
-            Button("Clear Log", systemImage: "trash") {
-                viewModel.clearLog()
+            Button("Clear Conversation", systemImage: "trash") {
+                Task { await viewModel.clearConversation() }
             }
-            .disabled(viewModel.messages.isEmpty)
+            .help("Clear Smith's context and start a fresh conversation (Ctrl-L clears only the screen)")
+            .disabled(viewModel.messages.isEmpty && !viewModel.isRunning)
 
             // Security Agent-visibility chip — surfaces the silent gatekeeper. Total reviews
             // and any flagged ones (denied / WARN that didn't auto-approve on retry).

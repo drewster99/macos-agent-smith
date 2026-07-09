@@ -1042,7 +1042,12 @@ final class AppViewModel {
 
         if pendingAttachments.isEmpty, text.lowercased() == "/clear" {
             inputText = ""
-            clearLog()
+            await clearConversation()
+            return
+        }
+        if pendingAttachments.isEmpty, text.lowercased() == "/compact" {
+            inputText = ""
+            await compactConversation()
             return
         }
 
@@ -1475,8 +1480,8 @@ final class AppViewModel {
         abortReason = ""
     }
 
-    /// Clears the visible channel transcript only. `allPersistedMessages` is untouched, so
-    /// `restoreHistory()` can bring the lines back.
+    /// Clears the visible channel transcript only — Ctrl-L. `allPersistedMessages` is
+    /// untouched, so `restoreHistory()` can bring the lines back.
     ///
     /// Deliberately does NOT touch `inspectorStore` or the cost caches: those hold the
     /// running agents' turn records, live context, and security evaluations. Clearing them
@@ -1485,6 +1490,43 @@ final class AppViewModel {
     func clearLog() {
         messages.removeAll()
         rebuildChannelLogIndexes()
+    }
+
+    /// `/clear` and the toolbar trashcan: resets SMITH'S LLM CONTEXT (with a fresh
+    /// task-state re-briefing) and starts a fresh screen. Distinct from Ctrl-L, which is
+    /// display-only. Brown is untouched — clearing a worker mid-task would break the task.
+    func clearConversation() async {
+        clearLog()
+        guard let runtime else {
+            appendLocalSystemMessage("Screen cleared. System is not running, so there was no agent context to clear.")
+            return
+        }
+        let result = await runtime.clearSmithContext()
+        let channel = await runtime.channel
+        await channel.post(ChannelMessage(sender: .system, content: result))
+    }
+
+    /// `/compact`: summarizes Smith's conversation and splices its context down to
+    /// system prompt + summary + recent turns. The screen is left untouched.
+    func compactConversation() async {
+        guard let runtime else {
+            appendLocalSystemMessage("System is not running — there is no agent context to compact.")
+            return
+        }
+        let result = await runtime.compactSmithContext()
+        let channel = await runtime.channel
+        await channel.post(ChannelMessage(sender: .system, content: result))
+    }
+
+    /// Surfaces a system line in the transcript when there's no runtime (and therefore no
+    /// channel) to post through. Mirrors the channel-stream append path so the message
+    /// also survives in the persisted history.
+    private func appendLocalSystemMessage(_ content: String) {
+        let message = ChannelMessage(sender: .system, content: content)
+        messages.append(message)
+        allPersistedMessages.append(message)
+        rebuildChannelLogIndexes()
+        persistMessages()
     }
 
     func restoreHistory() {

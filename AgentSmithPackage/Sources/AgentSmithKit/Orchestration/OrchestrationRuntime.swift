@@ -381,6 +381,152 @@ public actor OrchestrationRuntime {
         persistPendingUserMessages = persist
     }
 
+    // MARK: - Smith context management (/clear and /compact)
+
+    /// Resets Smith's LLM context to its system prompt plus a fresh task-state
+    /// orientation — the user-facing `/clear` / toolbar trashcan. Distinct from the
+    /// display-only screen clear (Ctrl-L): this changes what the MODEL knows, not what
+    /// the user sees. Brown is deliberately untouched — clearing a worker mid-task would
+    /// break the task. Returns a user-facing result line for the transcript.
+    public func clearSmithContext() async -> String {
+        guard let smith = supervisor.firstHandle(role: .smith)?.agent else {
+            return "System is not running — there is no agent context to clear."
+        }
+        let orientation = await composeContextResetOrientation()
+        await smith.resetConversationHistory(orientation: orientation)
+        return "Smith's context has been cleared. Current task state was re-briefed."
+    }
+
+    /// How many of Smith's most recent turns `/compact` preserves verbatim.
+    private static let compactionRecentTurnsKept = 6
+
+    /// Summarizes Smith's conversation and splices the history down to
+    /// `[system prompt] + [summary] + recent turns` — the user-facing `/compact`.
+    /// Uses the Summarizer's provider when configured (a compaction summary is exactly
+    /// its job, and it's typically a cheaper model), falling back to Smith's own.
+    /// Returns a user-facing result line for the transcript.
+    public func compactSmithContext() async -> String {
+        guard let smith = supervisor.firstHandle(role: .smith)?.agent else {
+            return "System is not running — there is no agent context to compact."
+        }
+        let snapshot = await smith.contextSnapshot()
+        guard snapshot.count > Self.compactionRecentTurnsKept + 3 else {
+            return "Smith's context is only \(snapshot.count) message(s) — nothing to compact."
+        }
+        let summarizerRole: AgentRole = llmProviders[.summarizer] != nil ? .summarizer : .smith
+        guard let provider = llmProviders[summarizerRole], let config = llmConfigs[summarizerRole] else {
+            return "No provider is available to summarize Smith's context."
+        }
+
+        let transcript = Self.renderTranscriptForCompaction(snapshot)
+        let messages: [LLMMessage] = [
+            .system("""
+                You summarize an AI orchestrator's working conversation so it can continue with a \
+                smaller context. Preserve, with specifics (task titles and IDs verbatim): \
+                (1) the user's requests, stated preferences, and any permissions they granted; \
+                (2) tasks created, run, reviewed, and their outcomes; \
+                (3) unresolved questions, commitments, or anything awaiting follow-up. \
+                Omit tool-call mechanics and routine acknowledgments. Under 400 words.
+                """),
+            .user(transcript)
+        ]
+
+        let response: LLMResponse
+        let callStart = Date()
+        do {
+            response = try await provider.send(
+                messages: messages,
+                tools: [],
+                overrides: LLMCallOverrides(maxOutputTokens: 2000)
+            )
+        } catch {
+            return "Compaction failed — the summary call errored: \(error.localizedDescription). Smith's context is unchanged."
+        }
+        await UsageRecorder.record(
+            response: response,
+            context: LLMCallContext(
+                agentRole: summarizerRole,
+                taskID: nil,
+                modelID: config.model,
+                providerType: providerAPITypes[summarizerRole]?.rawValue ?? "",
+                providerID: config.providerID,
+                configuration: config,
+                sessionID: currentSessionID
+            ),
+            latencyMs: Int(Date().timeIntervalSince(callStart) * 1000),
+            to: usageStore
+        )
+
+        guard let summary = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty else {
+            return "Compaction failed — the summary came back empty. Smith's context is unchanged."
+        }
+        guard let counts = await smith.compactConversationHistory(
+            summaryText: summary,
+            keepingRecentTurns: Self.compactionRecentTurnsKept
+        ) else {
+            return "Smith's context is already compact — nothing was changed."
+        }
+        return "Smith's context compacted: \(counts.before) → \(counts.after) messages."
+    }
+
+    /// A short re-briefing injected after `/clear` so Smith isn't amnesiac about live
+    /// work: active tasks by status, plus ground rules for treating the next message
+    /// fresh. Rebuilt from the task store — the source of truth — not from anything the
+    /// cleared context contained.
+    private func composeContextResetOrientation() async -> String {
+        let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
+        var lines: [String] = [
+            "[The user cleared your conversation context. Nothing before this message is visible to you.]"
+        ]
+        let interesting = activeTasks.filter { $0.status != .completed && $0.status != .failed }
+        if interesting.isEmpty {
+            lines.append("There are no active tasks right now.")
+        } else {
+            lines.append("Current task state:")
+            for task in interesting.prefix(15) {
+                lines.append("- \(task.title) (id: \(task.id.uuidString), status: \(task.status.rawValue))")
+            }
+        }
+        lines.append("""
+            Treat the user's next message as a fresh request. Do not re-announce or re-summarize \
+            these tasks unless asked; use list_tasks / get_task_details if you need more detail.
+            """)
+        return lines.joined(separator: "\n")
+    }
+
+    /// Renders Smith's history as plain text for the compaction summarizer. Tool calls
+    /// collapse to `[tool: name]` lines; the system prompt is skipped (static, re-added
+    /// by the splice). Capped from the END so a huge history can't blow the summarizer's
+    /// own window.
+    static func renderTranscriptForCompaction(_ messages: [LLMMessage], characterCap: Int = 120_000) -> String {
+        var lines: [String] = []
+        for message in messages where message.role != .system {
+            let speaker: String
+            switch message.role {
+            case .user, .developer: speaker = "USER/SYSTEM"
+            case .assistant: speaker = "SMITH"
+            case .tool: speaker = "TOOL RESULT"
+            case .system: continue
+            }
+            switch message.content {
+            case .text(let text):
+                lines.append("\(speaker): \(text)")
+            case .mixed(let text, let calls):
+                if !text.isEmpty { lines.append("\(speaker): \(text)") }
+                for call in calls { lines.append("\(speaker): [tool: \(call.name)]") }
+            case .toolCalls(let calls):
+                for call in calls { lines.append("\(speaker): [tool: \(call.name)]") }
+            case .toolResult(_, let content):
+                lines.append("\(speaker): \(String(content.prefix(300)))")
+            }
+        }
+        var transcript = lines.joined(separator: "\n")
+        if transcript.count > characterCap {
+            transcript = "[…earlier conversation truncated…]\n" + String(transcript.suffix(characterCap))
+        }
+        return transcript
+    }
+
     /// Nil when no Smith is live — "no Smith" must be distinguishable from "no wakes":
     /// persisting `[]` during a restart's teardown window truncated the wake file and
     /// killed recurring series before the replay filter ever saw them (fresh-Opus review
