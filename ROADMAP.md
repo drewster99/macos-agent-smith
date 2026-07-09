@@ -2,6 +2,51 @@
 
 ## Planned
 
+### Agent lifecycle: supervised generations (post-incident 2026-07-08) ✅
+
+The 2026-07-08 incident (full forensic report in the session artifact "Agent Smith —
+Zombie Agent Incident"): during interleaved restarts an entire agent generation escaped
+the runtime's registries without being stopped, survived 35 minutes invisibly through an
+LLM outage, then acted on a live user message — welding a verbatim bug-bounty prompt onto
+a scheduled 9 PM reminder via `run_task`'s description amendment. A self-resurrecting
+scheduled wake drove 31 full restart generations in 8 seconds on top of it. Git history
+showed ≥13 prior commits patching instances of the same class (`4a11812` "Eliminate
+zombie Browns", `c46e408`, `99ad32f`, …) without removing it.
+
+Landed in two phases:
+
+**Phase 0 — stabilizers** (`c450b2a`, `98eab6e`): clear-first teardown (snapshot registries
+synchronously before the first await); liveness lease / zombie tripwire
+(`ToolContext.isAgentCurrent` checked at every run-loop tick and post-LLM, self-stops
+orphans); wake replay filter (fired wakes don't resurrect from a stale disk snapshot;
+recurring wakes roll forward instead of dying); `run_task` never amends an
+inferred-target task and once-scheduled tasks are excluded from inference; runtime-held
+scoping circuit breaker (3 failures → 120 s open, both queue drains gated so an outage
+can't cascade the pending queue to `.failed`); per-tool failure-streak breaker (warn 5,
+idle 10 — catches loops the identical-call breaker misses).
+
+**Phase 1 — supervised lifecycle**: `AgentSupervisor` (a runtime-confined struct,
+deliberately NOT a second actor — cross-actor awaits would reintroduce the interleaving
+disease) owns the single `AgentHandle` registry (agent + role + epoch + evaluator +
+subscriptions as one value; half-registered agents unrepresentable) and generation
+records (epoch + sessionID). Every lifecycle transition — `start`, `stopAll`,
+`restartForNewTask`, tool-driven `spawnBrown` / `terminateAgent` / `terminateTaskAgents`
+— serializes through one FIFO `lifecycleQueue` (public entry points enqueue; `perform*`
+implementations call each other directly, never enqueue — see the deadlock rule on the
+queue). Registration on a stopped runtime fails cleanly instead of minting an untracked
+agent. `abort()` sets its flag outside the queue so in-flight transitions bail.
+
+Deliberately deferred: converting agent run loops to structured-concurrency children
+(the current `stop()` grace-timeout design exists precisely because awaiting a wedged
+child is the hang it dodges); channel-side epoch gating (serialized starts removed the
+cross-stamping race, and the lease blocks stale subscribers from acting). Next phases
+when wanted: long-lived Smith (workers cycle per task, Smith keeps memory across
+transitions — removes the restart-amnesia that produced the double-amendment), then the
+worker pool for many concurrent agents. The acceptance-validator feature (checklist
+criteria judged per-criterion with ACCEPT/REJECT/WAIVE verdicts) is designed to follow
+the `SecurityEvaluator` pattern — stateless evaluation calls, no run loop, no lifecycle
+surface — and is not blocked on any of this.
+
 ### Attachments — v2 follow-ups
 
 A cluster of deferred items from the v1 attachment work (committed in `a150dae`,

@@ -28,6 +28,29 @@ final class SerialChainedTaskQueue: Sendable {
         }
     }
 
+    /// Schedules an async operation like `schedule(_:)`, but suspends the caller until
+    /// that operation completes and returns its result. This is how the runtime's public
+    /// lifecycle entry points (`start`, `stopAll`, `spawnBrown`, `terminateAgent`) get
+    /// serialized while keeping their awaited-completion semantics for callers.
+    ///
+    /// DEADLOCK RULE: never call `run` from inside an operation already executing on the
+    /// same queue — the inner call would wait for the queue to drain, which includes the
+    /// operation making the call. Queue items must call internal (unqueued)
+    /// implementations directly; only outermost entry points enqueue.
+    public func run<T: Sendable>(_ work: @escaping @Sendable () async -> T) async -> T {
+        let task: Task<T, Never> = lock.withLock { inflight in
+            let prior = inflight
+            let item = Task {
+                await prior?.value
+                return await work()
+            }
+            // The chain tracks completion only; the typed result is returned to the caller.
+            inflight = Task { _ = await item.value }
+            return item
+        }
+        return await task.value
+    }
+
     /// Returns once every previously-scheduled operation has completed.
     /// Operations scheduled after this call begins are not awaited.
     public func waitForAll() async {
