@@ -10,6 +10,12 @@
 - Task LIST rows show no validation progress (settled-count chip); detail window only.
 - No Settings UI for the evaluator registry — definitions are edited as
   `evaluators/*.json` files on disk (load failures do surface in `list_validators`).
+- **Worker message attribution** (folds into worker-pool M3): channel rows from/to
+  Brown should say WHICH worker/task — e.g. "Brown · <task title>" on the sender
+  line, resolved from the message's senderID/recipientID through a persisted
+  agentID→(role, taskID, taskTitle) registry captured at spawn (survives agent
+  termination, unlike live supervisor lookups). Prerequisite for running multiple
+  Browns; useful even at capacity 1 across sequential tasks. (Drew, 2026-07-09.)
 
 ### Evaluator framework, acceptance validation, and the worker pool (agreed design, 2026-07-09)
 

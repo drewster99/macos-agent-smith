@@ -7,6 +7,9 @@ actor MonitoringTimer {
     private let taskStore: TaskStore
     private var timerTask: Task<Void, Never>?
     private var lastReportedTaskIDs: Set<UUID> = []
+    /// Running-with-no-worker tasks seen on the previous tick — the two-strike rule for
+    /// the orphaned-task watchdog.
+    private var orphanCandidateIDs: Set<UUID> = []
 
     public init(interval: TimeInterval = 60, channel: MessageChannel, taskStore: TaskStore) {
         self.interval = interval
@@ -38,7 +41,31 @@ actor MonitoringTimer {
             }
 
             let tasks = await taskStore.allTasks()
-            let runningTasks = tasks.filter { $0.status == .running }
+            var runningTasks = tasks.filter { $0.status == .running && $0.disposition == .active }
+
+            // Zombie-task watchdog. A task is legally `running` with no assigned worker
+            // only for the instants between spawn-success and assignment (two sequential
+            // awaits in every legitimate start path). One observed like that on TWO
+            // consecutive ticks is definitively orphaned — a status forced around the
+            // orchestrated path, or a worker death that unassigned it — and it will spin
+            // in the UI forever while blocking the auto-run queue's busy checks. Flip it
+            // to `interrupted` so run_task / auto-run-interrupted can recover it.
+            let orphaned = runningTasks.filter { $0.assigneeIDs.isEmpty }
+            let confirmedOrphans = orphaned.filter { orphanCandidateIDs.contains($0.id) }
+            orphanCandidateIDs = Set(orphaned.map(\.id)).subtracting(confirmedOrphans.map(\.id))
+            for task in confirmedOrphans {
+                await taskStore.updateStatus(id: task.id, status: .interrupted)
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Task \"\(task.title)\" (ID: \(task.id.uuidString)) was marked `running` but had NO assigned worker for two consecutive monitor ticks — an orphaned status that would spin forever and block the queue. It has been marked `interrupted`. Call `run_task` on it when nothing else is running (never set `running` via `update_task`).",
+                    metadata: [
+                        "messageKind": .string("task_update_guidance"),
+                        "taskID": .string(task.id.uuidString),
+                        "isWarning": .bool(true)
+                    ]
+                ))
+            }
+            runningTasks.removeAll { task in confirmedOrphans.contains { $0.id == task.id } }
             let runningIDs = Set(runningTasks.map(\.id))
 
             // Only post if there are running tasks and the set changed since last report

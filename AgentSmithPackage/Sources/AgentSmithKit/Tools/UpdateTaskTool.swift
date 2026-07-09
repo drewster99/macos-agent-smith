@@ -20,7 +20,7 @@ struct UpdateTaskTool: AgentTool {
                     .string("completed"),
                     .string("failed")
                 ]),
-                "description": .string("The new status for the task. Note: `awaitingReview` and `validating` are reserved — submissions enter validation via Brown's `task_complete`, and only a validation escalation parks a task in review.")
+                "description": .string("The new status for the task: pending, paused, completed, or failed. `running` is NOT settable here — use `run_task`, which actually spawns the worker. `awaitingReview` and `validating` are reserved — submissions enter validation via Brown's `task_complete`, and only a validation escalation parks a task in review.")
             ])
         ]),
         "required": .array([.string("task_id"), .string("status")])
@@ -43,9 +43,12 @@ struct UpdateTaskTool: AgentTool {
             throw ToolCallError.missingRequiredArgument("status")
         }
         guard let status = AgentTask.Status(rawValue: statusString) else {
-            return .failure("Invalid status: \(statusString). Valid values: pending, running, completed, failed")
+            return .failure("Invalid status: \(statusString). Valid values: pending, paused, completed, failed")
         }
 
+        if status == .running {
+            return .failure("`running` cannot be set directly — it would create a task that LOOKS in-flight but has no worker, and it blocks the auto-run queue. Use `run_task` to actually start a task (it spawns the worker); if it refuses because another task is running, wait for that task to finish.")
+        }
         if status == .awaitingReview {
             return .failure("`awaitingReview` is reserved — it is where acceptance validation parks a task when it ESCALATES (and where help requests park). You cannot set it directly. If the task needs your review, wait for the escalation notice, then call `review_work`.")
         }
