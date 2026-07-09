@@ -606,14 +606,16 @@ public actor OrchestrationRuntime {
     ///   kept, deduped by id. These carry instructions Smith must interpret; dropping them
     ///   would break the documented promise that arbitrary `schedule_task_action` wakes
     ///   survive restarts.
-    /// - **Auto-run `run_task` wakes**: dropped when `taskID == resumingTaskID` (this very
-    ///   restart is the wake's fulfillment), when the task is missing or inactive, or when
-    ///   the wake is PAST-DUE and its task has already left `.scheduled` — that combination
-    ///   means the wake fired and promoted its task before this snapshot was taken; replaying
-    ///   it re-fires it forever (the 2026-07-08 resurrection storm). A past-due wake whose
+    /// - **Auto-run `run_task` wakes**: dropped when the task is missing or inactive, or
+    ///   when the wake is PAST-DUE and either (a) it targets `resumingTaskID` — this very
+    ///   restart is its fulfillment — or (b) its task has already left `.scheduled`, which
+    ///   means it fired and promoted the task before this snapshot was taken; replaying it
+    ///   re-fires it forever (the 2026-07-08 resurrection storm). A past-due wake whose
     ///   task is still `.scheduled` elapsed while the app was quit and must fire (the
-    ///   documented cold-launch catch-up), and a FUTURE wake is kept regardless of task
-    ///   status (e.g. "run this pending task at 3pm" via `schedule_task_action`).
+    ///   documented cold-launch catch-up). A FUTURE wake is always kept — regardless of
+    ///   task status and even when it targets the resuming task ("run it again at 6pm").
+    ///   A fired wake with a RECURRENCE is rolled forward to its next future occurrence
+    ///   instead of dropped, so the persist race can't kill the series.
     /// - **Duplicates**: auto-run wakes deduped by (taskID, wakeAt) — the incident's disk
     ///   snapshot had accumulated the same 9 PM wake two and three times over.
     ///
@@ -635,12 +637,33 @@ public actor OrchestrationRuntime {
         var droppedCount = 0
         for wake in wakes {
             if AgentActor.wakeIsAutoRunRunTask(wake), let taskID = wake.taskID {
-                if taskID == resumingTaskID { droppedCount += 1; continue }
                 guard let task = tasksByID[taskID], task.disposition == .active else { droppedCount += 1; continue }
-                if wake.wakeAt <= now, task.status != .scheduled { droppedCount += 1; continue }
-                let key = "\(taskID.uuidString)|\(wake.wakeAt.timeIntervalSince1970)"
+                var candidate = wake
+                // Only a PAST-DUE wake can be "already handled": for the resuming task it
+                // is this very restart's trigger; for any other task that has left
+                // `.scheduled` it fired-and-promoted before the snapshot. A FUTURE wake is
+                // always live — including one aimed at the resuming task ("run it again at
+                // 6pm" queued while starting it now; survivesTaskTermination exists for
+                // exactly that).
+                let isFulfilledOrFired = wake.wakeAt <= now
+                    && (taskID == resumingTaskID || task.status != .scheduled)
+                if isFulfilledOrFired {
+                    // A RECURRING wake must not take its whole series down with it: the
+                    // fired occurrence schedules its successor in memory, but this disk
+                    // snapshot can predate that persist (the same race that resurrects
+                    // one-shot wakes). Roll the fired occurrence forward to its next
+                    // future fire time — mirroring checkScheduledWake's reschedule — and
+                    // let the (taskID, wakeAt) dedupe collapse it if the successor DID
+                    // reach disk. One-shot fired wakes just drop.
+                    guard let rolled = Self.rolledForwardRecurrence(of: wake, after: now) else {
+                        droppedCount += 1
+                        continue
+                    }
+                    candidate = rolled
+                }
+                let key = "\(taskID.uuidString)|\(candidate.wakeAt.timeIntervalSince1970)"
                 guard seenAutoRunKeys.insert(key).inserted else { droppedCount += 1; continue }
-                kept.append(wake)
+                kept.append(candidate)
             } else {
                 guard seenIDs.insert(wake.id).inserted else { droppedCount += 1; continue }
                 kept.append(wake)
@@ -650,6 +673,37 @@ public actor OrchestrationRuntime {
             stopLogger.notice("Wake replay: dropped \(droppedCount, privacy: .public) stale/duplicate wake(s), kept \(kept.count, privacy: .public)")
         }
         return kept
+    }
+
+    /// Rolls a fired recurring wake forward to its first occurrence strictly after `now`,
+    /// preserving the chain identity (`originalID`, recurrence, survives flag) exactly as
+    /// `AgentActor.checkScheduledWake`'s reschedule does. Returns nil for one-shot wakes
+    /// and for exhausted recurrences. Skipping straight to a FUTURE occurrence — rather
+    /// than the next occurrence after the fired one — is deliberate: intermediate
+    /// occurrences belong to fire windows that already elapsed, and re-firing them
+    /// immediately on replay is the storm shape this filter exists to prevent. Bounded
+    /// iteration guards against a degenerate recurrence that never reaches the future.
+    private static func rolledForwardRecurrence(of wake: ScheduledWake, after now: Date) -> ScheduledWake? {
+        guard let recurrence = wake.recurrence else { return nil }
+        var fireAt = wake.wakeAt
+        var previousFireAt = wake.previousFireAt
+        for _ in 0..<10_000 {
+            guard let next = recurrence.nextOccurrence(after: fireAt) else { return nil }
+            previousFireAt = fireAt
+            fireAt = next
+            if fireAt > now {
+                return ScheduledWake(
+                    wakeAt: fireAt,
+                    instructions: wake.instructions,
+                    taskID: wake.taskID,
+                    recurrence: recurrence,
+                    originalID: wake.originalID,
+                    previousFireAt: previousFireAt,
+                    survivesTaskTermination: wake.survivesTaskTermination
+                )
+            }
+        }
+        return nil
     }
 
     private func rearmScheduledTaskWakes(excluding excluded: UUID?) async {

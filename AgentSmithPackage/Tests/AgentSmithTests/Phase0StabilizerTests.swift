@@ -149,18 +149,31 @@ struct WakeReplayFilterTests {
         #expect(kept.count == 1)
     }
 
-    @Test("The wake for the task this restart is resuming is dropped")
-    func resumingTaskWakeIsDropped() async {
+    @Test("A past-due wake for the task this restart is resuming is dropped")
+    func resumingTaskPastDueWakeIsDropped() async {
         let runtime = makeRuntime()
         let store = await runtime.taskStore
+        // The incident shape: the 9 PM wake fired, promoted its task, and triggered this
+        // very restart — replaying it would fire it again.
         let task = await store.addTask(
             title: "Resuming", description: "d",
-            scheduledRunAt: Date(timeIntervalSinceNow: 3600)
+            scheduledRunAt: Date(timeIntervalSinceNow: -120)
         )
-        let wake = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: 3600))
+        let wake = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: -120))
 
         let kept = await runtime.replayableWakes(from: [wake], resumingTaskID: task.id)
         #expect(kept.isEmpty)
+    }
+
+    @Test("A future wake for the resuming task survives (run-it-again-later case)")
+    func resumingTaskFutureWakeIsKept() async {
+        let runtime = makeRuntime()
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Resuming", description: "d")
+        let wake = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: 3600))
+
+        let kept = await runtime.replayableWakes(from: [wake], resumingTaskID: task.id)
+        #expect(kept.count == 1)
     }
 
     @Test("Duplicate auto-run wakes collapse to one")
@@ -182,6 +195,48 @@ struct WakeReplayFilterTests {
 
         let kept = await runtime.replayableWakes(from: wakes, resumingTaskID: nil)
         #expect(kept.count == 1)
+    }
+
+    @Test("A fired recurring wake rolls forward instead of killing its series")
+    func firedRecurringWakeRollsForward() async {
+        let runtime = makeRuntime()
+        let store = await runtime.taskStore
+        // Fired shape: past-due wake, task already promoted out of .scheduled.
+        let task = await store.addTask(
+            title: "Every 10 minutes", description: "d",
+            scheduledRunAt: Date(timeIntervalSinceNow: -3600)
+        )
+        var wake = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: -3600))
+        wake.recurrence = .interval(seconds: 600)
+        wake.survivesTaskTermination = true
+
+        let kept = await runtime.replayableWakes(from: [wake], resumingTaskID: nil)
+        #expect(kept.count == 1)
+        guard let rolled = kept.first else { return }
+        #expect(rolled.wakeAt > Date(), "rolled occurrence must be in the future")
+        #expect(rolled.wakeAt.timeIntervalSinceNow <= 600, "must be the FIRST future occurrence")
+        #expect(rolled.originalID == wake.originalID, "chain identity preserved")
+        #expect(rolled.recurrence == wake.recurrence)
+        #expect(rolled.survivesTaskTermination)
+    }
+
+    @Test("A fired recurring wake dedupes against its disk-persisted successor")
+    func rolledRecurrenceDedupesAgainstPersistedSuccessor() async {
+        let runtime = makeRuntime()
+        let store = await runtime.taskStore
+        let task = await store.addTask(
+            title: "Every 10 minutes", description: "d",
+            scheduledRunAt: Date(timeIntervalSinceNow: -300)
+        )
+        var fired = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: -300))
+        fired.recurrence = .interval(seconds: 600)
+        // The successor checkScheduledWake scheduled before the restart: exactly one
+        // interval after the fired occurrence.
+        var successor = autoRunWake(taskID: task.id, wakeAt: fired.wakeAt.addingTimeInterval(600))
+        successor.recurrence = .interval(seconds: 600)
+
+        let kept = await runtime.replayableWakes(from: [fired, successor], resumingTaskID: nil)
+        #expect(kept.count == 1, "rolled wake and persisted successor must collapse to one")
     }
 
     @Test("Non-auto-run wakes are kept even when past-due")
