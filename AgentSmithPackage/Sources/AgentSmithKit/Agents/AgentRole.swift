@@ -8,6 +8,26 @@ public enum AgentRole: String, Codable, Sendable, CaseIterable, CodingKeyReprese
     case securityAgent
     case summarizer
 
+    /// Forward-compatibility fallback: a role rawValue this build doesn't know (written by
+    /// a NEWER build — e.g. a future `validator` case) must degrade to a harmless
+    /// attribution rather than failing the decode of an entire persisted array
+    /// (usage_records.json holds tens of thousands of records; one unknown role must not
+    /// brick them all on downgrade). `.summarizer` is the least-harmful bucket: it is
+    /// never interactive and never drives orchestration decisions.
+    public static let decodingFallback: AgentRole = .summarizer
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = AgentRole(rawValue: raw) ?? Self.decodingFallback
+    }
+
+    // NOTE: dictionary-KEY decoding (`[AgentRole: V]`) bypasses `init(from:)` via
+    // CodingKeyRepresentable and deliberately gets NO fallback: remapping an unknown key
+    // would land it on an existing case and OVERWRITE that case's value (e.g. a future
+    // "validator" config clobbering the summarizer's). When a new case is introduced,
+    // role-keyed persistence sites must migrate to `[String: V]` decoding that skips
+    // unknown keys explicitly.
+
     /// Thread-safe storage for the user's preferred nickname.
     private static let _userNickname = Mutex("")
 

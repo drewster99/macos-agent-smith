@@ -123,6 +123,16 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         /// `.pending` at fire time.
         case scheduled
 
+        /// Forward-compatibility fallback: a status rawValue this build doesn't know
+        /// (written by a NEWER build — e.g. a future `validating` case) must not brick
+        /// the decode of the entire task list. `.interrupted` is the safe bucket: it
+        /// never auto-runs, is visibly "needs attention" in the UI, and `run_task`
+        /// accepts it for an explicit user-driven resume.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Status(rawValue: raw) ?? .interrupted
+        }
+
         /// Whether this status represents work that is actively running — prevents archiving or deletion.
         public var isInProgress: Bool {
             self == .running || self == .paused || self == .awaitingReview

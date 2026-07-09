@@ -2,6 +2,102 @@
 
 ## Planned
 
+### Evaluator framework, acceptance validation, and the worker pool (agreed design, 2026-07-09)
+
+Agreed with Drew in full; build order at the end. The unifying insight (Drew's): the
+acceptance validator, the per-call tool approver, and the tool scoper are all the same
+shape — a FUNCTION: fresh context, specific system prompt, structured input, constrained
+output grammar, optional tool rounds, one parsed result. Build the function, then its
+clients.
+
+**Evaluator framework.**
+- `EvaluatorDefinition` is DATA, hot-loaded from `AppSupport/AgentSmith/evaluators/*.json`
+  (mcp_servers.json pattern), with shipped defaults bundled in Resources and copied on
+  first launch (defaults.json pattern). Fields: name, description ("when to use" — the
+  Smith-facing selection text), kind (`validator | approver | scoper | prepare`), system
+  prompt, input template with named slots + declared required slots (validated at load;
+  malformed files show as visible error entries), output grammar, model reference, tool
+  allowlist, max turns, wall-clock timeout, max output tokens.
+- One `EvaluationRunner` generalizing SecurityEvaluator's existing loop: render slots →
+  LLM → allowlisted tool rounds → until the grammar parses → bounded retries. Two grammar
+  kinds: first-line verdict (per-verdict reason requirements) and schema-validated JSON
+  (used by the scoper and by prepare phases).
+- Definition (data) vs payload (code): call sites build typed payloads; the runner
+  auto-fills STANDARD SLOTS on any task-bound invocation (task id/title/description,
+  recent updates, full step list incl. tombstones). Statefulness (WARN-retry tracking,
+  recent-request history, failure breakers) stays at the call site — the function is pure.
+- Model references are ROLE SLOTS ONLY in v1 (`validator`/`summarizer`/`smith`; a "smart
+  validator" points at the smith slot). Explicit provider+model IDs are v2 (needs runtime
+  provider construction). NO fallback chains: unconfigured → fail visible.
+- Registry: user-owned. Smith SELECTS validators (kind=validator only; approver/scoper
+  are system-reserved) via registry summaries embedded in tool descriptions at spawn
+  (GhTool auth-status precedent) plus a list_validators tool. Consent gates CAPABILITY,
+  not existence: Smith freely authors INLINE (task-scoped) validators and may persist
+  capped-capability definitions to the registry; anything wanting tools beyond the
+  read-only quartet (file_read, directory_listing, grep, glob) or a non-default model
+  goes through propose → user approval. Shipped validators get the quartet by default —
+  evidence-gathering is the default posture. Elevated tools still route through the
+  per-call security check at runtime.
+
+**Acceptance validation (replaces Smith's review entirely).**
+- `AcceptanceCriterion` array ON the task (source of truth): id, text, waivable, origin,
+  validator = .registry(name) | .inline(definition). create_task gains
+  acceptance_criteria + steps params; Smith gets set/update criteria tools (every change
+  posts to channel + task record; mid-round edits apply next round). User can specify
+  validation in the prompt and edit criteria/inline definitions in the task UI.
+- State machine: task_complete → `.validating` (new Status case — decode shim landed
+  first) → all ACCEPT/WAIVE → auto-complete, no Smith. Any REJECT → punch list delivered
+  DIRECTLY to the worker (review_work-rejection delivery path), bounded loop (default 3),
+  then escalate to `.awaitingReview` with active user notification. Criterion-less tasks
+  run the shipped `default-acceptance` definition (Smith's old review, distilled) — Smith
+  is out of the review business; review_work becomes the escalation-resolution tool
+  (accept-with-override + reason, send-back, edit-criteria).
+- Verdicts: ACCEPT / REJECT(reason) / WAIVE(reason, only when waivable) / ERROR (timeout,
+  turn-cap, backend, unparseable — retry once, then park for escalation; never counted as
+  REJECT). ACCEPT is STICKY per criterion within a task attempt (rounds re-validate only
+  rejected/errored criteria; editing a criterion resets stickiness). Validators default
+  to temperature 0. Re-validated criteria receive a previous_verdict slot so round 2
+  converges ("you said X was missing; here it is").
+- Validation is idempotent and restartable: inputs and results live on the task; partial
+  reports are never persisted; `.validating` tasks re-enqueue from sticky state on cold
+  boot or cancel. Reports store verdicts + reasons + bounded evidence summaries — never
+  raw tool output (prompt-injection of secrets into persistence, and tasks.json bloat).
+  The task PINS definition content-hashes at first use; edits apply to future tasks;
+  reports snapshot what ran (full body for inline).
+- Caps: max items per prepare (fail-visible truncation), max validator calls per task
+  attempt, per-report parallelism (Settings), and a GLOBAL evaluator-concurrency
+  semaphore so validation can't starve workers.
+
+**Steps (worker todo list).**
+- `steps` array on the task. Smith seeds initials at create_task; the worker owns them
+  after: add/update/reword/complete/skip(reason)/remove(reason) — but "delete" is a
+  TOMBSTONE (status .removed): hidden from the worker's active view and progress UI,
+  always visible to validators. The record under the plan is append-only, so a worker
+  can grow its obligations but never erase evidence (the ratchet). Step list rides in
+  the standard slots. Soft cap like task updates.
+- Dynamic validation: prepare (kind=prepare evaluator, tools + JSON-array grammar) over
+  ANY source — the step list arrives via slots, world sources (files in a folder) via
+  tools; each emitted item maps through the per-item validator as {{item}} alongside the
+  standard slots. Deterministic non-LLM prepare is a later optimization.
+
+**Worker pool (parallel track, disjoint code).**
+- Workers are 1:1 with tasks (taskID on AgentHandle); Settings gains "max simultaneous
+  tasks". Correctness first. M1 runtime core (capacity check replaces the single-Brown
+  terminate policy; per-agent callbacks; task-scoped lookups) behind capacity=1. M2
+  inspector/worker cards re-keyed by agent ID (incl. terminatedAgentArchive + processing
+  state, currently role-keyed). M3 orchestration gates (run_task/create_task/drains/
+  wakes capacity-aware; the awaiting-review block drops — validation owns completion),
+  Smith prompt + digest + message_brown task addressing. M4 polish (interrupt policy at
+  capacity, MCP concurrency verification, scoping off the serialized spawn path).
+  Cross-task file conflicts and vLLM load are explicitly out of scope (user-managed).
+
+**Migration order:** decode shims (✅ with this entry) → EvaluatorDefinition +
+EvaluationRunner + registry → validation state machine + default-acceptance + steps →
+dynamic prepare/map → Security Agent onto the runner LAST (scoper first, per-call
+approver only after soak) → worker pool milestones in parallel. The `/compact` command
+pattern applies: manual validation doubles as the prompt-tuning harness for
+default-acceptance before the automatic gate carries weight.
+
 ### Agent lifecycle: supervised generations (post-incident 2026-07-08) ✅
 
 The 2026-07-08 incident (full forensic report in the session artifact "Agent Smith —
