@@ -184,6 +184,19 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
                 return false
             }
         }
+
+        /// Whether the user can edit the task's acceptance criteria and step list in
+        /// this state — any state where no worker or validator is actively consuming
+        /// them. `awaitingReview` is included deliberately: fixing a wrong criterion is
+        /// exactly how a validation escalation gets resolved before work is sent back.
+        public var isValidationContractEditable: Bool {
+            switch self {
+            case .pending, .paused, .interrupted, .scheduled, .failed, .awaitingReview:
+                return true
+            case .running, .validating, .completed:
+                return false
+            }
+        }
     }
 
     public enum TaskDisposition: String, Codable, Sendable {

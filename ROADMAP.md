@@ -2,6 +2,15 @@
 
 ## Planned
 
+### Validation UI follow-ups (2026-07-09)
+
+- **PDF export**: `TaskPDFDocumentView` / `TaskPDFFieldOptions` don't include the
+  acceptance criteria (with verdicts) or the step list yet — add both as optional
+  PDF sections mirroring the task-detail window's Acceptance and Steps sections.
+- Task LIST rows show no validation progress (settled-count chip); detail window only.
+- No Settings UI for the evaluator registry — definitions are edited as
+  `evaluators/*.json` files on disk (load failures do surface in `list_validators`).
+
 ### Evaluator framework, acceptance validation, and the worker pool (agreed design, 2026-07-09)
 
 Agreed with Drew in full; build order at the end. The unifying insight (Drew's): the

@@ -1202,6 +1202,41 @@ final class AppViewModel {
         }
     }
 
+    /// Replaces a task's acceptance criteria from the task-detail editor. Gated to
+    /// states where no worker or validator is actively consuming the contract; the
+    /// store drops sticky verdicts for criteria that actually changed.
+    func setTaskAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async {
+        guard let taskStore else { return }
+        guard let task = await taskStore.task(id: id), task.status.isValidationContractEditable else {
+            taskActionError = "Acceptance criteria can't be edited while the task is running, validating, or completed."
+            return
+        }
+        await taskStore.setAcceptanceCriteria(id: id, criteria: criteria)
+    }
+
+    /// Replaces a task's step list from the task-detail editor (same gating). The user
+    /// holds full authority over the plan — unlike the worker, edits here may delete
+    /// steps outright rather than tombstoning them.
+    func setTaskSteps(id: UUID, steps: [TaskStep]) async {
+        guard let taskStore else { return }
+        guard let task = await taskStore.task(id: id), task.status.isValidationContractEditable else {
+            taskActionError = "Steps can't be edited while the task is running, validating, or completed."
+            return
+        }
+        await taskStore.setSteps(id: id, steps: steps)
+    }
+
+    /// Registry names the task-detail criteria editor can offer/validate against,
+    /// loaded fresh from the session's evaluators directory (the registry hot-loads;
+    /// a stale snapshot here would refuse names that are actually installed).
+    nonisolated func availableEvaluatorNames() -> (validators: [String], prepares: [String]) {
+        let registry = EvaluatorRegistry.load(from: persistenceManager.evaluatorsDirectory)
+        return (
+            registry.definitions(ofKind: .validator).map(\.name),
+            registry.definitions(ofKind: .prepare).map(\.name)
+        )
+    }
+
     func pauseTask(id: UUID) async {
         let slug = id.uuidString.prefix(8)
         let entry = Date()

@@ -37,6 +37,111 @@ struct TaskDetailWindow: View {
     @State private var expandedDebugRecordIDs: Set<UUID> = []
     /// Criteria whose pinned validator definition (system prompt + input template) is open.
     @State private var expandedValidatorPromptIDs: Set<UUID> = []
+    @State private var isEditingAcceptance = false
+    @State private var editedCriteria: [EditableCriterion] = []
+    @State private var isEditingSteps = false
+    @State private var editedSteps: [EditableStep] = []
+    /// Registry names loaded when an editor opens, used to validate typed names.
+    @State private var knownValidatorNames: [String] = []
+    @State private var knownPrepareNames: [String] = []
+
+    /// Editing model for one acceptance criterion. Criterion identity is preserved
+    /// through edits (the store resets sticky verdicts only when content changed).
+    /// An original `.inline` validator survives a save only while the name field is
+    /// left empty — typing a registry name replaces it.
+    private struct EditableCriterion: Identifiable {
+        let id: UUID
+        var text: String
+        var waivable: Bool
+        var validatorName: String
+        var prepareName: String
+        let origin: TaskAuthorship
+        let originalInlineValidator: AcceptanceCriterion.Validator?
+
+        init(criterion: AcceptanceCriterion) {
+            id = criterion.id
+            text = criterion.text
+            waivable = criterion.waivable
+            switch criterion.validator {
+            case .registry(let name):
+                validatorName = name
+                originalInlineValidator = nil
+            case .inline:
+                validatorName = ""
+                originalInlineValidator = criterion.validator
+            case nil:
+                validatorName = ""
+                originalInlineValidator = nil
+            }
+            prepareName = criterion.prepare ?? ""
+            origin = criterion.origin
+        }
+
+        init() {
+            id = UUID()
+            text = ""
+            waivable = false
+            validatorName = ""
+            prepareName = ""
+            origin = .user
+            originalInlineValidator = nil
+        }
+
+        func built() -> AcceptanceCriterion? {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let name = validatorName.trimmingCharacters(in: .whitespaces)
+            let validator: AcceptanceCriterion.Validator? = name.isEmpty ? originalInlineValidator : .registry(name)
+            let prepare = prepareName.trimmingCharacters(in: .whitespaces)
+            return AcceptanceCriterion(
+                id: id,
+                text: trimmed,
+                waivable: waivable,
+                origin: origin,
+                validator: validator,
+                prepare: prepare.isEmpty ? nil : prepare
+            )
+        }
+    }
+
+    /// Editing model for one step. The user holds full authority over the plan, so
+    /// rows can be deleted outright (no tombstone requirement, unlike the worker).
+    private struct EditableStep: Identifiable {
+        let id: UUID
+        var text: String
+        var status: TaskStep.Status
+        var note: String
+        let origin: TaskAuthorship
+
+        init(step: TaskStep) {
+            id = step.id
+            text = step.text
+            status = step.status
+            note = step.note ?? ""
+            origin = step.origin
+        }
+
+        init() {
+            id = UUID()
+            text = ""
+            status = .pending
+            note = ""
+            origin = .user
+        }
+
+        func built() -> TaskStep? {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+            return TaskStep(
+                id: id,
+                text: trimmed,
+                status: status,
+                note: trimmedNote.isEmpty ? nil : trimmedNote,
+                origin: origin
+            )
+        }
+    }
 
     /// Local copy of the current task. Sync'd from `viewModel.tasks` via `.onChange` so
     /// the body reads only @State and SwiftUI can short-circuit re-renders when this
@@ -397,26 +502,157 @@ struct TaskDetailWindow: View {
 
     @ViewBuilder
     private func acceptanceSection(_ task: AgentTask, mode: SectionMode) -> some View {
-        if !task.acceptanceCriteria.isEmpty {
+        // Shown when the task has criteria OR when the user could author some
+        // (an editable empty state offers the pencil).
+        if !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable {
             let ledger = task.validation
             let settled = ledger?.settledCriterionIDs() ?? []
             VStack(alignment: .leading, spacing: 10) {
-                sectionTitleRow(
-                    title: "Acceptance",
-                    subtitle: acceptanceSubtitle(task: task, settledCount: settled.count),
-                    copyText: Self.formattedAcceptance(task)
-                )
-                VStack(alignment: .leading, spacing: mode == .expanded ? 12 : 6) {
-                    ForEach(task.acceptanceCriteria) { criterion in
-                        criterionRow(criterion, task: task, expanded: mode == .expanded)
+                HStack(spacing: 8) {
+                    Text("Acceptance")
+                        .font(.title3.bold())
+                    if !task.acceptanceCriteria.isEmpty {
+                        Text(acceptanceSubtitle(task: task, settledCount: settled.count))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if !task.acceptanceCriteria.isEmpty {
+                        copyButton(text: Self.formattedAcceptance(task), id: "Acceptance")
+                    }
+                    if task.status.isValidationContractEditable && !isEditingAcceptance {
+                        Button {
+                            beginEditingAcceptance(task)
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.callout)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Edit acceptance criteria")
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                    toggleSection(.acceptance, for: task.status)
+
+                if isEditingAcceptance {
+                    acceptanceEditor(task)
+                } else if task.acceptanceCriteria.isEmpty {
+                    Text("No acceptance criteria — validation will run the default whole-task check.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: mode == .expanded ? 12 : 6) {
+                        ForEach(task.acceptanceCriteria) { criterion in
+                            criterionRow(criterion, task: task, expanded: mode == .expanded)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
+                        toggleSection(.acceptance, for: task.status)
+                    }
                 }
             }
             Divider()
+        }
+    }
+
+    private func beginEditingAcceptance(_ task: AgentTask) {
+        editedCriteria = task.acceptanceCriteria.map(EditableCriterion.init)
+        if editedCriteria.isEmpty { editedCriteria = [EditableCriterion()] }
+        let names = viewModel.availableEvaluatorNames()
+        knownValidatorNames = names.validators
+        knownPrepareNames = names.prepares
+        isEditingAcceptance = true
+    }
+
+    /// Registry names typed into the editor that don't exist — saving with these would
+    /// make every future validation round escalate, so Save refuses them up front.
+    private var unknownCriteriaNames: [String] {
+        var unknown: [String] = []
+        for row in editedCriteria {
+            let validator = row.validatorName.trimmingCharacters(in: .whitespaces)
+            if !validator.isEmpty && !knownValidatorNames.contains(validator) { unknown.append(validator) }
+            let prepare = row.prepareName.trimmingCharacters(in: .whitespaces)
+            if !prepare.isEmpty && !knownPrepareNames.contains(prepare) { unknown.append(prepare) }
+        }
+        return unknown
+    }
+
+    @ViewBuilder
+    private func acceptanceEditor(_ task: AgentTask) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach($editedCriteria) { $row in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        TextField("Criterion — one concrete, checkable requirement", text: $row.text, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            editedCriteria.removeAll { $0.id == row.id }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Remove criterion")
+                    }
+                    HStack(spacing: 12) {
+                        Toggle("Waivable", isOn: $row.waivable)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                        TextField("validator (default)", text: $row.validatorName)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                            .frame(maxWidth: 180)
+                        TextField("prepare (none)", text: $row.prepareName)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                            .frame(maxWidth: 180)
+                        Spacer()
+                    }
+                    if row.originalInlineValidator != nil && row.validatorName.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Text("Keeps this criterion's inline validator; typing a registry name replaces it.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Button {
+                editedCriteria.append(EditableCriterion())
+            } label: {
+                Label("Add criterion", systemImage: "plus.circle")
+                    .font(.callout)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AppColors.disclosureToggle)
+
+            if !knownValidatorNames.isEmpty || !knownPrepareNames.isEmpty {
+                Text("Validators: \(knownValidatorNames.joined(separator: ", "))\(knownPrepareNames.isEmpty ? "" : " · Prepare: \(knownPrepareNames.joined(separator: ", "))")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if !unknownCriteriaNames.isEmpty {
+                Text("Unknown in the registry: \(unknownCriteriaNames.joined(separator: ", "))")
+                    .font(.caption)
+                    .foregroundStyle(AppColors.verdictError)
+            }
+
+            HStack {
+                Text("Removing all criteria reverts to the default whole-task check. Edited criteria are re-judged; unchanged ones keep their verdicts.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") {
+                    isEditingAcceptance = false
+                }
+                Button("Save") {
+                    let criteria = editedCriteria.compactMap { $0.built() }
+                    Task {
+                        await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteria)
+                    }
+                    isEditingAcceptance = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!unknownCriteriaNames.isEmpty)
+            }
         }
     }
 
@@ -626,29 +862,140 @@ struct TaskDetailWindow: View {
 
     @ViewBuilder
     private func stepsSection(_ task: AgentTask, mode: SectionMode) -> some View {
-        if !task.steps.isEmpty {
+        if !task.steps.isEmpty || task.status.isValidationContractEditable {
             let visible = mode == .expanded ? task.steps : task.steps.filter(\.isActive)
             let completedCount = task.steps.filter { $0.status == .completed }.count
             let activeCount = task.steps.filter(\.isActive).count
             VStack(alignment: .leading, spacing: 8) {
-                sectionTitleRow(
-                    title: "Steps",
-                    subtitle: "\(completedCount) of \(activeCount) completed",
-                    copyText: Self.formattedSteps(task.steps)
-                )
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(visible) { step in
-                        stepRow(step)
+                HStack(spacing: 8) {
+                    Text("Steps")
+                        .font(.title3.bold())
+                    if !task.steps.isEmpty {
+                        Text("\(completedCount) of \(activeCount) completed")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if !task.steps.isEmpty {
+                        copyButton(text: Self.formattedSteps(task.steps), id: "Steps")
+                    }
+                    if task.status.isValidationContractEditable && !isEditingSteps {
+                        Button {
+                            beginEditingSteps(task)
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.callout)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Edit steps")
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if task.steps.contains(where: { !$0.isActive }) || mode == .expanded {
-                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                        toggleSection(.steps, for: task.status)
+
+                if isEditingSteps {
+                    stepsEditor(task)
+                } else if task.steps.isEmpty {
+                    Text("No steps yet — the worker plans its own; seed some here if you want to steer it.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(visible) { step in
+                            stepRow(step)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if task.steps.contains(where: { !$0.isActive }) || mode == .expanded {
+                        DisclosureMoreLessLink(isExpanded: mode == .expanded) {
+                            toggleSection(.steps, for: task.status)
+                        }
                     }
                 }
             }
             Divider()
+        }
+    }
+
+    private func beginEditingSteps(_ task: AgentTask) {
+        editedSteps = task.steps.map(EditableStep.init)
+        if editedSteps.isEmpty { editedSteps = [EditableStep()] }
+        isEditingSteps = true
+    }
+
+    /// Skipped/removed steps must say why — validators read the notes, and the rule
+    /// applies to the user's editor the same as the worker's tool.
+    private var stepsMissingRequiredNotes: Bool {
+        editedSteps.contains { row in
+            (row.status == .skipped || row.status == .removed)
+                && !row.text.trimmingCharacters(in: .whitespaces).isEmpty
+                && row.note.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
+    @ViewBuilder
+    private func stepsEditor(_ task: AgentTask) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach($editedSteps) { $row in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Picker("", selection: $row.status) {
+                            Text("Pending").tag(TaskStep.Status.pending)
+                            Text("In progress").tag(TaskStep.Status.inProgress)
+                            Text("Completed").tag(TaskStep.Status.completed)
+                            Text("Skipped").tag(TaskStep.Status.skipped)
+                            Text("Removed").tag(TaskStep.Status.removed)
+                        }
+                        .labelsHidden()
+                        .frame(width: 110)
+                        TextField("Step", text: $row.text, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            editedSteps.removeAll { $0.id == row.id }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Delete step")
+                    }
+                    if row.status == .skipped || row.status == .removed || !row.note.isEmpty {
+                        TextField("Note — why was this skipped/removed?", text: $row.note)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                            .padding(.leading, 118)
+                    }
+                }
+            }
+            Button {
+                editedSteps.append(EditableStep())
+            } label: {
+                Label("Add step", systemImage: "plus.circle")
+                    .font(.callout)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AppColors.disclosureToggle)
+
+            if stepsMissingRequiredNotes {
+                Text("Skipped and removed steps need a note — validators read it.")
+                    .font(.caption)
+                    .foregroundStyle(AppColors.verdictError)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    isEditingSteps = false
+                }
+                Button("Save") {
+                    let steps = editedSteps.compactMap { $0.built() }
+                    Task {
+                        await viewModel.setTaskSteps(id: task.id, steps: steps)
+                    }
+                    isEditingSteps = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(stepsMissingRequiredNotes)
+            }
         }
     }
 
