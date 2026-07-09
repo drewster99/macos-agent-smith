@@ -1467,11 +1467,16 @@ final class AppViewModel {
         abortReason = ""
     }
 
+    /// Clears the visible channel transcript only. `allPersistedMessages` is untouched, so
+    /// `restoreHistory()` can bring the lines back.
+    ///
+    /// Deliberately does NOT touch `inspectorStore` or the cost caches: those hold the
+    /// running agents' turn records, live context, and security evaluations. Clearing them
+    /// here tore down live state the user never asked to discard and left every agent card
+    /// reading "Not active" while its agent was still running.
     func clearLog() {
         messages.removeAll()
         rebuildChannelLogIndexes()
-        inspectorStore.clearAll()
-        clearCostCaches()
     }
 
     func restoreHistory() {
@@ -1699,6 +1704,21 @@ final class AppViewModel {
             return utType.preferredMIMEType ?? "application/octet-stream"
         }
         return "application/octet-stream"
+    }
+
+    // MARK: - Agent liveness
+
+    /// Whether the runtime has an agent for `role` in this run — the signal behind the
+    /// inspector's "Not active" badge and the grey/coloured role dot.
+    ///
+    /// Derived from runtime-owned state (registered tool names, recorded LLM turns, live
+    /// conversation context) rather than the channel transcript. A card must keep reading
+    /// Idle/Thinking after the user clears the transcript, and an agent that has been
+    /// spawned but hasn't posted to the channel yet is still active.
+    func hasAgentActivity(_ role: AgentRole) -> Bool {
+        if !(agentToolNames[role] ?? []).isEmpty { return true }
+        if !(inspectorStore.turnsByRole[role] ?? []).isEmpty { return true }
+        return !inspectorStore.contextMessages(for: role).isEmpty
     }
 
     // MARK: - Cost helpers

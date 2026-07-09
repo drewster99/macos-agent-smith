@@ -244,7 +244,7 @@ private struct RoleAgentCard: View {
             pollInterval: viewModel.agentPollIntervals[role] ?? 5,
             maxToolCalls: viewModel.agentMaxToolCalls[role] ?? 100,
             currentSystemPrompt: store.systemPrompt(for: role),
-            hasActivity: !roleMessages.isEmpty,
+            hasActivity: !roleMessages.isEmpty || viewModel.hasAgentActivity(role),
             availableTools: viewModel.agentToolNames[role] ?? [],
             evaluationRecords: role == .securityAgent ? store.evaluationRecords : [],
             isProcessing: viewModel.processingRoles.contains(role),
