@@ -166,14 +166,17 @@ struct SerialChainedTaskQueueRunTests {
 @Suite("OrchestrationRuntime lifecycle serialization")
 struct RuntimeLifecycleSerializationTests {
 
-    private func makeRuntime() -> OrchestrationRuntime {
+    private func makeRuntime(
+        providers: [AgentRole: any LLMProvider] = [:],
+        configurations: [AgentRole: ModelConfiguration] = [:]
+    ) -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-phase1-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
         return OrchestrationRuntime(
-            providers: [:],
-            configurations: [:],
+            providers: providers,
+            configurations: configurations,
             providerAPITypes: [:],
             agentTuning: [:],
             semanticSearchEngine: SemanticSearchEngine(),
@@ -214,5 +217,46 @@ struct RuntimeLifecycleSerializationTests {
         await runtime.stopAll()
         let brownID = await runtime.spawnBrown()
         #expect(brownID == nil)
+    }
+
+    @Test("A start that fails the provider guard leaves no generation behind")
+    func failedStartLeavesNoGeneration() async {
+        // No Smith provider: performStart bails at the provider guard AFTER beginning a
+        // generation. Codex review finding: the generation used to survive, so
+        // currentSessionID read as 'running' and a later spawnBrown could register a
+        // worker into a session that never started Smith.
+        let runtime = makeRuntime()
+        await runtime.start()
+        let sessionID = await runtime.currentSessionID
+        #expect(sessionID == nil, "failed start must end its generation")
+        let brownID = await runtime.spawnBrown()
+        #expect(brownID == nil, "no generation → no worker registration")
+    }
+
+    @Test("Successful start registers Smith; stopAll clears everything")
+    func successfulStartAndStop() async {
+        // A real Smith on a canned-response mock provider (the mock repeats its last
+        // response when exhausted, so the run loop can tick safely until stopped).
+        let runtime = makeRuntime(
+            providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
+            configurations: [.smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")]
+        )
+        await runtime.start()
+        let liveIDs = await runtime.activeAgentIDs()
+        #expect(liveIDs.count == 1, "exactly Smith should be registered")
+        let smithID = await runtime.agentIDForRole(.smith)
+        #expect(smithID != nil)
+        let sessionID = await runtime.currentSessionID
+        #expect(sessionID != nil)
+
+        await runtime.stopAll()
+        let afterIDs = await runtime.activeAgentIDs()
+        #expect(afterIDs.isEmpty)
+        let afterSession = await runtime.currentSessionID
+        #expect(afterSession == nil)
+        if let smithID {
+            let registered = await runtime.isAgentRegistered(smithID)
+            #expect(!registered, "the liveness lease must read false after stopAll")
+        }
     }
 }

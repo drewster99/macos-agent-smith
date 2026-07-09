@@ -1062,6 +1062,18 @@ public actor OrchestrationRuntime {
         }
     }
 
+    /// Unwinds the partial state of a `performStart` that failed before any agent was
+    /// registered: power assertion, summarizer, generation, and the channel's session
+    /// stamp. Nothing else exists yet by construction (agents register after the guards),
+    /// so this is the complete failure-path teardown.
+    private func abandonFailedStart() async {
+        await powerManager?.shutdown()
+        powerManager = nil
+        taskSummarizer = nil
+        _ = supervisor.endGeneration()
+        await channel.setCurrentSessionID(nil)
+    }
+
     /// The actual start implementation. Runs ONLY as a lifecycle-queue item (or from
     /// another implementation already inside one) — never call directly from a public
     /// entry point.
@@ -1112,6 +1124,11 @@ public actor OrchestrationRuntime {
         guard let smithConfig = llmConfigs[.smith],
               let provider = llmProviders[.smith] else {
             await channel.post(ChannelMessage(sender: .system, content: "No Smith provider configured — cannot start."))
+            // A start that fails before any agent exists must not leave a live generation
+            // behind: `currentSessionID` would read as "running", and a later tool-driven
+            // spawnBrown would register a worker into a session that never started Smith
+            // (codex review finding).
+            await abandonFailedStart()
             return
         }
 
@@ -1416,6 +1433,10 @@ public actor OrchestrationRuntime {
                         The user is already informed about THIS task. Don't inform them about it a 2nd time.
                         """)
                 } else {
+                    // An abort mid-spawn is not the task's failure: leave its status alone
+                    // and stop building this generation — the stopAll queued by abort()
+                    // owns the teardown of whatever exists.
+                    guard !aborted else { return }
                     // A failed spawn must not leave the task looking like ordinary pending
                     // work the user is waiting on — that's what let a stranded reminder be
                     // mistaken for "the task the user means" after the 2026-07-08 outage.
@@ -1613,6 +1634,10 @@ public actor OrchestrationRuntime {
             }
         }
 
+        // Final abort barrier: don't launch Smith's run loop if an abort arrived during
+        // the awaits above. Smith is registered but never started; the stopAll queued by
+        // abort() unsubscribes and drops it (stop() on a never-started agent is a no-op).
+        guard !aborted else { return }
         await smithAgent.start(initialInstruction: initialInstruction)
         onAgentStarted?(.smith, smithAgent.toolNames)
 
@@ -2146,6 +2171,11 @@ public actor OrchestrationRuntime {
                 await taskStore.setApprovedTools(id: task.id, approvedTools: Array(candidateNames))
             }
         }
+
+        // Re-check after the (possibly long) scoping LLM call above: an abort raised
+        // mid-scoping must not be answered by minting a fresh worker. The stopAll queued
+        // by abort() owns teardown of anything already built (codex review finding).
+        guard !aborted else { return nil }
 
         let brownAgent = AgentActor(
             id: brownID,

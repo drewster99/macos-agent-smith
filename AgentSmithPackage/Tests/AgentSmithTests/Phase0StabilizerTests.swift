@@ -239,6 +239,20 @@ struct WakeReplayFilterTests {
         #expect(kept.count == 1, "rolled wake and persisted successor must collapse to one")
     }
 
+    @Test("Distinct future run-wakes for the same task all survive")
+    func distinctFutureWakesForSameTaskAreKept() async {
+        // The dedupe key is (taskID, wakeAt): it must collapse only true duplicates,
+        // never legitimate separate runs ("run it at 3pm AND at 6pm").
+        let runtime = makeRuntime()
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Run twice", description: "d")
+        let threePM = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: 3600))
+        let sixPM = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: 3 * 3600))
+
+        let kept = await runtime.replayableWakes(from: [threePM, sixPM], resumingTaskID: nil)
+        #expect(kept.count == 2)
+    }
+
     @Test("Non-auto-run wakes are kept even when past-due")
     func smithImperativeWakesAreKept() async {
         let runtime = makeRuntime()
