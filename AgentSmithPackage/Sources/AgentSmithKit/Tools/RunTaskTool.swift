@@ -159,9 +159,21 @@ struct RunTaskTool: AgentTool {
 
         // Amend the task with the instructions before restarting, so they survive
         // the context reset and are visible to the new Smith, Brown, and Security Agent.
+        //
+        // ONLY when the model named the task explicitly. When `task_id` was auto-resolved,
+        // writing `instructions` into the description would permanently weld possibly-
+        // unrelated user text onto a task the model never actually identified — that is
+        // exactly how a 9 PM reminder became a bug-bounty research task on 2026-07-08.
+        // An inferred target runs AS-IS; if the user wants the task changed, the model
+        // must name it (amend_task or an explicit run_task).
         let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        var amendmentNote = ""
         if !trimmed.isEmpty {
-            await context.taskStore.amendDescription(id: taskID, amendment: trimmed)
+            if autoResolved {
+                amendmentNote = " NOTE: your `instructions` were NOT applied to the task description because task_id was auto-resolved — the task runs with its existing description. If the instructions matter, call amend_task with this task's ID."
+            } else {
+                await context.taskStore.amendDescription(id: taskID, amendment: trimmed)
+            }
         }
 
         await context.restartForNewTask(task.id)
@@ -169,18 +181,21 @@ struct RunTaskTool: AgentTool {
         let autoNote = autoResolved
             ? " (auto-resolved task_id because it was omitted from the call and only one task was eligible)"
             : ""
-        return .success("Running task '\(task.title)' (ID: \(task.id)).\(autoNote) System is restarting with a clean context to begin work.")
+        return .success("Running task '\(task.title)' (ID: \(task.id)).\(autoNote)\(amendmentNote) System is restarting with a clean context to begin work.")
     }
 
     /// When exactly one active task is in a pending/paused/interrupted status (the
     /// "obviously runnable now" set), returns its ID. Returns nil if there are
     /// zero or more than one — auto-pick is reserved for unambiguous cases.
     /// Failed/completed tasks are excluded because resurrecting them on guess is
-    /// destructive.
+    /// destructive. Tasks that were ever scheduled (`scheduledRunAt != nil`) are also
+    /// excluded: a reminder the SYSTEM promoted to pending at fire time is never "the
+    /// task the user just confirmed" — guessing it welded an unrelated user request
+    /// onto a 9 PM reminder in the 2026-07-08 incident.
     private static func onlyPendingRunnableTaskID(context: ToolContext) async -> UUID? {
         let allTasks = await context.taskStore.allTasks()
         let pending = allTasks.filter {
-            $0.disposition == .active && (
+            $0.disposition == .active && $0.scheduledRunAt == nil && (
                 $0.status == .pending || $0.status == .paused || $0.status == .interrupted
             )
         }

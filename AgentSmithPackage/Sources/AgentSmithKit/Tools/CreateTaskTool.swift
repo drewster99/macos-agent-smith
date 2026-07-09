@@ -271,23 +271,30 @@ public struct CreateTaskTool: AgentTool {
     }
 
     /// Build the "missing title" tool error. If there's exactly one pending task
-    /// already, redirect the model to run_task on that task — observed on
-    /// gemma3:27b emitting empty-argument create_task calls when "yes go ahead"
-    /// clearly meant "run the existing pending task."
+    /// already, mention run_task as a possibility — observed on gemma3:27b emitting
+    /// empty-argument create_task calls when "yes go ahead" clearly meant "run the
+    /// existing pending task."
+    ///
+    /// The candidate set excludes once-scheduled tasks (`scheduledRunAt != nil`), and the
+    /// wording offers rather than asserts: an earlier version claimed the pending task
+    /// "matches the user's intent" without having checked, which steered Smith into
+    /// welding an unrelated user request onto a system-promoted 9 PM reminder
+    /// (2026-07-08 incident).
     private static func missingTitleFailure(context: ToolContext) async -> String {
         let allTasks = await context.taskStore.allTasks()
         let pending = allTasks.filter {
-            $0.disposition == .active && (
+            $0.disposition == .active && $0.scheduledRunAt == nil && (
                 $0.status == .pending || $0.status == .paused || $0.status == .interrupted
             )
         }
         if pending.count == 1, let only = pending.first {
             return """
                 Missing required argument 'title' for create_task. \
-                There is already a pending task that matches the user's intent: \
-                '\(only.title)' (id: \(only.id.uuidString)). \
-                Do NOT call create_task again — call run_task with task_id='\(only.id.uuidString)' \
-                and instructions=<a string summarizing the user's confirmation>.
+                If the user is describing NEW work, re-call create_task with title=<short imperative> \
+                and description=<one-paragraph detail>. ONLY IF the user was clearly referring to the \
+                existing pending task '\(only.title)' (id: \(only.id.uuidString)) — e.g. they said \
+                "yes, go ahead" — call run_task with that task_id instead. Do not assume the pending \
+                task is what they meant.
                 """
         }
         return """
@@ -298,22 +305,22 @@ public struct CreateTaskTool: AgentTool {
             """
     }
 
-    /// Build the "missing description" tool error. Same redirection logic as for
-    /// missing title — if the model meant to run an existing task, send it there.
+    /// Build the "missing description" tool error. Same shape as the missing-title error;
+    /// same non-assertive wording and same exclusion of once-scheduled tasks.
     private static func missingDescriptionFailure(context: ToolContext, title: String) async -> String {
         let allTasks = await context.taskStore.allTasks()
         let pending = allTasks.filter {
-            $0.disposition == .active && (
+            $0.disposition == .active && $0.scheduledRunAt == nil && (
                 $0.status == .pending || $0.status == .paused || $0.status == .interrupted
             )
         }
         if pending.count == 1, let only = pending.first {
             return """
                 Missing required argument 'description' for create_task (title='\(title)'). \
-                There is already a pending task that may be what the user meant: \
-                '\(only.title)' (id: \(only.id.uuidString)). If so, do NOT create a new task — \
-                call run_task with task_id='\(only.id.uuidString)' and instructions=<summary of the \
-                user's confirmation>. Otherwise re-call create_task with a description.
+                If the user is describing NEW work, re-call create_task with a description. \
+                ONLY IF the user was clearly referring to the existing pending task \
+                '\(only.title)' (id: \(only.id.uuidString)) should you call run_task with that \
+                task_id instead. Do not assume the pending task is what they meant.
                 """
         }
         return "Missing required argument 'description' for create_task (title='\(title)'). Re-call with description=<one-paragraph detail of what needs to be done>."

@@ -87,6 +87,11 @@ public struct EvaluationRecord: Sendable, Identifiable, Equatable {
 
 /// Outcome of a per-task tool scoping pass.
 public struct ToolScopingResult: Sendable {
+    /// `rawResponse` sentinel for a scoping pass that ended because the surrounding task
+    /// was cancelled (user stop during "Preparing…"), as opposed to an evaluation failure.
+    /// Callers use this to avoid counting cancellations toward backend-health breakers.
+    public static let cancelledSentinel = "(cancelled)"
+
     /// Tool names the security agent approved (already intersected with the real candidate set,
     /// so hallucinated names are excluded).
     public let approvedNames: Set<String>
@@ -162,6 +167,15 @@ actor SecurityEvaluator {
     /// more headroom.
     private static let perCallEvalMaxTokensFloor = 1500
     private static let toolScopingMaxTokensFloor = 25000
+
+    /// Sleeps before scoping retry `attempt` (1-based): 0.5 s doubling per attempt, capped
+    /// at 4 s. `Task.sleep` throwing (cancellation) is intentionally swallowed — callers
+    /// re-check `Task.isCancelled` right after and bail on their own cancellation path.
+    private static func scopingRetryBackoff(attempt: Int) async {
+        let capped = min(attempt, 4)
+        let nanoseconds = UInt64(500_000_000) << (capped - 1)
+        try? await Task.sleep(nanoseconds: nanoseconds)
+    }
 
     /// Tool definition for file_read, presented to Security Agent's LLM.
     private static let fileReadToolDef: LLMToolDefinition = {
@@ -535,10 +549,17 @@ actor SecurityEvaluator {
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {
                 if Task.isCancelled {
-                    return ToolScopingResult(approvedNames: [], rawResponse: "(cancelled)", succeeded: false)
+                    return ToolScopingResult(approvedNames: [], rawResponse: ToolScopingResult.cancelledSentinel, succeeded: false)
                 }
                 lastError = error
                 retryCount += 1
+                // Backoff before the next attempt. Without this, an unreachable backend
+                // (connection refused) burns all retries in under a second — observed as
+                // ~270 ms per full 5-retry scoping pass during the 2026-07-08 outage.
+                await Self.scopingRetryBackoff(attempt: retryCount)
+                if Task.isCancelled {
+                    return ToolScopingResult(approvedNames: [], rawResponse: ToolScopingResult.cancelledSentinel, succeeded: false)
+                }
                 continue
             }
 
@@ -564,6 +585,7 @@ actor SecurityEvaluator {
             let responseText = response.text ?? ""
             guard let approved = Self.parseScopingResponse(responseText, candidateNames: candidateNames) else {
                 retryCount += 1
+                await Self.scopingRetryBackoff(attempt: retryCount)
                 continue
             }
 

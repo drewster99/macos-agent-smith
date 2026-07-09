@@ -242,6 +242,31 @@ public actor OrchestrationRuntime {
     /// the first to fully complete before its own work begins.
     private let restartQueue = SerialChainedTaskQueue()
 
+    /// Circuit breaker for the pre-flight tool-scoping pass. Lives on the RUNTIME (not the
+    /// per-spawn `SecurityEvaluator`) deliberately: `spawnBrown` builds a fresh evaluator
+    /// every spawn, so any breaker state kept there resets to zero on each restart and can
+    /// never trip. During the 2026-07-08 outage that reset let scoping hammer a dead
+    /// backend across 30+ restart generations. The runtime object survives
+    /// `restartForNewTask`, so this streak actually accumulates.
+    private var scopingFailureStreak = 0
+    private var lastScopingFailureAt: Date?
+    /// Consecutive scoping failures before the breaker opens.
+    private static let scopingBreakerThreshold = 3
+    /// How long the breaker stays open after the latest failure before allowing a retry.
+    private static let scopingBreakerCooldown: TimeInterval = 120
+
+    /// True while the scoping breaker is open (threshold reached and cooldown not yet
+    /// elapsed). Checked by `spawnBrown` before attempting a scoping pass, and by BOTH
+    /// queue drains: a spawn failure marks its task `.failed`, which fires the
+    /// task-terminated hook, which drains the queues and would otherwise start the next
+    /// pending task into the same dead backend — failing the entire queue task-by-task
+    /// in seconds. With the drains gated, the queue simply waits out the cooldown.
+    private var isScopingBreakerOpen: Bool {
+        guard scopingFailureStreak >= Self.scopingBreakerThreshold,
+              let lastFailure = lastScopingFailureAt else { return false }
+        return Date().timeIntervalSince(lastFailure) < Self.scopingBreakerCooldown
+    }
+
     public func setOnTimerEventForChannel(_ handler: @escaping @Sendable (TimerEvent) async -> Void) {
         onTimerEventForChannel = handler
     }
@@ -376,6 +401,13 @@ public actor OrchestrationRuntime {
     @discardableResult
     private func drainPendingScheduledRunQueue() async -> Bool {
         guard !pendingScheduledRunQueue.isEmpty else { return false }
+        // Breaker gate: starting a task while the scoping backend is known-dead would just
+        // fail it. Entries stay queued; the drain re-runs on the next task termination or
+        // restart after the cooldown.
+        guard !isScopingBreakerOpen else {
+            stopLogger.notice("drainPendingScheduledRunQueue skipped — scoping breaker open")
+            return false
+        }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview }
         guard !stillBusy else { return false }
@@ -409,6 +441,13 @@ public actor OrchestrationRuntime {
     /// has its own cold-launch auto-resume controlled by `autoRunInterruptedTasks`).
     private func drainPendingTaskQueue() async {
         guard autoAdvanceEnabled else { return }
+        // Breaker gate: without this, one spawn-failed task (marked .failed → terminated
+        // hook → this drain) would auto-advance into the next pending task, fail it
+        // against the same dead backend, and cascade the entire queue to .failed.
+        guard !isScopingBreakerOpen else {
+            stopLogger.notice("drainPendingTaskQueue skipped — scoping breaker open")
+            return
+        }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview }
         guard !stillBusy else { return }
@@ -560,6 +599,59 @@ public actor OrchestrationRuntime {
     /// promoted to `.pending` so the cold-launch task summary surfaces them.
     /// `excluded` skips a task that's about to be promoted out of `.scheduled` by the
     /// run_task path (no point arming a wake we'd immediately cancel).
+    /// Filters a disk-replayed wake snapshot down to the wakes still valid to re-arm on a
+    /// fresh Smith. Rules, per wake:
+    ///
+    /// - **Non-auto-run wakes** (Smith imperatives: pause/stop/summarize, user follow-ups):
+    ///   kept, deduped by id. These carry instructions Smith must interpret; dropping them
+    ///   would break the documented promise that arbitrary `schedule_task_action` wakes
+    ///   survive restarts.
+    /// - **Auto-run `run_task` wakes**: dropped when `taskID == resumingTaskID` (this very
+    ///   restart is the wake's fulfillment), when the task is missing or inactive, or when
+    ///   the wake is PAST-DUE and its task has already left `.scheduled` — that combination
+    ///   means the wake fired and promoted its task before this snapshot was taken; replaying
+    ///   it re-fires it forever (the 2026-07-08 resurrection storm). A past-due wake whose
+    ///   task is still `.scheduled` elapsed while the app was quit and must fire (the
+    ///   documented cold-launch catch-up), and a FUTURE wake is kept regardless of task
+    ///   status (e.g. "run this pending task at 3pm" via `schedule_task_action`).
+    /// - **Duplicates**: auto-run wakes deduped by (taskID, wakeAt) — the incident's disk
+    ///   snapshot had accumulated the same 9 PM wake two and three times over.
+    ///
+    /// Accepted trade-off: a `run` wake against a `.paused`/`.interrupted` task that
+    /// elapses while the app is QUIT is indistinguishable here from one that already
+    /// fired, so it is dropped (logged, task stays visible in the UI) rather than fired
+    /// late. Firing it would require distinguishing "elapsed while quit" from "fired and
+    /// dispatch failed", and guessing wrong on the latter is what produced the storm.
+    ///
+    /// Internal (not private) for direct unit-testing — the replay filter is the guard
+    /// against wake-resurrection restart storms and needs test coverage.
+    func replayableWakes(from wakes: [ScheduledWake], resumingTaskID: UUID?) async -> [ScheduledWake] {
+        let now = Date()
+        let allTasks = await taskStore.allTasks()
+        let tasksByID = Dictionary(allTasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var seenAutoRunKeys = Set<String>()
+        var seenIDs = Set<UUID>()
+        var kept: [ScheduledWake] = []
+        var droppedCount = 0
+        for wake in wakes {
+            if AgentActor.wakeIsAutoRunRunTask(wake), let taskID = wake.taskID {
+                if taskID == resumingTaskID { droppedCount += 1; continue }
+                guard let task = tasksByID[taskID], task.disposition == .active else { droppedCount += 1; continue }
+                if wake.wakeAt <= now, task.status != .scheduled { droppedCount += 1; continue }
+                let key = "\(taskID.uuidString)|\(wake.wakeAt.timeIntervalSince1970)"
+                guard seenAutoRunKeys.insert(key).inserted else { droppedCount += 1; continue }
+                kept.append(wake)
+            } else {
+                guard seenIDs.insert(wake.id).inserted else { droppedCount += 1; continue }
+                kept.append(wake)
+            }
+        }
+        if droppedCount > 0 {
+            stopLogger.notice("Wake replay: dropped \(droppedCount, privacy: .public) stale/duplicate wake(s), kept \(kept.count, privacy: .public)")
+        }
+        return kept
+    }
+
     private func rearmScheduledTaskWakes(excluding excluded: UUID?) async {
         guard let smithAgent = smith else { return }
         let existingTaskIDs: Set<UUID> = Set(
@@ -783,6 +875,14 @@ public actor OrchestrationRuntime {
     /// Returns the role of the agent with the given ID, if it exists.
     public func roleForAgent(id: UUID) -> AgentRole? {
         agentRoles[id]
+    }
+
+    /// True while the agent with this ID is tracked in the live registry. Backs the
+    /// per-turn liveness lease (`ToolContext.isAgentCurrent`): an agent that has been
+    /// stopped, terminated, or lost to a teardown race reads false here and self-stops
+    /// at its next turn boundary instead of acting as a zombie.
+    public func isAgentRegistered(_ id: UUID) -> Bool {
+        agents[id] != nil
     }
 
     /// Returns the currently active UUID for the given role, or nil if no such agent is running.
@@ -1077,10 +1177,19 @@ public actor OrchestrationRuntime {
         // addition to app quit. The disk file is kept current via `onTimerEventForChannel`.
         // Without this, every `restartForNewTask` silently dropped the previous Smith's
         // in-memory wake list, so a second-or-later scheduled task simply never fired.
+        //
+        // The replay is FILTERED: the disk snapshot can lag the in-memory list (the
+        // persist runs via a MainActor hop that races the restart's teardown), so a wake
+        // that already fired can come back from disk and fire again on the fresh Smith —
+        // which restarts, replays, and fires it again, forever. That resurrection loop
+        // produced 31 full runtime generations in 8 seconds on 2026-07-08.
         if let loader = loadPersistedWakes {
             let wakes = await loader()
             if !wakes.isEmpty {
-                await smithAgent.restoreScheduledWakes(wakes)
+                let replayable = await replayableWakes(from: wakes, resumingTaskID: resumingTaskID)
+                if !replayable.isEmpty {
+                    await smithAgent.restoreScheduledWakes(replayable)
+                }
             }
         }
 
@@ -1200,15 +1309,32 @@ public actor OrchestrationRuntime {
                         The user is already informed about THIS task. Don't inform them about it a 2nd time.
                         """)
                 } else {
+                    // A failed spawn must not leave the task looking like ordinary pending
+                    // work the user is waiting on — that's what let a stranded reminder be
+                    // mistaken for "the task the user means" after the 2026-07-08 outage.
+                    // Mark it failed; `run_task` auto-resets failed tasks, so retrying is
+                    // one call once the provider is reachable again.
+                    await taskStore.updateStatus(id: resumingTaskID, status: .failed)
                     smithParts.append("""
-                        Failed to spawn Brown for task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)). \
-                        Check that a Brown LLM provider is configured. \
-                        Send the user a message explaining that Brown could not be started.
+                        Failed to start task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)) — Brown could not be spawned \
+                        (LLM provider unreachable or the security agent could not scope tools; details were posted to the channel). \
+                        The task has been marked FAILED. Send the user a short message explaining the task could not start and why, \
+                        and that saying "retry" will run it again (via `run_task`, which auto-resets failed tasks). \
+                        IMPORTANT: this failure applies ONLY to that one task. If the user sends a NEW message, handle it normally — \
+                        create a task for genuine new work, or simply reply if they're chatting. Do NOT attach a new request to the failed task.
                         """)
                 }
 
                 if let userMsg = lastUserMessage, !userMsg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    smithParts.append("The user's most recent message (before this restart): \"\(userMsg)\"")
+                    smithParts.append("""
+                        UNHANDLED USER MESSAGE: the user sent the following message and no Smith has acted on it yet. \
+                        It arrived before this restart, but it is a LIVE request, not background context — handle it now, \
+                        exactly as if it had just arrived. If it describes new work, create a NEW task for it (do not fold \
+                        it into the task above). If it's a question or chat, reply to the user.
+                        ---
+                        \(userMsg)
+                        ---
+                        """)
                 }
 
                 initialInstruction = smithParts.joined(separator: "\n\n")
@@ -1583,41 +1709,23 @@ public actor OrchestrationRuntime {
     public func stopAll(preserveObserverCallbacks: Bool = false) async {
         let entryStart = Date()
         stopLogger.notice("Runtime.stopAll entry agents=\(self.agents.count, privacy: .public) preserveCallbacks=\(preserveObserverCallbacks, privacy: .public)")
-        await powerManager?.shutdown()
-        powerManager = nil
 
-        await monitoringTimer?.stop()
-        monitoringTimer = nil
-
-        // Save Brown's context summary to its task before stopping agents
-        await saveBrownContextToTask()
-
-        let parallelStart = Date()
-        await withTaskGroup(of: Void.self) { group in
-            for (_, agent) in agents {
-                group.addTask { await agent.stop() }
-            }
-        }
-        let parallelMs = Int(Date().timeIntervalSince(parallelStart) * 1000)
-        stopLogger.notice("Runtime.stopAll all agent.stop() returned elapsedMs=\(parallelMs, privacy: .public)")
-
-        for (_, subIDs) in agentSubscriptions {
-            for subID in subIDs {
-                await channel.unsubscribe(subID)
-            }
-        }
-        agentSubscriptions.removeAll()
-
-        // Archive evaluation records before clearing evaluators.
-        for (brownID, evaluator) in securityEvaluators {
-            let records = await evaluator.evaluationHistory()
-            if !records.isEmpty {
-                archivedEvaluationRecords[brownID] = records
-            }
-        }
-
+        // Snapshot-and-clear every agent registry SYNCHRONOUSLY, before the first await.
+        // stopAll used to clear these at the END, after many suspension points — any agent
+        // registered by a concurrently-interleaved start() during those awaits was erased
+        // from tracking by the final removeAll() without ever being stopped, leaving it
+        // alive, subscribed, and unreachable by every future stop (the 2026-07-08 zombie
+        // incident: a full agent generation survived 80+ minutes and acted on a live user
+        // message). With clear-first semantics an agent registered mid-teardown lands in
+        // the fresh registries — this stopAll doesn't touch it, and the next one can reach
+        // it. Nothing is ever tracked-then-lost.
+        let agentsSnapshot = agents
+        let subscriptionsSnapshot = agentSubscriptions
+        let evaluatorsSnapshot = securityEvaluators
+        let brownIDSnapshot = currentBrownID
         agents.removeAll()
         agentRoles.removeAll()
+        agentSubscriptions.removeAll()
         securityEvaluators.removeAll()
         currentBrownID = nil
         smith = nil
@@ -1626,7 +1734,47 @@ public actor OrchestrationRuntime {
         // `pendingUserMessages` and will be redelivered to the next Smith by its start-drain.
         deliveredUserMessageChannelIDs.removeAll()
         currentSessionID = nil
-        await channel.setCurrentSessionID(nil)
+
+        await powerManager?.shutdown()
+        powerManager = nil
+
+        await monitoringTimer?.stop()
+        monitoringTimer = nil
+
+        // Save Brown's context summary to its task before stopping agents
+        if let brownID = brownIDSnapshot, let brown = agentsSnapshot[brownID] {
+            await saveBrownContextToTask(brownID: brownID, brown: brown)
+        }
+
+        let parallelStart = Date()
+        await withTaskGroup(of: Void.self) { group in
+            for (_, agent) in agentsSnapshot {
+                group.addTask { await agent.stop() }
+            }
+        }
+        let parallelMs = Int(Date().timeIntervalSince(parallelStart) * 1000)
+        stopLogger.notice("Runtime.stopAll all agent.stop() returned elapsedMs=\(parallelMs, privacy: .public)")
+
+        for (_, subIDs) in subscriptionsSnapshot {
+            for subID in subIDs {
+                await channel.unsubscribe(subID)
+            }
+        }
+
+        // Archive evaluation records from the snapshot's evaluators.
+        for (brownID, evaluator) in evaluatorsSnapshot {
+            let records = await evaluator.evaluationHistory()
+            if !records.isEmpty {
+                archivedEvaluationRecords[brownID] = records
+            }
+        }
+
+        // Only clear the channel's session stamp if no new generation has started while we
+        // were suspended above — a racing start() owns the stamp now, and nilling it would
+        // mislabel every post the new generation makes.
+        if currentSessionID == nil {
+            await channel.setCurrentSessionID(nil)
+        }
 
         // Drop the observer callbacks now that the runtime is quiescent. They
         // hold strong references to closures captured against the app layer's
@@ -1822,6 +1970,20 @@ public actor OrchestrationRuntime {
             let mcpTools = mcpHost != nil ? await mcpHost!.currentBridgedTools() : []
             let candidateNames = Set((builtIns + mcpTools).map(\.name))
             if preflightScopingEnabled {
+                // Circuit breaker: after repeated consecutive scoping failures (usually a
+                // dead/unreachable backend), stop attempting for a cooldown window instead
+                // of hammering it once per restart.
+                if isScopingBreakerOpen, let lastFailure = lastScopingFailureAt {
+                    securityEvaluators.removeValue(forKey: brownID)
+                    let retryInSeconds = Int(Self.scopingBreakerCooldown - Date().timeIntervalSince(lastFailure))
+                    await channel.post(ChannelMessage(
+                        sender: .system,
+                        content: "Not starting task \"\(task.title)\": the security agent's tool-scoping has failed \(scopingFailureStreak) times in a row — the model backend looks unreachable. Waiting ~\(max(retryInSeconds, 1))s before allowing another attempt. Check the Security Agent's model configuration or backend, then retry the task.",
+                        metadata: ["isError": .bool(true)]
+                    ))
+                    return nil
+                }
+
                 // Light the Security Agent card while it scopes — this is a real (often slow) Security Agent
                 // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
                 await notifyProcessingStateChange(role: .securityAgent, isProcessing: true)
@@ -1835,6 +1997,14 @@ public actor OrchestrationRuntime {
                 guard scoping.succeeded else {
                     // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
                     // a worker; surface to the user.
+                    //
+                    // A user-initiated cancellation (Escape during "Preparing…") also lands
+                    // here with the evaluator's cancelled sentinel — that says nothing
+                    // about backend health, so it must not open the breaker.
+                    if scoping.rawResponse != ToolScopingResult.cancelledSentinel {
+                        scopingFailureStreak += 1
+                        lastScopingFailureAt = Date()
+                    }
                     securityEvaluators.removeValue(forKey: brownID)
                     await channel.post(ChannelMessage(
                         sender: .system,
@@ -1843,6 +2013,8 @@ public actor OrchestrationRuntime {
                     ))
                     return nil
                 }
+                scopingFailureStreak = 0
+                lastScopingFailureAt = nil
                 guard !scoping.approvedNames.isEmpty else {
                     // Refusal — no tools approved for this task. Don't spawn a hamstrung worker.
                     securityEvaluators.removeValue(forKey: brownID)
@@ -1940,30 +2112,37 @@ public actor OrchestrationRuntime {
     /// Terminates a specific agent. If it's a Brown, also cleans up its SecurityEvaluator.
     public func terminateAgent(id: UUID, callerID: UUID? = nil) async -> Bool {
         let agentSlug = id.uuidString.prefix(8)
-        guard let agent = agents[id] else {
+        // Remove from every registry SYNCHRONOUSLY before the first await (clear-first
+        // discipline, same as stopAll / handleAgentSelfTerminate) so no interleaved flow
+        // can observe a half-removed agent between the awaits below.
+        guard let agent = agents.removeValue(forKey: id) else {
             stopLogger.notice("Runtime.terminateAgent agent not found id=\(agentSlug, privacy: .public) — early return")
             return false
         }
-        let role = agentRoles[id]?.rawValue ?? "unknown"
+        let agentRole = agentRoles.removeValue(forKey: id)
+        let evaluator = securityEvaluators.removeValue(forKey: id)
+        if currentBrownID == id {
+            currentBrownID = nil
+        }
+        let role = agentRole?.rawValue ?? "unknown"
         stopLogger.notice("Runtime.terminateAgent entry id=\(agentSlug, privacy: .public) role=\(role, privacy: .public)")
-
-        // Archive the agent's state before termination so the inspector can still display it.
-        if let role = agentRoles[id] {
-            await archiveAgent(agent, role: role)
-        }
-
-        // Archive the security evaluator's history before removing it.
-        if let evaluator = securityEvaluators.removeValue(forKey: id) {
-            let records = await evaluator.evaluationHistory()
-            archivedEvaluationRecords[id] = records
-        }
 
         let stopStart = Date()
         await agent.stop()
         let elapsedMs = Int(Date().timeIntervalSince(stopStart) * 1000)
         stopLogger.notice("Runtime.terminateAgent agent.stop returned id=\(agentSlug, privacy: .public) role=\(role, privacy: .public) elapsedMs=\(elapsedMs, privacy: .public)")
-        agents.removeValue(forKey: id)
-        agentRoles.removeValue(forKey: id)
+
+        // Archive the agent's state after stop so the inspector can still display it.
+        if let agentRole {
+            await archiveAgent(agent, role: agentRole)
+        }
+
+        // Archive the security evaluator's history.
+        if let evaluator {
+            let records = await evaluator.evaluationHistory()
+            archivedEvaluationRecords[id] = records
+        }
+
         await unsubscribeAgent(id: id)
 
         // Scrub the terminated agent's UUID from every task's assignee list so stale
@@ -1971,10 +2150,6 @@ public actor OrchestrationRuntime {
         // status messages Smith sees ("assigned to N agents") grow monotonically and
         // misrepresent how many agents are actually live on a task.
         await taskStore.unassignAgentFromAllTasks(agentID: id)
-
-        if currentBrownID == id {
-            currentBrownID = nil
-        }
 
         return true
     }
@@ -2159,6 +2334,13 @@ public actor OrchestrationRuntime {
                 guard let self else { return }
                 await self.handleAgentSelfTerminate(id: agentID)
             },
+            // Liveness lease: true only while this exact agent ID is still in the live
+            // registry. A deallocated runtime also reads as not-current — an agent whose
+            // runtime is gone is by definition a zombie.
+            isAgentCurrent: { [weak self] in
+                guard let self else { return false }
+                return await self.isAgentRegistered(agentID)
+            },
             onProcessingStateChange: { [weak self] isProcessing in
                 guard let self else { return }
                 Task { await self.notifyProcessingStateChange(role: role, isProcessing: isProcessing) }
@@ -2292,21 +2474,31 @@ public actor OrchestrationRuntime {
     /// Cleans up registry entries and channel subscriptions when an agent's run loop exits on its own.
     /// Guarded by agents[id] presence to be idempotent with terminateAgent().
     private func handleAgentSelfTerminate(id: UUID) async {
-        guard let agent = agents[id] else { return }
+        // Remove from every registry SYNCHRONOUSLY before the first await (same clear-first
+        // discipline as stopAll) so a concurrent teardown interleaving with the archive work
+        // below can never observe a half-removed agent.
+        guard let agent = agents.removeValue(forKey: id) else { return }
+        let role = agentRoles.removeValue(forKey: id)
+        let evaluator = securityEvaluators.removeValue(forKey: id)
 
-        // Archive the agent's state before cleanup so the inspector can still display it.
-        if let role = agentRoles[id] {
+        // Belt-and-braces: the run loop reported it exited on its own, but if this path is
+        // ever reached while the loop is somehow still live, the flag prevents an
+        // untracked-but-running agent. Deliberately NOT full `stop()`: onSelfTerminate is
+        // called from inside the agent's own run task, and stop() awaits that task's
+        // completion — a guaranteed 5 s grace-timeout stall plus a self-cancellation.
+        await agent.markTerminated()
+
+        // Archive the agent's state after stop so the inspector can still display it.
+        if let role {
             await archiveAgent(agent, role: role)
         }
 
         // Archive security evaluator records before cleanup.
-        if let evaluator = securityEvaluators.removeValue(forKey: id) {
+        if let evaluator {
             let records = await evaluator.evaluationHistory()
             archivedEvaluationRecords[id] = records
         }
 
-        agents.removeValue(forKey: id)
-        agentRoles.removeValue(forKey: id)
         await unsubscribeAgent(id: id)
 
         // Mark any running tasks assigned to this agent as failed — no agent is working on them anymore.
@@ -2345,8 +2537,10 @@ public actor OrchestrationRuntime {
 
     /// Extracts Brown's last few assistant messages and saves a compressed context summary
     /// to the task it was working on, enabling better resumability.
-    private func saveBrownContextToTask() async {
-        guard let brownID = currentBrownID, let brown = agents[brownID] else { return }
+    /// Takes the Brown reference explicitly (rather than reading `currentBrownID` /
+    /// `agents`) so `stopAll` can call it AFTER those registries have been snapshot-and-
+    /// cleared at teardown entry.
+    private func saveBrownContextToTask(brownID: UUID, brown: AgentActor) async {
         let context = await brown.contextSnapshot()
 
         // Find the task Brown was working on

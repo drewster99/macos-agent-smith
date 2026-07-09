@@ -194,6 +194,12 @@ public struct ToolContext: Sendable {
     /// Called when the agent's run loop exits naturally (errors or self-termination).
     /// Allows the runtime to clean up subscriptions and registry entries.
     public let onSelfTerminate: @Sendable () async -> Void
+    /// Liveness lease check: returns true while the runtime still tracks this agent as a
+    /// live, current agent. The agent's run loop consults this around every LLM turn and
+    /// self-stops on false — the dead-man's switch that kills an agent whose runtime
+    /// moved on without stopping it (the "zombie agent" class). Defaults to always-true
+    /// for contexts built outside the runtime (tests).
+    public let isAgentCurrent: @Sendable () async -> Bool
     /// Called with `true` when the agent begins an LLM API call, and `false` when it completes.
     public let onProcessingStateChange: @Sendable (Bool) -> Void
     /// Called with `true` when Security Agent begins a security evaluation LLM call, `false` when it completes.
@@ -305,6 +311,7 @@ public struct ToolContext: Sendable {
         agentRoleForID: @escaping @Sendable (UUID) async -> AgentRole?,
         agentIDForRole: @escaping @Sendable (AgentRole) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
+        isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onToolExecutionStateChange: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
@@ -359,6 +366,7 @@ public struct ToolContext: Sendable {
         self.agentRoleForID = agentRoleForID
         self.agentIDForRole = agentIDForRole
         self.onSelfTerminate = onSelfTerminate
+        self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange
         self.onSecurityAgentProcessingStateChange = onSecurityAgentProcessingStateChange
         self.onToolExecutionStateChange = onToolExecutionStateChange

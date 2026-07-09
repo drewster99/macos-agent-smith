@@ -219,6 +219,18 @@ public actor AgentActor {
     private var consecutiveIdenticalToolCalls = 0
     private static let maxConsecutiveIdenticalToolCalls = 4
 
+    /// Per-tool failures since that tool's last success. Complements the identical-call
+    /// breaker above, which resets on any text-only turn or different call — the 2026-07-08
+    /// zombie Brown failed `task_complete` 13 times over 14 minutes with narration turns
+    /// and successful `file_read`s interleaved, so no *consecutive* rule could catch it.
+    /// A tool that fails this many times without a single success is a loop regardless of
+    /// what happens in between. Warned once per streak; the streak resets only when the
+    /// same tool finally succeeds.
+    private var toolFailureStreaks: [String: Int] = [:]
+    private var toolFailureWarnedTools: Set<String> = []
+    private static let toolFailureStreakWarnThreshold = 5
+    private static let toolFailureStreakStopThreshold = 10
+
     /// Brown-only: time of the most recent successful task_acknowledged/task_update/task_complete.
     /// Used by the silence nudge. Initialized when the run loop starts.
     private var lastTaskCommunicationAt: Date?
@@ -776,6 +788,34 @@ public actor AgentActor {
         onAutoRunTask = nil
     }
 
+    /// Marks the agent stopped WITHOUT cancelling or awaiting run-loop exit. For teardown
+    /// paths that can execute inside the agent's own run task (`onSelfTerminate` → runtime
+    /// → back here): calling full `stop()` there would await `runTask.value` — the very
+    /// task making the call — deadlocking until the 5 s grace timeout on every legitimate
+    /// self-terminate, and `task.cancel()` would self-cancel the remaining teardown. The
+    /// flag alone is enough: the run loop re-checks `isRunning` at every boundary.
+    public func markTerminated() {
+        isRunning = false
+    }
+
+    /// Liveness lease check — the dead-man's switch against zombie agents. Returns true
+    /// while the runtime still tracks this agent as current. On false, quietly stops the
+    /// run loop (fault-logged, no channel post): correctness must not depend on `stop()`
+    /// having been called on every teardown path — the 2026-07-08 incident had a full
+    /// agent generation escape tracking during interleaved restarts and act on a live
+    /// user message 35 minutes later. Quiet by design: during a normal `stopAll` the
+    /// registries are cleared before agents are awaited, so an in-flight turn can trip
+    /// this while being shut down — expected, and `stop()` lands moments later.
+    private func verifyLivenessLease() async -> Bool {
+        guard isRunning else { return false }
+        if await toolContext.isAgentCurrent() { return true }
+        let role = configuration.role.rawValue
+        let agentID = id.uuidString.prefix(8)
+        Self.stopLogger.fault("Zombie tripwire: agent no longer registered with runtime — self-stopping role=\(role, privacy: .public) agent=\(agentID, privacy: .public)")
+        isRunning = false
+        return false
+    }
+
     /// Injects a channel message into the agent's pending queue.
     ///
     /// Delivery rules:
@@ -1032,6 +1072,11 @@ public actor AgentActor {
 
     private func runLoop() async {
         while isRunning, !Task.isCancelled {
+            // Liveness lease at every loop tick, BEFORE wake-firing and message drains: an
+            // orphaned agent must not fire scheduled wakes (which can drive restartForNewTask
+            // on the live runtime) any more than it may run LLM turns.
+            guard await verifyLivenessLease() else { break }
+
             // Re-inject deferred messages (e.g. task_complete held back from a previous batch)
             // so they get their own focused LLM turn.
             if !deferredMessages.isEmpty {
@@ -1153,6 +1198,10 @@ public actor AgentActor {
                     toolContext.onProcessingStateChange(false)
                 }
 
+                // Liveness lease: don't burn an LLM call (or act on its result) if the
+                // runtime has already moved on without this agent.
+                guard await verifyLivenessLease() else { break }
+
                 let messagesForLLM = conversationHistory
 
                 let llmStartTime = Date()
@@ -1169,6 +1218,9 @@ public actor AgentActor {
                 )
                 let llmLatencyMs = Int(Date().timeIntervalSince(llmStartTime) * 1000)
                 guard isRunning else { break }
+                // Re-check the lease after the (possibly minutes-long) LLM call, BEFORE any
+                // tool executes. This is the exact window the 2026-07-08 zombie acted in.
+                guard await verifyLivenessLease() else { break }
 
                 consecutiveErrors = 0
                 consecutiveContextOverflows = 0
@@ -1674,6 +1726,7 @@ public actor AgentActor {
                     } else {
                         result = "Unknown tool: \(call.name)"
                         await toolContext.setToolExecutionStatus(call.id, false)
+                        recordToolOutcome(name: call.name, succeeded: false)
                     }
                     executedCallIDs.insert(call.id)
                     updatePostCallFlags(call: call, result: result, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
@@ -1884,6 +1937,7 @@ public actor AgentActor {
                     } else {
                         result = "Unknown tool: \(call.name)"
                         await toolContext.setToolExecutionStatus(call.id, false)
+                        recordToolOutcome(name: call.name, succeeded: false)
                     }
                     executedCallIDs.insert(call.id)
                     updatePostCallFlags(call: call, result: result, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
@@ -1928,6 +1982,35 @@ public actor AgentActor {
             lastToolCallSignature = nil
             hasUnprocessedInput = false
             return
+        }
+
+        // --- Per-tool failure-streak circuit breaker ---
+        // Catches the loop the identical-call breaker can't: a tool failing over and over
+        // with varying arguments and narration/successful other tools interleaved. Warn
+        // once mid-streak so the model can change course; if it still can't land a single
+        // success, break the loop the same way as above (idle until new input).
+        if let worst = toolFailureStreaks.max(by: { $0.value < $1.value }) {
+            if worst.value >= Self.toolFailureStreakStopThreshold {
+                await toolContext.post(ChannelMessage(
+                    sender: .system,
+                    content: "Agent \(configuration.role.displayName)'s calls to \(worst.key) have failed \(worst.value) times without a single success. Breaking loop — agent will idle until new input arrives.",
+                    metadata: ["isError": .bool(true)]
+                ))
+                toolFailureStreaks[worst.key] = nil
+                toolFailureWarnedTools.remove(worst.key)
+                hasUnprocessedInput = false
+                return
+            }
+            if worst.value >= Self.toolFailureStreakWarnThreshold, !toolFailureWarnedTools.contains(worst.key) {
+                toolFailureWarnedTools.insert(worst.key)
+                conversationHistory.append(.user("""
+                    [System] Your calls to `\(worst.key)` have now failed \(worst.value) times without a single success. \
+                    STOP retrying the same approach. Re-read the most recent error text carefully and either change \
+                    your approach or report the blocker\(configuration.role == .brown ? " via request_help" : ""). \
+                    After \(Self.toolFailureStreakStopThreshold) failures without a success you will be stopped.
+                    """))
+                pushLiveContext()
+            }
         }
 
         // run_task fires a detached restart — stop the run loop so we don't
@@ -2067,6 +2150,7 @@ public actor AgentActor {
             // a retry of the same call is recognized as a legitimate response, not a
             // duplicate operation.
             await toolContext.setToolExecutionStatus(call.id, false)
+            recordToolOutcome(name: call.name, succeeded: false)
             return "Tool execution denied: \(disposition.message ?? "No reason given")"
         }
     }
@@ -2079,7 +2163,19 @@ public actor AgentActor {
         turnToolExecutionMs += outcome.executionMs
         turnToolResultChars += outcome.result.count
         await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
+        recordToolOutcome(name: call.name, succeeded: outcome.succeeded)
         return outcome.result
+    }
+
+    /// Feeds the per-tool failure-streak breaker (`toolFailureStreaks`). A success wipes
+    /// that tool's streak and re-arms its warning; a failure increments it.
+    private func recordToolOutcome(name: String, succeeded: Bool) {
+        if succeeded {
+            toolFailureStreaks[name] = nil
+            toolFailureWarnedTools.remove(name)
+        } else {
+            toolFailureStreaks[name, default: 0] += 1
+        }
     }
 
     /// Rebuilds the per-turn `ToolAvailabilityContext` using current actor state.
