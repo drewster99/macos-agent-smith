@@ -733,6 +733,29 @@ public actor OrchestrationRuntime {
     /// iteration guards against a degenerate recurrence that never reaches the future.
     private static func rolledForwardRecurrence(of wake: ScheduledWake, after now: Date) -> ScheduledWake? {
         guard let recurrence = wake.recurrence else { return nil }
+
+        // `.interval` catch-up in O(1): a 60 s interval left offline for a week needs
+        // 10,000+ steps, which exhausted the iteration-capped loop below and silently
+        // killed the series (agy review finding). Number of whole intervals to reach
+        // strictly past `now`, computed arithmetically.
+        if case .interval(let seconds) = recurrence, seconds > 0 {
+            let interval = TimeInterval(seconds)
+            let elapsed = now.timeIntervalSince(wake.wakeAt)
+            let steps = max(1, Int(floor(elapsed / interval)) + 1)
+            let fireAt = wake.wakeAt.addingTimeInterval(TimeInterval(steps) * interval)
+            return ScheduledWake(
+                wakeAt: fireAt,
+                instructions: wake.instructions,
+                taskID: wake.taskID,
+                recurrence: recurrence,
+                originalID: wake.originalID,
+                previousFireAt: fireAt.addingTimeInterval(-interval),
+                survivesTaskTermination: wake.survivesTaskTermination
+            )
+        }
+
+        // Calendar recurrences step at most once per day, so the cap spans ~27 years —
+        // a true runaway guard, not a reachable limit.
         var fireAt = wake.wakeAt
         var previousFireAt = wake.previousFireAt
         for _ in 0..<10_000 {
@@ -1100,6 +1123,13 @@ public actor OrchestrationRuntime {
         let generation = supervisor.beginGeneration()
         let sessionID = generation.sessionID
         await channel.setCurrentSessionID(sessionID)
+
+        // Delivery tracking is per-Smith by definition (a fresh Smith has incorporated
+        // nothing), so reset it at generation start. Without this, a drain suspended in
+        // `acceptChannelMessage` while a stopAll interleaved could re-insert a stale ID
+        // AFTER the stop's clear, and the next session's drain would skip that buffered
+        // message until yet another stop cycle (agy review finding).
+        deliveredUserMessageChannelIDs.removeAll()
 
         let powerMgr = PowerAssertionManager(taskStore: taskStore)
         await powerMgr.start()
@@ -2233,9 +2263,13 @@ public actor OrchestrationRuntime {
         // Registration returns nil only when no generation is active — i.e. the runtime
         // was stopped while this spawn was mid-flight. Failing the spawn cleanly here is
         // exactly the structural guard against creating an untracked (unkillable) agent.
-        guard supervisor.register(id: brownID, role: .brown, agent: brownAgent, evaluator: evaluator) != nil else {
+        // The `!aborted` re-check closes the last window: an abort raised during the
+        // wiring awaits since the post-scoping barrier must not get a registered, started
+        // worker (agy review finding).
+        guard !aborted,
+              supervisor.register(id: brownID, role: .brown, agent: brownAgent, evaluator: evaluator) != nil else {
             await brownAgent.markTerminated()
-            stopLogger.warning("spawnBrown: runtime stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")
+            stopLogger.warning("spawnBrown: aborted or stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")
             return nil
         }
 

@@ -239,6 +239,28 @@ struct WakeReplayFilterTests {
         #expect(kept.count == 1, "rolled wake and persisted successor must collapse to one")
     }
 
+    @Test("A short-interval recurrence offline for a week still rolls forward")
+    func longOfflineIntervalRecurrenceSurvives() async {
+        // agy review finding: the iteration-capped roll-forward loop needed 10,000+ steps
+        // for a 60 s interval left offline ~7 days, exhausted the cap, and silently
+        // killed the series. The .interval path is now O(1) arithmetic.
+        let runtime = makeRuntime()
+        let store = await runtime.taskStore
+        let task = await store.addTask(
+            title: "Every minute", description: "d",
+            scheduledRunAt: Date(timeIntervalSinceNow: -8 * 24 * 3600)
+        )
+        var wake = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: -8 * 24 * 3600))
+        wake.recurrence = .interval(seconds: 60)
+
+        let kept = await runtime.replayableWakes(from: [wake], resumingTaskID: nil)
+        #expect(kept.count == 1, "an 8-day-offline 60 s recurrence must survive replay")
+        guard let rolled = kept.first else { return }
+        #expect(rolled.wakeAt > Date())
+        #expect(rolled.wakeAt.timeIntervalSinceNow <= 60, "must be the FIRST future occurrence")
+        #expect(rolled.originalID == wake.originalID)
+    }
+
     @Test("Distinct future run-wakes for the same task all survive")
     func distinctFutureWakesForSameTaskAreKept() async {
         // The dedupe key is (taskID, wakeAt): it must collapse only true duplicates,
