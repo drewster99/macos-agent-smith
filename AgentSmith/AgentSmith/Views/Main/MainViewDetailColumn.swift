@@ -16,6 +16,10 @@ struct MainViewDetailColumn: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if shared.taskOverlayVisible {
+                TaskOverlayBar(viewModel: viewModel, shared: shared)
+            }
+
             if viewModel.isAborted {
                 AbortBanner(
                     reason: viewModel.abortReason,

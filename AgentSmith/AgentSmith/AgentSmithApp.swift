@@ -151,6 +151,19 @@ struct AgentSmithApp: App {
         }
         .defaultSize(width: 800, height: 700)
 
+        WindowGroup("Task Panel", for: TaskOverlayPanelTarget.self) { $target in
+            if let target, let vm = sessionManager.viewModel(for: target.sessionID) {
+                TaskOverlayPanelWindow(taskID: target.taskID, viewModel: vm)
+            } else {
+                ContentUnavailableView(
+                    "Task Not Found",
+                    systemImage: "questionmark.circle",
+                    description: Text("This task's session may have been closed.")
+                )
+            }
+        }
+        .defaultSize(width: 360, height: 260)
+
         WindowGroup("Task Detail", for: TaskDetailTarget.self) { $target in
             if let target, let vm = sessionManager.viewModel(for: target.sessionID) {
                 TaskDetailWindow(taskID: target.taskID, viewModel: vm, sessionManager: sessionManager)

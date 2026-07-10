@@ -112,6 +112,14 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Stepper(value: $shared.taskOverlayColumns, in: 1...8) {
+                Text("Task overlay columns: \(shared.taskOverlayColumns)")
+            }
+
+            Text("How many task panels the top-of-window overlay bar shows side by side. Additional tasks collect in the bar's overflow menu.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Divider()
 
             Text("Scheduling")

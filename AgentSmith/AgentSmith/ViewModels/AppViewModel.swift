@@ -509,6 +509,7 @@ final class AppViewModel {
                     let allTasks = await store.allTasks()
                     guard myGen == self.taskApplyGeneration else { return }
                     self.tasks = allTasks
+                    self.updateTaskOverlay()
                     self.persistTasks()
                 }
             }
@@ -780,6 +781,7 @@ final class AppViewModel {
                 let allTasks = await liveTaskStore.allTasks()
                 guard myGen == self.taskApplyGeneration else { return }
                 self.tasks = allTasks
+                self.updateTaskOverlay()
                 self.persistTasks()
             }
         }
@@ -1371,6 +1373,104 @@ final class AppViewModel {
             Description: \(task.description)
             """
         )
+    }
+
+    // MARK: - Task overlay bar
+
+    /// One column in the top-of-window task overlay bar. Order is append-only — a
+    /// column's position never changes while it's visible (Drew's spec); removal only
+    /// happens via dismiss, tear-off, or the first-completed eviction when a NEW task
+    /// needs a slot.
+    struct TaskOverlayEntry: Identifiable, Equatable {
+        let id: UUID
+        /// When every active step reached completed/skipped — starts the 5-second dwell
+        /// before the column switches from the todo list to live acceptance criteria.
+        var allStepsDoneAt: Date?
+        /// Whether the column currently shows acceptance criteria instead of steps.
+        var showsCriteria: Bool
+    }
+
+    var taskOverlayEntries: [TaskOverlayEntry] = []
+    private var taskOverlayDismissedIDs: Set<UUID> = []
+    /// Monotonic token so a scheduled dwell re-check that outlived a newer overlay
+    /// update can't apply stale state.
+    private var taskOverlayDwellGeneration = 0
+
+    /// Recomputes the overlay from the current `tasks`. Called on every task-store
+    /// change; cheap (pure array/set work over the active task list).
+    func updateTaskOverlay() {
+        let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let inFlightStatuses: Set<AgentTask.Status> = [.running, .validating, .awaitingReview]
+
+        // Drop entries whose task vanished (deleted/archived elsewhere).
+        taskOverlayEntries.removeAll { byID[$0.id] == nil }
+
+        // Append newly in-flight tasks (creation order), never re-adding dismissed ones.
+        let present = Set(taskOverlayEntries.map(\.id))
+        let barCapacity = max(1, shared.taskOverlayColumns)
+        let newcomers = tasks
+            .filter { inFlightStatuses.contains($0.status) && !present.contains($0.id) && !taskOverlayDismissedIDs.contains($0.id) }
+            .sorted { $0.createdAt < $1.createdAt }
+        for task in newcomers {
+            // Bar full → evict the FIRST terminal column to free a slot. If nothing in
+            // the bar is terminal, the newcomer simply lands in the junk drawer.
+            if taskOverlayEntries.count >= barCapacity {
+                let barSlice = taskOverlayEntries.prefix(barCapacity)
+                if let evict = barSlice.first(where: { byID[$0.id]?.status.isTerminal ?? true }) {
+                    taskOverlayEntries.removeAll { $0.id == evict.id }
+                }
+            }
+            taskOverlayEntries.append(TaskOverlayEntry(id: task.id, allStepsDoneAt: nil, showsCriteria: false))
+        }
+
+        // Dwell + criteria handoff per entry.
+        taskOverlayDwellGeneration &+= 1
+        var needsDwellRecheck = false
+        let now = Date()
+        for index in taskOverlayEntries.indices {
+            guard let task = byID[taskOverlayEntries[index].id] else { continue }
+            let activeSteps = task.steps.filter(\.isActive)
+            let allDone = !activeSteps.isEmpty && activeSteps.allSatisfy { $0.status == .completed || $0.status == .skipped }
+
+            if task.status.isTerminal || activeSteps.isEmpty {
+                // Failed/completed columns and step-less tasks show criteria directly.
+                taskOverlayEntries[index].showsCriteria = true
+            } else if allDone {
+                if taskOverlayEntries[index].allStepsDoneAt == nil {
+                    taskOverlayEntries[index].allStepsDoneAt = now
+                }
+                if let doneAt = taskOverlayEntries[index].allStepsDoneAt, now.timeIntervalSince(doneAt) >= 5 {
+                    taskOverlayEntries[index].showsCriteria = true
+                } else {
+                    needsDwellRecheck = true
+                }
+            } else {
+                // Steps churned back to unfinished — return to the todo view.
+                taskOverlayEntries[index].allStepsDoneAt = nil
+                taskOverlayEntries[index].showsCriteria = false
+            }
+        }
+        if needsDwellRecheck {
+            let generation = taskOverlayDwellGeneration
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(5.1))
+                guard let self, self.taskOverlayDwellGeneration == generation else { return }
+                self.updateTaskOverlay()
+            }
+        }
+    }
+
+    /// Removes a column from the bar (the task itself is untouched). Sticky for the
+    /// session — the task won't re-add itself.
+    func dismissTaskOverlayEntry(taskID: UUID) {
+        taskOverlayDismissedIDs.insert(taskID)
+        taskOverlayEntries.removeAll { $0.id == taskID }
+    }
+
+    /// Tear-off: the caller opens the floating panel window; the bar column is removed
+    /// (and won't re-add, same as dismiss).
+    func tearOffTaskOverlayEntry(taskID: UUID) {
+        dismissTaskOverlayEntry(taskID: taskID)
     }
 
     /// Manually starts (or resumes) a pending / paused / interrupted task without waiting for

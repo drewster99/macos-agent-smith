@@ -114,6 +114,27 @@ final class SharedAppState {
         for observer in workerCapacityObservers.values { observer() }
     }
 
+    /// How many task columns the top-of-window overlay bar shows before overflowing
+    /// into the junk drawer (1–8; default 4).
+    var taskOverlayColumns: Int = SharedAppState.intDefault(key: "taskOverlayColumns", default: 4) {
+        didSet { UserDefaults.standard.set(taskOverlayColumns, forKey: "taskOverlayColumns") }
+    }
+
+    /// Whether the task overlay bar is shown at all (toolbar toggle).
+    var taskOverlayVisible: Bool = SharedAppState.boolDefault(key: "taskOverlayVisible", default: true) {
+        didSet { UserDefaults.standard.set(taskOverlayVisible, forKey: "taskOverlayVisible") }
+    }
+
+    /// Whether the overlay bar is collapsed to the one-line strip.
+    var taskOverlayCollapsed: Bool = SharedAppState.boolDefault(key: "taskOverlayCollapsed", default: false) {
+        didSet { UserDefaults.standard.set(taskOverlayCollapsed, forKey: "taskOverlayCollapsed") }
+    }
+
+    /// User-dragged height of the expanded overlay bar, clamped in the view.
+    var taskOverlayHeight: Double = SharedAppState.doubleDefault(key: "taskOverlayHeight", default: 170) {
+        didSet { UserDefaults.standard.set(taskOverlayHeight, forKey: "taskOverlayHeight") }
+    }
+
     /// Maximum bytes accepted for any single attachment. Files larger than this are
     /// rejected at ingestion time. Default 25 MB — large enough to cover phone-camera
     /// photos and small PDFs, small enough that one bad file can't blow the LLM context.
@@ -198,6 +219,11 @@ final class SharedAppState {
     private static func intDefault(key: String, default fallback: Int) -> Int {
         if UserDefaults.standard.object(forKey: key) == nil { return fallback }
         return UserDefaults.standard.integer(forKey: key)
+    }
+
+    private static func doubleDefault(key: String, default fallback: Double) -> Double {
+        if UserDefaults.standard.object(forKey: key) == nil { return fallback }
+        return UserDefaults.standard.double(forKey: key)
     }
 
     /// Reads a Bool from UserDefaults, defaulting to `default` when the key has never been set.

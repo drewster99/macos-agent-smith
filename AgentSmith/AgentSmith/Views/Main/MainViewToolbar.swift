@@ -49,6 +49,14 @@ struct MainViewToolbar: ToolbarContent {
                 .foregroundStyle(.secondary)
             }
 
+            Button(
+                shared.taskOverlayVisible ? "Hide Task Overlay" : "Show Task Overlay",
+                systemImage: shared.taskOverlayVisible ? "rectangle.topthird.inset.filled" : "rectangle"
+            ) {
+                shared.taskOverlayVisible.toggle()
+            }
+            .help(shared.taskOverlayVisible ? "Hide the task overlay bar" : "Show the task overlay bar")
+
             Button("Memory Browser", systemImage: "brain", action: onOpenMemoryBrowser)
 
             Button("Clear Conversation", systemImage: "trash") {
