@@ -41,12 +41,10 @@ struct AgentInspectorWindow: View {
     }
 
     var body: some View {
-        // Single-pass message bucketing per body. Without this, roleMessages /
-        // recentMessages / recentToolUses each re-filtered viewModel.messages.
-        let roleMessages = viewModel.messages.filter {
-            if case .agent(let r) = $0.sender { return r == role }
-            return false
-        }
+        // Single-pass message bucketing per body, sharing InspectorView's rules
+        // (role-attributed system diagnostics included, agent_online chrome excluded)
+        // so the standalone window and the sidebar card never disagree.
+        let roleMessages = InspectorView.bucketMessagesByRole(viewModel.messages)[role] ?? []
         let hasActivity = !roleMessages.isEmpty || viewModel.hasAgentActivity(role)
         let recentMessages = Array(roleMessages.suffix(10).reversed())
         let recentToolUses = Array(roleMessages.filter { $0.metadata?["tool"] != nil }.suffix(5).reversed())
