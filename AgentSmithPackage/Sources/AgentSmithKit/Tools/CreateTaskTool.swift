@@ -293,21 +293,22 @@ public struct CreateTaskTool: AgentTool {
             }
         }
 
-        // Auto-start the new task when nothing else is in flight. Prevents the failure mode
-        // where Smith creates a task and then idles instead of immediately calling run_task.
-        // Gated to active+pending sibling tasks so we don't yank focus from a running task or
-        // a task awaiting Smith's review.
-        let blockingTask = existingTasks.first { other in
+        // Auto-start the new task when a worker slot is free. Prevents the failure mode
+        // where Smith creates a task and then idles instead of immediately calling
+        // run_task. Beyond capacity the task queues as pending — auto-run starts it when
+        // a slot frees; Smith must NOT poll run_task for it.
+        let capacity = await context.workerCapacity()
+        let slotHolders = existingTasks.filter { other in
             other.id != task.id &&
             other.disposition == .active &&
             (other.status == .running || other.status == .awaitingReview || other.status == .validating)
         }
-        if blockingTask == nil {
+        if slotHolders.count < capacity {
             await context.restartForNewTask(task.id)
-            return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote) System is restarting with a clean context to begin work on this task.")
+            return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote) A worker is being spawned to begin work on it now.")
         }
 
-        return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote) Task '\(blockingTask!.title)' is currently \(blockingTask!.status.rawValue); call `run_task` once it finishes.")
+        return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote) All \(capacity) task slot(s) are busy — it is queued as pending and auto-run will start it when a slot frees. Do NOT call `run_task` on it.")
     }
 
     /// Build the "missing title" tool error. If there's exactly one pending task

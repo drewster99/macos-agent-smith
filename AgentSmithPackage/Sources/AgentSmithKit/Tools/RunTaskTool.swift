@@ -109,26 +109,34 @@ struct RunTaskTool: AgentTool {
                 """)
         }
 
-        // Refuse to restart if another task is running or awaiting review.
-        // Running: would kill Brown mid-work. AwaitingReview: Smith should review first.
+        // Capacity gate: each in-flight task (running/validating, plus awaitingReview —
+        // whose parked worker still holds its slot) occupies one of the configured
+        // worker slots. Refuse only when they're all taken.
         let allTasks = await context.taskStore.allTasks()
-        if let runningTask = allTasks.first(where: { ($0.status == .running || $0.status == .validating) && $0.id != taskID }) {
-            return .failure("""
-                Cannot start '\(task.title)' — task '\(runningTask.title)' is still running. \
-                Wait for the current task to complete (or fail) before calling run_task. \
-                The task has been created and is queued as pending.
-                """)
+        let capacity = await context.workerCapacity()
+        let slotHolders = allTasks.filter {
+            $0.disposition == .active && $0.id != taskID &&
+            ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
         }
-        if let reviewTask = allTasks.first(where: { $0.status == .awaitingReview && $0.id != taskID }) {
-            if reviewTask.helpRequest != nil {
+        if slotHolders.count >= capacity {
+            // Help requests and reviews deserve a pointed message — resolving one is
+            // usually the fastest way to free a slot.
+            if let helpTask = slotHolders.first(where: { $0.status == .awaitingReview && $0.helpRequest != nil }) {
                 return .failure("""
-                    Cannot start '\(task.title)' — task '\(reviewTask.title)' has a blocker from Brown awaiting your help. \
-                    Resolve it with `provide_help` (or `message_user` first if you need something from the user) before starting the next task.
+                    Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(helpTask.title)' \
+                    has a blocker from Brown awaiting your help. Resolve it with `provide_help` to free a slot.
                     """)
             }
+            if let reviewTask = slotHolders.first(where: { $0.status == .awaitingReview }) {
+                return .failure("""
+                    Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(reviewTask.title)' \
+                    is awaiting your review. Call review_work on it to free a slot.
+                    """)
+            }
+            let names = slotHolders.map { "'\($0.title)'" }.joined(separator: ", ")
             return .failure("""
-                Cannot start '\(task.title)' — task '\(reviewTask.title)' is awaiting your review. \
-                Call review_work to accept or reject it first, then run_task to start the next task.
+                Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy (\(names)). \
+                It stays queued; auto-run starts it when a slot frees. Do not retry run_task.
                 """)
         }
 

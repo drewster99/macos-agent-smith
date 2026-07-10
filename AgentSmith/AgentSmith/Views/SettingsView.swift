@@ -101,6 +101,19 @@ struct SettingsView: View {
 
             Divider()
 
+            Text("Tasks")
+                .font(AppFonts.sectionHeader)
+
+            Stepper(value: $shared.maxSimultaneousTasks, in: 1...10) {
+                Text("Max simultaneous tasks: \(shared.maxSimultaneousTasks)")
+            }
+
+            Text("How many tasks may run at the same time, each with its own worker agent. Starting beyond this limit never interrupts a running task — extra tasks queue as pending and auto-run starts them as slots free. Applies immediately to active sessions.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
             Text("Scheduling")
                 .font(AppFonts.sectionHeader)
 

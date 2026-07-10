@@ -201,6 +201,10 @@ public struct ToolContext: Sendable {
     /// registry directory is configured. Smith's criteria/validator tools use this as
     /// their selection surface. Defaults to nil for contexts built outside the runtime.
     public let loadEvaluatorRegistry: @Sendable () async -> EvaluatorRegistry?
+    /// How many tasks may run concurrently (each with its own worker). Task-starting
+    /// tools compare in-progress task counts against this. Defaults to 1 for contexts
+    /// built outside the runtime.
+    public let workerCapacity: @Sendable () async -> Int
     /// Liveness lease check: returns true while the runtime still tracks this agent as a
     /// live, current agent. The agent's run loop consults this around every LLM turn and
     /// self-stops on false — the dead-man's switch that kills an agent whose runtime
@@ -320,6 +324,7 @@ public struct ToolContext: Sendable {
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
         beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
         loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
+        workerCapacity: @escaping @Sendable () async -> Int = { 1 },
         isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
@@ -377,6 +382,7 @@ public struct ToolContext: Sendable {
         self.onSelfTerminate = onSelfTerminate
         self.beginTaskValidation = beginTaskValidation
         self.loadEvaluatorRegistry = loadEvaluatorRegistry
+        self.workerCapacity = workerCapacity
         self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange
         self.onSecurityAgentProcessingStateChange = onSecurityAgentProcessingStateChange

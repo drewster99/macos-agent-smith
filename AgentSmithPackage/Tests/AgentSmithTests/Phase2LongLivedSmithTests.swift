@@ -101,10 +101,11 @@ struct Phase2LongLivedSmithTests {
         await runtime.stopAll()
     }
 
-    @Test("spawnBrown for the same task cycles that task's worker; capacity 1 evicts the incumbent")
-    func spawnPolicyCyclesAndEvicts() async {
+    @Test("spawnBrown cycles the same task's worker; at capacity a different task's spawn is refused, never evicting")
+    func spawnPolicyCyclesButNeverEvicts() async {
         let runtime = makeRuntime()
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setWorkerCapacity(1)
         await runtime.start()
         let store = await runtime.taskStore
 
@@ -115,16 +116,16 @@ struct Phase2LongLivedSmithTests {
         #expect(workerA1 != nil && workerA2 != nil && workerA1 != workerA2)
         #expect(await runtime.agentIDForRole(.brown) == workerA2)
 
-        // Different task at capacity 1: the incumbent is evicted (historical policy).
+        // Different task at capacity: the spawn is REFUSED; the incumbent is untouchable.
         let taskB = await store.addTask(title: "B", description: "d")
         let workerB = await runtime.spawnBrown(for: taskB)
-        #expect(workerB != nil)
-        #expect(await runtime.agentIDForRole(.brown) == workerB, "only task B's worker survives at capacity 1")
+        #expect(workerB == nil, "capacity never evicts — the spawn fails cleanly")
+        #expect(await runtime.agentIDForRole(.brown) == workerA2, "task A's worker survives")
 
         await runtime.stopAll()
     }
 
-    @Test("At capacity 2, workers for two tasks coexist; a third spawn evicts the oldest")
+    @Test("At capacity 2, workers for two tasks coexist; a third spawn is refused")
     func capacityTwoAllowsConcurrentWorkers() async {
         let runtime = makeRuntime()
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
@@ -143,13 +144,38 @@ struct Phase2LongLivedSmithTests {
         #expect(await runtime.isAgentRegistered(workerA), "worker A survives worker B's spawn at capacity 2")
         #expect(await runtime.isAgentRegistered(workerB))
 
-        guard let workerC = await runtime.spawnBrown(for: taskC) else {
-            Issue.record("third worker spawn failed")
-            return
-        }
-        #expect(!(await runtime.isAgentRegistered(workerA)), "the OLDEST worker is evicted at capacity")
+        let workerC = await runtime.spawnBrown(for: taskC)
+        #expect(workerC == nil, "the third spawn is refused — nobody is evicted")
+        #expect(await runtime.isAgentRegistered(workerA))
         #expect(await runtime.isAgentRegistered(workerB))
-        #expect(await runtime.isAgentRegistered(workerC))
+
+        await runtime.stopAll()
+    }
+
+    @Test("A start racing past the tool checks is PENDED by the serialized gate, not failed, not evicting")
+    func capacityGatePendsTheRaceLoser() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setWorkerCapacity(1)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        // Task A occupies the only slot, genuinely running.
+        let taskA = await store.addTask(title: "A", description: "d")
+        await runtime.restartForNewTask(taskID: taskA.id)
+        await runtime.waitForPendingRestarts()
+        let workerA = await runtime.agentIDForRole(.brown)
+        #expect(workerA != nil)
+
+        // A second start arrives anyway (the tool-check race). The lifecycle-queue gate
+        // pends it instead of failing it or evicting task A's worker.
+        let taskB = await store.addTask(title: "B", description: "d")
+        await runtime.restartForNewTask(taskID: taskB.id)
+        await runtime.waitForPendingRestarts()
+
+        #expect(await store.task(id: taskB.id)?.status == .pending, "the race loser queues")
+        #expect(await store.task(id: taskA.id)?.status == .running, "the incumbent keeps running")
+        #expect(await runtime.agentIDForRole(.brown) == workerA, "task A's worker is untouched")
 
         await runtime.stopAll()
     }

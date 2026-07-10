@@ -326,18 +326,25 @@ public actor OrchestrationRuntime {
         evaluatorsDirectory = directory
     }
 
-    // MARK: - Worker pool configuration (M1: runtime core, behind capacity 1)
+    // MARK: - Worker pool configuration
 
-    /// How many workers (Browns, each 1:1 with a task) may run concurrently. At the
-    /// default of 1 the runtime behaves exactly as the historical single-Brown design:
-    /// spawning a worker evicts the previous one. Raising it requires the M3
-    /// capacity-aware orchestration gates (run_task/create_task/drains) to be in place —
-    /// the runtime core is safe at any value, but the surrounding flow still assumes 1.
-    private(set) var maxConcurrentWorkers = 1
+    /// How many workers (Browns, each 1:1 with a task) may run concurrently. Starting a
+    /// task beyond capacity never evicts anyone: run_task/the play button refuse,
+    /// create_task queues, and a start that races past the tool-level checks is pended
+    /// by the race-free gate in `performStartTaskWithLiveSmith`.
+    private(set) var maxConcurrentWorkers = 4
 
-    /// Sets the worker-pool capacity (clamped to at least 1).
+    /// The user-configurable ceiling for `setWorkerCapacity`.
+    public static let maxWorkerCapacity = 10
+
+    /// Sets the worker-pool capacity (clamped to 1...maxWorkerCapacity).
     public func setWorkerCapacity(_ capacity: Int) {
-        maxConcurrentWorkers = max(1, capacity)
+        maxConcurrentWorkers = min(max(1, capacity), Self.maxWorkerCapacity)
+    }
+
+    /// Live worker count vs. capacity — the slot arithmetic tools and UI gate on.
+    public func workerSlots() -> (live: Int, capacity: Int) {
+        (supervisor.handles(role: .brown).count, maxConcurrentWorkers)
     }
 
     /// Reentrancy guard shared by both task-queue drains (mirroring
@@ -627,7 +634,9 @@ public actor OrchestrationRuntime {
             $0.status == .running || $0.status == .awaitingReview || $0.status == .validating
         }
 
-        guard let blocker = inFlight else {
+        // A free worker slot means the scheduled task can start right now, no interrupt
+        // arbitration needed — other in-flight tasks keep running beside it.
+        guard supervisor.handles(role: .brown).count >= maxConcurrentWorkers, let blocker = inFlight else {
             restartForNewTask(taskID: taskID)
             return
         }
@@ -693,9 +702,7 @@ public actor OrchestrationRuntime {
             armBreakerRedrainIfNeeded()
             return false
         }
-        let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview || $0.status == .validating }
-        guard !stillBusy else { return false }
+        guard supervisor.handles(role: .brown).count < maxConcurrentWorkers else { return false }
 
         while let next = pendingScheduledRunQueue.first {
             pendingScheduledRunQueue.removeFirst()
@@ -709,15 +716,15 @@ public actor OrchestrationRuntime {
         return false
     }
 
-    /// Picks up the oldest active `.pending` task and drives `restartForNewTask` on it
-    /// when nothing is in flight. This is the auto-advance step that runs after a task
-    /// terminates (review_work accept/reject, task_failed, manual update_task, etc.) —
-    /// pairs with Smith's prompt directive to STOP after `review_work(accepted: true)`
-    /// and let the runtime advance the queue.
+    /// Starts pending tasks (oldest first) while worker slots are free. This is the
+    /// auto-advance step that runs after a task terminates (review_work accept/reject,
+    /// task_failed, manual update_task, etc.) and at cold boot — pairs with Smith's
+    /// prompt directive to STOP after `review_work(accepted: true)` and let the runtime
+    /// advance the queue.
     ///
     /// Gated on `autoAdvanceEnabled`. Skips when:
     ///   - auto-advance is off (user disabled "Auto-run next task")
-    ///   - a `.running` or `.awaitingReview` task already occupies the slot
+    ///   - every worker slot is occupied
     ///   - the scheduled-run queue (`pendingScheduledRunQueue`) just kicked off a restart
     ///     in this same drain pass — the caller is responsible for skipping us in that case
     ///
@@ -738,16 +745,20 @@ public actor OrchestrationRuntime {
             armBreakerRedrainIfNeeded()
             return
         }
+        // Fill free slots, oldest pending first. The restarts are enqueued (not awaited),
+        // so the live worker count doesn't move within this pass — bound the fan-out by
+        // the free-slot count instead. A modest overshoot from a racing start elsewhere
+        // is safe: performStartTaskWithLiveSmith's serialized gate re-pends the loser.
+        let freeSlots = maxConcurrentWorkers - supervisor.handles(role: .brown).count
+        guard freeSlots > 0 else { return }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        let stillBusy = activeTasks.contains { $0.status == .running || $0.status == .awaitingReview || $0.status == .validating }
-        guard !stillBusy else { return }
-
-        let oldestPending = activeTasks
+        let nextUp = activeTasks
             .filter { $0.status == .pending }
             .sorted { $0.createdAt < $1.createdAt }
-            .first
-        guard let next = oldestPending else { return }
-        restartForNewTask(taskID: next.id)
+            .prefix(freeSlots)
+        for task in nextUp {
+            restartForNewTask(taskID: task.id)
+        }
     }
 
     /// Builds the user-role message that seeds Brown's conversation history at task spawn.
@@ -1323,16 +1334,47 @@ public actor OrchestrationRuntime {
             return
         }
 
-        // Save each outgoing worker's context when its task is still resumable (e.g. a
-        // scheduled-interrupt paused it) — this was stopAll's job on the old full-restart
-        // path; the worker cycle must keep the resume-ability guarantee. At capacity 1
-        // there is at most one worker; at higher capacities only the evicted worker's
-        // context matters, but saving for every live non-terminal task is harmless.
+        // Cycle out IDLE workers: any whose task is terminal, inactive, or gone is a
+        // leftover from a previous task and frees its slot here. Workers on live tasks
+        // are untouchable — capacity never evicts. Resumable outgoing tasks (e.g. a
+        // scheduled-interrupt paused one) get their context saved first, preserving the
+        // old full-restart path's resume-ability guarantee.
         for brownHandle in supervisor.handles(role: .brown) {
-            let outgoingTask = await taskStore.taskForAgent(agentID: brownHandle.id)
-            if let outgoingTask, !outgoingTask.status.isTerminal {
+            let workerTask = await taskStore.taskForAgent(agentID: brownHandle.id)
+            if let workerTask, !workerTask.status.isTerminal {
                 await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
             }
+            // Slot-holding statuses: running/validating (actively working or awaiting a
+            // punch list) and awaitingReview (parked worker that provide_help /
+            // review_work-reject unparks — terminating it would lose its context).
+            // Paused is deliberately NOT one: the scheduled-interrupt flow pauses the
+            // blocker precisely so its worker cycles out here (context saved above;
+            // resume respawns from lastBrownContext).
+            let occupiesSlot = workerTask.map {
+                ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
+                    && $0.disposition == .active
+            } ?? false
+            if !occupiesSlot {
+                _ = await performTerminateAgent(id: brownHandle.id)
+            }
+        }
+
+        // The race-free capacity gate: tool-level checks are read-then-act and CAN race
+        // (observed 2026-07-09: a create_task auto-start raced the auto-advance drain and
+        // the loser's task stranded). This runs on the lifecycle queue, where all spawns
+        // and terminations serialize — the loser is PENDED, never failed and never
+        // evicting anyone; the auto-advance drain starts it when a slot frees.
+        if supervisor.handles(role: .brown).count >= maxConcurrentWorkers {
+            await taskStore.updateStatus(id: taskID, status: .pending)
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees.",
+                metadata: [
+                    "messageKind": .string("task_queued_at_capacity"),
+                    "taskID": .string(taskID.uuidString)
+                ]
+            ))
+            return
         }
 
         guard let brownID = await performSpawnBrown(for: task) else {
@@ -1719,6 +1761,12 @@ public actor OrchestrationRuntime {
             startTaskValidation(taskID: task.id)
         }
 
+        // Cold-boot auto-advance: with "Auto-run next task" on, pending tasks start
+        // filling worker slots at launch — Smith reports them, he does not gatekeep them
+        // (previously they sat until Smith or the user acted; observed 2026-07-09 as
+        // "asks if I want to run them"). The restarts enqueue behind this start.
+        await drainPendingTaskQueue()
+
         // Pre-register every persisted task attachment so a fresh Brown spawned during
         // this run can resolve IDs referenced by `task_update` / `task_complete` calls
         // that originally landed in a prior session. Bytes are lazy-loaded on first
@@ -1948,7 +1996,16 @@ public actor OrchestrationRuntime {
                         return entry
                     }
                     .joined(separator: "\n")
-                parts.append("The following task(s) are pending and waiting to be started:\n\(list)")
+                if autoAdvanceEnabled {
+                    parts.append("""
+                        The following pending task(s) are being started AUTOMATICALLY by the system \
+                        (auto-run is enabled) — do NOT ask the user whether to run them, in what order, \
+                        or call `run_task` on them yourself. Just mention them as already underway:
+                        \(list)
+                        """)
+                } else {
+                    parts.append("The following task(s) are pending and waiting to be started (auto-run is OFF — ask the user whether to start them):\n\(list)")
+                }
             }
 
             if !pausedTasks.isEmpty {
@@ -2383,12 +2440,12 @@ public actor OrchestrationRuntime {
         guard supervisor.currentGeneration != nil else { return nil }
         guard !aborted else { return nil }
 
-        // Worker pool policy (M1): a worker is 1:1 with its task, so a respawn for the
-        // same task always cycles that task's existing worker. Beyond that, capacity is
-        // enforced by evicting the OLDEST worker — at the default capacity of 1 this is
-        // byte-for-byte the historical single-Brown policy (spawn evicts the incumbent).
-        // The M3 orchestration gates keep callers from ever hitting eviction at
-        // capacity > 1; this check is the runtime's own invariant, not the UX.
+        // Worker pool policy: a worker is 1:1 with its task, so a respawn for the same
+        // task always cycles that task's existing worker (punch-list respawns, run_task
+        // restarts). Beyond that, capacity NEVER evicts — a running task's worker is
+        // untouchable. Callers gate before spawning (tool checks, the race-free pend
+        // gate in performStartTaskWithLiveSmith); reaching capacity here fails the
+        // spawn cleanly as the runtime's own invariant.
         if let task {
             // Match by the handle's task binding AND by task assignment — legacy paths
             // (review_work respawn) assign via the task store after a task-less spawn.
@@ -2399,30 +2456,9 @@ public actor OrchestrationRuntime {
                 _ = await performTerminateAgent(id: worker.id)
             }
         }
-        while supervisor.handles(role: .brown).count >= maxConcurrentWorkers,
-              let oldestWorker = supervisor.handles(role: .brown).first {
-            // Evicting a worker ORPHANS its task unless the status transitions with it:
-            // a task left `running` with no worker spins in the UI forever and blocks
-            // the queue's busy checks (observed live 2026-07-09 — a create_task
-            // auto-start raced the auto-advance drain, and the loser's task stranded).
-            // Mirror stopAll's rule: non-terminal task of a torn-down worker becomes
-            // `interrupted`, recoverable by run_task / auto-run-interrupted.
-            let evictedTask = await taskStore.taskForAgent(agentID: oldestWorker.id)
-            _ = await performTerminateAgent(id: oldestWorker.id)
-            // Only `.running` transitions — a `.validating` task survives worker eviction
-            // fine (validation holds its own state; the punch-list path respawns).
-            if let evictedTask, evictedTask.status == .running {
-                await taskStore.updateStatus(id: evictedTask.id, status: .interrupted)
-                await channel.post(ChannelMessage(
-                    sender: .system,
-                    content: "Task \"\(evictedTask.title)\" was interrupted: its worker was evicted to start another task at worker capacity.",
-                    metadata: [
-                        "messageKind": .string("task_interrupted"),
-                        "taskID": .string(evictedTask.id.uuidString),
-                        "isWarning": .bool(true)
-                    ]
-                ))
-            }
+        guard supervisor.handles(role: .brown).count < maxConcurrentWorkers else {
+            stopLogger.notice("spawnBrown refused — worker capacity \(self.maxConcurrentWorkers, privacy: .public) reached")
+            return nil
         }
 
         guard let brownConfig = llmConfigs[.brown],
@@ -2943,6 +2979,9 @@ public actor OrchestrationRuntime {
             loadEvaluatorRegistry: { [weak self] in
                 guard let directory = await self?.evaluatorsDirectory else { return nil }
                 return EvaluatorRegistry.load(from: directory)
+            },
+            workerCapacity: { [weak self] in
+                await self?.maxConcurrentWorkers ?? 1
             },
             // Liveness lease: true only while this exact agent ID is still in the live
             // registry. A deallocated runtime also reads as not-current — an agent whose

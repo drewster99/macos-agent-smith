@@ -89,6 +89,31 @@ final class SharedAppState {
         didSet { UserDefaults.standard.set(scheduledWakesInterruptRunning, forKey: "scheduledWakesInterruptRunning") }
     }
 
+    /// How many tasks may run concurrently, each with its own worker (Brown). 1–10;
+    /// default 4. Starting beyond this never evicts a running task: run_task and the
+    /// play button refuse, create_task queues, auto-run fills slots as they free.
+    /// Applied to each session's runtime at start and pushed live on change.
+    var maxSimultaneousTasks: Int = SharedAppState.intDefault(key: "maxSimultaneousTasks", default: 4) {
+        didSet {
+            UserDefaults.standard.set(maxSimultaneousTasks, forKey: "maxSimultaneousTasks")
+            notifyWorkerCapacityChanged()
+        }
+    }
+
+    /// Per-session observers for worker-capacity changes (same shape as the
+    /// tool-security observers): each session's view model pushes the new value to its
+    /// runtime so Settings changes apply without a restart.
+    private var workerCapacityObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerWorkerCapacityObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        workerCapacityObservers[id] = observer
+    }
+    func unregisterWorkerCapacityObserver(_ id: UUID) {
+        workerCapacityObservers.removeValue(forKey: id)
+    }
+    private func notifyWorkerCapacityChanged() {
+        for observer in workerCapacityObservers.values { observer() }
+    }
+
     /// Maximum bytes accepted for any single attachment. Files larger than this are
     /// rejected at ingestion time. Default 25 MB — large enough to cover phone-camera
     /// photos and small PDFs, small enough that one bad file can't blow the LLM context.

@@ -654,10 +654,18 @@ final class AppViewModel {
             perCallCheck: shared.enablePerToolCheck,
             globalPolicy: shared.globalToolPolicies
         )
+        // Worker-pool capacity ("Max simultaneous tasks" in Settings): applied at start
+        // and pushed live on change.
+        await newRuntime.setWorkerCapacity(shared.maxSimultaneousTasks)
         // Apply later Settings changes to this session immediately (no restart). Re-registering on
         // each start() replaces any prior closure for this session.
         shared.registerToolSecurityObserver(session.id) { [weak self] in
             self?.pushToolSecurity()
+        }
+        shared.registerWorkerCapacityObserver(session.id) { [weak self] in
+            guard let self else { return }
+            let capacity = self.shared.maxSimultaneousTasks
+            Task { await self.runtime?.setWorkerCapacity(capacity) }
         }
         // Rebuild + push this session's LLM providers when an assigned model config changes, so a
         // model swap takes effect on the next task without a session restart.
@@ -870,9 +878,10 @@ final class AppViewModel {
             }
         )
 
-        // Acceptance validation: seed the shipped evaluator definitions on first launch
-        // (never overwrites — the files are the user's to edit) and point the runtime at
-        // the registry. Definitions hot-load per validation round.
+        // Acceptance validation: built-in definitions ship IN the app (always current;
+        // duplicate under a new name to customize). Migrate any registry written by the
+        // old seed-to-disk mechanism, then point the runtime at the user directory.
+        // Definitions hot-load per validation round.
         let evaluatorsDirectory = persistence.evaluatorsDirectory
         EvaluatorDefaults.migrateLegacySeededBuiltIns(in: evaluatorsDirectory)
         await newRuntime.setEvaluatorConfiguration(directory: evaluatorsDirectory)
@@ -1366,16 +1375,20 @@ final class AppViewModel {
 
     /// Manually starts (or resumes) a pending / paused / interrupted task without waiting for
     /// Smith to pick it up — drives the same `run_task` path the orchestrator uses. Refuses
-    /// when another task is mid-run or awaiting review, mirroring the `run_task` tool's guardrails.
+    /// when every worker slot is taken, mirroring the `run_task` tool's capacity gate.
     func startTask(_ task: AgentTask) async {
         guard task.status.isRunnable else {
             taskActionError = "This task can't be run right now (status: \(task.status.rawValue))."
             return
         }
-        if let blocker = tasks.first(where: { $0.id != task.id && ($0.status == .running || $0.status == .awaitingReview) }) {
-            taskActionError = blocker.status == .running
-                ? "Task “\(blocker.title)” is still running. Stop it before starting another task."
-                : "Task “\(blocker.title)” is awaiting review. Resolve it before starting another task."
+        let slotHolders = tasks.filter {
+            $0.id != task.id &&
+            ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
+        }
+        let capacity = await runtime?.workerSlots().capacity ?? 1
+        if slotHolders.count >= capacity {
+            let names = slotHolders.prefix(3).map { "“\($0.title)”" }.joined(separator: ", ")
+            taskActionError = "All \(capacity) task slot(s) are busy (\(names)). Wait for one to finish — or raise “Max simultaneous tasks” in Settings."
             return
         }
         await runtime?.restartForNewTask(taskID: task.id)
