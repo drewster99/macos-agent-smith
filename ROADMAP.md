@@ -4,6 +4,15 @@
 
 ### Validation UI follow-ups (2026-07-09)
 
+- ✅ (2026-07-10) **Task overlay bar**: retractable top-of-window bar with one live
+  panel per in-flight task — todo list with Task Detail's status circles, switching to
+  live acceptance criteria after a 5s all-done dwell; append-only column order;
+  dismiss/tear-off per column; overflow menu (opens windows only); first-terminal
+  eviction on new arrivals; user-resizable height + collapse-to-strip + toolbar
+  show/hide; "Task overlay columns" in Settings (default 4, 1–8).
+- Live-updating validation BANNER in the channel log (replace the verbose per-round
+  system messages with ✓/✗ criterion rows that collapse to a summary) — still pending;
+  the overlay bar covers the at-a-glance need meanwhile.
 - **PDF export**: `TaskPDFDocumentView` / `TaskPDFFieldOptions` don't include the
   acceptance criteria (with verdicts) or the step list yet — add both as optional
   PDF sections mirroring the task-detail window's Acceptance and Steps sections.
@@ -44,15 +53,19 @@ clients.
 - Model references are ROLE SLOTS ONLY in v1 (`validator`/`summarizer`/`smith`; a "smart
   validator" points at the smith slot). Explicit provider+model IDs are v2 (needs runtime
   provider construction). NO fallback chains: unconfigured → fail visible.
-- Registry: user-owned. Smith SELECTS validators (kind=validator only; approver/scoper
-  are system-reserved) via registry summaries embedded in tool descriptions at spawn
-  (GhTool auth-status precedent) plus a list_validators tool. Consent gates CAPABILITY,
-  not existence: Smith freely authors INLINE (task-scoped) validators and may persist
-  capped-capability definitions to the registry; anything wanting tools beyond the
-  read-only quartet (file_read, directory_listing, grep, glob) or a non-default model
-  goes through propose → user approval. Shipped validators get the quartet by default —
-  evidence-gathering is the default posture. Elevated tools still route through the
-  per-call security check at runtime.
+- Registry: built-ins ship in-app (always current, not editable — 2026-07-09 revision
+  of the original seed-to-disk design); user files sit beside them, and shadowing a
+  built-in name is a visible load failure. Smith SELECTS validators (kind=validator
+  only; approver/scoper are system-reserved) via registry summaries embedded in tool
+  descriptions at spawn plus a list_validators tool — and (✅ 2026-07-10) AUTHORS them:
+  `define_validator` persists validator/prepare definitions where Smith writes only the
+  judgment/enumeration prompt and the SYSTEM supplies grammar, standard slots, the
+  read-only tool cap, and limits; `custom_validator` inline on a criterion (in both
+  set_acceptance_criteria and create_task) does the same task-scoped. Consent gates
+  CAPABILITY, not existence: anything wanting tools beyond the read-only quartet
+  (file_read, directory_listing, grep, glob) or a non-default model still goes through
+  propose → user approval (that elevation path remains future work). Elevated tools
+  still route through the per-call security check at runtime.
 
 **Acceptance validation (replaces Smith's review entirely).**
 - `AcceptanceCriterion` array ON the task (source of truth): id, text, waivable, origin,
