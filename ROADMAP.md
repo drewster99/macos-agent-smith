@@ -120,9 +120,16 @@ prepare-kind evaluator; items map through the per-item validator via {{item}};
 empty item list auto-accepts, >50 items is a fail-visible ERROR not a silent
 truncation; items run sequentially inside the round's parallel wave) →
 worker pool M1 (✅ `792c656`: taskID+sequence on AgentHandle, handles(role:)/
-workerHandle(taskID:), same-task cycle + oldest-eviction capacity check behind
-maxConcurrentWorkers=1, pool-correct setToolSecurity/overrides/context-save;
-M2 inspector re-key, M3 orchestration gates, M4 polish remain) →
+workerHandle(taskID:), pool-correct setToolSecurity/overrides/context-save) →
+worker pool M3 (✅ `16263c0` + `c1aeb6d`: capacity 4 default, Settings 1-10
+live-applied; NO eviction ever — same-task respawn cycles, at-capacity spawn
+refuses, race-free pend-gate on the lifecycle queue; capacity-aware
+run_task/create_task/play-button/drains/wake-dispatch; cold-boot auto-advance;
+worker message attribution via senderTaskTitle/recipientTaskTitle metadata.
+ALSO landed: validation convergence is now the STALL rule — 3 consecutive
+rejection rounds with nothing newly settled FAILS the task, never parks on
+Smith; escalation only for machine-can't-judge outcomes. M2 inspector
+re-key + M4 polish + the live-updating validation banner UI remain) →
 Security Agent onto the runner LAST (scoper first, per-call
 approver only after soak) → worker pool milestones in parallel. The `/compact` command
 pattern applies: manual validation doubles as the prompt-tuning harness for
