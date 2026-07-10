@@ -35,11 +35,11 @@ struct TaskOverlayBar: View {
         if !viewModel.taskOverlayEntries.isEmpty {
             VStack(spacing: 0) {
                 if shared.taskOverlayCollapsed {
-                    collapsedStrip
+                    collapsedStrip()
                 } else {
-                    expandedColumns
+                    expandedColumns()
                         .frame(height: currentHeight)
-                    grabHandle
+                    grabHandle()
                 }
             }
             .background(AppColors.secondaryBackground)
@@ -49,7 +49,8 @@ struct TaskOverlayBar: View {
 
     // MARK: - Expanded
 
-    private var expandedColumns: some View {
+    @ViewBuilder
+    private func expandedColumns() -> some View {
         HStack(spacing: 0) {
             ForEach(barEntries) { entry in
                 if let task = viewModel.tasks.first(where: { $0.id == entry.id }) {
@@ -66,15 +67,16 @@ struct TaskOverlayBar: View {
                 }
             }
             Spacer(minLength: 0)
-            trailingControls
+            trailingControls()
         }
     }
 
-    private var trailingControls: some View {
+    @ViewBuilder
+    private func trailingControls() -> some View {
         VStack(spacing: 6) {
             collapseButton(collapsed: false)
             if !drawerEntries.isEmpty {
-                drawerMenu
+                drawerMenu()
             }
             Spacer(minLength: 0)
         }
@@ -82,7 +84,8 @@ struct TaskOverlayBar: View {
         .padding(.horizontal, 4)
     }
 
-    private var drawerMenu: some View {
+    @ViewBuilder
+    private func drawerMenu() -> some View {
         Menu {
             Text("More tasks")
             ForEach(drawerEntries) { entry in
@@ -118,7 +121,8 @@ struct TaskOverlayBar: View {
         .help(collapsed ? "Expand task overlay" : "Collapse to strip")
     }
 
-    private var grabHandle: some View {
+    @ViewBuilder
+    private func grabHandle() -> some View {
         RoundedRectangle(cornerRadius: 2)
             .fill(Color.secondary.opacity(0.45))
             .frame(width: 44, height: 4)
@@ -144,7 +148,8 @@ struct TaskOverlayBar: View {
 
     // MARK: - Collapsed strip
 
-    private var collapsedStrip: some View {
+    @ViewBuilder
+    private func collapsedStrip() -> some View {
         HStack(spacing: 14) {
             ForEach(barEntries) { entry in
                 if let task = viewModel.tasks.first(where: { $0.id == entry.id }) {
@@ -195,13 +200,13 @@ struct TaskOverlayColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            header
+            header()
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 3) {
                     if entry.showsCriteria && !task.acceptanceCriteria.isEmpty {
-                        criteriaRows
+                        criteriaRows()
                     } else if !task.steps.filter(\.isActive).isEmpty {
-                        stepRows
+                        stepRows()
                         if entry.allStepsDoneAt != nil && !entry.showsCriteria {
                             DwellCountdown(since: entry.allStepsDoneAt ?? Date())
                         }
@@ -213,17 +218,18 @@ struct TaskOverlayColumn: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            footer
+            footer()
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private var header: some View {
+    @ViewBuilder
+    private func header() -> some View {
         HStack(spacing: 6) {
             Text(task.status.displayName.uppercased())
-                .font(.system(size: 9, weight: .bold))
+                .font(AppFonts.taskOverlayChip)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1.5)
                 .background(Capsule().fill(task.status.overlayColor.opacity(0.18)))
@@ -236,7 +242,7 @@ struct TaskOverlayColumn: View {
             if let onTearOff {
                 Button(action: onTearOff) {
                     Image(systemName: "rectangle.on.rectangle")
-                        .font(.system(size: 10))
+                        .font(AppFonts.taskOverlayIcon)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.tertiary)
@@ -245,7 +251,7 @@ struct TaskOverlayColumn: View {
             if let onDismiss {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppFonts.taskOverlayDismiss)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.tertiary)
@@ -254,11 +260,12 @@ struct TaskOverlayColumn: View {
         }
     }
 
-    private var stepRows: some View {
+    @ViewBuilder
+    private func stepRows() -> some View {
         ForEach(task.steps.filter(\.isActive)) { step in
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: Self.stepSymbol(step.status))
-                    .font(.system(size: 10))
+                    .font(AppFonts.taskOverlayIcon)
                     .foregroundStyle(Self.stepColor(step.status))
                 VStack(alignment: .leading, spacing: 0) {
                     Text(step.text)
@@ -276,12 +283,13 @@ struct TaskOverlayColumn: View {
         }
     }
 
-    private var criteriaRows: some View {
+    @ViewBuilder
+    private func criteriaRows() -> some View {
         ForEach(task.acceptanceCriteria) { criterion in
             let latest = task.validation?.latestVerdict(for: criterion.id)
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: Self.verdictSymbol(latest?.verdict))
-                    .font(.system(size: 10))
+                    .font(AppFonts.taskOverlayIcon)
                     .foregroundStyle(Self.verdictColor(latest?.verdict, taskStatus: task.status))
                 Text(criterion.text)
                     .font(.caption)
@@ -292,7 +300,7 @@ struct TaskOverlayColumn: View {
     }
 
     @ViewBuilder
-    private var footer: some View {
+    private func footer() -> some View {
         if entry.showsCriteria && !task.acceptanceCriteria.isEmpty {
             let settledIDs = task.validation?.settledCriterionIDs() ?? []
             let settled = task.acceptanceCriteria.filter { settledIDs.contains($0.id) }.count

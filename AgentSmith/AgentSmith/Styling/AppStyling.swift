@@ -174,6 +174,13 @@ enum AppColors {
 
 /// Centralized font definitions.
 enum AppFonts {
+    /// Task-overlay bar: the status chip in a column header.
+    static let taskOverlayChip = Font.system(size: 9, weight: .bold)
+    /// Task-overlay bar: step/criterion status icons and header buttons.
+    static let taskOverlayIcon = Font.system(size: 10)
+    /// Task-overlay bar: the column dismiss (✕) button.
+    static let taskOverlayDismiss = Font.system(size: 10, weight: .semibold)
+
     static let channelSender = Font.system(.caption, design: .monospaced, weight: .bold)
     static let channelBody = Font.system(.body, design: .monospaced)
     static let channelTimestamp = Font.system(.caption2, design: .monospaced)
