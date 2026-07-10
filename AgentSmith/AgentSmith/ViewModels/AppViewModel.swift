@@ -1399,7 +1399,11 @@ final class AppViewModel {
     /// Recomputes the overlay from the current `tasks`. Called on every task-store
     /// change; cheap (pure array/set work over the active task list).
     func updateTaskOverlay() {
-        let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // Only ACTIVE-disposition tasks belong in the bar — a task the user trashes or
+        // archives mid-flight must drop its column, not haunt it (its record stays in
+        // `tasks` with a non-active disposition, so presence alone isn't enough).
+        let activeTasks = tasks.filter { $0.disposition == .active }
+        let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let inFlightStatuses: Set<AgentTask.Status> = [.running, .validating, .awaitingReview]
 
         // Drop entries whose task vanished (deleted/archived elsewhere).
@@ -1408,7 +1412,7 @@ final class AppViewModel {
         // Append newly in-flight tasks (creation order), never re-adding dismissed ones.
         let present = Set(taskOverlayEntries.map(\.id))
         let barCapacity = max(1, shared.taskOverlayColumns)
-        let newcomers = tasks
+        let newcomers = activeTasks
             .filter { inFlightStatuses.contains($0.status) && !present.contains($0.id) && !taskOverlayDismissedIDs.contains($0.id) }
             .sorted { $0.createdAt < $1.createdAt }
         for task in newcomers {
