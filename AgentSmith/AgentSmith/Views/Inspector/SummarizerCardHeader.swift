@@ -27,16 +27,14 @@ struct SummarizerCardHeader: View {
 
                     if isProcessing {
                         HStack(spacing: 4) {
-                            ProgressView()
-                                .controlSize(.mini)
+                            AgentActivitySpinner()
                             Text("Summarizing")
                                 .font(AppFonts.inspectorLabel)
                                 .foregroundStyle(.secondary)
                         }
                     } else if !executingTools.isEmpty {
                         HStack(spacing: 4) {
-                            ProgressView()
-                                .controlSize(.mini)
+                            AgentActivitySpinner()
                             Text(executingTools.count == 1 ? "Working — \(executingTools[0])" : "Working — \(executingTools.count) tools")
                                 .font(AppFonts.inspectorLabel)
                                 .foregroundStyle(.secondary)

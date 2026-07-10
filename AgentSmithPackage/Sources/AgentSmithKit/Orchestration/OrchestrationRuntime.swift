@@ -314,8 +314,10 @@ public actor OrchestrationRuntime {
     /// `.validator` fail visibly until then (no fallback chains).
     var validatorProvider: (any LLMProvider)?
     var validatorConfiguration: ModelConfiguration?
-    /// Bounded worker↔validator loop: rejections beyond this many rounds escalate.
-    var maxValidationRounds = 3
+    /// Convergence rule for the worker↔validator loop: this many CONSECUTIVE rejection
+    /// rounds with nothing newly settled fails the task. Absolute round count is
+    /// unbounded as long as rounds keep making progress.
+    var maxValidationStallRounds = 3
     /// Per-report criterion parallelism cap.
     var validationParallelism = 3
     /// Per-task reentrancy guard for validation runs.
@@ -1341,22 +1343,24 @@ public actor OrchestrationRuntime {
         // old full-restart path's resume-ability guarantee.
         for brownHandle in supervisor.handles(role: .brown) {
             let workerTask = await taskStore.taskForAgent(agentID: brownHandle.id)
-            if let workerTask, !workerTask.status.isTerminal {
-                await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
-            }
             // Slot-holding statuses: running/validating (actively working or awaiting a
             // punch list) and awaitingReview (parked worker that provide_help /
             // review_work-reject unparks — terminating it would lose its context).
             // Paused is deliberately NOT one: the scheduled-interrupt flow pauses the
-            // blocker precisely so its worker cycles out here (context saved above;
+            // blocker precisely so its worker cycles out here (context saved first;
             // resume respawns from lastBrownContext).
             let occupiesSlot = workerTask.map {
                 ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
                     && $0.disposition == .active
             } ?? false
-            if !occupiesSlot {
-                _ = await performTerminateAgent(id: brownHandle.id)
+            guard !occupiesSlot else { continue }
+            // Context is saved only for the workers actually being cycled out — saving
+            // every live worker's context on every task start would pile up to 10
+            // sequential snapshot round-trips on the lifecycle queue (agy finding).
+            if let workerTask, !workerTask.status.isTerminal {
+                await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
             }
+            _ = await performTerminateAgent(id: brownHandle.id)
         }
 
         // The race-free capacity gate: tool-level checks are read-then-act and CAN race
@@ -2713,6 +2717,12 @@ public actor OrchestrationRuntime {
             await brownAgent.markTerminated()
             stopLogger.warning("spawnBrown: aborted or stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")
             return nil
+        }
+
+        // Label the worker's channel messages with its task so the UI can distinguish
+        // workers ("Brown" alone is ambiguous once several run concurrently).
+        if let task {
+            await brownAgent.setChannelTaskTitle(task.title)
         }
 
         let brownSubID = await channel.subscribe { [weak brownAgent] message in

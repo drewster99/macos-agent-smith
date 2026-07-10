@@ -13,9 +13,36 @@ struct MessageRowSenderHeader: View {
     let displayPrefs: TimestampPreferences
     let toolCallElapsedSeconds: TimeInterval?
 
+    /// Workers are labeled by their TASK, not the bare role name — "Brown" is ambiguous
+    /// once several run concurrently. Falls back to the role name for unstamped
+    /// messages (pre-feature history, task-less spawns).
+    private var senderLabel: String {
+        if case .agent(.brown) = message.sender,
+           case .string(let title)? = message.metadata?["senderTaskTitle"] {
+            return Self.truncatedTitle(title)
+        }
+        return message.sender.displayName
+    }
+
+    private var recipientLabel: String {
+        if case .agent(.brown)? = message.recipient {
+            if case .string(let title)? = message.metadata?["recipientTaskTitle"] {
+                return Self.truncatedTitle(title)
+            }
+            if case .string(let title)? = message.metadata?["taskTitle"] {
+                return Self.truncatedTitle(title)
+            }
+        }
+        return message.recipient?.displayName ?? "private"
+    }
+
+    private static func truncatedTitle(_ title: String) -> String {
+        title.count <= 48 ? title : String(title.prefix(48)) + "…"
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            Text(message.sender.displayName)
+            Text(senderLabel)
                 .font(AppFonts.channelSender)
                 .foregroundStyle(senderColor)
 
@@ -23,7 +50,7 @@ struct MessageRowSenderHeader: View {
                 Image(systemName: "lock.fill")
                     .font(AppFonts.metaIcon)
                     .foregroundStyle(.secondary)
-                Text("\u{2192} \(message.recipient?.displayName ?? "private")")
+                Text("\u{2192} \(recipientLabel)")
                     .font(AppFonts.channelTimestamp)
                     .foregroundStyle(recipientColor)
             }

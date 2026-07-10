@@ -6,6 +6,18 @@ import SwiftUI
 /// thinking or working — long tool executions (slow AppleScripts, network fetches) used
 /// to leave the agent looking idle while it was actually blocked waiting for the tool to
 /// return; the Working state covers that span.
+/// Activity spinner for agent status rows. Replaces `ProgressView(.mini)`, whose
+/// NSProgressIndicator ignores tint and rendered near-invisible dark-on-dark; the
+/// variable-color symbol follows the label's adaptive `.secondary` style in both modes.
+struct AgentActivitySpinner: View {
+    var body: some View {
+        Image(systemName: "progress.indicator")
+            .symbolEffect(.variableColor.iterative, options: .repeating)
+            .font(AppFonts.inspectorLabel)
+            .foregroundStyle(.secondary)
+    }
+}
+
 struct AgentCardStatusBadge: View {
     let isProcessing: Bool
     let hasActivity: Bool
@@ -23,8 +35,7 @@ struct AgentCardStatusBadge: View {
         Group {
             if isProcessing {
                 HStack(spacing: 4) {
-                    ProgressView()
-                        .controlSize(.mini)
+                    AgentActivitySpinner()
                     Text(isSecurityAgent ? "Evaluating" : "Thinking")
                         .font(AppFonts.inspectorLabel)
                         .foregroundStyle(.secondary)
@@ -36,8 +47,7 @@ struct AgentCardStatusBadge: View {
                 .fixedSize(horizontal: true, vertical: false)
             } else if !executingTools.isEmpty {
                 HStack(spacing: 4) {
-                    ProgressView()
-                        .controlSize(.mini)
+                    AgentActivitySpinner()
                     Text(workingLabel)
                         .font(AppFonts.inspectorLabel)
                         .foregroundStyle(.secondary)

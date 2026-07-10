@@ -212,10 +212,6 @@ extension OrchestrationRuntime {
         }
 
         guard let round = await taskStore.beginValidationRound(id: taskID) else { return }
-        guard round <= maxValidationRounds else {
-            await escalateValidation(taskID: taskID, reason: "Validation did not converge after \(maxValidationRounds) rounds — rejected criteria remain.")
-            return
-        }
 
         let settled = task.validation?.settledCriterionIDs() ?? []
         let pending = task.acceptanceCriteria.filter { !settled.contains($0.id) }
@@ -224,9 +220,12 @@ extension OrchestrationRuntime {
             return
         }
 
+        // Count settled AGAINST the current criteria — the raw ledger can hold records
+        // for criteria that were since edited/removed ("4 of 3 settled").
+        let settledOnTask = task.acceptanceCriteria.count - pending.count
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "Validating \"\(task.title)\" — round \(round): \(pending.count) criterion(s) to judge, \(settled.count) already settled.",
+            content: "Validating \"\(task.title)\" — round \(round): \(pending.count) criterion(s) to judge, \(settledOnTask) already settled.",
             metadata: ["messageKind": .string("validation_report"), "taskID": .string(taskID.uuidString)]
         ))
 
@@ -274,13 +273,55 @@ extension OrchestrationRuntime {
             await escalateValidation(taskID: taskID, reason: "Validation could not be completed: \(errored.count) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review.")
         } else if unjudged > 0 && rejected.isEmpty {
             // Smith added criteria mid-round (set_acceptance_criteria) — never-judged
-            // criteria aren't errors OR rejections; they just need the next round. The
-            // round budget still bounds this (a spin hits the round-cap escalation).
+            // criteria aren't errors OR rejections; they just need the next round.
+            // Bounded: the stall rule below terminates any non-progressing spin.
             await performTaskValidation(taskID: taskID)
-        } else if round >= maxValidationRounds {
-            await escalateValidation(taskID: taskID, reason: "Validation did not converge after \(round) rounds — \(rejected.count) criterion(s) still rejected.")
         } else {
-            await returnRejectionsToWorker(taskID: taskID, rejected: rejected, round: round)
+            // Rejections. Convergence is judged by PROGRESS, not an absolute round cap:
+            // a 50-criterion task may take many rounds while settling more each time,
+            // but consecutive rounds with nothing newly settled mean the worker and
+            // validator disagree irreconcilably — the task FAILS. Exhaustion is never
+            // Smith's judgment call.
+            let progressed = records.contains { $0.verdict.isFinal }
+            let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed)
+            if stallRounds >= maxValidationStallRounds {
+                await failValidation(
+                    taskID: taskID,
+                    reason: "validation did not converge: \(stallRounds) consecutive round(s) with no newly accepted criterion — \(rejected.count) criterion(s) still rejected"
+                )
+            } else {
+                await returnRejectionsToWorker(taskID: taskID, rejected: rejected, round: round)
+            }
+        }
+    }
+
+    /// Non-convergence outcome: the task FAILS — the result is not delivered, the
+    /// worker is torn down, and Smith/user are informed. `run_task` retries reset the
+    /// counters (sticky accepts survive), and Smith may fix the criteria first with
+    /// `set_acceptance_criteria` if they were the problem.
+    private func failValidation(taskID: UUID, reason: String) async {
+        await taskStore.updateStatus(id: taskID, status: .failed)
+        guard let task = await taskStore.task(id: taskID) else { return }
+        await taskStore.addUpdate(id: taskID, message: "Task FAILED: \(reason).")
+        for agentID in task.assigneeIDs {
+            _ = await terminateAgent(id: agentID)
+        }
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Task \"\(task.title)\" FAILED acceptance validation: \(reason).",
+            metadata: [
+                "messageKind": .string("validation_failed"),
+                "taskID": .string(taskID.uuidString),
+                "isWarning": .bool(true)
+            ]
+        ))
+        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
+            await smithAgent.appendUserMessage("""
+                [System: Task "\(task.title)" (ID: \(taskID.uuidString)) FAILED acceptance validation — \(reason). \
+                The result was NOT delivered. Tell the user briefly. If the acceptance criteria themselves were \
+                too strict or ambiguous (read the rejection reasons in the task updates), fix them with \
+                `set_acceptance_criteria`; a `run_task` retry resets the validation counters.]
+                """)
         }
     }
 
@@ -729,9 +770,11 @@ extension OrchestrationRuntime {
             return "- \(text)"
         }.joined(separator: "\n")
 
-        await taskStore.updateStatus(id: taskID, status: .running)
-        await taskStore.clearResult(id: taskID)
-
+        // Secure the worker BEFORE mutating the task. The old order (set .running,
+        // clear result, THEN spawn) crashed live 2026-07-09: the spawn was refused at
+        // worker capacity, the fallback escalated to .awaitingReview with the result
+        // already cleared, and TaskStore's awaitingReview-requires-result invariant
+        // (correctly) refused the transition with a fatal assertion.
         var brownID = task.assigneeIDs.first { supervisor.role(of: $0) == .brown }
         var brownWasSpawned = false
         if brownID == nil {
@@ -742,9 +785,28 @@ extension OrchestrationRuntime {
             }
         }
         guard let brownID else {
-            await escalateValidation(taskID: taskID, reason: "Validation rejected \(rejected.count) criterion(s) but no worker could be spawned to fix them.")
+            // No worker and no free slot: re-queue as pending — the auto-run drain
+            // restarts it when a slot frees, and the fresh worker's briefing carries
+            // the punch list via the task updates recorded below.
+            await taskStore.addUpdate(id: taskID, message: "Validation rejected \(rejected.count) criterion(s); no worker slot was free for the rework, so the task is re-queued:\n\(punchList)")
+            // Status first, then clear: a `.pending` task with a stale result is
+            // consistent; a `.validating` task with no result is the invariant-violating
+            // shape observers must never see (agy review finding).
+            await taskStore.updateStatus(id: taskID, status: .pending)
+            await taskStore.clearResult(id: taskID)
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Task \"\(task.title)\" needs rework (validation rejected \(rejected.count) criterion(s)) but all worker slots are busy — re-queued; it will restart when a slot frees.",
+                metadata: [
+                    "messageKind": .string("task_queued_at_capacity"),
+                    "taskID": .string(taskID.uuidString)
+                ]
+            ))
             return
         }
+
+        await taskStore.updateStatus(id: taskID, status: .running)
+        await taskStore.clearResult(id: taskID)
 
         var parts: [String] = []
         if brownWasSpawned {

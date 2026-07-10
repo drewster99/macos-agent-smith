@@ -230,11 +230,18 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
     public var round: Int
     public var verdictRecords: [CriterionVerdictRecord]
     public var pinnedDefinitions: [String: EvaluatorDefinition]
+    /// Consecutive rejection rounds in which NOTHING newly settled. This — not the
+    /// absolute round count — is the convergence test: 50 criteria may take many rounds
+    /// while progressing, but three straight rounds with zero new acceptances means the
+    /// worker and validator disagree irreconcilably and the task FAILS (never parked on
+    /// Smith). Optional so records written before the field decode unchanged.
+    public var consecutiveStallRounds: Int?
 
-    public init(round: Int = 0, verdictRecords: [CriterionVerdictRecord] = [], pinnedDefinitions: [String: EvaluatorDefinition] = [:]) {
+    public init(round: Int = 0, verdictRecords: [CriterionVerdictRecord] = [], pinnedDefinitions: [String: EvaluatorDefinition] = [:], consecutiveStallRounds: Int? = nil) {
         self.round = round
         self.verdictRecords = verdictRecords
         self.pinnedDefinitions = pinnedDefinitions
+        self.consecutiveStallRounds = consecutiveStallRounds
     }
 
     /// The live verdict for a criterion (latest record wins).

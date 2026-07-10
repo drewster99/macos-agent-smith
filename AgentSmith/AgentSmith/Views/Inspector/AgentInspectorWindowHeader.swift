@@ -27,8 +27,7 @@ struct AgentInspectorWindowHeader: View {
 
             if isProcessing {
                 HStack(spacing: 4) {
-                    ProgressView()
-                        .controlSize(.mini)
+                    AgentActivitySpinner()
                     Text(role == .securityAgent ? "Evaluating" : "Thinking")
                         .font(.headline)
                         .foregroundStyle(.secondary)
@@ -38,8 +37,7 @@ struct AgentInspectorWindowHeader: View {
                 }
             } else if !executingTools.isEmpty {
                 HStack(spacing: 4) {
-                    ProgressView()
-                        .controlSize(.mini)
+                    AgentActivitySpinner()
                     Text(workingLabel)
                         .font(.headline)
                         .foregroundStyle(.secondary)

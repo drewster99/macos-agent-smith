@@ -207,6 +207,14 @@ public actor TaskStore {
         task.completedAt = nil
         task.status = .pending
         task.disposition = .active
+        // A fresh attempt gets fresh validation counters — a task that failed on the
+        // stall rule would otherwise insta-fail its first rejection after the retry.
+        // Sticky accepts survive.
+        if var validation = task.validation {
+            validation.round = 0
+            validation.consecutiveStallRounds = 0
+            task.validation = validation
+        }
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
@@ -228,6 +236,11 @@ public actor TaskStore {
         task.completedAt = nil
         task.status = .pending
         task.disposition = .active
+        if var validation = task.validation {
+            validation.round = 0
+            validation.consecutiveStallRounds = 0
+            task.validation = validation
+        }
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
@@ -391,12 +404,25 @@ public actor TaskStore {
                 changedIDs.insert(criterion.id)
             }
         }
+        let previousIDs = Set(previousByID.keys)
+        let currentIDs = Set(criteria.map(\.id))
+        let contractChanged = !changedIDs.isEmpty || previousIDs != currentIDs
         task.acceptanceCriteria = criteria
-        if !changedIDs.isEmpty, var validation = task.validation {
-            // Reset stickiness by appending a neutral marker? No — simplest correct form:
-            // drop the changed criteria's records from the LIVE reading by filtering the
-            // ledger. The audit trail for unchanged criteria is preserved verbatim.
-            validation.verdictRecords.removeAll { changedIDs.contains($0.criterionID) }
+        if var validation = task.validation {
+            // Drop records for changed criteria (stickiness reset) AND for criteria no
+            // longer on the task — orphaned records otherwise haunt every settled-count
+            // ("4 of 3 settled", observed 2026-07-09 after Smith rewrote criterion text,
+            // which mints new IDs and strands the old IDs' accepts in the ledger).
+            validation.verdictRecords.removeAll {
+                changedIDs.contains($0.criterionID) || !currentIDs.contains($0.criterionID)
+            }
+            // An edited contract gets a fresh convergence budget: rejections under the
+            // OLD criteria must not count toward failing the task under the new ones
+            // (agy review finding). Unchanged lists keep their counters.
+            if contractChanged {
+                validation.round = 0
+                validation.consecutiveStallRounds = 0
+            }
             task.validation = validation
         }
         task.updatedAt = Date()
@@ -459,18 +485,33 @@ public actor TaskStore {
         return validation.round
     }
 
-    /// Resets the validation round budget for a fresh Smith/user-directed rework cycle
-    /// (`review_work` reject after an escalation). Without this, a resubmission after
-    /// escalation would instantly re-escalate on a stale "rounds exhausted" counter.
-    /// Sticky accepts, the verdict ledger, and pinned definitions all survive — only the
-    /// counter refreshes.
+    /// Resets the validation counters (round + stall) for a fresh rework cycle — a
+    /// `review_work` reject, or `run_task`'s auto-reset of a failed task. Without this,
+    /// a resubmission would instantly re-fail on a stale stall counter. Sticky accepts,
+    /// the verdict ledger, and pinned definitions all survive — only the counters
+    /// refresh.
     public func resetValidationRound(id: UUID) {
         guard var task = tasks[id], var validation = task.validation else { return }
         validation.round = 0
+        validation.consecutiveStallRounds = 0
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
+    }
+
+    /// Records whether a rejection round made progress (settled anything new). Returns
+    /// the updated consecutive-stall count: 0 after a progressing round, incremented
+    /// after a stalled one. The coordinator fails the task when this hits its limit.
+    public func updateValidationStall(id: UUID, progressed: Bool) -> Int {
+        guard var task = tasks[id] else { return 0 }
+        var validation = task.validation ?? TaskValidationState()
+        let updated = progressed ? 0 : (validation.consecutiveStallRounds ?? 0) + 1
+        validation.consecutiveStallRounds = updated
+        task.validation = validation
+        tasks[id] = task
+        onChange?()
+        return updated
     }
 
     /// Appends verdict records to the task's audit ledger.

@@ -506,7 +506,10 @@ struct TaskDetailWindow: View {
         // (an editable empty state offers the pencil).
         if !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable {
             let ledger = task.validation
-            let settled = ledger?.settledCriterionIDs() ?? []
+            // Intersect with the CURRENT criteria — the ledger can hold records for
+            // criteria that were since edited/removed ("4 of 3 settled").
+            let settledIDs = ledger?.settledCriterionIDs() ?? []
+            let settled = Set(task.acceptanceCriteria.map(\.id).filter { settledIDs.contains($0) })
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Text("Acceptance")

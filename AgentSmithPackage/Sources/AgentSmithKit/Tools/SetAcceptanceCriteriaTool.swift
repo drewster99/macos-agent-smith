@@ -56,7 +56,12 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             judges the worker's submission against (you do NOT review routine submissions; \
             validation does). Derive criteria from what the user actually asked for, including any \
             validation the user explicitly requested. Each criterion is judged independently by a \
-            validator, so make each one concrete and checkable on evidence. \
+            validator, so make each one concrete and checkable on evidence. The validator is \
+            EXTREMELY strict and literal: write each criterion so a CORRECT result passes even in \
+            edge cases — ties, zero/empty results, nonexistent targets (e.g. "identifies the \
+            most-starred repository, or reports a tie / that none exists, whichever the data \
+            shows"). If the worker can do the task correctly and still fail the criterion as \
+            written, the criterion is wrong; repeated no-progress rejections FAIL the task. \
             \
             This REPLACES the task's whole criteria list: pass every criterion that should apply, \
             not just new ones. Criteria whose text is unchanged keep their already-accepted status; \

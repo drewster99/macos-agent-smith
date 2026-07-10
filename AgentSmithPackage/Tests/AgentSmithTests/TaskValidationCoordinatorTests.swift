@@ -190,11 +190,12 @@ struct TaskValidationCoordinatorTests {
         #expect(status == .awaitingReview)
     }
 
-    @Test("Round exhaustion escalates; a reset round budget lets a post-escalation resubmission validate again")
-    func roundExhaustionEscalatesAndResetRestoresValidation() async {
-        // One criterion rejected three straight rounds → escalation. After the budget
-        // reset (review_work's reject path), a resubmission must get judged again
-        // rather than insta-escalating on the stale counter.
+    @Test("Three no-progress rejection rounds FAIL the task (never Smith); a counter reset restores validation for a retry")
+    func stalledValidationFailsAndResetRestoresValidation() async {
+        // One criterion rejected three straight rounds with nothing newly settled →
+        // the task FAILS. After the counter reset (run_task's failed-task auto-reset /
+        // review_work's reject path), a resubmission must get judged again rather than
+        // insta-failing on the stale stall counter.
         let (runtime, directory) = makeRuntime(verdictScript: [
             "REJECT: round 1 miss",
             "REJECT: round 2 miss",
@@ -212,7 +213,7 @@ struct TaskValidationCoordinatorTests {
         var status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
         #expect(status == .running, "round 1 rejection returns to the worker")
 
-        for expectedOutcome in [AgentTask.Status.running, .awaitingReview] {
+        for expectedOutcome in [AgentTask.Status.running, .failed] {
             await store.setResult(id: task.id, result: "another attempt", commentary: nil, attachments: [])
             await store.updateStatus(id: task.id, status: .validating)
             await runtime.startTaskValidation(taskID: task.id)
@@ -220,23 +221,19 @@ struct TaskValidationCoordinatorTests {
             #expect(status == expectedOutcome)
         }
 
-        // The escalation must ALSO tell the worker to stand down — otherwise it never
-        // learns the last round's outcome and flails (re-reasoning, request_help loops).
         let messages = await runtime.channel.allMessages()
         #expect(messages.contains { message in
-            if case .string("validation_wait_notice") = message.metadata?["messageKind"] {
-                return message.recipientID != nil
-            }
+            if case .string("validation_failed") = message.metadata?["messageKind"] { return true }
             return false
-        }, "the worker gets a private stand-down notice on escalation")
+        }, "the failure is announced in the channel")
 
-        // Smith review_work-rejects: fresh round budget, worker fixes, resubmits.
-        await store.resetValidationRound(id: task.id)
+        // run_task's auto-reset gives the retry fresh counters; the resubmission judges again.
+        #expect(await store.resetFailedTask(id: task.id))
         await store.setResult(id: task.id, result: "the real fix", commentary: nil, attachments: [])
         await store.updateStatus(id: task.id, status: .validating)
         await runtime.startTaskValidation(taskID: task.id)
         status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
-        #expect(status == .completed, "after a reset, validation judges again instead of insta-escalating")
+        #expect(status == .completed, "after a reset, validation judges again instead of insta-failing")
 
         await runtime.stopAll()
     }

@@ -345,7 +345,7 @@ struct MarkdownText: View, Equatable {
     /// behavior.
     private func parseMarkdown(_ markdown: String, fallback: String) -> AttributedString {
         if let parsed = try? AttributedString(
-            markdown: markdown,
+            markdown: Self.escapingPathTildes(markdown),
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace
             )
@@ -353,5 +353,36 @@ struct MarkdownText: View, Equatable {
             return parsed
         }
         return AttributedString(fallback)
+    }
+
+    /// GFM treats even single tildes as strikethrough delimiters, so two home-relative
+    /// paths in one line ("check ~/cursor/a and ~/cursor/b") struck through everything
+    /// between them (observed on user-typed text 2026-07-09). Escape `~` only when it
+    /// starts a `~/` path and is outside a backtick code span — deliberate
+    /// `~~strikethrough~~` and code spans are untouched.
+    static func escapingPathTildes(_ text: String) -> String {
+        guard text.contains("~/") else { return text }
+        var result = ""
+        result.reserveCapacity(text.count + 4)
+        var insideCode = false
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character == "`" {
+                insideCode.toggle()
+                result.append(character)
+            } else if character == "~", !insideCode {
+                let next = text.index(after: index)
+                if next < text.endIndex, text[next] == "/" {
+                    result.append("\\~")
+                } else {
+                    result.append(character)
+                }
+            } else {
+                result.append(character)
+            }
+            index = text.index(after: index)
+        }
+        return result
     }
 }

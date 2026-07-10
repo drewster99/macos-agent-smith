@@ -53,7 +53,7 @@ public struct CreateTaskTool: AgentTool {
             "acceptance_criteria": .dictionary([
                 "type": .string("array"),
                 "items": .dictionary(["type": .string("string")]),
-                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive 2-5 concrete, evidence-checkable criteria from what the user asked for (including any validation the user explicitly requested). Omit only for trivial reminder-style tasks, where the default whole-task acceptance check suffices. Refine later (waivable flags, specific validators, dynamic prepare) with `set_acceptance_criteria`.")
+                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive 2-5 concrete, evidence-checkable criteria from what the user asked for (including any validation the user explicitly requested). The validator is EXTREMELY strict and literal: write each criterion so a CORRECT result passes even in edge cases — ties, zero/empty results, nonexistent targets, ambiguous inputs (e.g. 'identifies the most-starred repository, or reports a tie / that none exists, whichever the data shows'). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong — and repeated no-progress rejections FAIL the task. Omit only for trivial reminder-style tasks. Refine later (waivable flags, specific validators, dynamic prepare) with `set_acceptance_criteria`.")
             ]),
             "steps": .dictionary([
                 "type": .string("array"),

@@ -54,12 +54,15 @@ struct MessageBrownTool: AgentTool {
             return .failure("No active Brown agent found. Use `run_task` to start a task — it will spawn Brown automatically.")
         }
 
+        // Label the recipient with its task so the UI shows WHICH worker was addressed.
+        let recipientTask = await context.taskStore.taskForAgent(agentID: brownID)
         await context.post(ChannelMessage(
             sender: .agent(context.agentRole),
             recipientID: brownID,
             recipient: .agent(.brown),
             content: message,
-            attachments: attachments
+            attachments: attachments,
+            metadata: recipientTask.map { ["recipientTaskTitle": .string($0.title)] }
         ))
 
         if attachments.isEmpty {

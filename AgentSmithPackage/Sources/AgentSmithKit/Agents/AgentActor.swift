@@ -56,6 +56,16 @@ public actor AgentActor {
     private let toolContext: ToolContext
 
     private var conversationHistory: [LLMMessage] = []
+
+    /// The task title stamped (as `senderTaskTitle` metadata) on this agent's channel
+    /// messages, so the UI can label a worker by WHAT it's working on instead of a bare
+    /// "Brown" — the only disambiguator once multiple workers run concurrently.
+    private var channelTaskTitle: String?
+
+    /// Sets the task title stamped on this agent's channel messages (worker spawns).
+    public func setChannelTaskTitle(_ title: String?) {
+        channelTaskTitle = title
+    }
     private var isRunning = false
     private var runTask: Task<Void, Never>?
 
@@ -1497,7 +1507,8 @@ public actor AgentActor {
         if let text = response.text, !text.isEmpty, !configuration.suppressesRawTextToChannel {
             await toolContext.post(ChannelMessage(
                 sender: .agent(configuration.role),
-                content: text
+                content: text,
+                metadata: channelTaskTitle.map { ["senderTaskTitle": .string($0)] }
             ))
         }
 
@@ -1849,6 +1860,7 @@ public actor AgentActor {
                 let role = configuration.role
                 let roleName = configuration.role.displayName
                 let ctx = toolContext
+                let taskTitleForChannel = channelTaskTitle
                 let agentIDPrefix = String(id.uuidString.prefix(8))
 
                 let securityAgentActiveCount = OSAllocatedUnfairLock(initialState: 0)
@@ -1908,7 +1920,7 @@ public actor AgentActor {
                         // cancellation is also recorded as a failure.
                         await ctx.setToolExecutionStatus(entry.call.id, outcome.succeeded)
                         await AgentActor.postToolOutputToChannel(
-                            result: result, call: entry.call, role: role, context: ctx
+                            result: result, call: entry.call, role: role, context: ctx, taskTitle: taskTitleForChannel
                         )
                     } else {
                         if let taskID = currentTask?.id {
@@ -2201,7 +2213,7 @@ public actor AgentActor {
         if disposition.approved {
             let result = await directExecute(call, tool: tool)
             await Self.postToolOutputToChannel(
-                result: result, call: call, role: configuration.role, context: toolContext
+                result: result, call: call, role: configuration.role, context: toolContext, taskTitle: channelTaskTitle
             )
             return result
         } else {
@@ -2418,6 +2430,9 @@ public actor AgentActor {
             }
         }
 
+        if let channelTaskTitle {
+            metadata["senderTaskTitle"] = .string(channelTaskTitle)
+        }
         await toolContext.post(ChannelMessage(
             sender: .agent(configuration.role),
             content: Self.conciseToolCallSummary(name: call.name, arguments: call.arguments),
@@ -2462,7 +2477,7 @@ public actor AgentActor {
     ///
     /// The channel message stores only the display-truncated version of the output to avoid
     /// bloating the SwiftUI view layer with megabytes of data (e.g., binary blobs from osascript).
-    static func postToolOutputToChannel(result: String, call: LLMToolCall, role: AgentRole, context: ToolContext) async {
+    static func postToolOutputToChannel(result: String, call: LLMToolCall, role: AgentRole, context: ToolContext, taskTitle: String? = nil) async {
         let trimmedResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedResult.isEmpty else { return }
         let truncated = AgentActor.truncateOutput(trimmedResult, maxLines: 4)
@@ -2472,6 +2487,9 @@ public actor AgentActor {
             "messageKind": .string("tool_output"),
             "tool": .string(call.name)
         ]
+        if let taskTitle {
+            outputMetadata["senderTaskTitle"] = .string(taskTitle)
+        }
         if isTruncated {
             outputMetadata["truncatedContent"] = .string(truncated)
             // Store a larger excerpt for "Show more" — cap at 10K to avoid bloating the UI.
