@@ -134,6 +134,24 @@ public struct CreateTaskTool: AgentTool {
                 """)
         }
 
+        // Parse acceptance criteria BEFORE creating the task — bad criteria then mean
+        // NO task, not an orphaned banner-less task plus a "fix it later" errand.
+        // Criteria accept the same shapes as set_acceptance_criteria: plain strings, or
+        // {text, waivable?, validator?, prepare?, custom_validator?} objects — so Smith
+        // can attach custom validators at creation time, not just after.
+        var seedCriteria: [AcceptanceCriterion] = []
+        if case .array(let rawCriteria) = arguments["acceptance_criteria"], !rawCriteria.isEmpty {
+            let registry = await context.loadEvaluatorRegistry()
+            switch CriterionArgumentParsing.parse(rawCriteria, registry: registry) {
+            case .success(let parsed):
+                seedCriteria = parsed.map {
+                    AcceptanceCriterion(text: $0.text, waivable: $0.waivable, origin: .smith, validator: $0.validator, prepare: $0.prepare)
+                }
+            case .failure(let problem):
+                return .failure("Task NOT created — the acceptance_criteria are invalid: \(problem.message) Fix them and call create_task again.")
+            }
+        }
+
         let task = await context.taskStore.addTask(
             title: title,
             description: description,
@@ -141,28 +159,8 @@ public struct CreateTaskTool: AgentTool {
             descriptionAttachments: resolvedAttachments
         )
 
-        // Seed acceptance criteria and the initial step list when supplied. Criteria
-        // accept the same shapes as set_acceptance_criteria: plain strings, or
-        // {text, waivable?, validator?, prepare?, custom_validator?} objects — so Smith
-        // can attach custom validators at creation time, not just after.
-        if case .array(let rawCriteria) = arguments["acceptance_criteria"], !rawCriteria.isEmpty {
-            let registry = await context.loadEvaluatorRegistry()
-            switch CriterionArgumentParsing.parse(rawCriteria, registry: registry) {
-            case .success(let parsed) where !parsed.isEmpty:
-                await context.taskStore.setAcceptanceCriteria(
-                    id: task.id,
-                    criteria: parsed.map {
-                        AcceptanceCriterion(text: $0.text, waivable: $0.waivable, origin: .smith, validator: $0.validator, prepare: $0.prepare)
-                    }
-                )
-            case .success:
-                break
-            case .failure(let problem):
-                // The task exists; the criteria didn't apply. Fail loudly so Smith fixes
-                // and re-issues via set_acceptance_criteria rather than shipping a task
-                // with a silently-dropped contract.
-                return .failure("Task created (ID: \(task.id)) but the acceptance_criteria were NOT applied: \(problem.message) Fix them and call set_acceptance_criteria on the task.")
-            }
+        if !seedCriteria.isEmpty {
+            await context.taskStore.setAcceptanceCriteria(id: task.id, criteria: seedCriteria)
         }
         if case .array(let rawSteps) = arguments["steps"] {
             let texts = rawSteps.compactMap { raw -> String? in

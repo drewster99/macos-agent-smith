@@ -308,6 +308,25 @@ struct ValidationAgentSurfaceTests {
         }
     }
 
+    @Test("create_task with invalid criteria creates NO task at all")
+    func createTaskInvalidCriteriaCreatesNothing() async throws {
+        let taskStore = TaskStore()
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+        let result = try await CreateTaskTool().execute(
+            arguments: [
+                "title": .string("Doomed"),
+                "description": .string("d"),
+                "acceptance_criteria": .array([
+                    .dictionary(["text": .string("c"), "validator": .string("does-not-exist")])
+                ])
+            ],
+            context: context
+        )
+        #expect(!result.succeeded)
+        #expect(result.output.contains("NOT created"))
+        #expect(await taskStore.allTasks().isEmpty, "bad criteria must not leave an orphaned task behind")
+    }
+
     // MARK: - review_work override visibility
 
     @Test("Accepting an escalated task records the override: ledger settles, update logged, channel told")
