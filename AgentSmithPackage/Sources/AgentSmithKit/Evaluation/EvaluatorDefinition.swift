@@ -110,6 +110,25 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         self.maxOutputTokens = maxOutputTokens
     }
 
+    /// A copy under a different name — used when migrating a user-edited copy of a
+    /// built-in definition out of the built-in's (reserved) name.
+    public func renamed(to newName: String) -> EvaluatorDefinition {
+        EvaluatorDefinition(
+            name: newName,
+            description: description,
+            kind: kind,
+            systemPrompt: systemPrompt,
+            inputTemplate: inputTemplate,
+            requiredSlots: requiredSlots,
+            outputGrammar: outputGrammar,
+            modelSlot: modelSlot,
+            toolNames: toolNames,
+            maxTurns: maxTurns,
+            timeoutSeconds: timeoutSeconds,
+            maxOutputTokens: maxOutputTokens
+        )
+    }
+
     // MARK: - Template inspection
 
     /// Every `{{slot}}` placeholder present in the input template.

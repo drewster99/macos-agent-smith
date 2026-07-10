@@ -874,7 +874,7 @@ final class AppViewModel {
         // (never overwrites — the files are the user's to edit) and point the runtime at
         // the registry. Definitions hot-load per validation round.
         let evaluatorsDirectory = persistence.evaluatorsDirectory
-        EvaluatorDefaults.seed(into: evaluatorsDirectory)
+        EvaluatorDefaults.migrateLegacySeededBuiltIns(in: evaluatorsDirectory)
         await newRuntime.setEvaluatorConfiguration(directory: evaluatorsDirectory)
 
         // Per-session persistence for the pending-user-message buffer (messages typed while

@@ -2401,7 +2401,28 @@ public actor OrchestrationRuntime {
         }
         while supervisor.handles(role: .brown).count >= maxConcurrentWorkers,
               let oldestWorker = supervisor.handles(role: .brown).first {
+            // Evicting a worker ORPHANS its task unless the status transitions with it:
+            // a task left `running` with no worker spins in the UI forever and blocks
+            // the queue's busy checks (observed live 2026-07-09 — a create_task
+            // auto-start raced the auto-advance drain, and the loser's task stranded).
+            // Mirror stopAll's rule: non-terminal task of a torn-down worker becomes
+            // `interrupted`, recoverable by run_task / auto-run-interrupted.
+            let evictedTask = await taskStore.taskForAgent(agentID: oldestWorker.id)
             _ = await performTerminateAgent(id: oldestWorker.id)
+            // Only `.running` transitions — a `.validating` task survives worker eviction
+            // fine (validation holds its own state; the punch-list path respawns).
+            if let evictedTask, evictedTask.status == .running {
+                await taskStore.updateStatus(id: evictedTask.id, status: .interrupted)
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Task \"\(evictedTask.title)\" was interrupted: its worker was evicted to start another task at worker capacity.",
+                    metadata: [
+                        "messageKind": .string("task_interrupted"),
+                        "taskID": .string(evictedTask.id.uuidString),
+                        "isWarning": .bool(true)
+                    ]
+                ))
+            }
         }
 
         guard let brownConfig = llmConfigs[.brown],

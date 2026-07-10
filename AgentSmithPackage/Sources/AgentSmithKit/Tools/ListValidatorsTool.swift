@@ -34,7 +34,8 @@ public struct ListValidatorsTool: AgentTool {
             sections.append("No validators are installed. Criteria cannot name one; validation will escalate.")
         } else {
             sections.append("Available validators:\n" + validators.map { definition in
-                "- `\(definition.name)`: \(definition.description)"
+                let builtInTag = EvaluatorDefaults.builtInNames.contains(definition.name) ? " (built-in — always current; duplicate under a new name to customize)" : ""
+                return "- `\(definition.name)`\(builtInTag): \(definition.description)"
             }.joined(separator: "\n"))
         }
         if !registry.failures.isEmpty {

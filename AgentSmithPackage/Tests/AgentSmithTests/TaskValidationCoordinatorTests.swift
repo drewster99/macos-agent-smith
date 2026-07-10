@@ -19,7 +19,6 @@ struct TaskValidationCoordinatorTests {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
         let evaluatorsDirectory = tmpRoot.appendingPathComponent("evaluators", isDirectory: true)
-        EvaluatorDefaults.seed(into: evaluatorsDirectory)
 
         let testConfiguration = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         let runtime = OrchestrationRuntime(
@@ -242,40 +241,54 @@ struct TaskValidationCoordinatorTests {
         await runtime.stopAll()
     }
 
-    // MARK: - Registry seeding
+    // MARK: - Built-in registry model + legacy migration
 
-    @Test("seed writes when missing, upgrades pristine superseded copies, never touches user edits")
-    func seedUpgradePolicy() throws {
+    @Test("Built-ins load from the app (always current); files shadowing them are visible failures")
+    func builtInsAlwaysCurrent() throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("agent-smith-seed-tests", isDirectory: true)
+            .appendingPathComponent("agent-smith-builtin-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let target = directory.appendingPathComponent("default-acceptance.json")
-        let decoder = JSONDecoder()
+
+        // Empty (even nonexistent) directory → built-ins present.
+        let registry = EvaluatorRegistry.load(from: directory)
+        #expect(registry.definition(named: "default-acceptance")?.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash)
+
+        // A user file under a built-in name never shadows — it fails visibly.
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let shadowing = Self.defaultVariant(systemPrompt: "trying to shadow the built-in")
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(shadowing).write(to: directory.appendingPathComponent("default-acceptance.json"), options: .atomic)
+        let reloaded = EvaluatorRegistry.load(from: directory)
+        #expect(reloaded.definition(named: "default-acceptance")?.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash, "the built-in wins")
+        #expect(reloaded.failures.contains { $0.problem.contains("built-in") }, "the shadow attempt is a visible failure")
+    }
 
-        // Missing → seeded.
-        EvaluatorDefaults.seed(into: directory)
-        let seeded = try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target))
-        #expect(seeded.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash)
+    @Test("Legacy migration deletes pristine seeded copies and preserves user edits as -custom")
+    func legacySeededMigration() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-migration-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacyFile = directory.appendingPathComponent("default-acceptance.json")
+        let encoder = JSONEncoder()
 
-        // Pristine current copy re-seeded → unchanged (not in the superseded set).
-        EvaluatorDefaults.seed(into: directory)
-        #expect(try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target)).contentHash == seeded.contentHash)
+        // A pristine legacy shipped copy is deleted — the built-in supplies it now.
+        let pristine = Self.defaultVariant(systemPrompt: "old shipped prompt")
+        try encoder.encode(pristine).write(to: legacyFile, options: .atomic)
+        EvaluatorDefaults.migrateLegacySeededBuiltIns(in: directory, legacyHashes: [pristine.contentHash])
+        #expect(!FileManager.default.fileExists(atPath: legacyFile.path))
 
-        // A pristine SUPERSEDED shipped copy is upgraded in place.
-        let old = Self.defaultVariant(systemPrompt: "an older shipped prompt")
-        try encoder.encode(old).write(to: target, options: .atomic)
-        EvaluatorDefaults.seed(into: directory, supersededHashes: [old.contentHash])
-        let upgraded = try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target))
-        #expect(upgraded.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash, "pristine superseded copies upgrade")
-
-        // A USER-EDITED copy (hash matches nothing shipped) is never overwritten.
+        // A user-EDITED copy is renamed to -custom (nothing the user wrote is lost).
         let edited = Self.defaultVariant(systemPrompt: "the user's customized prompt")
-        try encoder.encode(edited).write(to: target, options: .atomic)
-        EvaluatorDefaults.seed(into: directory)
-        let preserved = try decoder.decode(EvaluatorDefinition.self, from: Data(contentsOf: target))
-        #expect(preserved.systemPrompt == "the user's customized prompt", "user edits are untouchable")
+        try encoder.encode(edited).write(to: legacyFile, options: .atomic)
+        EvaluatorDefaults.migrateLegacySeededBuiltIns(in: directory, legacyHashes: [])
+        #expect(!FileManager.default.fileExists(atPath: legacyFile.path), "the shadowing name is vacated")
+
+        let registry = EvaluatorRegistry.load(from: directory)
+        let custom = registry.definition(named: "default-acceptance-custom")
+        #expect(custom?.systemPrompt == "the user's customized prompt", "the edit survives under the -custom name")
+        #expect(registry.definition(named: "default-acceptance")?.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash)
+        #expect(registry.failures.isEmpty)
     }
 
     /// The shipped default with only the system prompt swapped (fields are immutable).
@@ -316,6 +329,7 @@ struct TaskValidationCoordinatorTests {
 
     /// Installs a minimal prepare-kind definition into the test registry.
     private func installPrepareDefinition(named name: String, in directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let definition = EvaluatorDefinition(
             name: name,
             description: "Emits the items to judge for a dynamic criterion (test double).",

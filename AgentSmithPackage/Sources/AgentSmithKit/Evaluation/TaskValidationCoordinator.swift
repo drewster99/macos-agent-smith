@@ -40,8 +40,10 @@ public enum EvaluatorDefaults {
             because YOU lack the tool. For claims you can check yourself (files, directories, \
             file contents), verify with your tools rather than taking the worker's word. For \
             actions you cannot reproduce (shell commands, web fetches, sent messages), judge on \
-            the evidence trail — the step list, progress updates, and the specificity of the \
-            result — not on whether you could perform them.
+            the evidence trail — the SYSTEM-OBSERVED tool activity log in the input (this is \
+            recorded by the runtime, not self-reported; trust it over narrative claims), the \
+            step list, progress updates, and the specificity of the result — not on whether \
+            you could perform them.
 
             Be strict about completeness, but judge what the criterion asks — not what you would \
             have asked. Respond with your verdict on the FIRST line:
@@ -55,6 +57,9 @@ public enum EvaluatorDefaults {
 
             ## Worker's tools (its capabilities differ from yours)
             {{worker_tools}}
+
+            ## Worker's tool activity (system-observed — trust this over narrative claims)
+            {{worker_activity}}
 
             ## Worker's step list (statuses + tombstones)
             {{steps}}
@@ -74,7 +79,7 @@ public enum EvaluatorDefaults {
             ## Your previous verdict on this criterion (if any)
             {{previous_verdict}}
             """,
-        requiredSlots: ["task_title", "task_id", "task_description", "worker_tools", "steps", "recent_updates", "result", "commentary", "criterion", "previous_verdict"],
+        requiredSlots: ["task_title", "task_id", "task_description", "worker_tools", "worker_activity", "steps", "recent_updates", "result", "commentary", "criterion", "previous_verdict"],
         outputGrammar: .verdictLine(allowed: [
             .init(token: "ACCEPT", requiresReason: false),
             .init(token: "REJECT", requiresReason: true),
@@ -91,32 +96,56 @@ public enum EvaluatorDefaults {
     /// validators, and the default toolset for shipped ones.
     public static let validatorEvidenceToolNames = ["file_read", "directory_listing", "grep", "glob"]
 
-    /// Content hashes of PREVIOUS shipped revisions of `default-acceptance`. A registry
-    /// file whose definition matches one of these is a pristine older shipped copy and
-    /// gets upgraded in place by `seed(into:)`; anything else — user-edited or
-    /// user-authored — is never touched.
-    public static let supersededShippedContentHashes: Set<String> = [
-        "f3fbf8a16403fce2"  // 2026-07-09 initial revision, before the worker_tools slot
+    /// The definitions the app itself provides. NOT stored in the user's registry
+    /// directory and NOT editable — the app always supplies the current version. To
+    /// customize one, duplicate its JSON (from the pinned body on any task, or
+    /// `list_validators`) under a NEW name in the evaluators directory and edit that.
+    public static var builtInDefinitions: [EvaluatorDefinition] {
+        [defaultAcceptanceDefinition]
+    }
+
+    /// Names reserved by built-ins — user registry files with these names are load
+    /// failures (they would shadow an always-current definition).
+    public static var builtInNames: Set<String> {
+        Set(builtInDefinitions.map(\.name))
+    }
+
+    /// Content hashes of every revision the OLD disk-seeding mechanism ever wrote.
+    /// Used solely to migrate legacy registries: a file matching one of these is a
+    /// pristine shipped copy (delete it — the built-in supplies it now); anything else
+    /// under a built-in name is a user edit (preserved by renaming to `<name>-custom`).
+    public static let legacyShippedContentHashes: Set<String> = [
+        "f3fbf8a16403fce2",  // 2026-07-09 initial revision (pre worker_tools)
+        "800f30b972f29840"   // 2026-07-09 worker_tools revision (pre worker_activity, pre built-in model)
     ]
 
-    /// Seeds the shipped definitions into the user-owned registry directory. Missing
-    /// files are written; a file that is byte-for-byte a SUPERSEDED shipped revision
-    /// (matched by content hash) is upgraded to the current one; anything the user has
-    /// edited or authored is never overwritten. Undecodable files are also left alone —
-    /// the registry surfaces those as visible load failures.
-    public static func seed(into directory: URL, supersededHashes: Set<String> = supersededShippedContentHashes) {
+    /// One-time migration of registries written by the old seed-to-disk mechanism.
+    /// Pristine shipped copies are deleted (the built-in supplies them, always
+    /// current); user-EDITED copies are preserved as `<name>-custom` so nothing the
+    /// user wrote is ever lost — they just stop shadowing the built-in. Undecodable
+    /// files are left alone; the registry surfaces those as visible load failures.
+    public static func migrateLegacySeededBuiltIns(in directory: URL, legacyHashes: Set<String> = legacyShippedContentHashes) {
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let target = directory.appendingPathComponent("default-acceptance.json")
-        if fileManager.fileExists(atPath: target.path) {
-            guard let data = try? Data(contentsOf: target),
-                  let existing = try? JSONDecoder().decode(EvaluatorDefinition.self, from: data),
-                  supersededHashes.contains(existing.contentHash) else { return }
-        }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(defaultAcceptanceDefinition) {
-            try? data.write(to: target, options: .atomic)
+        for builtIn in builtInDefinitions {
+            let legacyFile = directory.appendingPathComponent("\(builtIn.name).json")
+            guard fileManager.fileExists(atPath: legacyFile.path),
+                  let data = try? Data(contentsOf: legacyFile),
+                  let existing = try? JSONDecoder().decode(EvaluatorDefinition.self, from: data) else { continue }
+            if legacyHashes.contains(existing.contentHash) || existing.contentHash == builtIn.contentHash {
+                try? fileManager.removeItem(at: legacyFile)
+                continue
+            }
+            // User-edited: preserve under a non-shadowing name.
+            let customized = existing.renamed(to: "\(builtIn.name)-custom")
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            if let customizedData = try? encoder.encode(customized) {
+                let customFile = directory.appendingPathComponent("\(customized.name).json")
+                guard !fileManager.fileExists(atPath: customFile.path) else { continue }
+                try? customizedData.write(to: customFile, options: .atomic)
+                try? fileManager.removeItem(at: legacyFile)
+            }
         }
     }
 }
@@ -508,6 +537,7 @@ extension OrchestrationRuntime {
             "task_title": task.title,
             "task_description": task.description,
             "worker_tools": workerToolsDescription(for: task),
+            "worker_activity": await workerActivityDigest(for: task),
             "steps": Self.renderSteps(task.steps),
             "recent_updates": task.updates.suffix(10).map { "- \($0.message)" }.joined(separator: "\n"),
             "result": task.result ?? "(none submitted)",
@@ -555,6 +585,40 @@ extension OrchestrationRuntime {
         }
         return BrownBehavior.toolNames.joined(separator: ", ")
             + " (standard worker toolset; the worker may also have had MCP-provided tools)"
+    }
+
+    /// A bounded, SYSTEM-OBSERVED digest of the worker's tool calls and results, from
+    /// the live worker's LLM turn records. This is the validator's ground truth for
+    /// "did the worker actually run what it claims" — without it, validators reject
+    /// legitimate work as unverifiable ("no gh tool calls are present in the evidence",
+    /// observed 2026-07-09). Most recent activity wins the size cap.
+    private func workerActivityDigest(for task: AgentTask) async -> String {
+        guard let worker = liveWorkerHandle(for: task) else {
+            return "(worker no longer running — tool activity log unavailable)"
+        }
+        let turns = await worker.agent.turnsSnapshot()
+        var lines: [String] = []
+        for turn in turns {
+            // Tool RESULTS arrive in the next turn's input delta; rendering both sides
+            // in turn order keeps call → result adjacency close enough for judging.
+            for message in turn.inputDelta {
+                if case .toolResult(_, let content) = message.content {
+                    lines.append("   ↳ \(content.prefix(220))")
+                }
+            }
+            for call in turn.response.toolCalls {
+                lines.append("→ \(call.name)(\(call.arguments.prefix(220)))")
+            }
+        }
+        guard !lines.isEmpty else { return "(no tool calls recorded this session)" }
+        // Keep the most recent activity when capped.
+        var digest = ""
+        for line in lines.reversed() {
+            let candidate = line + "\n" + digest
+            if candidate.count > 8_000 { break }
+            digest = candidate
+        }
+        return digest.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// V1 model references are role slots only. `.validator` resolves to a dedicated

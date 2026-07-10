@@ -277,7 +277,9 @@ struct EvaluatorRegistryTests {
         #expect(registry.definition(named: "test-validator") != nil)
         #expect(registry.failures.count == 1)
         #expect(registry.failures.first?.fileName == "broken.json")
-        #expect(registry.definitions(ofKind: .validator).count == 1)
+        // Built-ins (default-acceptance) load alongside user files.
+        let userValidators = registry.definitions(ofKind: .validator).filter { !EvaluatorDefaults.builtInNames.contains($0.name) }
+        #expect(userValidators.count == 1)
         #expect(registry.definitions(ofKind: .scoper).isEmpty)
     }
 
@@ -291,15 +293,16 @@ struct EvaluatorRegistryTests {
         try data.write(to: URL(fileURLWithPath: dir.path).appendingPathComponent("b.json"))
 
         let registry = EvaluatorRegistry.load(from: URL(fileURLWithPath: dir.path))
-        #expect(registry.definitions.count == 1)
+        #expect(registry.definitions.count == 1 + EvaluatorDefaults.builtInDefinitions.count)
         #expect(registry.failures.first?.fileName == "b.json")
         #expect(registry.failures.first?.problem.contains("duplicate") == true)
     }
 
-    @Test("A missing directory yields an empty registry, not an error")
+    @Test("A missing directory yields just the built-ins, not an error")
     func missingDirectoryIsEmpty() {
         let registry = EvaluatorRegistry.load(from: URL(fileURLWithPath: "/tmp/does-not-exist-\(UUID())"))
-        #expect(registry.definitions.isEmpty)
+        #expect(registry.definitions.count == EvaluatorDefaults.builtInDefinitions.count)
+        #expect(registry.definition(named: "default-acceptance") != nil)
         #expect(registry.failures.isEmpty)
     }
 }

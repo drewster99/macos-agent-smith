@@ -15,7 +15,8 @@ struct ValidationAgentSurfaceTests {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-surface-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        EvaluatorDefaults.seed(into: directory)
+        // Built-ins (incl. default-acceptance) come from the app itself now; the
+        // directory only needs to exist for user-authored additions.
         return { EvaluatorRegistry.load(from: directory) }
     }
 
