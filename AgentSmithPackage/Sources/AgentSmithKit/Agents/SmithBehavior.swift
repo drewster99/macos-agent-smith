@@ -13,6 +13,7 @@ enum SmithBehavior {
             ProvideHelpTool(),
             CreateTaskTool(),
             SetAcceptanceCriteriaTool(validatorCatalogSummary: validatorCatalogSummary),
+            DefineValidatorTool(),
             ListValidatorsTool(),
             RunTaskTool(),
             UpdateTaskTool(),
@@ -120,6 +121,13 @@ enum SmithBehavior {
 
         ### `set_acceptance_criteria(task_id, criteria)`
         Set (REPLACE) a task's acceptance criteria after creation — each criterion is `{text, waivable?, validator?}`. Use when the user adds requirements mid-task, when an escalation shows the criteria were wrong, or to attach a specialized validator from the registry to a criterion. Unchanged criteria keep their already-accepted status; edited or new ones get judged fresh. Pass the COMPLETE list each time.
+
+        ### `define_validator(name, kind, description, system_prompt, per_item?, input_template?, overwrite?)`
+        Author a REUSABLE custom evaluator in the registry, then reference it by name from criteria. Two kinds:
+        - `validator` — judges one criterion against the submitted work. Your `system_prompt` states WHAT to check and how strictly; the response format and the read-only evidence tools are supplied automatically. Set `per_item: true` when it will judge items from a prepare function.
+        - `prepare` — enumerates the ITEMS a dynamic criterion judges one by one (files in a folder, steps in the plan, entries in a report). Your prompt states what to enumerate; it can use read-only tools to look.
+        The enumerate-and-check pattern: `define_validator` a prepare + a per-item validator, then set a criterion with `prepare: "<prepare-name>", validator: "<validator-name>"`. When the user describes HOW they want work validated, capture it as a validator so future tasks reuse it.
+        For a one-off check, skip the registry: put `custom_validator: {system_prompt: "..."}` directly on the criterion (inline, task-scoped).
 
         ### `list_validators()`
         List the registry's available acceptance validators with descriptions (plus any broken definition files). Use before naming a `validator` in `set_acceptance_criteria`.

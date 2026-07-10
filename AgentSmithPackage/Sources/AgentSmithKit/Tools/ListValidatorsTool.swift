@@ -38,6 +38,12 @@ public struct ListValidatorsTool: AgentTool {
                 return "- `\(definition.name)`\(builtInTag): \(definition.description)"
             }.joined(separator: "\n"))
         }
+        let prepares = registry.definitions(ofKind: .prepare)
+        if !prepares.isEmpty {
+            sections.append("Available prepare functions (for dynamic criteria — `prepare: \"<name>\"`):\n" + prepares.map { definition in
+                "- `\(definition.name)`: \(definition.description)"
+            }.joined(separator: "\n"))
+        }
         if !registry.failures.isEmpty {
             sections.append("Definition files that FAILED to load (tell the user — these need fixing in the evaluators directory):\n" + registry.failures.map {
                 "- \($0.fileName): \($0.problem)"

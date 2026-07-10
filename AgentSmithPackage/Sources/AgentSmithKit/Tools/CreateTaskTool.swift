@@ -52,8 +52,7 @@ public struct CreateTaskTool: AgentTool {
             ]),
             "acceptance_criteria": .dictionary([
                 "type": .string("array"),
-                "items": .dictionary(["type": .string("string")]),
-                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive 2-5 concrete, evidence-checkable criteria from what the user asked for (including any validation the user explicitly requested). The validator is EXTREMELY strict and literal: write each criterion so a CORRECT result passes even in edge cases — ties, zero/empty results, nonexistent targets, ambiguous inputs (e.g. 'identifies the most-starred repository, or reports a tie / that none exists, whichever the data shows'). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong — and repeated no-progress rejections FAIL the task. Omit only for trivial reminder-style tasks. Refine later (waivable flags, specific validators, dynamic prepare) with `set_acceptance_criteria`.")
+                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive 2-5 concrete, evidence-checkable criteria from what the user asked for (including any validation the user explicitly requested). Each item is either a STRING (criterion text, default validator) or an OBJECT {text, waivable?, validator?, prepare?, custom_validator?} — the same shapes as `set_acceptance_criteria`, so custom/named validators and dynamic prepare functions can be attached at creation. The validator is EXTREMELY strict and literal: write each criterion so a CORRECT result passes even in edge cases — ties, zero/empty results, nonexistent targets, ambiguous inputs (e.g. 'identifies the most-starred repository, or reports a tie / that none exists, whichever the data shows'). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong — and repeated no-progress rejections FAIL the task. Omit only for trivial reminder-style tasks.")
             ]),
             "steps": .dictionary([
                 "type": .string("array"),
@@ -142,20 +141,27 @@ public struct CreateTaskTool: AgentTool {
             descriptionAttachments: resolvedAttachments
         )
 
-        // Seed acceptance criteria and the initial step list when supplied. Plain
-        // strings here — waivable flags and named validators are refinements made via
-        // set_acceptance_criteria; the step list belongs to the worker from now on.
-        if case .array(let rawCriteria) = arguments["acceptance_criteria"] {
-            let texts = rawCriteria.compactMap { raw -> String? in
-                guard case .string(let s) = raw else { return nil }
-                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : trimmed
-            }
-            if !texts.isEmpty {
+        // Seed acceptance criteria and the initial step list when supplied. Criteria
+        // accept the same shapes as set_acceptance_criteria: plain strings, or
+        // {text, waivable?, validator?, prepare?, custom_validator?} objects — so Smith
+        // can attach custom validators at creation time, not just after.
+        if case .array(let rawCriteria) = arguments["acceptance_criteria"], !rawCriteria.isEmpty {
+            let registry = await context.loadEvaluatorRegistry()
+            switch CriterionArgumentParsing.parse(rawCriteria, registry: registry) {
+            case .success(let parsed) where !parsed.isEmpty:
                 await context.taskStore.setAcceptanceCriteria(
                     id: task.id,
-                    criteria: texts.map { AcceptanceCriterion(text: $0, origin: .smith) }
+                    criteria: parsed.map {
+                        AcceptanceCriterion(text: $0.text, waivable: $0.waivable, origin: .smith, validator: $0.validator, prepare: $0.prepare)
+                    }
                 )
+            case .success:
+                break
+            case .failure(let problem):
+                // The task exists; the criteria didn't apply. Fail loudly so Smith fixes
+                // and re-issues via set_acceptance_criteria rather than shipping a task
+                // with a silently-dropped contract.
+                return .failure("Task created (ID: \(task.id)) but the acceptance_criteria were NOT applied: \(problem.message) Fix them and call set_acceptance_criteria on the task.")
             }
         }
         if case .array(let rawSteps) = arguments["steps"] {

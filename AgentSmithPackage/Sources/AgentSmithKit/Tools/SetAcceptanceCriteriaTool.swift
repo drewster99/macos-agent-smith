@@ -35,7 +35,26 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                         ]),
                         "prepare": .dictionary([
                             "type": .string("string"),
-                            "description": .string("Optional registry name of a prepare-kind evaluator, making this criterion DYNAMIC: the prepare function emits a list of items (e.g. every file in a folder, every step in the plan) and EACH item is judged independently by the criterion's validator. Every item must pass.")
+                            "description": .string("Optional registry name of a prepare-kind evaluator, making this criterion DYNAMIC: the prepare function emits a list of items (e.g. every file in a folder, every step in the plan) and EACH item is judged independently by the criterion's validator. Every item must pass. Create prepare functions with `define_validator`.")
+                        ]),
+                        "custom_validator": .dictionary([
+                            "type": .string("object"),
+                            "properties": .dictionary([
+                                "system_prompt": .dictionary([
+                                    "type": .string("string"),
+                                    "description": .string("The judgment instructions: what to check and how strictly. Do NOT restate the output format — the ACCEPT/REJECT/WAIVE contract is appended automatically.")
+                                ]),
+                                "name": .dictionary([
+                                    "type": .string("string"),
+                                    "description": .string("Optional kebab-case display name for this inline validator.")
+                                ]),
+                                "per_item": .dictionary([
+                                    "type": .string("boolean"),
+                                    "description": .string("True when paired with a `prepare` function — the validator then judges each emitted item via the {{item}} slot.")
+                                ])
+                            ]),
+                            "required": .array([.string("system_prompt")]),
+                            "description": .string("An INLINE Smith-authored validator for this one criterion (task-scoped; not saved to the registry). You write only the judgment prompt — grammar, standard inputs, and the read-only evidence toolset are supplied by the system. Mutually exclusive with `validator`. For a reusable validator, use `define_validator` instead.")
                         ])
                     ]),
                     "required": .array([.string("text")])
@@ -95,62 +114,35 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             return .failure("'criteria' must be a non-empty array of {text, waivable?, validator?} objects.")
         }
 
-        // Validate any named validators against the live registry BEFORE touching the
-        // task — a criterion pointing at a missing validator would escalate every
-        // submission until fixed.
+        // Parse + validate against the live registry BEFORE touching the task — a
+        // criterion pointing at a missing evaluator would fail every round until fixed.
+        // Shared with create_task: strings or {text, waivable?, validator?, prepare?,
+        // custom_validator?} objects, where custom_validator is a Smith-authored INLINE
+        // validator (task-scoped, capability-capped by construction).
         let registry = await context.loadEvaluatorRegistry()
-        var parsed: [(text: String, waivable: Bool, validatorName: String?, prepareName: String?)] = []
-        for raw in rawCriteria {
-            guard case .dictionary(let fields) = raw, case .string(let text) = fields["text"],
-                  !text.trimmingCharacters(in: .whitespaces).isEmpty else {
-                return .failure("Every criterion must be an object with a non-empty 'text'.")
-            }
-            var waivable = false
-            if case .bool(let flag) = fields["waivable"] { waivable = flag }
-            var validatorName: String?
-            if case .string(let named) = fields["validator"], !named.trimmingCharacters(in: .whitespaces).isEmpty {
-                guard let registry else {
-                    return .failure("Cannot name validator '\(named)': no evaluator registry is configured.")
-                }
-                guard let definition = registry.definition(named: named), definition.kind == .validator else {
-                    let available = registry.definitions(ofKind: .validator).map(\.name).joined(separator: ", ")
-                    return .failure("Validator '\(named)' is not in the registry. Available validators: \(available.isEmpty ? "(none)" : available). Use list_validators for descriptions.")
-                }
-                validatorName = named
-            }
-            var prepareName: String?
-            if case .string(let named) = fields["prepare"], !named.trimmingCharacters(in: .whitespaces).isEmpty {
-                guard let registry else {
-                    return .failure("Cannot name prepare function '\(named)': no evaluator registry is configured.")
-                }
-                guard let definition = registry.definition(named: named), definition.kind == .prepare else {
-                    let available = registry.definitions(ofKind: .prepare).map(\.name).joined(separator: ", ")
-                    return .failure("Prepare function '\(named)' is not in the registry (or is not kind=prepare). Available prepare functions: \(available.isEmpty ? "(none)" : available).")
-                }
-                prepareName = named
-            }
-            parsed.append((text, waivable, validatorName, prepareName))
+        let parsed: [CriterionArgumentParsing.ParsedCriterion]
+        switch CriterionArgumentParsing.parse(rawCriteria, registry: registry) {
+        case .success(let criteria):
+            parsed = criteria
+        case .failure(let problem):
+            return .failure(problem.message)
         }
-        // Duplicate texts would both inherit the same existing criterion's identity below,
-        // corrupting per-criterion verdict bookkeeping.
-        let uniqueTexts = Set(parsed.map(\.text))
-        guard uniqueTexts.count == parsed.count else {
-            return .failure("Duplicate criterion texts in the list — each criterion must be distinct.")
+        guard !parsed.isEmpty else {
+            return .failure("'criteria' must contain at least one non-empty criterion.")
         }
 
         // Unchanged text keeps the criterion's identity so its sticky ACCEPT survives;
         // the store drops verdicts for anything that actually changed.
         let existingByText = Dictionary(task.acceptanceCriteria.map { ($0.text, $0) }, uniquingKeysWith: { a, _ in a })
         let criteria = parsed.map { entry -> AcceptanceCriterion in
-            let validator: AcceptanceCriterion.Validator? = entry.validatorName.map { .registry($0) }
             if let existing = existingByText[entry.text] {
                 var updated = existing
                 updated.waivable = entry.waivable
-                updated.validator = validator
-                updated.prepare = entry.prepareName
+                updated.validator = entry.validator
+                updated.prepare = entry.prepare
                 return updated
             }
-            return AcceptanceCriterion(text: entry.text, waivable: entry.waivable, origin: .smith, validator: validator, prepare: entry.prepareName)
+            return AcceptanceCriterion(text: entry.text, waivable: entry.waivable, origin: .smith, validator: entry.validator, prepare: entry.prepare)
         }
 
         await context.taskStore.setAcceptanceCriteria(id: taskID, criteria: criteria)

@@ -173,6 +173,141 @@ struct ValidationAgentSurfaceTests {
         #expect(!failed.succeeded)
     }
 
+    // MARK: - Custom validator authoring
+
+    @Test("define_validator persists both kinds with the system-supplied contract; built-in names and silent overwrites are refused")
+    func defineValidatorAuthoring() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-authoring-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Mirror the runtime's save closure over a TempDir registry.
+        let save: @Sendable (EvaluatorDefinition, Bool) async -> String? = { definition, overwrite in
+            if EvaluatorDefaults.builtInNames.contains(definition.name) { return "'\(definition.name)' is a built-in definition name" }
+            let target = directory.appendingPathComponent("\(definition.name).json")
+            if FileManager.default.fileExists(atPath: target.path) && !overwrite { return "already exists" }
+            let encoder = JSONEncoder()
+            guard let data = try? encoder.encode(definition) else { return "encode failed" }
+            try? data.write(to: target, options: .atomic)
+            return nil
+        }
+        let context = TestToolContext.make(agentRole: .smith, saveEvaluatorDefinition: save)
+        let tool = DefineValidatorTool()
+
+        // A prepare function: enumeration prompt + JSON-array grammar appended by the system.
+        let prepareResult = try await tool.execute(arguments: [
+            "name": .string("swift-files-enumerator"),
+            "kind": .string("prepare"),
+            "description": .string("Lists every Swift file the task touched."),
+            "system_prompt": .string("Enumerate every .swift file referenced by the task's result or steps.")
+        ], context: context)
+        #expect(prepareResult.succeeded)
+
+        // A per-item validator: judgment prompt + verdict grammar + {{item}} slot.
+        let validatorResult = try await tool.execute(arguments: [
+            "name": .string("file-header-check"),
+            "kind": .string("validator"),
+            "description": .string("Checks one Swift file has a documentation header."),
+            "system_prompt": .string("Verify the file named in the item has a documentation comment as its first non-import line."),
+            "per_item": .bool(true)
+        ], context: context)
+        #expect(validatorResult.succeeded)
+
+        let registry = EvaluatorRegistry.load(from: directory)
+        let prepare = registry.definition(named: "swift-files-enumerator")
+        #expect(prepare?.kind == .prepare)
+        #expect(prepare?.outputGrammar == .jsonArray, "prepare gets the JSON-array contract automatically")
+        let validator = registry.definition(named: "file-header-check")
+        #expect(validator?.kind == .validator)
+        #expect(validator?.requiredSlots.contains("item") == true, "per_item validators receive the {{item}} slot")
+        #expect(validator?.toolNames == EvaluatorDefaults.validatorEvidenceToolNames, "capability is capped to the evidence quartet")
+        #expect(validator?.systemPrompt.contains("ACCEPT") == true, "the verdict contract is appended")
+        #expect(registry.failures.isEmpty)
+
+        // Built-in names are reserved; existing names need overwrite:true.
+        let builtIn = try await tool.execute(arguments: [
+            "name": .string("default-acceptance"), "kind": .string("validator"),
+            "description": .string("x"), "system_prompt": .string("x")
+        ], context: context)
+        #expect(!builtIn.succeeded)
+        let duplicate = try await tool.execute(arguments: [
+            "name": .string("file-header-check"), "kind": .string("validator"),
+            "description": .string("x"), "system_prompt": .string("changed")
+        ], context: context)
+        #expect(!duplicate.succeeded)
+
+        // Unknown template slots are refused at authoring time.
+        let badTemplate = try await tool.execute(arguments: [
+            "name": .string("bad-template"), "kind": .string("validator"),
+            "description": .string("x"), "system_prompt": .string("x"),
+            "input_template": .string("Check {{nonexistent_slot}} now")
+        ], context: context)
+        #expect(!badTemplate.succeeded)
+        #expect(badTemplate.output.contains("nonexistent_slot"))
+    }
+
+    @Test("set_acceptance_criteria accepts an inline custom_validator and embeds it on the criterion")
+    func inlineCustomValidatorOnCriterion() async throws {
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "t", description: "d")
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore, loadEvaluatorRegistry: makeSeededRegistryLoader())
+        let result = try await SetAcceptanceCriteriaTool().execute(
+            arguments: [
+                "task_id": .string(task.id.uuidString),
+                "criteria": .array([
+                    .dictionary([
+                        "text": .string("the summary is in French"),
+                        "custom_validator": .dictionary([
+                            "name": .string("french-check"),
+                            "system_prompt": .string("Verify the submitted result is written in French.")
+                        ])
+                    ])
+                ])
+            ],
+            context: context
+        )
+        #expect(result.succeeded)
+
+        let criterion = await taskStore.task(id: task.id)?.acceptanceCriteria.first
+        guard case .inline(let definition)? = criterion?.validator else {
+            Issue.record("expected an inline validator, got \(String(describing: criterion?.validator))")
+            return
+        }
+        #expect(definition.name == "french-check")
+        #expect(definition.systemPrompt.contains("French"))
+        #expect(definition.systemPrompt.contains("ACCEPT"), "the verdict contract is appended")
+        #expect(definition.toolNames == EvaluatorDefaults.validatorEvidenceToolNames)
+    }
+
+    @Test("create_task accepts criterion objects (inline validator + waivable) alongside strings")
+    func createTaskObjectCriteria() async throws {
+        let taskStore = TaskStore()
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+        let result = try await CreateTaskTool().execute(
+            arguments: [
+                "title": .string("Mixed criteria task"),
+                "description": .string("d"),
+                "acceptance_criteria": .array([
+                    .string("plain criterion"),
+                    .dictionary([
+                        "text": .string("fancy criterion"),
+                        "waivable": .bool(true),
+                        "custom_validator": .dictionary(["system_prompt": .string("Judge fancily.")])
+                    ])
+                ])
+            ],
+            context: context
+        )
+        #expect(result.succeeded)
+        let criteria = await taskStore.allTasks().first?.acceptanceCriteria ?? []
+        #expect(criteria.count == 2)
+        #expect(criteria[0].validator == nil)
+        #expect(criteria[1].waivable)
+        if case .inline = criteria[1].validator {} else {
+            Issue.record("expected inline validator on the object criterion")
+        }
+    }
+
     // MARK: - review_work override visibility
 
     @Test("Accepting an escalated task records the override: ledger settles, update logged, channel told")

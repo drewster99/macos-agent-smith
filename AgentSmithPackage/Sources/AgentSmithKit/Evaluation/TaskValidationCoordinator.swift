@@ -96,6 +96,112 @@ public enum EvaluatorDefaults {
     /// validators, and the default toolset for shipped ones.
     public static let validatorEvidenceToolNames = ["file_read", "directory_listing", "grep", "glob"]
 
+    /// Slot names the coordinator provides to every validator/prepare run. Custom input
+    /// templates may reference these — plus `item`, which per-item validators receive
+    /// during dynamic (prepare/map) judging.
+    public static let standardSlotNames: Set<String> = [
+        "task_id", "task_title", "task_description", "worker_tools", "worker_activity",
+        "steps", "recent_updates", "result", "commentary", "criterion", "previous_verdict"
+    ]
+
+    /// A human-readable authoring refusal, surfaced verbatim to the authoring tool.
+    public struct AuthoringError: Error, Sendable {
+        public let message: String
+        public init(_ message: String) { self.message = message }
+    }
+
+    /// Builds a Smith-authored definition from just a name, description, and the
+    /// authored prompt. The SYSTEM supplies the contract — output grammar (verdict line
+    /// for validators, JSON array for prepare), the standard input template, the
+    /// read-only evidence toolset, and conservative limits — so an authored evaluator
+    /// can judge however it likes but cannot grant itself capabilities or break the
+    /// parse loop. A custom `inputTemplate` may only reference the standard slots
+    /// (plus `item` for per-item validators); unknown placeholders fail here, at
+    /// authoring time, never mid-validation.
+    public static func makeCustomDefinition(
+        name: String,
+        description: String,
+        kind: EvaluatorDefinition.Kind,
+        authoredPrompt: String,
+        inputTemplate: String? = nil,
+        perItem: Bool = false
+    ) -> Result<EvaluatorDefinition, AuthoringError> {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, trimmedName.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }) else {
+            return .failure(AuthoringError("name must be non-empty kebab-case (lowercase letters, digits, hyphens), e.g. 'accessibility-check'"))
+        }
+        guard kind == .validator || kind == .prepare else {
+            return .failure(AuthoringError("only 'validator' and 'prepare' definitions can be authored — approver/scoper are system-reserved"))
+        }
+        let trimmedPrompt = authoredPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else {
+            return .failure(AuthoringError("the authored prompt must be non-empty"))
+        }
+
+        let template: String
+        if let inputTemplate, !inputTemplate.trimmingCharacters(in: .whitespaces).isEmpty {
+            template = inputTemplate
+        } else if perItem {
+            template = defaultAcceptanceDefinition.inputTemplate + "\n\n## Item to judge\n{{item}}"
+        } else {
+            template = defaultAcceptanceDefinition.inputTemplate
+        }
+        var allowedSlots = standardSlotNames
+        if perItem { allowedSlots.insert("item") }
+        let placeholders = EvaluatorDefinition.placeholders(in: template)
+        let unknown = placeholders.subtracting(allowedSlots)
+        guard unknown.isEmpty else {
+            return .failure(AuthoringError("input_template references unknown slot(s): \(unknown.sorted().joined(separator: ", ")). Available: \(allowedSlots.sorted().joined(separator: ", "))"))
+        }
+
+        let systemPrompt: String
+        let grammar: EvaluatorDefinition.OutputGrammar
+        switch kind {
+        case .validator:
+            grammar = .verdictLine(allowed: [
+                .init(token: "ACCEPT", requiresReason: false),
+                .init(token: "REJECT", requiresReason: true),
+                .init(token: "WAIVE", requiresReason: true)
+            ])
+            systemPrompt = trimmedPrompt + """
+
+
+                Your toolset is read-only evidence tools; the worker's differs — never conclude a \
+                tool was unavailable because you lack it. Judge on evidence: the system-observed \
+                activity log, the step list, and what you can verify yourself. Respond with your \
+                verdict on the FIRST line:
+                ACCEPT — the criterion is satisfied.
+                REJECT: <specific reason and what is missing — the worker acts on this verbatim>
+                WAIVE: <why this criterion does not apply>
+                """
+        default:
+            grammar = .jsonArray
+            systemPrompt = trimmedPrompt + """
+
+
+                Use your read-only tools if you need to inspect files or directories. When you \
+                have gathered what you need, output ONLY a JSON array of the items to validate \
+                individually (strings, or small objects). No commentary after the array; an empty \
+                array means nothing applies.
+                """
+        }
+
+        return .success(EvaluatorDefinition(
+            name: trimmedName,
+            description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+            kind: kind,
+            systemPrompt: systemPrompt,
+            inputTemplate: template,
+            requiredSlots: placeholders.sorted(),
+            outputGrammar: grammar,
+            modelSlot: .summarizer,
+            toolNames: validatorEvidenceToolNames,
+            maxTurns: 10,
+            timeoutSeconds: 300,
+            maxOutputTokens: 2000
+        ))
+    }
+
     /// The definitions the app itself provides. NOT stored in the user's registry
     /// directory and NOT editable — the app always supplies the current version. To
     /// customize one, duplicate its JSON (from the pinned body on any task, or
@@ -153,6 +259,39 @@ public enum EvaluatorDefaults {
 extension OrchestrationRuntime {
 
     // MARK: - Entry points
+
+    /// Persists a Smith-authored definition into the session's registry directory.
+    /// Returns nil on success, or a human-readable refusal: built-in names are
+    /// reserved, invalid definitions never land on disk, and an existing name is only
+    /// replaced when `overwrite` says so (protects user-authored files from silent
+    /// clobbering).
+    func saveEvaluatorDefinition(_ definition: EvaluatorDefinition, overwrite: Bool) -> String? {
+        guard let directory = evaluatorsDirectory else {
+            return "no evaluator registry is configured for this session"
+        }
+        guard !EvaluatorDefaults.builtInNames.contains(definition.name) else {
+            return "'\(definition.name)' is a built-in definition name — pick a different name"
+        }
+        let problems = definition.validationProblems()
+        guard problems.isEmpty else {
+            return "definition is invalid: \(problems.joined(separator: "; "))"
+        }
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let target = directory.appendingPathComponent("\(definition.name).json")
+        if fileManager.fileExists(atPath: target.path) && !overwrite {
+            return "a definition named '\(definition.name)' already exists — pass overwrite: true to replace it, or pick a new name"
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(definition)
+            try data.write(to: target, options: .atomic)
+            return nil
+        } catch {
+            return "could not write the definition: \(error.localizedDescription)"
+        }
+    }
 
     /// One-line-per-validator summary baked into `set_acceptance_criteria`'s description
     /// at Smith's spawn, or nil when no registry is configured. A snapshot by design —

@@ -2993,6 +2993,9 @@ public actor OrchestrationRuntime {
             workerCapacity: { [weak self] in
                 await self?.maxConcurrentWorkers ?? 1
             },
+            saveEvaluatorDefinition: { [weak self] definition, overwrite in
+                await self?.saveEvaluatorDefinition(definition, overwrite: overwrite) ?? "runtime unavailable"
+            },
             // Liveness lease: true only while this exact agent ID is still in the live
             // registry. A deallocated runtime also reads as not-current — an agent whose
             // runtime is gone is by definition a zombie.

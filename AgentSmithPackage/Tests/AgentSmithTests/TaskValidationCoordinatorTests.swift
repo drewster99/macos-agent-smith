@@ -426,6 +426,31 @@ struct TaskValidationCoordinatorTests {
         #expect(status == .awaitingReview)
     }
 
+    @Test("An inline Smith-authored validator judges its criterion end to end")
+    func inlineValidatorJudgesEndToEnd() async throws {
+        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        guard case .success(let inline) = EvaluatorDefaults.makeCustomDefinition(
+            name: "french-check",
+            description: "Checks the result is in French.",
+            kind: .validator,
+            authoredPrompt: "Verify the submitted result is written in French."
+        ) else {
+            Issue.record("factory refused a valid definition")
+            return
+        }
+        let criteria = [AcceptanceCriterion(text: "the summary is in French", origin: .smith, validator: .inline(inline))]
+        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .completed)
+
+        let record = await runtime.taskStore.task(id: task.id)?.validation?.verdictRecords.first
+        #expect(record?.validatorName == "french-check")
+        #expect(record?.renderedInput?.contains("The thing was done.") == true, "the inline validator saw the standard slots")
+    }
+
     @Test("A criterion naming a missing registry validator escalates")
     func missingValidatorEscalates() async {
         let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
