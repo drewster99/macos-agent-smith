@@ -260,6 +260,18 @@ public actor MemoryStore {
         var parts: [String] = []
         parts.append(task.title)
         parts.append(task.description)
+        // The acceptance contract and the worker's plan describe what the task was
+        // really about, often more concretely than the description — include their
+        // texts. Verdicts/validation results are deliberately EXCLUDED (pass/fail
+        // chatter says nothing about the topic), as are tombstoned steps (abandoned
+        // plans are retrieval noise).
+        if !task.acceptanceCriteria.isEmpty {
+            parts.append(task.acceptanceCriteria.map(\.text).joined(separator: " "))
+        }
+        let activeSteps = task.steps.filter(\.isActive)
+        if !activeSteps.isEmpty {
+            parts.append(activeSteps.map(\.text).joined(separator: " "))
+        }
         parts.append(summary)
         if let result = task.result, !result.isEmpty {
             parts.append(result)
