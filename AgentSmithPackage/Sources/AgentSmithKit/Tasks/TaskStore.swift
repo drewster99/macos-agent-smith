@@ -56,6 +56,66 @@ public actor TaskStore {
         return await inactiveStore.all()
     }
 
+    /// Toggles a task's template flag. A template, when started, clones a fresh instance
+    /// rather than running in place. Any task can become a template or stop being one.
+    /// Becoming a template normalizes a terminal task to a clean `.pending` launcher
+    /// (prior result preserved into history) so it's startable and carries no stale
+    /// run-state — a template never runs itself.
+    public func setTemplate(id: UUID, isTemplate: Bool) {
+        guard var task = tasks[id] else { return }
+        task.isTemplate = isTemplate
+        if isTemplate && task.status.isTerminal {
+            preserveResultIntoHistory(&task)
+            task.result = nil
+            task.commentary = nil
+            task.completedAt = nil
+            task.startedAt = nil
+            task.validation = nil
+            task.status = .pending
+        }
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
+    /// Clones a template into a fresh, runnable INSTANCE and adds it to the store.
+    /// Carries over the "what to do" fields — title, description, description
+    /// attachments, the step plan (each reset to `.pending`, notes cleared), and the
+    /// acceptance criteria (fresh criterion IDs, no verdicts). Blanks every run-state
+    /// field (result, commentary, updates, summary, validation, timestamps, scoped
+    /// tools, relevant-context, help request) and the template/recurrence-carrying
+    /// fields (`isTemplate = false`, `scheduledRunAt = nil`). Sets `parentTaskID` to the
+    /// template. Returns the instance, or nil if the template is missing.
+    public func cloneTemplateInstance(templateID: UUID) -> AgentTask? {
+        guard let template = tasks[templateID] else { return nil }
+        let clonedSteps = template.steps.map { step in
+            TaskStep(text: step.text, status: .pending, note: nil, origin: step.origin)
+        }
+        let clonedCriteria = template.acceptanceCriteria.map { criterion in
+            AcceptanceCriterion(
+                text: criterion.text,
+                waivable: criterion.waivable,
+                origin: criterion.origin,
+                validator: criterion.validator,
+                prepare: criterion.prepare
+            )
+        }
+        let instance = AgentTask(
+            title: template.title,
+            description: template.description,
+            status: .pending,
+            disposition: .active,
+            descriptionAttachments: template.descriptionAttachments,
+            acceptanceCriteria: clonedCriteria,
+            steps: clonedSteps,
+            isTemplate: false,
+            parentTaskID: template.id
+        )
+        tasks[instance.id] = instance
+        onChange?()
+        return instance
+    }
+
     /// Adds a new task and returns it. Also archives any completed tasks older than 4 hours.
     /// When `scheduledRunAt` is non-nil and in the future the new task is created with status
     /// `.scheduled` so the auto-runner skips it; the runtime should pair the call with a
@@ -65,7 +125,8 @@ public actor TaskStore {
         title: String,
         description: String,
         scheduledRunAt: Date? = nil,
-        descriptionAttachments: [Attachment] = []
+        descriptionAttachments: [Attachment] = [],
+        isTemplate: Bool = false
     ) async -> AgentTask {
         await archiveStaleCompleted()
         let initialStatus: AgentTask.Status = (scheduledRunAt.map { $0 > Date() } ?? false) ? .scheduled : .pending
@@ -74,7 +135,8 @@ public actor TaskStore {
             description: description,
             status: initialStatus,
             scheduledRunAt: scheduledRunAt,
-            descriptionAttachments: descriptionAttachments
+            descriptionAttachments: descriptionAttachments,
+            isTemplate: isTemplate
         )
         tasks[task.id] = task
         onChange?()

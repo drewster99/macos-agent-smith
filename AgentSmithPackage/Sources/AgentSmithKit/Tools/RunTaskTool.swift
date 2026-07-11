@@ -90,7 +90,12 @@ struct RunTaskTool: AgentTool {
         // pending first so the retry runs on the same task ID (preserving history and prior
         // context). Completed tasks get the same reopen-in-place treatment so the user's
         // "redo that one" never silently turns into a new duplicate task.
-        if task.status == .failed {
+        // Templates never run or reset in place — starting one clones a fresh instance
+        // (handled downstream in restartForNewTask). Skip the reopen/reset entirely so
+        // the template's own state is left untouched.
+        if task.isTemplate {
+            // fall through to restart, which clones
+        } else if task.status == .failed {
             _ = await context.taskStore.resetFailedTask(id: taskID)
             guard let refreshed = await context.taskStore.task(id: taskID), refreshed.status.isRunnable else {
                 return .failure("Could not reset task '\(task.title)' for retry.")

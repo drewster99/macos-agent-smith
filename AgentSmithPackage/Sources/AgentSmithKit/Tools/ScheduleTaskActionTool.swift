@@ -131,6 +131,14 @@ struct ScheduleTaskActionTool: AgentTool {
             extra = trimmed.isEmpty ? nil : trimmed
         }
 
+        // A RECURRING run defaults the task to a TEMPLATE — the user wants a fresh
+        // instance on each firing, not the same record re-run in place (which would
+        // pile prior results into one task). Smith can toggle it off via update_task if
+        // they specifically want in-place updates instead.
+        if action == .run, recurrenceResult.value != nil, !task.isTemplate {
+            await context.taskStore.setTemplate(id: taskID, isTemplate: true)
+        }
+
         let imperative = action.imperativeText(for: task, extra: extra)
         let outcome = await context.scheduleWake(
             wakeAt,

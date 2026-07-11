@@ -63,6 +63,17 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// Nil until the first validation begins.
     public var validation: TaskValidationState?
 
+    /// When true, this task is a TEMPLATE: starting it never runs the task itself —
+    /// instead a fresh instance is CLONED (title/description/steps/criteria copied,
+    /// run-state blanked) and that clone runs. The template stays put and can be
+    /// started again for another fresh instance. Recurring tasks default to templates.
+    /// Any task can be toggled into or out of a template.
+    public var isTemplate: Bool
+    /// For a cloned INSTANCE, the ID of the template it was cloned from. Nil for
+    /// ordinary tasks and for templates themselves. Lets future UI group instances
+    /// under their template; for now it's just a recorded lineage.
+    public var parentTaskID: UUID?
+
     /// The most recent set of tool names the security agent approved for the worker on this
     /// task (per-task tool scoping). A **record**, not the gate — the live registry is the
     /// source of truth for enforcement. `nil` for legacy/unscoped tasks. Replaced wholesale
@@ -236,7 +247,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         helpRequest: String? = nil,
         acceptanceCriteria: [AcceptanceCriterion] = [],
         steps: [TaskStep] = [],
-        validation: TaskValidationState? = nil
+        validation: TaskValidationState? = nil,
+        isTemplate: Bool = false,
+        parentTaskID: UUID? = nil
     ) {
         self.id = id
         self.title = title
@@ -266,12 +279,14 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.acceptanceCriteria = acceptanceCriteria
         self.steps = steps
         self.validation = validation
+        self.isTemplate = isTemplate
+        self.parentTaskID = parentTaskID
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID
     }
 
     public init(from decoder: Decoder) throws {
@@ -304,6 +319,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         acceptanceCriteria = try c.decodeIfPresent([AcceptanceCriterion].self, forKey: .acceptanceCriteria) ?? []
         steps = try c.decodeIfPresent([TaskStep].self, forKey: .steps) ?? []
         validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
+        isTemplate = try c.decodeIfPresent(Bool.self, forKey: .isTemplate) ?? false
+        parentTaskID = try c.decodeIfPresent(UUID.self, forKey: .parentTaskID)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -348,5 +365,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             try c.encode(steps, forKey: .steps)
         }
         try c.encodeIfPresent(validation, forKey: .validation)
+        if isTemplate { try c.encode(true, forKey: .isTemplate) }
+        try c.encodeIfPresent(parentTaskID, forKey: .parentTaskID)
     }
 }

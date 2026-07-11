@@ -58,6 +58,10 @@ public struct CreateTaskTool: AgentTool {
                 "type": .string("array"),
                 "items": .dictionary(["type": .string("string")]),
                 "description": .string("Initial step list for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. The worker owns and evolves it from there (`manage_steps`); validators see the final list including anything skipped or removed.")
+            ]),
+            "is_template": .dictionary([
+                "type": .string("boolean"),
+                "description": .string("Make this a TEMPLATE. A template never runs itself — each time it's started, a fresh instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly and get a clean run each time. Default false. (When you schedule a RECURRING run on a task, it becomes a template automatically.)")
             ])
         ]),
         "required": .array([.string("title"), .string("description")])
@@ -152,11 +156,15 @@ public struct CreateTaskTool: AgentTool {
             }
         }
 
+        var isTemplate = false
+        if case .bool(let flag) = arguments["is_template"] { isTemplate = flag }
+
         let task = await context.taskStore.addTask(
             title: title,
             description: description,
             scheduledRunAt: scheduledRunAt,
-            descriptionAttachments: resolvedAttachments
+            descriptionAttachments: resolvedAttachments,
+            isTemplate: isTemplate
         )
 
         if !seedCriteria.isEmpty {

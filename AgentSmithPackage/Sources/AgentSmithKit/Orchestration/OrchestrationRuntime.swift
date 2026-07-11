@@ -1300,8 +1300,14 @@ public actor OrchestrationRuntime {
     public func restartForNewTask(taskID: UUID) {
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
+            // Template interception: starting a template never runs the template — it
+            // clones a fresh instance and runs THAT. The template stays put (gets a
+            // "started instance" note) so it can spawn another instance next time. This
+            // is the single chokepoint every start path funnels through (run_task, the
+            // play button, auto-advance, scheduled wakes), so all of them clone.
+            let startID = await self.resolveStartTarget(taskID: taskID)
             if await self.hasLiveSmith() {
-                await self.performStartTaskWithLiveSmith(taskID: taskID)
+                await self.performStartTaskWithLiveSmith(taskID: startID)
                 return
             }
             // Cold path — no Smith to preserve. Capture the most recent user message
@@ -1311,10 +1317,30 @@ public actor OrchestrationRuntime {
             let priorSessionID = await self.currentSessionID
             await self.performStopAll(preserveObserverCallbacks: true)
             if let priorSessionID {
-                await self.usageStore.backfillTaskID(taskID, forSession: priorSessionID)
+                await self.usageStore.backfillTaskID(startID, forSession: priorSessionID)
             }
-            await self.performStart(resumingTaskID: taskID, lastUserMessage: lastUserMessage)
+            await self.performStart(resumingTaskID: startID, lastUserMessage: lastUserMessage)
         }
+    }
+
+    /// If `taskID` is a template, clone a fresh instance, note it on the template, and
+    /// announce the instance; return the ID to actually start (the instance, or the
+    /// original for a non-template). Runs on the lifecycle queue via `restartForNewTask`.
+    private func resolveStartTarget(taskID: UUID) async -> UUID {
+        guard let task = await taskStore.task(id: taskID), task.isTemplate else { return taskID }
+        guard let instance = await taskStore.cloneTemplateInstance(templateID: taskID) else { return taskID }
+        await taskStore.addUpdate(id: taskID, message: "Started instance \(instance.id.uuidString) from this template.")
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: instance.title,
+            metadata: [
+                "messageKind": .string("task_created"),
+                "taskID": .string(instance.id.uuidString),
+                "taskDescription": .string(instance.description),
+                "clonedFromTemplate": .string(taskID.uuidString)
+            ]
+        ))
+        return instance.id
     }
 
     private func hasLiveSmith() -> Bool {

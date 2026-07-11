@@ -20,10 +20,14 @@ struct UpdateTaskTool: AgentTool {
                     .string("completed"),
                     .string("failed")
                 ]),
-                "description": .string("The new status for the task: pending, paused, completed, or failed. `running` is NOT settable here — use `run_task`, which actually spawns the worker. `awaitingReview` and `validating` are reserved — submissions enter validation via Brown's `task_complete`, and only a validation escalation parks a task in review.")
+                "description": .string("The new status for the task: pending, paused, completed, or failed. `running` is NOT settable here — use `run_task`, which actually spawns the worker. `awaitingReview` and `validating` are reserved — submissions enter validation via Brown's `task_complete`, and only a validation escalation parks a task in review. Optional when `is_template` is provided.")
+            ]),
+            "is_template": .dictionary([
+                "type": .string("boolean"),
+                "description": .string("Toggle whether this task is a TEMPLATE. A template never runs itself — starting it clones a fresh instance (state blanked) that runs. true = make it a template; false = make it an ordinary task. May be sent alone (without `status`).")
             ])
         ]),
-        "required": .array([.string("task_id"), .string("status")])
+        "required": .array([.string("task_id")])
     ]
 
     public init() {}
@@ -39,7 +43,23 @@ struct UpdateTaskTool: AgentTool {
         guard let taskID = UUID(uuidString: taskIDString) else {
             return .failure("Invalid `task_id` format: \(taskIDString)")
         }
+        guard await context.taskStore.task(id: taskID) != nil else {
+            return .failure("Task not found: \(taskIDString)")
+        }
+
+        // Template toggle — independent of status. May be sent alone or with a status.
+        var appliedTemplate: Bool?
+        if case .bool(let flag) = arguments["is_template"] {
+            await context.taskStore.setTemplate(id: taskID, isTemplate: flag)
+            appliedTemplate = flag
+        }
+
+        // Status is optional when a template toggle is present, so a caller can flip the
+        // template flag without also restating the status.
         guard case .string(let statusString) = arguments["status"] else {
+            if appliedTemplate != nil {
+                return .success("Task \(taskIDString) is \(appliedTemplate! ? "now a template" : "no longer a template").")
+            }
             throw ToolCallError.missingRequiredArgument("status")
         }
         guard let status = AgentTask.Status(rawValue: statusString) else {
@@ -56,11 +76,8 @@ struct UpdateTaskTool: AgentTool {
             return .failure("`validating` is reserved — only Brown's `task_complete` submission enters validation. Setting it directly would strand the task with no validation run attached.")
         }
 
-        guard await context.taskStore.task(id: taskID) != nil else {
-            return .failure("Task not found: \(taskIDString)")
-        }
-
         await context.taskStore.updateStatus(id: taskID, status: status)
-        return .success("Task \(taskIDString) updated to \(statusString).")
+        let templateNote = appliedTemplate.map { " (\($0 ? "now a template" : "no longer a template"))" } ?? ""
+        return .success("Task \(taskIDString) updated to \(statusString)\(templateNote).")
     }
 }

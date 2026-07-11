@@ -400,6 +400,10 @@ private struct TaskRow: View {
             titleText()
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            if task.isTemplate {
+                templatePip()
+            }
+
             if attachmentCount > 0 {
                 attachmentPip()
             }
@@ -429,6 +433,18 @@ private struct TaskRow: View {
         task.descriptionAttachments.count
             + task.updates.reduce(0) { $0 + $1.attachments.count }
             + task.resultAttachments.count
+    }
+
+    @ViewBuilder
+    private func templatePip() -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: "doc.on.doc")
+                .imageScale(.small)
+            Text("Template")
+                .font(.caption2)
+        }
+        .foregroundStyle(.tertiary)
+        .help("Template — starting it clones a fresh instance to run")
     }
 
     @ViewBuilder
