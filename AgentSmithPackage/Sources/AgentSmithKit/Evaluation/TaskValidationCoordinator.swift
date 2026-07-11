@@ -23,9 +23,11 @@ public enum EvaluatorDefaults {
     /// Criterion-less tasks get exactly one materialized criterion judged by this.
     /// Ships with the read-only evidence quartet and the Summarizer's model (a required
     /// role, so validation works out of the box; point it at a dedicated validator slot
-    /// by editing the JSON once one is configured).
-    public static let defaultAcceptanceDefinition = EvaluatorDefinition(
-        name: "default-acceptance",
+    /// by editing the JSON once one is configured). The system prompt here is the JUDGING
+    /// stance only — the input-format description, the criterion, and the response-format
+    /// contract are supplied by `composeValidatorSystemPrompt` at judge time.
+    public static let defaultDefinition = EvaluatorDefinition(
+        name: "default",
         description: "General-purpose acceptance check: is the task, as described, genuinely and completely satisfied by the submitted result? Used when a criterion doesn't name a more specific validator.",
         kind: .validator,
         systemPrompt: """
@@ -46,40 +48,8 @@ public enum EvaluatorDefaults {
             you could perform them.
 
             Be strict about completeness, but judge what the criterion asks — not what you would \
-            have asked. Respond with your verdict on the FIRST line:
-            ACCEPT — the criterion is satisfied.
-            REJECT: <specific reason and what is missing — the worker acts on this verbatim>
-            WAIVE: <why this criterion does not apply to this task>
+            have asked.
             """,
-        inputTemplate: """
-            ## Task: {{task_title}} (id: {{task_id}})
-            {{task_description}}
-
-            ## Worker's tools (its capabilities differ from yours)
-            {{worker_tools}}
-
-            ## Worker's tool activity (system-observed — trust this over narrative claims)
-            {{worker_activity}}
-
-            ## Worker's step list (statuses + tombstones)
-            {{steps}}
-
-            ## Recent progress updates
-            {{recent_updates}}
-
-            ## Submitted result
-            {{result}}
-
-            ## Worker commentary
-            {{commentary}}
-
-            ## Criterion to judge
-            {{criterion}}
-
-            ## Your previous verdict on this criterion (if any)
-            {{previous_verdict}}
-            """,
-        requiredSlots: ["task_title", "task_id", "task_description", "worker_tools", "worker_activity", "steps", "recent_updates", "result", "commentary", "criterion", "previous_verdict"],
         outputGrammar: .verdictLine(allowed: [
             .init(token: "ACCEPT", requiresReason: false),
             .init(token: "REJECT", requiresReason: true),
@@ -96,35 +66,24 @@ public enum EvaluatorDefaults {
     /// validators, and the default toolset for shipped ones.
     public static let validatorEvidenceToolNames = ["file_read", "directory_listing", "grep", "glob"]
 
-    /// Slot names the coordinator provides to every validator/prepare run. Custom input
-    /// templates may reference these — plus `item`, which per-item validators receive
-    /// during dynamic (prepare/map) judging.
-    public static let standardSlotNames: Set<String> = [
-        "task_id", "task_title", "task_description", "worker_tools", "worker_activity",
-        "steps", "recent_updates", "result", "commentary", "criterion", "previous_verdict"
-    ]
-
     /// A human-readable authoring refusal, surfaced verbatim to the authoring tool.
     public struct AuthoringError: Error, Sendable {
         public let message: String
         public init(_ message: String) { self.message = message }
     }
 
-    /// Builds a Smith-authored definition from just a name, description, and the
+    /// Builds a Smith-authored definition from just a name, description, kind, and the
     /// authored prompt. The SYSTEM supplies the contract — output grammar (verdict line
-    /// for validators, JSON array for prepare), the standard input template, the
-    /// read-only evidence toolset, and conservative limits — so an authored evaluator
-    /// can judge however it likes but cannot grant itself capabilities or break the
-    /// parse loop. A custom `inputTemplate` may only reference the standard slots
-    /// (plus `item` for per-item validators); unknown placeholders fail here, at
-    /// authoring time, never mid-validation.
+    /// for validators, JSON array for prepare), the JSON input format, the criterion
+    /// placement, the read-only evidence toolset, and conservative limits (all applied by
+    /// `composeValidatorSystemPrompt` at judge time) — so an authored evaluator can judge
+    /// however it likes but cannot grant itself capabilities or break the parse loop. The
+    /// authored prompt is stored RAW: the judging stance only, no output-format text.
     public static func makeCustomDefinition(
         name: String,
         description: String,
         kind: EvaluatorDefinition.Kind,
-        authoredPrompt: String,
-        inputTemplate: String? = nil,
-        perItem: Bool = false
+        authoredPrompt: String
     ) -> Result<EvaluatorDefinition, AuthoringError> {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty, trimmedName.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }) else {
@@ -137,62 +96,19 @@ public enum EvaluatorDefaults {
         guard !trimmedPrompt.isEmpty else {
             return .failure(AuthoringError("the authored prompt must be non-empty"))
         }
-
-        let template: String
-        if let inputTemplate, !inputTemplate.trimmingCharacters(in: .whitespaces).isEmpty {
-            template = inputTemplate
-        } else if perItem {
-            template = defaultAcceptanceDefinition.inputTemplate + "\n\n## Item to judge\n{{item}}"
-        } else {
-            template = defaultAcceptanceDefinition.inputTemplate
-        }
-        var allowedSlots = standardSlotNames
-        if perItem { allowedSlots.insert("item") }
-        let placeholders = EvaluatorDefinition.placeholders(in: template)
-        let unknown = placeholders.subtracting(allowedSlots)
-        guard unknown.isEmpty else {
-            return .failure(AuthoringError("input_template references unknown slot(s): \(unknown.sorted().joined(separator: ", ")). Available: \(allowedSlots.sorted().joined(separator: ", "))"))
-        }
-
-        let systemPrompt: String
-        let grammar: EvaluatorDefinition.OutputGrammar
-        switch kind {
-        case .validator:
-            grammar = .verdictLine(allowed: [
+        let grammar: EvaluatorDefinition.OutputGrammar = kind == .validator
+            ? .verdictLine(allowed: [
                 .init(token: "ACCEPT", requiresReason: false),
                 .init(token: "REJECT", requiresReason: true),
                 .init(token: "WAIVE", requiresReason: true)
-            ])
-            systemPrompt = trimmedPrompt + """
-
-
-                Your toolset is read-only evidence tools; the worker's differs — never conclude a \
-                tool was unavailable because you lack it. Judge on evidence: the system-observed \
-                activity log, the step list, and what you can verify yourself. Respond with your \
-                verdict on the FIRST line:
-                ACCEPT — the criterion is satisfied.
-                REJECT: <specific reason and what is missing — the worker acts on this verbatim>
-                WAIVE: <why this criterion does not apply>
-                """
-        default:
-            grammar = .jsonArray
-            systemPrompt = trimmedPrompt + """
-
-
-                Use your read-only tools if you need to inspect files or directories. When you \
-                have gathered what you need, output ONLY a JSON array of the items to validate \
-                individually (strings, or small objects). No commentary after the array; an empty \
-                array means nothing applies.
-                """
-        }
+              ])
+            : .jsonArray
 
         return .success(EvaluatorDefinition(
             name: trimmedName,
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
             kind: kind,
-            systemPrompt: systemPrompt,
-            inputTemplate: template,
-            requiredSlots: placeholders.sorted(),
+            systemPrompt: trimmedPrompt,
             outputGrammar: grammar,
             modelSlot: .summarizer,
             toolNames: validatorEvidenceToolNames,
@@ -207,7 +123,7 @@ public enum EvaluatorDefaults {
     /// customize one, duplicate its JSON (from the pinned body on any task, or
     /// `list_validators`) under a NEW name in the evaluators directory and edit that.
     public static var builtInDefinitions: [EvaluatorDefinition] {
-        [defaultAcceptanceDefinition]
+        [defaultDefinition]
     }
 
     /// Names reserved by built-ins — user registry files with these names are load
@@ -345,7 +261,7 @@ extension OrchestrationRuntime {
             await taskStore.materializeImplicitCriterion(id: taskID, criterion: AcceptanceCriterion(
                 text: "The task, as described, has been completed correctly and completely, and the submitted result actually delivers it.",
                 origin: .system,
-                validator: .registry(EvaluatorDefaults.defaultAcceptanceDefinition.name)
+                validator: .registry(EvaluatorDefaults.defaultDefinition.name)
             ))
             task = await taskStore.task(id: taskID) ?? task
         }
@@ -364,7 +280,7 @@ extension OrchestrationRuntime {
         let settledOnTask = task.acceptanceCriteria.count - pending.count
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "Validating \"\(task.title)\" — round \(round): \(pending.count) criterion(s) to judge, \(settledOnTask) already settled.",
+            content: "Validating \"\(task.title)\": \(pending.count) criterion(s) to judge, \(settledOnTask) already settled.",
             metadata: ["messageKind": .string("validation_report"), "taskID": .string(taskID.uuidString)]
         ))
 
@@ -391,7 +307,7 @@ extension OrchestrationRuntime {
         }
 
         await taskStore.recordCriterionVerdicts(id: taskID, records: records)
-        await postRoundSummary(taskID: taskID, round: round, records: records)
+        await postRoundSummary(taskID: taskID, records: records)
 
         guard !aborted, !stopRequested else { return }
         guard let judged = await taskStore.task(id: taskID), judged.status == .validating else { return }
@@ -429,7 +345,7 @@ extension OrchestrationRuntime {
                     reason: "validation did not converge: \(stallRounds) consecutive round(s) with no newly accepted criterion — \(rejected.count) criterion(s) still rejected"
                 )
             } else {
-                await returnRejectionsToWorker(taskID: taskID, rejected: rejected, round: round)
+                await returnRejectionsToWorker(taskID: taskID, rejected: rejected)
             }
         }
     }
@@ -679,7 +595,7 @@ extension OrchestrationRuntime {
             if case .registry(let named) = criterion.validator {
                 effectiveName = named
             } else {
-                effectiveName = EvaluatorDefaults.defaultAcceptanceDefinition.name
+                effectiveName = EvaluatorDefaults.defaultDefinition.name
             }
             if let pinned = (await taskStore.task(id: taskID))?.validation?.pinnedDefinitions[effectiveName] {
                 return .success(pinned)
@@ -711,31 +627,45 @@ extension OrchestrationRuntime {
             return (.error("no model configured for slot '\(definition.modelSlot.rawValue)'"), EvaluationRunner.Transcript())
         }
         let (provider, config, usageRole, providerTypeRawValue) = resolved
-        let previousVerdict = (task.validation?.latestVerdict(for: criterion.id)).map(Self.describeVerdict) ?? "none"
-        var slots: [String: String] = [
-            "task_id": task.id.uuidString,
-            "task_title": task.title,
-            "task_description": task.description,
-            "worker_tools": workerToolsDescription(for: task),
-            "worker_activity": await workerActivityDigest(for: task),
-            "steps": Self.renderSteps(task.steps),
-            "recent_updates": task.updates.suffix(10).map { "- \($0.message)" }.joined(separator: "\n"),
-            "result": task.result ?? "(none submitted)",
+
+        // The evidence is delivered as a labeled JSON object and the criterion lives in the
+        // system prompt. Keeping the two apart is deliberate: when both shared one undelimited
+        // markdown blob, weak judge models confused the worker's result with the rubric — a
+        // task whose result format was itself verdict-like got rejected for "not beginning with
+        // ACCEPT/REJECT/WAIVE" (the validator's OWN output rule bleeding onto the worker).
+        // No prior verdict is included on purpose: showing the validator its last answer
+        // anchors it to that answer instead of re-judging the (changed) evidence fresh.
+        var fields: [String: String] = [
+            "resultsToEvaluate": task.result ?? "(none submitted)",
+            "taskTitle": task.title,
+            "taskDescription": task.description,
+            "taskUpdateHistory": task.updates.suffix(10).map { "- \($0.message)" }.joined(separator: "\n"),
             "commentary": task.commentary ?? "(none)",
-            "criterion": criterion.text,
-            "previous_verdict": previousVerdict
+            "workerTools": workerToolsDescription(for: task),
+            "workerActivity": await workerActivityDigest(for: task),
+            "workerSteps": Self.renderSteps(task.steps)
         ]
-        slots.merge(extraSlots) { _, extra in extra }
+        if let item = extraSlots["item"] {
+            fields["itemToEvaluate"] = item
+        }
+        let userMessage = Self.validatorPayloadJSON(fields)
+        let systemPrompt = Self.composeValidatorSystemPrompt(
+            definition: definition,
+            criterion: criterion,
+            hasItem: extraSlots["item"] != nil
+        )
         let tools = Self.evidenceTools(named: definition.toolNames)
         let evaluationContext = makeToolContext(agentID: UUID(), role: .securityAgent)
         let sessionID = currentSessionID
         let usageStore = usageStore
-        return await EvaluationRunner.runCapturing(
+        return await EvaluationRunner.runMessages(
             definition: definition,
-            slots: slots,
+            systemPrompt: systemPrompt,
+            userMessage: userMessage,
             provider: provider,
             tools: tools,
             toolContext: evaluationContext,
+            temperature: 0,
             onResponse: { response, latencyMs in
                 await UsageRecorder.record(
                     response: response,
@@ -753,6 +683,85 @@ extension OrchestrationRuntime {
                 )
             }
         )
+    }
+
+    /// Serializes the evidence fields as a pretty-printed JSON object. Sorted keys keep the
+    /// payload deterministic (stable across runs, diffable in the persisted transcript);
+    /// the system prompt names `resultsToEvaluate` as the focus, so field order carries no
+    /// meaning. JSON encoding is what makes the delivery robust: a result containing quotes,
+    /// braces, or newlines can't leak out of its field and be mistaken for structure.
+    static func validatorPayloadJSON(_ fields: [String: String]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return text
+    }
+
+    /// Builds the validator's system prompt: the definition's judging stance, a description
+    /// of the JSON input's fields, the ONE criterion, and the response contract. The criterion
+    /// lives here (not in the user message) so it reads as an instruction, and the SYSTEM —
+    /// not the authored/default prompt — owns the output format: for validators that means an
+    /// explicit firewall (ACCEPT/REJECT/WAIVE is the VALIDATOR's format, never a requirement
+    /// on the worker's result) and offering WAIVE only when the criterion is `waivable`; for
+    /// prepare functions it means the JSON-array enumeration contract.
+    static func composeValidatorSystemPrompt(
+        definition: EvaluatorDefinition,
+        criterion: AcceptanceCriterion,
+        hasItem: Bool
+    ) -> String {
+        var prompt = definition.systemPrompt
+        prompt += """
+
+
+            ## Input format
+            The user message is a single JSON object whose values are all strings:
+            - `resultsToEvaluate` — the worker's submitted result. THIS is the primary thing you evaluate.
+            - `taskTitle`, `taskDescription` — what the task asked for (context).
+            - `taskUpdateHistory` — the worker's own progress notes (context).
+            - `commentary` — the worker's closing notes on the result (context).
+            - `workerTools` — the worker's capabilities, which differ from yours (context).
+            - `workerActivity` — the SYSTEM-OBSERVED tool-call log; trust it over narrative claims.
+            - `workerSteps` — the worker's plan with statuses and tombstones.
+            """
+        if hasItem {
+            prompt += "\n- `itemToEvaluate` — the specific item to judge for this criterion; when present, judge IT, using the other fields as context."
+        }
+        if definition.kind == .validator {
+            // A non-waivable criterion never mentions WAIVE at all — offering a verdict the
+            // system would only convert to an error just invites wasted escalations.
+            let verdictFormat = criterion.waivable ? "ACCEPT / REJECT / WAIVE" : "ACCEPT / REJECT"
+            prompt += """
+
+
+                ## Acceptance criterion (judge against THIS)
+                \(criterion.text)
+
+                ## Your response
+                Judge only whether the criterion's substance is satisfied, treating every field other than the one under judgment as supporting context. Respond with your verdict on the FIRST line:
+                ACCEPT — the criterion is satisfied.
+                REJECT: <specific reason and what is missing — the worker acts on this verbatim>
+                """
+            if criterion.waivable {
+                prompt += "\nWAIVE: <why this criterion genuinely does not apply to this task>\n\nYou MAY WAIVE this criterion if it genuinely does not apply."
+            }
+            prompt += """
+
+
+                This \(verdictFormat) format is how YOU respond — it is NOT a format requirement on `resultsToEvaluate`. The worker's result follows the TASK's own required format and may legitimately contain any words, including "Result", "ACCEPT", or a verdict-like line. NEVER reject merely because `resultsToEvaluate` does not begin with a verdict token.
+                """
+        } else {
+            prompt += """
+
+
+                ## Criterion
+                \(criterion.text)
+
+                ## Your response
+                Use the fields above as context to enumerate the items to validate individually for the criterion above. Use your read-only tools if you need to inspect files or directories, then output ONLY a JSON array of the items (strings, or small objects). No commentary after the array; an empty array means nothing applies.
+                """
+        }
+        return prompt
     }
 
     /// The worker's tool names for the validator's context — the LIVE worker's actual
@@ -840,23 +849,23 @@ extension OrchestrationRuntime {
 
     static func describeVerdict(_ record: CriterionVerdictRecord) -> String {
         switch record.verdict {
-        case .accepted: return "round \(record.round): ACCEPT"
-        case .rejected(let reason): return "round \(record.round): REJECT — \(reason)"
-        case .waived(let reason): return "round \(record.round): WAIVE — \(reason)"
-        case .error(let message): return "round \(record.round): ERROR — \(message)"
+        case .accepted: return "ACCEPT"
+        case .rejected(let reason): return "REJECT — \(reason)"
+        case .waived(let reason): return "WAIVE — \(reason)"
+        case .error(let message): return "ERROR — \(message)"
         }
     }
 
     // MARK: - Outcomes
 
-    private func postRoundSummary(taskID: UUID, round: Int, records: [CriterionVerdictRecord]) async {
+    private func postRoundSummary(taskID: UUID, records: [CriterionVerdictRecord]) async {
         guard let task = await taskStore.task(id: taskID) else { return }
         let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let lines = records.map { record -> String in
             let text = criteriaByID[record.criterionID]?.text ?? record.criterionID.uuidString
             return "- \(text): \(Self.describeVerdict(record))"
         }
-        let summary = "Validation round \(round) for \"\(task.title)\":\n" + lines.joined(separator: "\n")
+        let summary = "Validation results for \"\(task.title)\":\n" + lines.joined(separator: "\n")
         await taskStore.addUpdate(id: taskID, message: summary)
         await channel.post(ChannelMessage(
             sender: .system,
@@ -898,7 +907,7 @@ extension OrchestrationRuntime {
     /// Rejections with rounds remaining: the punch list goes DIRECTLY to the worker —
     /// Smith is not a relay. Mirrors review_work's reject path (status, clearResult,
     /// respawn fallback, private unparking message).
-    private func returnRejectionsToWorker(taskID: UUID, rejected: [CriterionVerdictRecord], round: Int) async {
+    private func returnRejectionsToWorker(taskID: UUID, rejected: [CriterionVerdictRecord]) async {
         guard let task = await taskStore.task(id: taskID) else { return }
         let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let punchList = rejected.map { record -> String in
@@ -955,7 +964,7 @@ extension OrchestrationRuntime {
             }
         }
         parts.append("""
-            ## Acceptance validation — round \(round): changes required
+            ## Acceptance validation — changes required
             The following acceptance criteria were REJECTED. Fix each, then resubmit with `task_complete`. \
             Criteria already accepted stay accepted — do not rework them.
             \(punchList)
@@ -1028,7 +1037,7 @@ private extension AcceptanceCriterion {
         switch validator {
         case .registry(let name): return name
         case .inline(let definition): return definition.name
-        case .none: return "default-acceptance"
+        case .none: return EvaluatorDefaults.defaultDefinition.name
         }
     }
 }

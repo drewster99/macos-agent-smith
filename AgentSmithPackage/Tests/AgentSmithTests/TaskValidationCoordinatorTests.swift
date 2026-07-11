@@ -10,7 +10,7 @@ import SemanticSearch
 @Suite("Task validation coordinator", .serialized)
 struct TaskValidationCoordinatorTests {
 
-    /// Runtime whose summarizer mock (the default-acceptance model slot) answers each
+    /// Runtime whose summarizer mock (the default model slot) answers each
     /// validation call with the next `verdictScript` entry, repeating the last when
     /// exhausted. Smith/Brown/Security mocks are present so worker respawn paths work.
     private func makeRuntime(verdictScript: [String]) -> (OrchestrationRuntime, URL) {
@@ -92,7 +92,7 @@ struct TaskValidationCoordinatorTests {
         #expect(final?.acceptanceCriteria.count == 1, "the implicit default criterion must be materialized")
         #expect(final?.acceptanceCriteria.first?.origin == .system)
         #expect(final?.validation?.verdictRecords.count == 1)
-        #expect(final?.validation?.pinnedDefinitions["default-acceptance"] != nil, "the definition body must be pinned to the task")
+        #expect(final?.validation?.pinnedDefinitions["default"] != nil, "the definition body must be pinned to the task")
 
         // The debugging transcript persists with the verdict: the rendered input the
         // validator saw and its raw output.
@@ -248,15 +248,15 @@ struct TaskValidationCoordinatorTests {
 
         // Empty (even nonexistent) directory → built-ins present.
         let registry = EvaluatorRegistry.load(from: directory)
-        #expect(registry.definition(named: "default-acceptance")?.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash)
+        #expect(registry.definition(named: "default")?.contentHash == EvaluatorDefaults.defaultDefinition.contentHash)
 
         // A user file under a built-in name never shadows — it fails visibly.
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let shadowing = Self.defaultVariant(systemPrompt: "trying to shadow the built-in")
         let encoder = JSONEncoder()
-        try encoder.encode(shadowing).write(to: directory.appendingPathComponent("default-acceptance.json"), options: .atomic)
+        try encoder.encode(shadowing).write(to: directory.appendingPathComponent("default.json"), options: .atomic)
         let reloaded = EvaluatorRegistry.load(from: directory)
-        #expect(reloaded.definition(named: "default-acceptance")?.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash, "the built-in wins")
+        #expect(reloaded.definition(named: "default")?.contentHash == EvaluatorDefaults.defaultDefinition.contentHash, "the built-in wins")
         #expect(reloaded.failures.contains { $0.problem.contains("built-in") }, "the shadow attempt is a visible failure")
     }
 
@@ -266,7 +266,7 @@ struct TaskValidationCoordinatorTests {
             .appendingPathComponent("agent-smith-migration-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let legacyFile = directory.appendingPathComponent("default-acceptance.json")
+        let legacyFile = directory.appendingPathComponent("default.json")
         let encoder = JSONEncoder()
 
         // A pristine legacy shipped copy is deleted — the built-in supplies it now.
@@ -282,22 +282,20 @@ struct TaskValidationCoordinatorTests {
         #expect(!FileManager.default.fileExists(atPath: legacyFile.path), "the shadowing name is vacated")
 
         let registry = EvaluatorRegistry.load(from: directory)
-        let custom = registry.definition(named: "default-acceptance-custom")
+        let custom = registry.definition(named: "default-custom")
         #expect(custom?.systemPrompt == "the user's customized prompt", "the edit survives under the -custom name")
-        #expect(registry.definition(named: "default-acceptance")?.contentHash == EvaluatorDefaults.defaultAcceptanceDefinition.contentHash)
+        #expect(registry.definition(named: "default")?.contentHash == EvaluatorDefaults.defaultDefinition.contentHash)
         #expect(registry.failures.isEmpty)
     }
 
     /// The shipped default with only the system prompt swapped (fields are immutable).
     private static func defaultVariant(systemPrompt: String) -> EvaluatorDefinition {
-        let base = EvaluatorDefaults.defaultAcceptanceDefinition
+        let base = EvaluatorDefaults.defaultDefinition
         return EvaluatorDefinition(
             name: base.name,
             description: base.description,
             kind: base.kind,
             systemPrompt: systemPrompt,
-            inputTemplate: base.inputTemplate,
-            requiredSlots: base.requiredSlots,
             outputGrammar: base.outputGrammar,
             modelSlot: base.modelSlot,
             toolNames: base.toolNames,
@@ -318,8 +316,40 @@ struct TaskValidationCoordinatorTests {
         #expect(status == .completed)
 
         let record = await runtime.taskStore.task(id: task.id)?.validation?.verdictRecords.first
-        #expect(record?.renderedInput?.contains("Worker's tools") == true)
+        #expect(record?.renderedInput?.contains("workerTools") == true, "the JSON payload carries the worker-tools field")
         #expect(record?.renderedInput?.contains("bash") == true, "the worker toolset (incl. bash) is in the validator's input")
+    }
+
+    @Test("Validator input keeps rubric and result apart: criterion in the system prompt, result in a JSON field, with the verdict-format firewall")
+    func validatorInputSeparatesRubricFromResult() {
+        let criterion = AcceptanceCriterion(
+            text: #"Result must be in the format "Result: <result>" and begin with "Result:""#,
+            origin: .user
+        )
+        let system = OrchestrationRuntime.composeValidatorSystemPrompt(
+            definition: EvaluatorDefaults.defaultDefinition,
+            criterion: criterion,
+            hasItem: false
+        )
+        // The criterion reads as an instruction in the system prompt, clearly labeled.
+        #expect(system.contains("## Acceptance criterion"))
+        #expect(system.contains(criterion.text))
+        // The firewall that fixes the bug: ACCEPT/REJECT/WAIVE is the validator's format,
+        // never a requirement on the worker's result.
+        #expect(system.contains("is how YOU respond"))
+        #expect(system.contains("NEVER reject merely because"))
+        #expect(system.contains("resultsToEvaluate"))
+
+        // A result full of JSON-hostile characters — quotes, braces, newlines, and a
+        // verdict-like first line — survives intact inside its field and cannot leak into
+        // structure or be mistaken for the rubric.
+        let nastyResult = "ACCEPT\nResult: {\"x\": \"POSSIBLE SUCCESS\"}\n## Discussion"
+        let payload = OrchestrationRuntime.validatorPayloadJSON([
+            "resultsToEvaluate": nastyResult,
+            "taskTitle": "t"
+        ])
+        let parsed = (try? JSONSerialization.jsonObject(with: Data(payload.utf8))) as? [String: String]
+        #expect(parsed?["resultsToEvaluate"] == nastyResult, "the exact result round-trips through its JSON field")
     }
 
     // MARK: - Dynamic (prepare/map) criteria
@@ -332,8 +362,6 @@ struct TaskValidationCoordinatorTests {
             description: "Emits the items to judge for a dynamic criterion (test double).",
             kind: .prepare,
             systemPrompt: "Emit a JSON array of items for the criterion.",
-            inputTemplate: "Criterion: {{criterion}}",
-            requiredSlots: ["criterion"],
             outputGrammar: .jsonArray,
             modelSlot: .summarizer,
             toolNames: [],

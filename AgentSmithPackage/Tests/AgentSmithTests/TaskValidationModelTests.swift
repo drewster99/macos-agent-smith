@@ -24,13 +24,13 @@ struct TaskValidationModelTests {
     func criteriaRoundTrip() throws {
         let inline = EvaluatorDefinition(
             name: "inline-check", description: "d", kind: .validator,
-            systemPrompt: "judge", inputTemplate: "{{criterion}}", requiredSlots: ["criterion"],
+            systemPrompt: "judge",
             outputGrammar: .verdictLine(allowed: [.init(token: "ACCEPT", requiresReason: false)]),
             modelSlot: .summarizer
         )
         var task = AgentTask(title: "t", description: "d")
         task.acceptanceCriteria = [
-            AcceptanceCriterion(text: "tests pass", origin: .user, validator: .registry("default-acceptance")),
+            AcceptanceCriterion(text: "tests pass", origin: .user, validator: .registry("default")),
             AcceptanceCriterion(text: "a11y ok", waivable: true, origin: .smith, validator: .inline(inline))
         ]
         let decoded = try JSONDecoder().decode(AgentTask.self, from: JSONEncoder().encode(task))

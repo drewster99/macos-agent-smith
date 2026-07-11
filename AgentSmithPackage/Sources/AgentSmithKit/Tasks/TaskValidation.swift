@@ -7,7 +7,7 @@ public enum TaskAuthorship: String, Codable, Sendable {
     case user
     case smith
     case worker
-    /// Synthesized by the runtime (e.g. the implicit default-acceptance criterion
+    /// Synthesized by the runtime (e.g. the implicit default criterion
     /// materialized for a criterion-less task).
     case system
 }
@@ -18,7 +18,7 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
     /// Which evaluation function judges this criterion. `.registry` names a definition
     /// in the user-owned registry; `.inline` embeds a Smith-authored definition whose
     /// capabilities are capped (read-only evidence tools, default model) so authoring
-    /// one grants nothing new. Nil → the shipped `default-acceptance` definition.
+    /// one grants nothing new. Nil → the shipped `default` definition.
     public enum Validator: Codable, Sendable, Equatable {
         case registry(String)
         case inline(EvaluatorDefinition)

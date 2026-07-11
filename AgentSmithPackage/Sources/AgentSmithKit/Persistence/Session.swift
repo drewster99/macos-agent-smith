@@ -41,7 +41,7 @@ public struct SessionState: Codable, Sendable {
         agentMessageDebounceIntervals: [AgentRole: TimeInterval] = [:],
         toolsEnabled: [String: Bool] = [:],
         autoRunNextTask: Bool = true,
-        autoRunInterruptedTasks: Bool = false
+        autoRunInterruptedTasks: Bool = true
     ) {
         self.agentAssignments = agentAssignments
         self.agentPollIntervals = agentPollIntervals

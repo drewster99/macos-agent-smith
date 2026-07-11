@@ -81,8 +81,9 @@ final class AppViewModel {
             Task { await runtime?.setAutoAdvance(autoRunNextTask) }
         }
     }
-    /// Whether interrupted tasks are automatically resumed on launch.
-    var autoRunInterruptedTasks: Bool = false {
+    /// Whether interrupted tasks are automatically resumed on launch. Defaults ON so a
+    /// relaunch picks up where it left off without a manual play.
+    var autoRunInterruptedTasks: Bool = true {
         didSet {
             if autoRunInterruptedTasks != oldValue {
                 logAutoRunChange(name: "autoRunInterruptedTasks", old: oldValue, new: autoRunInterruptedTasks)
@@ -358,7 +359,7 @@ final class AppViewModel {
                 autoRunNextTask = state.autoRunNextTask
                 autoRunInterruptedTasks = state.autoRunInterruptedTasks
             } else {
-                logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=false")
+                logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
                 // No per-session state — fall back to the shared default assignments (from
                 // bundled defaults). New sessions get this the first time they're opened.
                 agentAssignments = shared.defaultAgentAssignments

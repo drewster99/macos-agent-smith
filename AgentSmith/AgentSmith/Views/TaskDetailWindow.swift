@@ -660,11 +660,7 @@ struct TaskDetailWindow: View {
     }
 
     private func acceptanceSubtitle(task: AgentTask, settledCount: Int) -> String {
-        var parts = ["\(settledCount) of \(task.acceptanceCriteria.count) settled"]
-        if let round = task.validation?.round, round > 0 {
-            parts.append("round \(round)")
-        }
-        return parts.joined(separator: " · ")
+        "\(settledCount) of \(task.acceptanceCriteria.count) settled"
     }
 
     @ViewBuilder
@@ -726,7 +722,6 @@ struct TaskDetailWindow: View {
                 .foregroundStyle(AppColors.disclosureToggle)
                 if expandedValidatorPromptIDs.contains(criterion.id) {
                     debugTextBox(title: "System prompt", text: pinned.systemPrompt)
-                    debugTextBox(title: "Input template", text: pinned.inputTemplate)
                 }
             }
             ForEach(records.reversed()) { record in
@@ -845,7 +840,7 @@ struct TaskDetailWindow: View {
         case .registry(let name):
             return task.validation?.pinnedDefinitions[name]
         case nil:
-            return task.validation?.pinnedDefinitions["default-acceptance"]
+            return task.validation?.pinnedDefinitions[EvaluatorDefaults.defaultDefinition.name]
         }
     }
 

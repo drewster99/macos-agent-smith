@@ -29,7 +29,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                             "type": .string("boolean"),
                             "description": .string("Whether the validator may WAIVE this criterion as not applicable. Default false.")
                         ]),
-                        "validator": .dictionary([
+                        "validator_name": .dictionary([
                             "type": .string("string"),
                             "description": .string("Optional registry validator name (from `list_validators`). Omit for the default acceptance validator.")
                         ]),
@@ -37,7 +37,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                             "type": .string("string"),
                             "description": .string("Optional registry name of a prepare-kind evaluator, making this criterion DYNAMIC: the prepare function emits a list of items (e.g. every file in a folder, every step in the plan) and EACH item is judged independently by the criterion's validator. Every item must pass. Create prepare functions with `define_validator`.")
                         ]),
-                        "custom_validator": .dictionary([
+                        "inline_validator": .dictionary([
                             "type": .string("object"),
                             "properties": .dictionary([
                                 "system_prompt": .dictionary([
@@ -47,14 +47,10 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                                 "name": .dictionary([
                                     "type": .string("string"),
                                     "description": .string("Optional kebab-case display name for this inline validator.")
-                                ]),
-                                "per_item": .dictionary([
-                                    "type": .string("boolean"),
-                                    "description": .string("True when paired with a `prepare` function — the validator then judges each emitted item via the {{item}} slot.")
                                 ])
                             ]),
                             "required": .array([.string("system_prompt")]),
-                            "description": .string("An INLINE Smith-authored validator for this one criterion (task-scoped; not saved to the registry). You write only the judgment prompt — grammar, standard inputs, and the read-only evidence toolset are supplied by the system. Mutually exclusive with `validator`. For a reusable validator, use `define_validator` instead.")
+                            "description": .string("An INLINE Smith-authored validator for this one criterion (task-scoped; not saved to the registry). You write only the judgment prompt — grammar, standard inputs, and the read-only evidence toolset are supplied by the system. Mutually exclusive with `validator_name`. For a reusable validator, use `define_validator` instead.")
                         ])
                     ]),
                     "required": .array([.string("text")])
@@ -116,8 +112,8 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
 
         // Parse + validate against the live registry BEFORE touching the task — a
         // criterion pointing at a missing evaluator would fail every round until fixed.
-        // Shared with create_task: strings or {text, waivable?, validator?, prepare?,
-        // custom_validator?} objects, where custom_validator is a Smith-authored INLINE
+        // Shared with create_task: strings or {text, waivable?, validator_name?, prepare?,
+        // inline_validator?} objects, where inline_validator is a Smith-authored INLINE
         // validator (task-scoped, capability-capped by construction).
         let registry = await context.loadEvaluatorRegistry()
         let parsed: [CriterionArgumentParsing.ParsedCriterion]

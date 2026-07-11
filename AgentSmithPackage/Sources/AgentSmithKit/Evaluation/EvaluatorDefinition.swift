@@ -9,8 +9,9 @@ import Foundation
 /// makes one such function DISTINCT as data, hot-loadable from
 /// `AppSupport/AgentSmith/evaluators/*.json` with no rebuild. What it deliberately does
 /// NOT capture is the live payload (task fields, tool params, candidate lists) — that is
-/// runtime state, built by typed call sites and rendered into the input template's
-/// named slots by `EvaluationRunner`.
+/// runtime state, assembled by typed call sites (e.g. the validation coordinator, which
+/// builds the criterion into the system prompt and the evidence as a JSON object) and
+/// run through `EvaluationRunner`.
 public struct EvaluatorDefinition: Codable, Sendable, Equatable {
 
     /// What role this function plays. Smith's selection surface only exposes
@@ -57,18 +58,13 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
     }
 
     /// Stable identifier and registry key (kebab-case by convention, e.g.
-    /// "default-acceptance").
+    /// "default").
     public let name: String
     /// The Smith-facing "when to use" text — this is what selection reads, exactly as
     /// tool descriptions drive tool choice.
     public let description: String
     public let kind: Kind
     public let systemPrompt: String
-    /// The user-message template. Named slots use `{{slot_name}}`; every placeholder
-    /// must appear in `requiredSlots` (validated at load), and every required slot must
-    /// be supplied by the call site (validated at run).
-    public let inputTemplate: String
-    public let requiredSlots: [String]
     public let outputGrammar: OutputGrammar
     public let modelSlot: ModelSlot
     /// Names of tools the function may call during its tool rounds. The read-only
@@ -87,8 +83,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         description: String,
         kind: Kind,
         systemPrompt: String,
-        inputTemplate: String,
-        requiredSlots: [String],
         outputGrammar: OutputGrammar,
         modelSlot: ModelSlot,
         toolNames: [String] = [],
@@ -100,8 +94,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         self.description = description
         self.kind = kind
         self.systemPrompt = systemPrompt
-        self.inputTemplate = inputTemplate
-        self.requiredSlots = requiredSlots
         self.outputGrammar = outputGrammar
         self.modelSlot = modelSlot
         self.toolNames = toolNames
@@ -118,8 +110,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
             description: description,
             kind: kind,
             systemPrompt: systemPrompt,
-            inputTemplate: inputTemplate,
-            requiredSlots: requiredSlots,
             outputGrammar: outputGrammar,
             modelSlot: modelSlot,
             toolNames: toolNames,
@@ -127,26 +117,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
             timeoutSeconds: timeoutSeconds,
             maxOutputTokens: maxOutputTokens
         )
-    }
-
-    // MARK: - Template inspection
-
-    /// Every `{{slot}}` placeholder present in the input template.
-    public var templatePlaceholders: Set<String> {
-        Self.placeholders(in: inputTemplate)
-    }
-
-    static func placeholders(in template: String) -> Set<String> {
-        var found: Set<String> = []
-        var remainder = Substring(template)
-        while let open = remainder.range(of: "{{") {
-            remainder = remainder[open.upperBound...]
-            guard let close = remainder.range(of: "}}") else { break }
-            let name = remainder[..<close.lowerBound].trimmingCharacters(in: .whitespaces)
-            if !name.isEmpty { found.insert(name) }
-            remainder = remainder[close.upperBound...]
-        }
-        return found
     }
 
     /// Load-time validation: a malformed definition must fail when installed, not
@@ -158,16 +128,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         }
         if systemPrompt.trimmingCharacters(in: .whitespaces).isEmpty {
             problems.append("systemPrompt must not be empty")
-        }
-        let placeholders = templatePlaceholders
-        let required = Set(requiredSlots)
-        let undeclared = placeholders.subtracting(required)
-        if !undeclared.isEmpty {
-            problems.append("template uses undeclared slots: \(undeclared.sorted().joined(separator: ", "))")
-        }
-        let unused = required.subtracting(placeholders)
-        if !unused.isEmpty {
-            problems.append("requiredSlots never used by the template: \(unused.sorted().joined(separator: ", "))")
         }
         if case .verdictLine(let allowed) = outputGrammar {
             if allowed.isEmpty {
@@ -191,7 +151,7 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
     // JSON friendliness: {"type": "verdictLine", "verdicts": [...]} / {"type": "jsonArray"})
 
     private enum CodingKeys: String, CodingKey {
-        case name, description, kind, systemPrompt, inputTemplate, requiredSlots
+        case name, description, kind, systemPrompt
         case outputGrammar, modelSlot, toolNames, maxTurns, timeoutSeconds, maxOutputTokens
     }
 
@@ -205,8 +165,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         description = try c.decode(String.self, forKey: .description)
         kind = try c.decode(Kind.self, forKey: .kind)
         systemPrompt = try c.decode(String.self, forKey: .systemPrompt)
-        inputTemplate = try c.decode(String.self, forKey: .inputTemplate)
-        requiredSlots = try c.decodeIfPresent([String].self, forKey: .requiredSlots) ?? []
         modelSlot = try c.decode(ModelSlot.self, forKey: .modelSlot)
         toolNames = try c.decodeIfPresent([String].self, forKey: .toolNames) ?? []
         maxTurns = try c.decodeIfPresent(Int.self, forKey: .maxTurns) ?? 8
@@ -234,8 +192,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         try c.encode(description, forKey: .description)
         try c.encode(kind, forKey: .kind)
         try c.encode(systemPrompt, forKey: .systemPrompt)
-        try c.encode(inputTemplate, forKey: .inputTemplate)
-        try c.encode(requiredSlots, forKey: .requiredSlots)
         try c.encode(modelSlot, forKey: .modelSlot)
         try c.encode(toolNames, forKey: .toolNames)
         try c.encode(maxTurns, forKey: .maxTurns)
@@ -256,8 +212,7 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
     /// validation meant.
     public var contentHash: String {
         let payload = [
-            name, description, kind.rawValue, systemPrompt, inputTemplate,
-            requiredSlots.joined(separator: ","), modelSlot.rawValue,
+            name, description, kind.rawValue, systemPrompt, modelSlot.rawValue,
             toolNames.joined(separator: ","),
             String(maxTurns), String(timeoutSeconds), String(maxOutputTokens),
             grammarDescription

@@ -4,10 +4,11 @@ import Foundation
 /// `set_acceptance_criteria` and `create_task` so the two accept the same shapes.
 ///
 /// Each array element is either a plain STRING (criterion text, default validator) or an
-/// OBJECT: `{text, waivable?, validator?, prepare?, custom_validator?}` where
-/// `custom_validator` is `{system_prompt, name?, description?, per_item?}` — an INLINE
-/// Smith-authored validator embedded on the criterion (task-scoped, capability-capped to
-/// the read-only evidence tools by construction and re-checked at judge time).
+/// OBJECT: `{text, waivable?, validator_name?, prepare?, inline_validator?}` where
+/// `inline_validator` is `{system_prompt, name?, description?}` — an INLINE Smith-authored
+/// validator embedded on the criterion (task-scoped, capability-capped to the read-only
+/// evidence tools by construction and re-checked at judge time). A validator reached via a
+/// criterion's `prepare` automatically judges each enumerated item.
 enum CriterionArgumentParsing {
 
     struct ParsedCriterion {
@@ -42,7 +43,7 @@ enum CriterionArgumentParsing {
                 if case .bool(let flag) = fields["waivable"] { waivable = flag }
 
                 var validator: AcceptanceCriterion.Validator?
-                if case .string(let named) = fields["validator"], !named.trimmingCharacters(in: .whitespaces).isEmpty {
+                if case .string(let named) = fields["validator_name"], !named.trimmingCharacters(in: .whitespaces).isEmpty {
                     guard let registry else {
                         return .failure(EvaluatorDefaults.AuthoringError("Cannot name validator '\(named)': no evaluator registry is configured."))
                     }
@@ -53,13 +54,13 @@ enum CriterionArgumentParsing {
                     validator = .registry(named)
                 }
 
-                if case .dictionary(let customFields) = fields["custom_validator"] {
+                if case .dictionary(let customFields) = fields["inline_validator"] {
                     guard validator == nil else {
-                        return .failure(EvaluatorDefaults.AuthoringError("A criterion can have EITHER a registry `validator` name OR an inline `custom_validator`, not both."))
+                        return .failure(EvaluatorDefaults.AuthoringError("A criterion can have EITHER a registry `validator_name` OR an `inline_validator`, not both."))
                     }
                     guard case .string(let prompt) = customFields["system_prompt"],
                           !prompt.trimmingCharacters(in: .whitespaces).isEmpty else {
-                        return .failure(EvaluatorDefaults.AuthoringError("`custom_validator` requires a non-empty 'system_prompt' — the judgment instructions."))
+                        return .failure(EvaluatorDefaults.AuthoringError("`inline_validator` requires a non-empty 'system_prompt' — the judgment instructions."))
                     }
                     var inlineName = "inline-validator"
                     if case .string(let named) = customFields["name"], !named.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -69,19 +70,16 @@ enum CriterionArgumentParsing {
                     if case .string(let description) = customFields["description"], !description.trimmingCharacters(in: .whitespaces).isEmpty {
                         inlineDescription = description
                     }
-                    var perItem = false
-                    if case .bool(let flag) = customFields["per_item"] { perItem = flag }
                     switch EvaluatorDefaults.makeCustomDefinition(
                         name: inlineName,
                         description: inlineDescription,
                         kind: .validator,
-                        authoredPrompt: prompt,
-                        perItem: perItem
+                        authoredPrompt: prompt
                     ) {
                     case .success(let definition):
                         validator = .inline(definition)
                     case .failure(let problem):
-                        return .failure(EvaluatorDefaults.AuthoringError("Invalid custom_validator: \(problem.message)"))
+                        return .failure(EvaluatorDefaults.AuthoringError("Invalid inline_validator: \(problem.message)"))
                     }
                 }
 
@@ -99,7 +97,7 @@ enum CriterionArgumentParsing {
                 parsed.append(ParsedCriterion(text: text.trimmingCharacters(in: .whitespacesAndNewlines), waivable: waivable, validator: validator, prepare: prepare))
 
             default:
-                return .failure(EvaluatorDefaults.AuthoringError("Every criterion must be a string or a {text, waivable?, validator?, prepare?, custom_validator?} object."))
+                return .failure(EvaluatorDefaults.AuthoringError("Every criterion must be a string or a {text, waivable?, validator_name?, prepare?, inline_validator?} object."))
             }
         }
         let uniqueTexts = Set(parsed.map(\.text))

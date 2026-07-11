@@ -304,8 +304,7 @@ struct TaskOverlayColumn: View {
         if entry.showsCriteria && !task.acceptanceCriteria.isEmpty {
             let settledIDs = task.validation?.settledCriterionIDs() ?? []
             let settled = task.acceptanceCriteria.filter { settledIDs.contains($0.id) }.count
-            let round = task.validation?.round ?? 0
-            Text("acceptance · \(settled) of \(task.acceptanceCriteria.count) settled\(round > 0 ? " · round \(round)" : "")")
+            Text("acceptance · \(settled) of \(task.acceptanceCriteria.count) settled")
                 .font(.caption2)
                 .foregroundStyle(task.status == .failed ? AppColors.verdictRejected : Color.secondary.opacity(0.6))
         }

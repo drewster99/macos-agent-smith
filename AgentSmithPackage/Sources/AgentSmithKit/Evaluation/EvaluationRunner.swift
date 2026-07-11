@@ -48,53 +48,31 @@ public enum EvaluationRunner {
         }
     }
 
-    /// Runs one evaluation. `slots` must cover the definition's `requiredSlots`;
-    /// `tools` is the already-resolved allowlist (the caller maps `definition.toolNames`
-    /// to live tools — the runner never conjures capabilities). `onResponse` lets the
-    /// caller record usage per LLM call.
-    public static func run(
+    /// The evaluation loop over already-composed messages: LLM → allowlisted tool rounds →
+    /// until the output grammar parses → bounded retries. The caller composes the system
+    /// prompt and user message — as the validation coordinator does, placing the criterion
+    /// in the system prompt and delivering the evidence as a labeled JSON object so the
+    /// judged result can never be confused with the rubric. `tools` is the already-resolved
+    /// allowlist (the caller maps `definition.toolNames` to live tools — the runner never
+    /// conjures capabilities). `temperature` overrides the model's configured sampling:
+    /// validators pass 0 for a deterministic verdict; nil inherits the provider's config.
+    /// `onResponse` lets the caller record usage per LLM call.
+    public static func runMessages(
         definition: EvaluatorDefinition,
-        slots: [String: String],
+        systemPrompt: String,
+        userMessage: String,
         provider: any LLMProvider,
         tools: [any AgentTool],
         toolContext: ToolContext,
-        onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil
-    ) async -> Outcome {
-        await runCapturing(
-            definition: definition,
-            slots: slots,
-            provider: provider,
-            tools: tools,
-            toolContext: toolContext,
-            onResponse: onResponse
-        ).outcome
-    }
-
-    /// `run`, plus the full transcript of the exchange — what the coordinator persists
-    /// so assessments are debuggable.
-    public static func runCapturing(
-        definition: EvaluatorDefinition,
-        slots: [String: String],
-        provider: any LLMProvider,
-        tools: [any AgentTool],
-        toolContext: ToolContext,
+        temperature: Double? = nil,
         onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil
     ) async -> (outcome: Outcome, transcript: Transcript) {
         var transcript = Transcript()
-        let missing = Set(definition.requiredSlots).subtracting(slots.keys)
-        guard missing.isEmpty else {
-            return (.error("missing required slots: \(missing.sorted().joined(separator: ", "))"), transcript)
-        }
-
-        var rendered = definition.inputTemplate
-        for (slot, value) in slots {
-            rendered = rendered.replacingOccurrences(of: "{{\(slot)}}", with: value)
-        }
-        transcript.renderedInput = rendered
+        transcript.renderedInput = userMessage
 
         var messages: [LLMMessage] = [
-            .system(definition.systemPrompt),
-            .user(rendered)
+            .system(systemPrompt),
+            .user(userMessage)
         ]
         let toolDefinitions = tools.map { $0.definition(for: .securityAgent) }
         let deadline = Date().addingTimeInterval(definition.timeoutSeconds)
@@ -113,10 +91,14 @@ public enum EvaluationRunner {
             let response: LLMResponse
             let callStart = Date()
             do {
+                // Models that reject a temperature override (reasoning models) are handled
+                // proactively by SwiftLLMKit's `mustNeverSendTemperatureParam` metadata — the
+                // provider omits temperature for those, so a 0 here reaches every other model
+                // and never 400s a flagged one.
                 response = try await provider.send(
                     messages: messages,
                     tools: toolDefinitions,
-                    overrides: LLMCallOverrides(maxOutputTokens: definition.maxOutputTokens)
+                    overrides: LLMCallOverrides(maxOutputTokens: definition.maxOutputTokens, temperature: temperature)
                 )
             } catch {
                 return (.error("LLM call failed: \(error.localizedDescription)"), transcript)

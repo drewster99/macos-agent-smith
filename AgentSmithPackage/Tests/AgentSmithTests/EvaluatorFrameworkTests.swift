@@ -6,8 +6,7 @@ import Testing
 /// evaluate-with-tools loop), and the registry (hot-loaded user-owned JSON).
 
 private func makeDefinition(
-    template: String = "Task: {{task_title}}\nCriterion: {{criterion}}",
-    requiredSlots: [String] = ["task_title", "criterion"],
+    systemPrompt: String = "You judge things.",
     grammar: EvaluatorDefinition.OutputGrammar = .verdictLine(allowed: [
         .init(token: "ACCEPT", requiresReason: false),
         .init(token: "REJECT", requiresReason: true),
@@ -20,9 +19,7 @@ private func makeDefinition(
         name: "test-validator",
         description: "test",
         kind: .validator,
-        systemPrompt: "You judge things.",
-        inputTemplate: template,
-        requiredSlots: requiredSlots,
+        systemPrompt: systemPrompt,
         outputGrammar: grammar,
         modelSlot: .smith,
         toolNames: tools,
@@ -43,14 +40,14 @@ struct EvaluatorDefinitionTests {
         #expect(decoded == original)
     }
 
-    @Test("Load-time validation catches undeclared and unused slots")
-    func slotValidation() {
-        let undeclared = makeDefinition(template: "{{task_title}} {{mystery}}", requiredSlots: ["task_title"])
-        #expect(undeclared.validationProblems().contains { $0.contains("mystery") })
-
-        let unused = makeDefinition(template: "{{task_title}}", requiredSlots: ["task_title", "never_used"])
-        #expect(unused.validationProblems().contains { $0.contains("never_used") })
-
+    @Test("Load-time validation catches an empty prompt and grammar problems")
+    func definitionValidation() {
+        #expect(makeDefinition(systemPrompt: "   ").validationProblems().contains { $0.contains("systemPrompt") })
+        let dupTokens = makeDefinition(grammar: .verdictLine(allowed: [
+            .init(token: "ACCEPT", requiresReason: false),
+            .init(token: "ACCEPT", requiresReason: false)
+        ]))
+        #expect(dupTokens.validationProblems().contains { $0.contains("unique") })
         #expect(makeDefinition().validationProblems().isEmpty)
     }
 
@@ -59,7 +56,7 @@ struct EvaluatorDefinitionTests {
         let a = makeDefinition()
         let b = makeDefinition()
         #expect(a.contentHash == b.contentHash)
-        let edited = makeDefinition(template: "Task: {{task_title}}\nCriterion: {{criterion}} CHANGED")
+        let edited = makeDefinition(systemPrompt: "You judge things. CHANGED")
         #expect(edited.contentHash != a.contentHash)
     }
 }
@@ -134,36 +131,28 @@ struct EvaluationRunnerParsingTests {
 @Suite("EvaluationRunner loop")
 struct EvaluationRunnerLoopTests {
 
-    @Test("Happy path: one call, verdict returned, slots rendered")
-    func happyPath() async {
-        let provider = MockLLMProvider(responses: [LLMResponse(text: "ACCEPT")])
-        let outcome = await EvaluationRunner.run(
-            definition: makeDefinition(),
-            slots: ["task_title": "Fix the bug", "criterion": "Tests pass"],
+    private func runOutcome(
+        _ definition: EvaluatorDefinition,
+        userMessage: String = "Task: t\nCriterion: c",
+        provider: MockLLMProvider,
+        tools: [any AgentTool] = []
+    ) async -> EvaluationRunner.Outcome {
+        await EvaluationRunner.runMessages(
+            definition: definition,
+            systemPrompt: definition.systemPrompt,
+            userMessage: userMessage,
             provider: provider,
-            tools: [],
+            tools: tools,
             toolContext: TestToolContext.make()
-        )
-        #expect(outcome == .verdict(token: "ACCEPT", reason: nil))
-        #expect(provider.receivedMessages.first?.last?.content.textValue?.contains("Fix the bug") == true)
+        ).outcome
     }
 
-    @Test("Missing required slot errors before any LLM call")
-    func missingSlotErrors() async {
+    @Test("Happy path: one call, verdict returned, user message delivered")
+    func happyPath() async {
         let provider = MockLLMProvider(responses: [LLMResponse(text: "ACCEPT")])
-        let outcome = await EvaluationRunner.run(
-            definition: makeDefinition(),
-            slots: ["task_title": "only one"],
-            provider: provider,
-            tools: [],
-            toolContext: TestToolContext.make()
-        )
-        guard case .error(let why) = outcome else {
-            Issue.record("expected error, got \(outcome)")
-            return
-        }
-        #expect(why.contains("criterion"))
-        #expect(provider.callCount == 0)
+        let outcome = await runOutcome(makeDefinition(), userMessage: "Task: Fix the bug\nCriterion: Tests pass", provider: provider)
+        #expect(outcome == .verdict(token: "ACCEPT", reason: nil))
+        #expect(provider.receivedMessages.first?.last?.content.textValue?.contains("Fix the bug") == true)
     }
 
     @Test("Tool round: evaluator reads evidence, then issues its verdict")
@@ -177,13 +166,7 @@ struct EvaluationRunnerLoopTests {
             LLMResponse(toolCalls: [readCall]),
             LLMResponse(text: "ACCEPT: evidence confirms tests are green")
         ])
-        let outcome = await EvaluationRunner.run(
-            definition: makeDefinition(tools: ["file_read"]),
-            slots: ["task_title": "t", "criterion": "c"],
-            provider: provider,
-            tools: [FileReadTool()],
-            toolContext: TestToolContext.make()
-        )
+        let outcome = await runOutcome(makeDefinition(tools: ["file_read"]), provider: provider, tools: [FileReadTool()])
         guard case .verdict(let token, _) = outcome else {
             Issue.record("expected verdict, got \(outcome)")
             return
@@ -206,13 +189,7 @@ struct EvaluationRunnerLoopTests {
             LLMResponse(toolCalls: [sneaky]),
             LLMResponse(text: "ACCEPT")
         ])
-        let outcome = await EvaluationRunner.run(
-            definition: makeDefinition(),
-            slots: ["task_title": "t", "criterion": "c"],
-            provider: provider,
-            tools: [],
-            toolContext: TestToolContext.make()
-        )
+        let outcome = await runOutcome(makeDefinition(), provider: provider)
         #expect(outcome == .verdict(token: "ACCEPT", reason: nil))
         let secondCallMessages = provider.receivedMessages.last ?? []
         let refusalDelivered = secondCallMessages.contains {
@@ -225,13 +202,7 @@ struct EvaluationRunnerLoopTests {
     @Test("Persistent grammar violations end in ERROR, never a fake verdict")
     func persistentParseFailureErrors() async {
         let provider = MockLLMProvider(responses: [LLMResponse(text: "I feel good about this one!")])
-        let outcome = await EvaluationRunner.run(
-            definition: makeDefinition(),
-            slots: ["task_title": "t", "criterion": "c"],
-            provider: provider,
-            tools: [],
-            toolContext: TestToolContext.make()
-        )
+        let outcome = await runOutcome(makeDefinition(), provider: provider)
         guard case .error(let why) = outcome else {
             Issue.record("expected error, got \(outcome)")
             return
@@ -243,13 +214,7 @@ struct EvaluationRunnerLoopTests {
     func turnExhaustionErrors() async {
         let loopingCall = LLMToolCall(id: "c", name: "nope", arguments: "{}")
         let provider = MockLLMProvider(responses: [LLMResponse(toolCalls: [loopingCall])])
-        let outcome = await EvaluationRunner.run(
-            definition: makeDefinition(maxTurns: 3),
-            slots: ["task_title": "t", "criterion": "c"],
-            provider: provider,
-            tools: [],
-            toolContext: TestToolContext.make()
-        )
+        let outcome = await runOutcome(makeDefinition(maxTurns: 3), provider: provider)
         guard case .error(let why) = outcome else {
             Issue.record("expected error, got \(outcome)")
             return
@@ -277,7 +242,7 @@ struct EvaluatorRegistryTests {
         #expect(registry.definition(named: "test-validator") != nil)
         #expect(registry.failures.count == 1)
         #expect(registry.failures.first?.fileName == "broken.json")
-        // Built-ins (default-acceptance) load alongside user files.
+        // Built-ins (the default validator) load alongside user files.
         let userValidators = registry.definitions(ofKind: .validator).filter { !EvaluatorDefaults.builtInNames.contains($0.name) }
         #expect(userValidators.count == 1)
         #expect(registry.definitions(ofKind: .scoper).isEmpty)
@@ -302,7 +267,7 @@ struct EvaluatorRegistryTests {
     func missingDirectoryIsEmpty() {
         let registry = EvaluatorRegistry.load(from: URL(fileURLWithPath: "/tmp/does-not-exist-\(UUID())"))
         #expect(registry.definitions.count == EvaluatorDefaults.builtInDefinitions.count)
-        #expect(registry.definition(named: "default-acceptance") != nil)
+        #expect(registry.definition(named: "default") != nil)
         #expect(registry.failures.isEmpty)
     }
 }

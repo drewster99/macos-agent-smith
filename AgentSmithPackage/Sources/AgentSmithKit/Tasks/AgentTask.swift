@@ -53,7 +53,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
 
     /// The acceptance contract: criteria judged by evaluators when the task enters
     /// `.validating`. Requester-owned (user/Smith/system); the worker never edits these.
-    /// Empty means the implicit default-acceptance criterion is materialized at first
+    /// Empty means the implicit default criterion is materialized at first
     /// validation.
     public var acceptanceCriteria: [AcceptanceCriterion]
     /// The worker's plan. Worker-owned, tombstone semantics (see `TaskStep`); Smith may

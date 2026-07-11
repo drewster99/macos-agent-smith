@@ -52,7 +52,7 @@ public struct CreateTaskTool: AgentTool {
             ]),
             "acceptance_criteria": .dictionary([
                 "type": .string("array"),
-                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive 2-5 concrete, evidence-checkable criteria from what the user asked for (including any validation the user explicitly requested). Each item is either a STRING (criterion text, default validator) or an OBJECT {text, waivable?, validator?, prepare?, custom_validator?} — the same shapes as `set_acceptance_criteria`, so custom/named validators and dynamic prepare functions can be attached at creation. The validator is EXTREMELY strict and literal: write each criterion so a CORRECT result passes even in edge cases — ties, zero/empty results, nonexistent targets, ambiguous inputs (e.g. 'identifies the most-starred repository, or reports a tie / that none exists, whichever the data shows'). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong — and repeated no-progress rejections FAIL the task. Omit only for trivial reminder-style tasks.")
+                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive 2-5 concrete, evidence-checkable criteria from what the user asked for (including any validation the user explicitly requested). Each item is either a STRING (criterion text, default validator) or an OBJECT {text, waivable?, validator_name?, prepare?, inline_validator?} — the same shapes as `set_acceptance_criteria`, so custom/named validators and dynamic prepare functions can be attached at creation. The validator is EXTREMELY strict and literal: write each criterion so a CORRECT result passes even in edge cases — ties, zero/empty results, nonexistent targets, ambiguous inputs (e.g. 'identifies the most-starred repository, or reports a tie / that none exists, whichever the data shows'). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong — and repeated no-progress rejections FAIL the task. Omit only for trivial reminder-style tasks.")
             ]),
             "steps": .dictionary([
                 "type": .string("array"),
@@ -141,7 +141,7 @@ public struct CreateTaskTool: AgentTool {
         // Parse acceptance criteria BEFORE creating the task — bad criteria then mean
         // NO task, not an orphaned banner-less task plus a "fix it later" errand.
         // Criteria accept the same shapes as set_acceptance_criteria: plain strings, or
-        // {text, waivable?, validator?, prepare?, custom_validator?} objects — so Smith
+        // {text, waivable?, validator_name?, prepare?, inline_validator?} objects — so Smith
         // can attach custom validators at creation time, not just after.
         var seedCriteria: [AcceptanceCriterion] = []
         if case .array(let rawCriteria) = arguments["acceptance_criteria"], !rawCriteria.isEmpty {
