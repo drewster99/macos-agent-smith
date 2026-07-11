@@ -250,7 +250,7 @@ struct TaskRowButton: View {
                 Label("Delete", systemImage: "trash")
             })
 
-        case .running:
+        case .running, .validating:
             Button(action: {
                 let slug = task.id.uuidString.prefix(8)
                 stopLogger.notice("UI.taskCard contextMenu Pause clicked task=\(slug, privacy: .public)")
@@ -281,7 +281,7 @@ struct TaskRowButton: View {
                 Label("Delete", systemImage: "trash")
             })
 
-        case .awaitingReview, .validating:
+        case .awaitingReview:
             EmptyView()
 
         case .pending, .paused, .interrupted:
@@ -408,7 +408,7 @@ private struct TaskRow: View {
                 attachmentPip()
             }
 
-            if style == .active && task.status == .running {
+            if style == .active && (task.status == .running || task.status == .validating) {
                 runningInlineControls()
             } else if style == .active && task.status.isRunnable {
                 runInlineControl()

@@ -8,7 +8,7 @@ import SemanticSearch
 @Suite("Long-lived Smith worker cycling")
 struct Phase2LongLivedSmithTests {
 
-    private func makeRuntime(includeBrown: Bool = true) -> OrchestrationRuntime {
+    private func makeRuntime(includeBrown: Bool = true, autoRunInterrupted: Bool = false) -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-phase2-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -33,7 +33,7 @@ struct Phase2LongLivedSmithTests {
             semanticSearchEngine: SemanticSearchEngine(),
             usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
             autoAdvanceEnabled: false,
-            autoRunInterruptedTasks: false,
+            autoRunInterruptedTasks: autoRunInterrupted,
             memoryStore: nil
         )
     }
@@ -249,6 +249,115 @@ struct Phase2LongLivedSmithTests {
         #expect(await runtime.agentIDForRole(.smith) == smithBefore, "Smith survives the failure too")
         let smithContext = await runtime.contextSnapshot(for: .smith)
         #expect(smithContext?.contains { $0.content.textValue?.contains("could not be started") == true } == true)
+
+        await runtime.stopAll()
+    }
+
+    @Test("Cold boot resumes ALL interrupted tasks up to worker capacity, not just the first")
+    func coldBootResumesAllInterruptedUpToCapacity() async {
+        let runtime = makeRuntime(autoRunInterrupted: true)
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setWorkerCapacity(2)
+        let store = await runtime.taskStore
+
+        // Two tasks that were mid-run when the app quit.
+        let a = await store.addTask(title: "A", description: "d")
+        let b = await store.addTask(title: "B", description: "d")
+        await store.updateStatus(id: a.id, status: .interrupted)
+        await store.updateStatus(id: b.id, status: .interrupted)
+
+        await runtime.start()
+
+        #expect(await store.task(id: a.id)?.status == .running, "first interrupted task resumes")
+        #expect(await store.task(id: b.id)?.status == .running, "the SECOND also resumes — both were running at quit")
+        let aWorker = await store.task(id: a.id)?.assigneeIDs.first
+        let bWorker = await store.task(id: b.id)?.assigneeIDs.first
+        #expect(aWorker != nil && bWorker != nil && aWorker != bWorker, "each resumed task gets its own fresh worker")
+
+        await runtime.stopAll()
+    }
+
+    @Test("Cold-boot resume is capped by capacity: at capacity 1, one of two interrupted tasks stays interrupted")
+    func coldBootResumeCappedByCapacity() async {
+        let runtime = makeRuntime(autoRunInterrupted: true)
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setWorkerCapacity(1)
+        let store = await runtime.taskStore
+
+        let a = await store.addTask(title: "A", description: "d")
+        let b = await store.addTask(title: "B", description: "d")
+        await store.updateStatus(id: a.id, status: .interrupted)
+        await store.updateStatus(id: b.id, status: .interrupted)
+
+        await runtime.start()
+
+        let statuses = [await store.task(id: a.id)?.status, await store.task(id: b.id)?.status]
+        #expect(statuses.filter { $0 == .running }.count == 1, "exactly one resumes at capacity 1")
+        #expect(statuses.filter { $0 == .interrupted }.count == 1, "the other stays interrupted for a manual start")
+
+        await runtime.stopAll()
+    }
+
+    @Test("Launch resume queue drains overflow interrupted tasks as slots free")
+    func launchResumeQueueDrainsOverflow() async {
+        let runtime = makeRuntime(autoRunInterrupted: true)
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setWorkerCapacity(2)
+        let store = await runtime.taskStore
+        func statusOf(_ id: UUID) async -> AgentTask.Status? { await store.task(id: id)?.status }
+
+        let a = await store.addTask(title: "A", description: "d")
+        let b = await store.addTask(title: "B", description: "d")
+        let c = await store.addTask(title: "C", description: "d")
+        for t in [a, b, c] { await store.updateStatus(id: t.id, status: .interrupted) }
+
+        await runtime.start()
+
+        // Capacity 2: two resume now, the third waits in the launch queue.
+        var boot: [AgentTask.Status?] = []
+        for t in [a, b, c] { boot.append(await statusOf(t.id)) }
+        #expect(boot.filter { $0 == .running }.count == 2, "two resume at capacity")
+        #expect(boot.filter { $0 == .interrupted }.count == 1, "the third waits, queued")
+
+        // One running task completes and frees its slot.
+        var freedID: UUID?
+        for t in [a, b, c] where await statusOf(t.id) == .running { freedID = t.id; break }
+        if let freedID {
+            await runtime.terminateTaskAgents(taskID: freedID)
+            await store.updateStatus(id: freedID, status: .completed)
+        }
+        await runtime.drainPendingTaskQueueForTesting()
+        await runtime.waitForPendingRestarts()
+
+        var after: [AgentTask.Status?] = []
+        for t in [a, b, c] { after.append(await statusOf(t.id)) }
+        #expect(after.filter { $0 == .interrupted }.count == 0, "the queued interrupted task resumed when a slot freed")
+        #expect(after.filter { $0 == .running }.count == 2, "two running again (one completed, the queued one took its slot)")
+
+        await runtime.stopAll()
+    }
+
+    @Test("A task Stopped MID-session is not re-resumed — only the launch batch auto-resumes")
+    func midSessionStopStaysStopped() async {
+        let runtime = makeRuntime(autoRunInterrupted: true)
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setWorkerCapacity(2)
+        let store = await runtime.taskStore
+
+        let a = await store.addTask(title: "A", description: "d")
+        await store.updateStatus(id: a.id, status: .interrupted)
+
+        await runtime.start()
+        #expect(await store.task(id: a.id)?.status == .running, "the launch-time interrupt resumes")
+
+        // The user Stops it mid-session — it becomes interrupted again, but is NOT on the
+        // launch resume queue (it was removed when first resumed), so the drain leaves it be.
+        await runtime.terminateTaskAgents(taskID: a.id)
+        await store.updateStatus(id: a.id, status: .interrupted)
+        await runtime.drainPendingTaskQueueForTesting()
+        await runtime.waitForPendingRestarts()
+
+        #expect(await store.task(id: a.id)?.status == .interrupted, "a mid-session Stop stays stopped; auto-resume does not re-run it")
 
         await runtime.stopAll()
     }

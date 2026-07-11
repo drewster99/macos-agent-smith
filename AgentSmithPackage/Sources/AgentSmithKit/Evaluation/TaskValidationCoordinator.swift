@@ -225,14 +225,22 @@ extension OrchestrationRuntime {
     public func startTaskValidation(taskID: UUID) {
         guard !tasksBeingValidated.contains(taskID) else { return }
         tasksBeingValidated.insert(taskID)
-        Task { [weak self] in
+        validationTasks[taskID] = Task { [weak self] in
             await self?.performTaskValidation(taskID: taskID)
             await self?.finishTaskValidation(taskID: taskID)
         }
     }
 
+    /// Cancels an in-flight validation for a task (pause/stop path). The run bails at the
+    /// EvaluationRunner's cancellation check; its transitions are CAS-guarded, so it can't
+    /// clobber the new status even if it's mid-flight.
+    func cancelTaskValidation(taskID: UUID) {
+        validationTasks[taskID]?.cancel()
+    }
+
     private func finishTaskValidation(taskID: UUID) async {
         tasksBeingValidated.remove(taskID)
+        validationTasks[taskID] = nil
         // A resubmission landing while this run was finishing gets its start call
         // swallowed by the reentrancy guard — re-check on the way out so the task can't
         // strand in `.validating`. Abort/stop paths intentionally leave that status for
@@ -355,7 +363,9 @@ extension OrchestrationRuntime {
     /// counters (sticky accepts survive), and Smith may fix the criteria first with
     /// `set_acceptance_criteria` if they were the problem.
     private func failValidation(taskID: UUID, reason: String) async {
-        await taskStore.updateStatus(id: taskID, status: .failed)
+        // CAS: only fail if still validating — never overwrite a pause/stop that landed
+        // after the coordinator's status snapshot.
+        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating]) else { return }
         guard let task = await taskStore.task(id: taskID) else { return }
         await taskStore.addUpdate(id: taskID, message: "Task FAILED: \(reason).")
         for agentID in task.assigneeIDs {
@@ -878,7 +888,9 @@ extension OrchestrationRuntime {
     /// accept path (status, worker teardown, completion banner, summarization). The
     /// terminated hook then drives auto-advance and Smith's context compaction.
     private func completeValidatedTask(taskID: UUID) async {
-        await taskStore.updateStatus(id: taskID, status: .completed)
+        // CAS: only complete if still validating — a pause/stop that landed after the
+        // coordinator's status snapshot must not be overwritten by this completion.
+        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: [.validating]) else { return }
         guard let completed = await taskStore.task(id: taskID) else { return }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
@@ -936,12 +948,13 @@ extension OrchestrationRuntime {
             // No worker and no free slot: re-queue as pending — the auto-run drain
             // restarts it when a slot frees, and the fresh worker's briefing carries
             // the punch list via the task updates recorded below.
-            await taskStore.addUpdate(id: taskID, message: "Validation rejected \(rejected.count) criterion(s); no worker slot was free for the rework, so the task is re-queued:\n\(punchList)")
+            // CAS: a pause/stop that landed after our snapshot must not be re-queued.
             // Status first, then clear: a `.pending` task with a stale result is
             // consistent; a `.validating` task with no result is the invariant-violating
             // shape observers must never see (agy review finding).
-            await taskStore.updateStatus(id: taskID, status: .pending)
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating]) else { return }
             await taskStore.clearResult(id: taskID)
+            await taskStore.addUpdate(id: taskID, message: "Validation rejected \(rejected.count) criterion(s); no worker slot was free for the rework, so the task is re-queued:\n\(punchList)")
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Task \"\(task.title)\" needs rework (validation rejected \(rejected.count) criterion(s)) but all worker slots are busy — re-queued; it will restart when a slot frees.",
@@ -953,7 +966,12 @@ extension OrchestrationRuntime {
             return
         }
 
-        await taskStore.updateStatus(id: taskID, status: .running)
+        // CAS: if a pause/stop landed after our snapshot, don't flip to .running — and if we
+        // just spawned a worker for the rework, tear it back down so it doesn't orphan.
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating]) else {
+            if brownWasSpawned { _ = await terminateAgent(id: brownID) }
+            return
+        }
         await taskStore.clearResult(id: taskID)
 
         var parts: [String] = []
@@ -988,7 +1006,9 @@ extension OrchestrationRuntime {
     /// review_work becomes the resolution tool — and both Smith and the user are
     /// actively notified. Escalation must never be silent.
     private func escalateValidation(taskID: UUID, reason: String) async {
-        await taskStore.updateStatus(id: taskID, status: .awaitingReview)
+        // CAS: only escalate if still validating — never overwrite a pause/stop that landed
+        // after the coordinator's status snapshot.
+        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating]) else { return }
         guard let task = await taskStore.task(id: taskID) else { return }
         await channel.post(ChannelMessage(
             sender: .system,

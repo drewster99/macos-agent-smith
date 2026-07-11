@@ -137,11 +137,11 @@ struct MainView: View {
                 stopLogger.notice("UI.Escape pressed but viewModel.isRunning=false — ignored")
                 return event
             }
-            stopLogger.notice("UI.Escape pressed → dispatching stopCurrentTask")
+            stopLogger.notice("UI.Escape pressed → pausing all running tasks")
             Task {
-                stopLogger.notice("UI.Escape Task body running → calling stopCurrentTask")
-                await viewModel.stopCurrentTask()
-                stopLogger.notice("UI.Escape Task body returned from stopCurrentTask")
+                stopLogger.notice("UI.Escape Task body running → calling pauseAllRunningTasks")
+                await viewModel.pauseAllRunningTasks()
+                stopLogger.notice("UI.Escape Task body returned from pauseAllRunningTasks")
             }
             return nil
         }

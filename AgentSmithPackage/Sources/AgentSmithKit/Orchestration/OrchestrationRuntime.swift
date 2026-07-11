@@ -322,6 +322,10 @@ public actor OrchestrationRuntime {
     var validationParallelism = 3
     /// Per-task reentrancy guard for validation runs.
     var tasksBeingValidated: Set<UUID> = []
+    /// The in-flight validation Task per task, so a pause/stop can cancel it — the
+    /// EvaluationRunner's LLM loop checks `Task.isCancelled` and bails, so the validator
+    /// stops promptly instead of burning tokens against a task the user just halted.
+    var validationTasks: [UUID: Task<Void, Never>] = [:]
 
     /// App-layer wiring for the validation system.
     public func setEvaluatorConfiguration(directory: URL) {
@@ -355,6 +359,14 @@ public actor OrchestrationRuntime {
     /// "not busy" and double-dequeue — starting a task only for the second drain's
     /// restart to immediately tear it down (fresh-Opus review finding).
     private var isDrainingTaskQueues = false
+
+    /// Tasks that were `.interrupted` when THIS session came up (Stop, app-quit, orphan
+    /// recovery) and are waiting to auto-resume, oldest-first. The cold-launch path fills
+    /// it and resumes up to capacity immediately; `drainPendingTaskQueue` resumes the rest
+    /// as slots free. An ID is removed the moment its resume is initiated — so a task the
+    /// user Stops MID-session (which also lands `.interrupted`) is never on this queue and
+    /// stays stopped until the next launch. Governed by `autoRunInterruptedTasks`.
+    private var launchResumeQueue: [UUID] = []
 
     private func armBreakerRedrainIfNeeded() {
         // `lastScopingFailureAt` is always set when the breaker is open (the only callers
@@ -730,11 +742,16 @@ public actor OrchestrationRuntime {
     ///   - the scheduled-run queue (`pendingScheduledRunQueue`) just kicked off a restart
     ///     in this same drain pass — the caller is responsible for skipping us in that case
     ///
-    /// `.scheduled` is deliberately excluded (those wait for their fire time) and so are
-    /// `.paused` / `.interrupted` (paused requires a deliberate user resume; interrupted
-    /// has its own cold-launch auto-resume controlled by `autoRunInterruptedTasks`).
+    /// `.scheduled` is deliberately excluded (those wait for their fire time) and so is
+    /// `.paused` (a deliberate user halt requires a deliberate resume). `.interrupted` is
+    /// drained ONLY via `launchResumeQueue` — the batch captured at cold launch — so an
+    /// interrupt from a mid-session Stop is never auto-resumed here; it waits for the next
+    /// launch. Governed by `autoRunInterruptedTasks`.
     private func drainPendingTaskQueue() async {
-        guard autoAdvanceEnabled else { return }
+        // Two queues share the pool: the launch-scoped interrupted-resume queue
+        // (autoRunInterruptedTasks) and pending auto-advance (autoAdvanceEnabled). Run if
+        // either could place work.
+        guard autoAdvanceEnabled || (autoRunInterruptedTasks && !launchResumeQueue.isEmpty) else { return }
         guard !isDrainingTaskQueues else { return }
         isDrainingTaskQueues = true
         defer { isDrainingTaskQueues = false }
@@ -754,15 +771,34 @@ public actor OrchestrationRuntime {
         let freeSlots = maxConcurrentWorkers - supervisor.handles(role: .brown).count
         guard freeSlots > 0 else { return }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        let nextUp = activeTasks
-            // Templates are `.pending` launchers, not queued work — they start only on
-            // an EXPLICIT action (run_task, the play button, a scheduled/recurring wake),
-            // never by auto-advance. Without this exclusion the drain would clone-and-run
-            // every template the moment a slot freed.
-            .filter { $0.status == .pending && !$0.isTemplate }
-            .sorted { $0.createdAt < $1.createdAt }
-            .prefix(freeSlots)
-        for task in nextUp {
+        let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+        // Prune the resume queue to IDs still present AND still interrupted (a task that
+        // completed, was manually run, or was archived drops off).
+        launchResumeQueue = launchResumeQueue.filter { byID[$0]?.status == .interrupted }
+
+        // Launch-interrupted work (in-flight when the session came up) resumes before pending
+        // (never-started) work; each oldest-first. `restartForNewTask` resumes an interrupted
+        // task WITH its prior context (the briefing draws on task.updates), so nothing is lost.
+        var runnable: [AgentTask] = []
+        if autoRunInterruptedTasks {
+            runnable += launchResumeQueue.compactMap { byID[$0] }
+        }
+        if autoAdvanceEnabled {
+            // Templates are `.pending` launchers, not queued work — they start only on an
+            // EXPLICIT action (run_task, the play button, a scheduled/recurring wake), never
+            // by auto-advance. Without this exclusion the drain would clone-and-run every
+            // template the moment a slot freed.
+            runnable += activeTasks
+                .filter { $0.status == .pending && !$0.isTemplate }
+                .sorted { $0.createdAt < $1.createdAt }
+        }
+        let toStart = Array(runnable.prefix(freeSlots))
+        // Drop resumed IDs from the queue immediately, so a later mid-session Stop of the same
+        // task can't put it back on the auto-resume path.
+        let startedIDs = Set(toStart.map(\.id))
+        launchResumeQueue.removeAll { startedIDs.contains($0) }
+        for task in toStart {
             restartForNewTask(taskID: task.id)
         }
     }
@@ -1958,11 +1994,19 @@ public actor OrchestrationRuntime {
             // `rearmScheduledTaskWakes()` — it runs on every restart path, not just cold launch.
             let nowAtBoot = Date()
 
-            // If autoRunInterruptedTasks is enabled and no awaitingReview task needs attention first,
-            // auto-start the first interrupted task by spawning Brown and delivering the briefing.
-            var autoResumedTask: AgentTask?
-            if autoRunInterruptedTasks, awaitingReviewTasks.isEmpty, let task = interruptedTasks.first {
-                if let brownID = await performSpawnBrown(for: task) {
+            // If autoRunInterruptedTasks is enabled and no awaitingReview task needs attention
+            // first, resume the tasks that were interrupted when this session came up. Every
+            // task that was mid-run at quit should restart — not just the first — capped by
+            // worker capacity. What doesn't fit now goes onto `launchResumeQueue` and resumes
+            // as running tasks finish (`drainPendingTaskQueue`). This is scoped to the LAUNCH
+            // batch on purpose: a task the user Stops mid-session also becomes `.interrupted`,
+            // but it never enters this queue, so it stays stopped until the next launch.
+            var autoResumedTasks: [AgentTask] = []
+            if autoRunInterruptedTasks, awaitingReviewTasks.isEmpty {
+                var remaining = interruptedTasks.sorted { $0.createdAt < $1.createdAt }
+                while supervisor.handles(role: .brown).count < maxConcurrentWorkers, let task = remaining.first {
+                    guard let brownID = await performSpawnBrown(for: task) else { break }
+                    remaining.removeFirst()
                     await taskStore.updateStatus(id: task.id, status: .running)
                     await taskStore.assignAgent(taskID: task.id, agentID: brownID)
 
@@ -1972,18 +2016,27 @@ public actor OrchestrationRuntime {
                         await brownAgent.setSyntheticFirstToolCall("task_acknowledged")
                         await brownAgent.appendUserMessage(briefing, attachments: attachmentsForBrown)
                     }
-                    autoResumedTask = task
+                    autoResumedTasks.append(task)
                 }
+                // The overflow drains as slots free.
+                launchResumeQueue = remaining.map(\.id)
             }
 
             // Build Smith's initial instruction with ALL task categories
             var parts: [String] = []
 
-            if let resumed = autoResumedTask {
+            if !autoResumedTasks.isEmpty {
+                let list = autoResumedTasks
+                    .map { "\"\($0.title)\" (ID: \($0.id.uuidString))" }
+                    .joined(separator: "\n- ")
+                let lead = autoResumedTasks.count == 1
+                    ? "Brown has automatically resumed the interrupted task:"
+                    : "Brown workers have automatically resumed \(autoResumedTasks.count) interrupted tasks:"
                 parts.append("""
-                    Brown has automatically resumed the interrupted task "\(resumed.title)" (ID: \(resumed.id.uuidString)). \
-                    Do NOT call `message_brown` for this task — Brown is already briefed and working. \
-                    Brown will signal progress via task_update / task_complete; you'll also get an automatic 10-minute Brown-activity digest. Do NOT poll.
+                    \(lead)
+                    - \(list)
+                    Do NOT call `message_brown` for these — the workers are already briefed and working. \
+                    They signal progress via task_update / task_complete; you'll also get an automatic 10-minute Brown-activity digest. Do NOT poll.
                     """)
             }
 
@@ -2011,8 +2064,9 @@ public actor OrchestrationRuntime {
                 parts.append("\(helpRequestTasks.count) task(s) have a BLOCKER from Brown awaiting your help (not a review):\n\(taskList)\nResolve each with `provide_help`, or `message_user` first if you need something from the user. Do NOT call `review_work` on these.")
             }
 
-            // Show interrupted tasks that were NOT auto-resumed
-            let remainingInterrupted = interruptedTasks.filter { $0.id != autoResumedTask?.id }
+            // Show interrupted tasks that were NOT auto-resumed (e.g. beyond worker capacity)
+            let resumedIDs = Set(autoResumedTasks.map { $0.id })
+            let remainingInterrupted = interruptedTasks.filter { !resumedIDs.contains($0.id) }
             if !remainingInterrupted.isEmpty {
                 let list = remainingInterrupted
                     .map { task in
@@ -2876,6 +2930,8 @@ public actor OrchestrationRuntime {
         let taskSlug = taskID.uuidString.prefix(8)
         let entryStart = Date()
         stopLogger.notice("Runtime.terminateTaskAgents entry task=\(taskSlug, privacy: .public)")
+        // Halting a task (pause/stop) also halts any in-flight validation of it.
+        cancelTaskValidation(taskID: taskID)
         guard let task = await taskStore.task(id: taskID) else {
             stopLogger.notice("Runtime.terminateTaskAgents no task found task=\(taskSlug, privacy: .public)")
             return

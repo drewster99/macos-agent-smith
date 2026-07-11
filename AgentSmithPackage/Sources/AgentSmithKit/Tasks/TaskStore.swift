@@ -874,6 +874,19 @@ public actor TaskStore {
         updateStatus(id: id, status: .interrupted)
     }
 
+    /// Atomically transition a task's status ONLY IF it is currently one of `allowed`,
+    /// returning whether it applied. Validation transitions use this: a user pause/stop can
+    /// flip a `.validating` task to `.paused`/`.interrupted` between the coordinator's status
+    /// snapshot and its transition, and this prevents the transition from clobbering that.
+    /// Atomic because the guard and the `updateStatus` call run with no actor suspension
+    /// between them.
+    @discardableResult
+    public func updateStatus(id: UUID, to newStatus: AgentTask.Status, ifCurrentlyIn allowed: Set<AgentTask.Status>) -> Bool {
+        guard let task = tasks[id], allowed.contains(task.status) else { return false }
+        updateStatus(id: id, status: newStatus)
+        return true
+    }
+
     // MARK: - Bulk operations
 
     /// Restores tasks from a persisted list (e.g., on app launch).

@@ -1511,14 +1511,20 @@ final class AppViewModel {
         await runtime.updateMaxToolCalls(for: role, count: count)
     }
 
-    func stopCurrentTask() async {
-        stopLogger.notice("VM.stopCurrentTask entry")
-        guard let runningTask = tasks.first(where: { $0.status == .running }) else {
-            stopLogger.notice("VM.stopCurrentTask no running task — early return")
-            return
+    /// Escape-key action: PAUSE every actively-working task in this session — both `.running`
+    /// (Brown executing) and `.validating` (a validator judging its result). The worker/parked
+    /// Brown is cycled out and the task goes `.paused`; the user can resume later. Escape is a
+    /// "hold on" gesture, not an emergency session shutdown — that's Stop, which marks tasks
+    /// interrupted so a restart resumes them. Pause leaves them `.paused`, off the auto-resume
+    /// path. `.awaitingReview` is deliberately excluded — nothing is running there to pause.
+    func pauseAllRunningTasks() async {
+        let activeIDs = tasks.filter { $0.status == .running || $0.status == .validating }.map(\.id)
+        stopLogger.notice("VM.pauseAllRunningTasks entry — \(activeIDs.count, privacy: .public) active task(s)")
+        guard !activeIDs.isEmpty else { return }
+        for id in activeIDs {
+            await pauseTask(id: id)
         }
-        stopLogger.notice("VM.stopCurrentTask found running task=\(runningTask.id.uuidString.prefix(8), privacy: .public)")
-        await stopTask(id: runningTask.id)
+        stopLogger.notice("VM.pauseAllRunningTasks exit")
     }
 
     /// Stops this session only. For app-wide Emergency Stop, SessionManager iterates all sessions.
