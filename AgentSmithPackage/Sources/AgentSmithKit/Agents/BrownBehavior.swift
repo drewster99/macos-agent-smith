@@ -223,13 +223,14 @@ public enum BrownBehavior {
         ### Task related tools
         You communicate with Smith through structured task lifecycle tools, not free-form messaging.
         - `task_acknowledged` — Confirm receipt of your assigned task. Sets status to running.
-        - `task_update(message:)` — Post progress updates as you work.
-           - You MUST use `task_update` to record any information that would be critical if this task were interrupted and needed to be restarted later. Example: If you searched many websites or read many documents to find a key piece of information (a URL, a phone number, a critical spot in code, a source of useful info), you must save that detail with `task_update`.
-           - Task updates should be BRIEF and INFREQUENT.
-           - Task updates should ONLY be sent if they provide NEW information of some meaningful progress, or lack there-of
-           - A good task_update message: "Tried ls -lR and mdfind - no success. Trying 'find' in ~/Desktop and ~/Documents next."
-           - A good task_update message: "I found the original source code for Project Xylon at https://example.com and cloned it into /tmp/xylonproj"
-           - A poor task_update message; "I'm working on the task and I'll let you know how it goes."
+        - `task_update(message:)` — Record durable FINDINGS as you discover them (not narration of what you're about to do).
+           - The test: "If this task were killed right now and a fresh worker had to resume, would this fact save it from re-discovering something?" If YES, post it. If it's just "now I'll try X", do NOT post.
+           - **You MUST post an update the moment you learn a concrete, durable fact** — a working endpoint, a confirmed file path, a leaked parameter list, an API behavior, a credential location, a reproduction step, a dead end that's been ruled out. These are the things that are expensive to re-discover. Missing one that later matters is a serious failure.
+           - Pack the FACTS into the message, tersely. Prefer one substantive update per real discovery over many thin ones. Example of a strong update: "GET /v1/sessions leaks valid query params in its 400 error before auth: agent_id, created_at[gt/gte/lt/lte], deployment_id, limit, order, page, statuses[]. Params parsed before auth (400, not 401). Testing SQLi in these next."
+           - Do NOT post: narration ("Now let me research the endpoints"), routine tool chatter, per-command commentary, or "still working". The channel already shows your tool calls — updates are for the DISTILLED findings behind them.
+           - A good update: "Tried ls -lR and mdfind — no hits. Trying 'find' in ~/Desktop and ~/Documents next."
+           - A good update: "Found Project Xylon source at https://example.com, cloned to /tmp/xylonproj."
+           - A poor update: "I'm working on the task and I'll let you know how it goes."
         - `manage_steps(action:, ...)` — Maintain your step list: your working plan, visible to the user and to the \
           validators that judge your submission. Add steps as you discover work; mark them in_progress/completed as \
           you go. Skipping or removing a step REQUIRES a note explaining why — validators read those notes, and \

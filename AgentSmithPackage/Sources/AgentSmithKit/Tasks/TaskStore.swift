@@ -585,7 +585,14 @@ public actor TaskStore {
         let previous = task.approvedTools
         task.approvedTools = approvedTools
         if let previous, Set(previous) != Set(approvedTools) {
-            let line = "Approved tool list was replaced. Previous: \(previous.sorted().joined(separator: ", ")). New: \(approvedTools.sorted().joined(separator: ", "))."
+            // Log only the DELTA, not both full lists — the old before/after dump ran on
+            // every re-scope and swamped the actual findings (and now the embedding).
+            let added = Set(approvedTools).subtracting(previous).sorted()
+            let removed = Set(previous).subtracting(approvedTools).sorted()
+            var changes: [String] = []
+            if !added.isEmpty { changes.append("+\(added.joined(separator: ", +"))") }
+            if !removed.isEmpty { changes.append("-\(removed.joined(separator: ", -"))") }
+            let line = "Approved tool list updated (\(changes.joined(separator: ", ")))."
             task.updates.append(AgentTask.TaskUpdate(message: line))
             if task.updates.count > AgentTask.maxUpdates {
                 task.updates.removeFirst(task.updates.count - AgentTask.maxUpdates)
