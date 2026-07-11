@@ -305,6 +305,13 @@ public struct CreateTaskTool: AgentTool {
             }
         }
 
+        // A TEMPLATE is a launcher, not work to run — never auto-start it. It runs only
+        // when explicitly started (run_task / play button / a scheduled run), which then
+        // clones a fresh instance.
+        if isTemplate {
+            return .success("Template task created (ID: \(task.id), title: \"\(title)\").\(contextNote) It won't run on its own — starting it (run_task, the play button, or a scheduled run) clones a fresh instance each time.")
+        }
+
         // Auto-start the new task when a worker slot is free. Prevents the failure mode
         // where Smith creates a task and then idles instead of immediately calling
         // run_task. Beyond capacity the task queues as pending — auto-run starts it when

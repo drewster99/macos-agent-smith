@@ -755,7 +755,11 @@ public actor OrchestrationRuntime {
         guard freeSlots > 0 else { return }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let nextUp = activeTasks
-            .filter { $0.status == .pending }
+            // Templates are `.pending` launchers, not queued work — they start only on
+            // an EXPLICIT action (run_task, the play button, a scheduled/recurring wake),
+            // never by auto-advance. Without this exclusion the drain would clone-and-run
+            // every template the moment a slot freed.
+            .filter { $0.status == .pending && !$0.isTemplate }
             .sorted { $0.createdAt < $1.createdAt }
             .prefix(freeSlots)
         for task in nextUp {
@@ -1447,6 +1451,12 @@ public actor OrchestrationRuntime {
 
     /// Awaits every previously-scheduled restart. Surfaced for tests / smoke
     /// scripts that need a quiescence point before asserting on runtime state.
+    /// Test hook: drives the auto-advance pending-task drain directly (normally invoked
+    /// from the task-termination hook).
+    public func drainPendingTaskQueueForTesting() async {
+        await drainPendingTaskQueue()
+    }
+
     public func waitForPendingRestarts() async {
         await lifecycleQueue.waitForAll()
     }
@@ -1931,7 +1941,10 @@ public actor OrchestrationRuntime {
             // Cold launch — gather all active tasks by status and surface everything to Smith.
             let awaitingReviewTasks = activeTasks.filter { $0.status == .awaitingReview }
             let interruptedTasks = activeTasks.filter { $0.status == .interrupted }
-            let pendingTasks = activeTasks.filter { $0.status == .pending }
+            // Templates are `.pending` launchers, not queued work — exclude them from the
+            // startup pending list so Smith isn't told they're being auto-started (they
+            // aren't; they run only on explicit action).
+            let pendingTasks = activeTasks.filter { $0.status == .pending && !$0.isTemplate }
             let pausedTasks = activeTasks.filter { $0.status == .paused }
             let scheduledTasks = activeTasks.filter { $0.status == .scheduled }
             let recentFailed = Array(

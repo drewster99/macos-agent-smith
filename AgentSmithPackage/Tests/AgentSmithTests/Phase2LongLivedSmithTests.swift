@@ -180,6 +180,58 @@ struct Phase2LongLivedSmithTests {
         await runtime.stopAll()
     }
 
+    @Test("Starting a template clones a fresh instance and runs it; the template stays put")
+    func templateStartClonesAndRuns() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.start()
+        let store = await runtime.taskStore
+        let template = await store.addTask(title: "Nightly", description: "d", isTemplate: true)
+
+        await runtime.restartForNewTask(taskID: template.id)
+        await runtime.waitForPendingRestarts()
+
+        // The template itself never ran — it's still a pending template.
+        let templateAfter = await store.task(id: template.id)
+        #expect(templateAfter?.isTemplate == true)
+        #expect(templateAfter?.status == .pending)
+        #expect(templateAfter?.assigneeIDs.isEmpty == true)
+
+        // A single fresh instance was created and is the one running.
+        let instances = await store.allTasks().filter { $0.parentTaskID == template.id }
+        #expect(instances.count == 1)
+        #expect(instances.first?.isTemplate == false)
+        #expect(instances.first?.status == .running)
+
+        await runtime.stopAll()
+    }
+
+    @Test("Auto-advance never starts a template")
+    func autoAdvanceSkipsTemplates() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setAutoAdvance(true)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        // A pending template + a pending normal task, both eligible for slots.
+        let template = await store.addTask(title: "Template", description: "d", isTemplate: true)
+        let normal = await store.addTask(title: "Normal", description: "d")
+
+        // Drive the auto-advance drain (as a task-termination would).
+        await runtime.drainPendingTaskQueueForTesting()
+        await runtime.waitForPendingRestarts()
+
+        // The normal task started; the template did not (no clone, still pending template).
+        #expect(await store.task(id: normal.id)?.status == .running)
+        let templateAfter = await store.task(id: template.id)
+        #expect(templateAfter?.isTemplate == true)
+        #expect(templateAfter?.status == .pending)
+        #expect(await store.allTasks().contains { $0.parentTaskID == template.id } == false, "no instance was cloned by auto-advance")
+
+        await runtime.stopAll()
+    }
+
     @Test("A worker spawn failure marks the task failed and tells the surviving Smith")
     func spawnFailureNotifiesSmithInContext() async {
         let runtime = makeRuntime(includeBrown: false)
