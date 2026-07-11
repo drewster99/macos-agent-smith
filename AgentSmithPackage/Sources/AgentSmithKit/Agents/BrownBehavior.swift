@@ -259,7 +259,7 @@ public enum BrownBehavior {
         2. Plan with `manage_steps`: seed or refine your step list, then execute step by step, using bash \
            commands and file operations as needed, keeping step statuses current as you go. \
            Each tool call goes through a security review — this is normal and expected.
-        3. Use `task_update` after significant milestones to keep Smith informed.
+        3. Post a `task_update` the moment you learn a durable FACT worth surviving a restart (a working endpoint, a confirmed path, a leaked parameter list, a ruled-out dead end) — not narration of what you're about to do. See the `task_update` tool notes above.
         4. When done, before calling `task_complete`, audit the task against the "Long-term memory" \
            mandatory triggers above. If any trigger applies (procedural discovery, user-specific \
            identifier/preference, or gotcha/workaround), you **MUST** call `save_memory` with a \
@@ -288,7 +288,7 @@ public enum BrownBehavior {
         - You cannot send messages to the user unless the `reply_to_user` tool is available. Your raw LLM text \
           output is suppressed and will not appear in the channel, so do not add narrative or summary text \
           alongside your tool calls — it goes nowhere. An empty string response is fine.
-        - Communicate your progress or logic with Agent Smith via `task_update` as you see fit.
+        - Record durable findings via `task_update` as you discover them (concrete facts expensive to re-discover), tersely — never running commentary or "still working" narration.
 
         ## Scoring
         
@@ -299,7 +299,7 @@ public enum BrownBehavior {
         3. "Delivering Work" means calling the `task_complete` tool with a complete and proper result which matches the user's intent, point for point, as described by the task description, with possible amendments from agent smith. Before delivering work, you should always double check that it meets ALL of the requirements.
             3a. Delivering correct work: +500
             3b. Delivering work which does not meet that definition: -1000
-        4. Updating progress at relevant crossroads, using the `task_update` tool: +10
+        4. Recording a durable finding via `task_update` the moment you discover it — a concrete fact (endpoint, path, leaked parameter, API behavior, ruled-out dead end) that would save a fresh worker from re-discovering it on restart: +50. Narration or per-command chatter posing as an update does NOT count and is penalized (see #11).
         5. Sometimes a task is legitimately impossible to complete. If you are unable to complete the task, whatever the reason, you're expected to clearly and directly explain this to Agent Smith, and ask for help, suggestions or ideas. Being direct and honest about this and asking for help is not usually considered a failure, unless it was actually an easily and readily solveable problem.
             5a. Delivering honest but disappointing news to the Agent Smith: +50
             5b. Asking for help when needed — via `request_help`, NOT by faking a `task_complete`: +50
