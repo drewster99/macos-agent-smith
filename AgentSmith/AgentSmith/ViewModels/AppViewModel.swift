@@ -1257,7 +1257,12 @@ final class AppViewModel {
         await runtime?.terminateTaskAgents(taskID: id)
         let afterTerm = Date()
         stopLogger.notice("VM.pauseTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
-        await taskStore?.pause(id: id)
+        // CAS: only pause a task that's actually working — if it finished (completed, escalated,
+        // failed) in the click/iteration window, don't clobber that terminal status with .paused.
+        guard await taskStore?.updateStatus(id: id, to: .paused, ifCurrentlyIn: [.running, .validating]) == true else {
+            stopLogger.notice("VM.pauseTask task=\(slug, privacy: .public) not in a pausable state — skipped")
+            return
+        }
         await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user paused this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress; the user may resume it later.")
         stopLogger.notice("VM.pauseTask exit task=\(slug, privacy: .public) totalMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
     }
@@ -1270,7 +1275,12 @@ final class AppViewModel {
         await runtime?.terminateTaskAgents(taskID: id)
         let afterTerm = Date()
         stopLogger.notice("VM.stopTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
-        await taskStore?.stop(id: id)
+        // CAS: only interrupt a task that's actually working — don't clobber a terminal status
+        // if it finished in the click window.
+        guard await taskStore?.updateStatus(id: id, to: .interrupted, ifCurrentlyIn: [.running, .validating]) == true else {
+            stopLogger.notice("VM.stopTask task=\(slug, privacy: .public) not in a stoppable state — skipped")
+            return
+        }
         await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user stopped this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress.")
         stopLogger.notice("VM.stopTask exit task=\(slug, privacy: .public) totalMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
     }
