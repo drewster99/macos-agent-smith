@@ -6,6 +6,15 @@ import SwiftLLMKit
 /// Follows the `SecurityEvaluator` pattern: standalone actor with its own `LLMProvider`,
 /// focused prompt, and no tools. Each summary captures the problem, outcome, and approach
 /// for semantic search retrieval.
+/// The outcome of reconciling a new memory against a similar existing one.
+public enum MemoryReconciliation: Sendable, Equatable {
+    /// Distinct facts — keep both (save the new memory separately).
+    case distinct
+    /// The new memory duplicates or supersedes the existing one; here is the single
+    /// reconciled text (newer info preferred on any conflict).
+    case merged(String)
+}
+
 actor TaskSummarizer {
     private let provider: any LLMProvider
     private let memoryStore: MemoryStore
@@ -134,16 +143,30 @@ actor TaskSummarizer {
 
     // MARK: - Memory Consolidation
 
-    /// Merges two related memory texts into one consolidated memory using an LLM call.
-    ///
-    /// Retries transient HTTP errors (429, 5xx) with exponential backoff.
-    /// Returns the merged text, or `nil` if the LLM call fails.
-    public func mergeMemoryTexts(existing: String, new: String) async -> String? {
+    /// Decides whether a new memory should merge into a similar existing one, and if so
+    /// produces the reconciled text. The LLM is the decider — cosine only chose the
+    /// candidate — so distinct facts that merely phrase alike stay separate, and a
+    /// changed fact supersedes the old value instead of piling up a contradictory
+    /// duplicate. Retries transient HTTP errors; on any failure returns `.distinct`
+    /// (the safe default: never clobber an existing memory on an unreliable call).
+    public func reconcileMemoryTexts(existing: String, new: String) async -> MemoryReconciliation {
         let systemPrompt = """
-            You are merging two related memories into one consolidated memory. \
-            Retain ALL relevant details from both memories. Be concise but complete. \
-            If the memories contain conflicting information, prefer the newer memory. \
-            Output ONLY the merged memory text — no headings, bullet points, or commentary.
+            You decide whether two memories should be ONE memory or kept SEPARATE.
+
+            They are the SAME memory if the new one states the same specific fact as the \
+            existing one, OR directly updates/supersedes it (a changed phone number, a moved \
+            file path, a revised preference, a renamed account).
+
+            They are DIFFERENT if they are distinct facts — even within the same category. A \
+            GitHub username and a GitLab username are different. Two different people's phone \
+            numbers are different. A file path for project A and one for project B are different. \
+            When in doubt, answer DIFFERENT.
+
+            Respond with exactly SAME or DIFFERENT on the FIRST line.
+            - If DIFFERENT: output nothing else.
+            - If SAME: on the following lines output the single reconciled memory text — retain \
+            every still-current detail from both, and on ANY conflict prefer the NEWER memory \
+            (it supersedes the old). No headings, bullets, or commentary.
             """
 
         // Cap combined memory texts to 80% of the context window (same logic as
@@ -178,7 +201,7 @@ actor TaskSummarizer {
 
         var lastError: Error?
         for attempt in 0...Self.maxRetries {
-            if Task.isCancelled { return nil }
+            if Task.isCancelled { return .distinct }
             if attempt > 0 {
                 let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
                 do { try await Task.sleep(for: .seconds(delay)) } catch { break }
@@ -206,23 +229,41 @@ actor TaskSummarizer {
                     )
                 }
 
-                guard let text = response.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    return nil
+                guard let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                    return .distinct
                 }
-                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return Self.parseReconciliation(text)
             } catch {
                 lastError = error
                 guard Self.isRetryableError(error) else { break }
             }
         }
 
-        if Task.isCancelled { return nil }   // cancelled mid-call: don't post a spurious failure
+        if Task.isCancelled { return .distinct }   // cancelled mid-call: don't post a spurious failure
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
-            content: "Memory merge failed: \(lastError?.localizedDescription ?? "unknown error")",
+            content: "Memory reconciliation failed: \(lastError?.localizedDescription ?? "unknown error")",
             metadata: ["isError": .bool(true)]
         ))
-        return nil
+        return .distinct
+    }
+
+    /// Parses a reconciliation response: first line SAME/DIFFERENT (case-insensitive,
+    /// punctuation-tolerant), remaining lines the merged text on SAME. A SAME verdict
+    /// with no body degrades to `.distinct` — never destroy the existing memory on a
+    /// malformed response; a rare extra near-duplicate is the lesser harm.
+    static func parseReconciliation(_ text: String) -> MemoryReconciliation {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let firstRaw = lines.first else { return .distinct }
+        let firstWord = firstRaw
+            .trimmingCharacters(in: .whitespaces)
+            .split(separator: " ", maxSplits: 1).first
+            .map(String.init)?
+            .trimmingCharacters(in: CharacterSet(charactersIn: ":.,!*#`"))
+            .uppercased() ?? ""
+        guard firstWord == "SAME" else { return .distinct }
+        let body = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? .distinct : .merged(body)
     }
 
     /// Runs `prompt` against fetched web-page `content` and returns the extracted answer, or

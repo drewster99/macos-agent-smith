@@ -246,9 +246,10 @@ public struct ToolContext: Sendable {
     public let memoryStore: MemoryStore
     /// Triggers summarization and embedding of a completed or failed task.
     public let summarizeCompletedTask: @Sendable (UUID) async -> Void
-    /// Merges two related memory texts into a single consolidated memory via LLM.
-    /// Parameters: (existingContent, newContent). Returns merged text, or nil if unavailable.
-    public let mergeMemoryContent: @Sendable (String, String) async -> String?
+    /// Decides whether a new memory should merge into a similar existing one, and if so
+    /// produces the reconciled text (newer info wins conflicts). Parameters:
+    /// (existingContent, newContent). The LLM is the decider; `.distinct` on any failure.
+    public let reconcileMemory: @Sendable (String, String) async -> MemoryReconciliation
     /// Runs a prompt against fetched web-page content via the summarizer's LLM and returns the
     /// extracted answer, or nil if unavailable or the call fails. Backs `web_fetch`'s hybrid
     /// extraction mode. Parameters: (content, prompt).
@@ -341,7 +342,7 @@ public struct ToolContext: Sendable {
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
         summarizeCompletedTask: @escaping @Sendable (UUID) async -> Void = { _ in },
-        mergeMemoryContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
+        reconcileMemory: @escaping @Sendable (String, String) async -> MemoryReconciliation = { _, _ in .distinct },
         extractWebContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
         autoAdvanceEnabled: @escaping @Sendable () async -> Bool = { true },
         recordFileRead: @escaping @Sendable (String) -> Void = { _ in },
@@ -400,7 +401,7 @@ public struct ToolContext: Sendable {
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore
         self.summarizeCompletedTask = summarizeCompletedTask
-        self.mergeMemoryContent = mergeMemoryContent
+        self.reconcileMemory = reconcileMemory
         self.extractWebContent = extractWebContent
         self.autoAdvanceEnabled = autoAdvanceEnabled
         self.recordFileRead = recordFileRead

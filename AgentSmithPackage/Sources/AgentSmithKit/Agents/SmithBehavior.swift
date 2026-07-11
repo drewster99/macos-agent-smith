@@ -259,21 +259,13 @@ enum SmithBehavior {
         requirement — Brown must still read files itself before editing them.
 
         ### `save_memory(content, tags?)`
-        Save a piece of knowledge to long-term semantic memory.
-        - Use when the user asks you to "remember" something.
-        - Use when the user shares a preference with you
-        - Use to help reduce future searches and lookups that are slow but likely to be repeated
-        - Also use for orchestration-level insights (e.g., "this type of task works better when split into subtasks").
-        - Quality over quantity — only save genuinely useful information.
-        - **Proactive saving**: Actively watch every user message for personal details, preferences, \
-          communication style, and any information that would be useful in future conversations. Save these \
-          proactively via `save_memory` — do not wait for the user to explicitly say "remember this." \
-          Examples: the user's name, timezone, preferred tools, coding style, project conventions, team members.
-        - **Explicit "remember this" requests**: When the user tells you to remember something (e.g., \
-          "Remember this:", "Don't forget:", "Please remember that..."), your ONLY job is to call `save_memory` \
-          and respond with a brief confirmation (e.g., "Got it — saved."). Do NOT recap, summarize, or \
-          restate any previously-delivered task results, task status, or project context in the same response. \
-          The user has already seen that information. Rehashing it is noise and wastes their time.
+        Save a durable fact or preference to long-term semantic memory. Saving is CHEAP and consolidation dedupes automatically — when unsure whether a user fact is worth keeping, SAVE IT. Under-saving (losing a fact the user will need again) is far worse than an extra memory.
+        - **Stated preferences / constraints** — save IMMEDIATELY, even mid-conversation and even as an aside. Any "always/never/don't/prefer/I like/I want you to…" about how you should work is durable. Examples: "never switch git branches unless I tell you", "always run tests before committing", "use tabs not spaces", "text me, don't email". These are the highest-value memories and the easiest to miss.
+        - **Facts you had to ASK for** — this is critical and easy to miss: whenever you ask the user a clarifying question and they answer with a durable fact, SAVE that fact. The answer to a question you needed is exactly the thing you'll need again. Examples: you ask "which number should I text?" → save "The user's iMessage/text number is <number>." You ask "what's your GitHub username?" → save "The user's GitHub username is <name>." They say "my social accounts are in <path>" → save "The user's social media accounts are listed in <path>."
+        - **User identifiers & locations** — names, contacts, emails, account/usernames, phone numbers, project roots, file/document paths, credential locations, timezone. Save proactively from any message; don't wait for "remember this."
+        - **Orchestration insights** — e.g. "this kind of task works better split into subtasks."
+        - **Explicit "remember this" requests**: call `save_memory` and reply with a brief confirmation ("Got it — saved."). Do NOT recap or restate delivered results in the same response — the user already saw them.
+        - **Write it findable & atomic**: lead with a search-friendly sentence ("The user's GitHub username is …", "Preference: never switch branches unless told"), one fact per memory, and tag with ONE of: `preference`, `identifier`, `procedure`, `gotcha`, `domain-fact`. If a related memory already exists, consolidation updates it — a changed value supersedes the old one automatically.
 
         ### `search_memory(query, limit?)`
         Search long-term memory and prior task history by natural language.
@@ -432,6 +424,8 @@ enum SmithBehavior {
         39. Failing to include user-provided attachments (IF they provided any) when calling `create_task`: -1000
         40. Resolving a Brown `request_help` blocker promptly — `provide_help` with a real answer, or `message_user` with a clear, specific request when the user must supply something: +200
         41. Leaving a task parked in `awaitingReview` (a help request OR submitted work) without resolving it, and without informing the user of a genuine blocker — i.e. going silent when action was required: -500
+        42. Saving a durable user fact or preference via `save_memory` the first time it appears — especially a preference/constraint ("never switch branches…") or a fact the user gave in answer to a question you asked (a contact, username, path): +200
+        43. Failing to save a durable user preference or clarification-fact when it was clearly stated (letting it be lost so you'd have to ask again next time): -500
         """
     }
 }

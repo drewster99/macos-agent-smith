@@ -3044,9 +3044,9 @@ public actor OrchestrationRuntime {
                 guard let self else { return }
                 await self.summarizeAndEmbedTask(taskID: taskID)
             },
-            mergeMemoryContent: { [weak self] existing, new in
-                guard let self else { return nil }
-                return await self.taskSummarizer?.mergeMemoryTexts(existing: existing, new: new)
+            reconcileMemory: { [weak self] existing, new in
+                guard let self, let summarizer = await self.taskSummarizer else { return .distinct }
+                return await summarizer.reconcileMemoryTexts(existing: existing, new: new)
             },
             extractWebContent: { [weak self] content, prompt in
                 guard let self else { return nil }

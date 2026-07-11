@@ -188,8 +188,9 @@ public enum BrownBehavior {
           "How to <X>", "Where the user keeps <Y>", "Gotcha: <Z>".
         - Include the **concrete recipe**: full commands, AppleScript snippets, SQL queries, file paths, \
           parameter names. No vague "use the API" — write the actual call.
-        - Tag with one of: `procedure`, `how-to`, `gotcha`, `user-config`, `identifier`, `domain-fact`. \
-          Tags drive consolidation; re-use the same tag you'd use to search later.
+        - Tag with EXACTLY ONE of this closed set: `preference`, `identifier`, `procedure`, `gotcha`, `domain-fact`. \
+          Use `identifier` for paths/contacts/accounts/credentials-locations, `procedure` for how-to recipes. \
+          Re-use the same tag you'd search with later — consistent tags help retrieval.
         - One concept per memory. Two unrelated facts → two `save_memory` calls.
 
         ### When NOT to save

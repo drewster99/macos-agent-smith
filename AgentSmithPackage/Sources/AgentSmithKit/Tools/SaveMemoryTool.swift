@@ -20,9 +20,10 @@ struct SaveMemoryTool: AgentTool {
         identifiers (file paths, contacts, account names, project roots), and stated \
         user preferences. \
         Lead with a search-friendly title sentence so the memory is findable later. \
-        Tag with one of: `procedure`, `how-to`, `gotcha`, `user-config`, `identifier`, \
-        `domain-fact` — tags drive consolidation. One concept per memory. \
-        If a closely related memory already exists, it will be automatically consolidated.
+        Tag with EXACTLY ONE of: `preference`, `identifier`, `procedure`, `gotcha`, \
+        `domain-fact`. One concept per memory. \
+        If a closely related memory already exists, it is automatically consolidated — a \
+        changed value supersedes the old one.
         """
 
     let parameters: [String: AnyCodable] = [
@@ -44,13 +45,14 @@ struct SaveMemoryTool: AgentTool {
         "required": .array([.string("content")])
     ]
 
-    /// Minimum semantic cosine similarity for two memories to be considered consolidation
-    /// candidates. Applied to `MemorySearchResult.similarity` (raw cosine from the Qwen3
-    /// embedding) independently of the RRF ranking. With Qwen3, near-duplicate text sits
-    /// at ≥0.85 — that's the floor we want for an automatic merge. Tag overlap is also
-    /// required (see guard below) so even a high-cosine false positive needs an
-    /// agent-supplied agreement before consolidating.
-    private static let consolidationThreshold: Double = 0.85
+    /// Cosine floor for handing a candidate to the LLM reconciler. NOT a merge decision —
+    /// just "similar enough to be worth asking about." Deliberately BELOW near-duplicate
+    /// territory (≈0.85) so a SUPERSEDING memory (a changed value phrased differently, e.g.
+    /// a new phone number) still surfaces for the reconciler to update the old one; a high
+    /// gate here structurally excluded exactly that case. The LLM — not this number — makes
+    /// the same/different call, so distinct-but-similar facts don't wrongly merge.
+    /// Tunable via `RetrievalEvalRunner` if the embedding model changes.
+    private static let consolidationThreshold: Double = 0.70
     /// Loose noise floor for the candidate fetch — anything moderately related is OK
     /// because the strict semantic gate above is what actually decides consolidation.
     private static let consolidationCandidateFloor: Double = 0.5
@@ -112,19 +114,12 @@ struct SaveMemoryTool: AgentTool {
             .max(by: { $0.similarity < $1.similarity })
 
         if let match = bestMatch {
-            // Require at least one shared tag before consolidating — high cosine alone is
-            // not enough, and the agent-supplied tag agreement gives a second axis of
-            // confirmation before two distinct memories get merged.
-            let sharedTags = Set(match.memory.tags).intersection(tags)
-            guard !tags.isEmpty, !match.memory.tags.isEmpty, !sharedTags.isEmpty else {
-                return try await saveNew(
-                    content: content, source: source, tags: tags,
-                    sourceTaskID: sourceTaskID, consolidated: false, context: context
-                )
-            }
-
-            // Attempt LLM-based merge of the existing and new content.
-            if let merged = await context.mergeMemoryContent(match.memory.content, content) {
+            // The LLM reconciler is the decider — cosine only picked the candidate. It
+            // returns `.merged` for a duplicate OR an update/supersession (newer info
+            // wins), and `.distinct` for two different facts that merely phrase alike.
+            // No hard tag requirement: tags were an unreliable second axis (agents tag
+            // the same fact inconsistently), and the LLM is a better one.
+            if case .merged(let merged) = await context.reconcileMemory(match.memory.content, content) {
                 let mergedTags = Array(Set(match.memory.tags + tags))
                 do {
                     try await context.memoryStore.update(
@@ -151,7 +146,7 @@ struct SaveMemoryTool: AgentTool {
             }
         }
 
-        // No match found or merge unavailable — save as new memory.
+        // No candidate, or the reconciler judged them distinct — save as new memory.
         return try await saveNew(
             content: content, source: source, tags: tags,
             sourceTaskID: sourceTaskID, consolidated: false, context: context
