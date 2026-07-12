@@ -160,9 +160,10 @@ struct PersistentClientErrorSurfaceTests {
         #expect(banner != nil, "a rate limit should surface on the first failure so the wait is visible")
         if let banner {
             #expect(banner.content.contains("Rate limited"))
-            // No server Retry-After here → our own backoff, shown in human units.
-            #expect(banner.content.contains("retrying after"))
-            #expect(!banner.content.contains("server Retry-After"))
+            // No server Retry-After here → our own backoff, shown relatively + as a clock time.
+            #expect(banner.content.contains("retrying in"))
+            #expect(banner.content.contains("(at "))
+            #expect(!banner.content.contains("Retry-After"))
         }
     }
 
@@ -188,8 +189,34 @@ struct PersistentClientErrorSurfaceTests {
         let banner = await channel.allMessages().first { $0.content.contains("Agent Brown error (1/") }
         #expect(banner != nil)
         if let banner {
-            #expect(banner.content.contains("retrying after 2 minutes"))
-            #expect(banner.content.contains("server Retry-After"))
+            #expect(banner.content.contains("retrying in 2 minutes"))
+            #expect(banner.content.contains("per server Retry-After"))
+        }
+    }
+
+    @Test("A ridiculously long server Retry-After is honored but flagged")
+    func http429FlagsRidiculousRetryAfter() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let provider = SingleShot400Provider(
+            statusCode: 429,
+            body: #"{"error":{"message":"weekly limit"}}"#,
+            retryAfter: 2 * 3600  // 2 hours — over the "unusually long" threshold
+        )
+        let agent = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
+
+        await agent.start(initialInstruction: "do something")
+        await Self.waitUntil(deadline: 1.0) {
+            let msgs = await channel.allMessages()
+            return msgs.contains { $0.content.contains("Agent Brown error (1/") }
+        }
+        await agent.stop()
+
+        let banner = await channel.allMessages().first { $0.content.contains("Agent Brown error (1/") }
+        #expect(banner != nil)
+        if let banner {
+            #expect(banner.content.contains("retrying in 2 hours"))
+            #expect(banner.content.contains("unusually long"))
         }
     }
 
@@ -202,5 +229,17 @@ struct PersistentClientErrorSurfaceTests {
         #expect(AgentActor.formatRetryDelay(3600) == "1 hour")
         #expect(AgentActor.formatRetryDelay(18000) == "5 hours")
         #expect(AgentActor.formatRetryDelay(5400) == "1.5 hours")
+        #expect(AgentActor.formatRetryDelay(86400) == "1 day")
+        #expect(AgentActor.formatRetryDelay(172800) == "2 days")
+        #expect(AgentActor.formatRetryDelay(129600) == "1.5 days")
+    }
+
+    @Test("formatRetryClock shows a bare time today and adds the date on another day")
+    func retryClockFormatting() {
+        let now = Date(timeIntervalSince1970: 800_000_000)
+        // Same instant → same calendar day in any timezone: a bare time, no date.
+        #expect(!AgentActor.formatRetryClock(now, now: now).contains(" on "))
+        // +26h always crosses a calendar-day boundary in any timezone: date appended.
+        #expect(AgentActor.formatRetryClock(now.addingTimeInterval(26 * 3600), now: now).contains(" on "))
     }
 }

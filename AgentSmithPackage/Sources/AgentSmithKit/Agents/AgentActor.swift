@@ -159,12 +159,17 @@ public actor AgentActor {
     /// Tracks consecutive LLM errors for exponential backoff.
     private var consecutiveErrors = 0
     private static let maxConsecutiveErrors = 50
-    /// Cap on the self-computed exponential backoff, used when the server gives us no explicit
-    /// retry hint. Raised from 180s to 600s (10 min) so a time-windowed rate limit (e.g. a
-    /// provider's multi-hour session quota) can actually be waited out: at a 3-min cap, 50
-    /// consecutive errors exhaust in ~2.2h — shorter than a 5h window, so the agent died before
-    /// the window ever reset. At a 10-min cap, 50 errors span ~7h.
-    private static let maxBackoffSeconds: Double = 600
+    /// Caps on the self-computed exponential backoff (used only when the server gives no
+    /// `Retry-After`), split by error class. Transient errors (5xx/408/network) recover fast, so
+    /// a short cap keeps retries responsive. A 429 rate limit is a longer outage by nature —
+    /// waiting it out at a short cap just burns calls against a wall — so it gets a much longer
+    /// cap: fewer futile attempts, while a session-length limit still recovers.
+    private static let maxTransientBackoffSeconds: Double = 120     // 2 min
+    private static let maxRateLimitBackoffSeconds: Double = 1800    // 30 min
+    /// A server-supplied `Retry-After` is always honored (see `backoff`), but one at or above
+    /// this is flagged in the transcript as unusually long so a multi-hour/day wait doesn't look
+    /// like a hang and the user can intervene.
+    private static let ridiculousRetryAfterSeconds: Double = 3600   // 1 hour
 
     /// Wall-clock seconds before the per-turn stall watchdog logs a warning and posts
     /// a system message. The watchdog itself doesn't unstick anything (per-tool timeouts
@@ -1457,17 +1462,6 @@ public actor AgentActor {
                     serverRetryAfter = retryAfter
                 }
 
-                // Honor a server-supplied Retry-After (e.g. on a 429) over our own guess: the
-                // server knows when its window resets. Floor at 1s so a `Retry-After: 0` can't
-                // spin a tight retry loop. No upper cap — a multi-hour session limit means we
-                // wait multiple hours, which is the point. Otherwise, exponential backoff from
-                // 3s, capped at maxBackoffSeconds.
-                let computedBackoff = min(
-                    3.0 * pow(2.0, Double(min(consecutiveErrors - 1, 10))),
-                    Self.maxBackoffSeconds
-                )
-                let backoff = serverRetryAfter.map { max($0, 1.0) } ?? computedBackoff
-
                 // Surface persistent HTTP 4xx (config/payload problems retrying won't fix — bad
                 // API key, unsupported parameter, DeepSeek's reasoning_content replay demand) and
                 // rate limits on the first occurrence: the former never recovers, the latter can
@@ -1479,6 +1473,16 @@ public actor AgentActor {
                 } ?? false
                 let isRateLimited = httpStatus == 429
 
+                // Honor a server-supplied Retry-After (e.g. on a 429) over our own guess: the
+                // server knows when its window resets. Floor at 1s so a `Retry-After: 0` can't
+                // spin a tight retry loop, and honor it with NO upper cap — a multi-hour limit
+                // means we wait multiple hours, which is the point (a suspiciously long one is
+                // flagged below). Otherwise, exponential backoff from 3s, capped by error class:
+                // rate limits get a long cap (sustained outage), everything else a short one.
+                let cap = isRateLimited ? Self.maxRateLimitBackoffSeconds : Self.maxTransientBackoffSeconds
+                let computedBackoff = min(3.0 * pow(2.0, Double(min(consecutiveErrors - 1, 10))), cap)
+                let backoff = serverRetryAfter.map { max($0, 1.0) } ?? computedBackoff
+
                 let shouldSurfaceNow = consecutiveErrors >= 5
                     || (isPersistentClientError && consecutiveErrors == 1)
                     || (isRateLimited && consecutiveErrors == 1)
@@ -1486,10 +1490,18 @@ public actor AgentActor {
                 if shouldSurfaceNow {
                     var content = "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)"
                     // Only claim a retry when one is actually coming (the stop below fires at the
-                    // cap). Name the source so a long server-directed wait is understood.
+                    // cap). State the wait both relatively and as a wall-clock time so a long wait
+                    // reads clearly, and flag a suspiciously long server-directed delay.
                     if consecutiveErrors < Self.maxConsecutiveErrors {
-                        let source = serverRetryAfter != nil ? " (server Retry-After)" : ""
-                        content += " — retrying after \(Self.formatRetryDelay(backoff))\(source)"
+                        let retryAt = Date().addingTimeInterval(backoff)
+                        content += " — retrying in \(Self.formatRetryDelay(backoff)) (at \(Self.formatRetryClock(retryAt)))"
+                        if let serverRetryAfter {
+                            if serverRetryAfter >= Self.ridiculousRetryAfterSeconds {
+                                content += "; server Retry-After asked for an unusually long wait — honoring it, but you may want to check the provider or switch this agent's model"
+                            } else {
+                                content += ", per server Retry-After"
+                            }
+                        }
                     }
                     await toolContext.post(ChannelMessage(
                         sender: .system,
@@ -3757,7 +3769,7 @@ public actor AgentActor {
     }
 
     /// Formats a retry delay for the transcript in the largest sensible whole unit —
-    /// e.g. "6 seconds", "10 minutes", "1.5 hours". Approximate by design (rounds to the unit).
+    /// e.g. "6 seconds", "10 minutes", "1.5 hours", "2 days". Approximate by design.
     static func formatRetryDelay(_ seconds: Double) -> String {
         let s = max(0, seconds)
         if s < 60 {
@@ -3768,9 +3780,30 @@ public actor AgentActor {
             let n = Int((s / 60).rounded())
             return "\(n) minute\(n == 1 ? "" : "s")"
         }
-        let hours = (s / 3600 * 10).rounded() / 10
-        let text = hours == hours.rounded() ? String(Int(hours)) : String(format: "%.1f", hours)
-        return "\(text) hour\(hours == 1 ? "" : "s")"
+        if s < 86_400 {
+            let hours = (s / 3600 * 10).rounded() / 10
+            let text = hours == hours.rounded() ? String(Int(hours)) : String(format: "%.1f", hours)
+            return "\(text) hour\(hours == 1 ? "" : "s")"
+        }
+        let days = (s / 86_400 * 10).rounded() / 10
+        let text = days == days.rounded() ? String(Int(days)) : String(format: "%.1f", days)
+        return "\(text) day\(days == 1 ? "" : "s")"
+    }
+
+    /// Wall-clock time a retry will fire, for the transcript: just the time when it's later
+    /// today ("3:14 PM"), or the weekday + date when it lands on another day
+    /// ("3:14 PM on Mon Jul 14").
+    static func formatRetryClock(_ date: Date, now: Date = Date()) -> String {
+        let time = DateFormatter()
+        time.locale = Locale(identifier: "en_US_POSIX")
+        time.dateFormat = "h:mm a"
+        if Calendar.current.isDate(date, inSameDayAs: now) {
+            return time.string(from: date)
+        }
+        let day = DateFormatter()
+        day.locale = Locale(identifier: "en_US_POSIX")
+        day.dateFormat = "EEE MMM d"
+        return "\(time.string(from: date)) on \(day.string(from: date))"
     }
 
 }
