@@ -195,6 +195,15 @@ struct ChannelLogView: View, Equatable {
 
     @State private var isAtBottom = true
     @State private var autoScrollEnabled = true
+    /// Non-nil while the user has scrolled up: the window's top is pinned here so streaming
+    /// messages append *below* the visible area instead of sliding rows off the top (which
+    /// shifts the ScrollView content up and drags the viewport toward the bottom — the "can't
+    /// stop scrolling" regression). Cleared when the user returns to the bottom.
+    @State private var frozenWindowStart: Int?
+    /// True while the user is actively driving the scroll (drag/momentum), as opposed to the
+    /// view scrolling because content grew. Only a user-driven move off the bottom breaks
+    /// auto-follow — content growth must not.
+    @State private var userInteracting = false
     /// How many of the most-recent messages are eligible to render. Only a bounded tail of
     /// `messages` is ever placed in the view tree — a non-lazy `VStack` materializes a
     /// CoreAnimation layer for every row at once, so rendering an unbounded transcript
@@ -212,6 +221,9 @@ struct ChannelLogView: View, Equatable {
     static let initialWindowSize = 400
     /// How many additional older rows each "Load earlier messages" click reveals.
     static let windowGrowStep = 800
+    /// Hard cap on rows rendered while the window is frozen (user scrolled up). Bounds render
+    /// cost even if someone browses through a long, fast stream; past it the top slides again.
+    static let maxFrozenWindowRows = 3000
 
     /// Prevents body re-evaluation when only unrelated parent properties change (e.g. inputText).
     /// Closures and Bindings are excluded — they can't be meaningfully compared, and
@@ -237,11 +249,6 @@ struct ChannelLogView: View, Equatable {
         && lhs.persistedHistoryCount == rhs.persistedHistoryCount
         && lhs.hasRestoredHistory == rhs.hasRestoredHistory
         && lhs.displayPrefs == rhs.displayPrefs
-    }
-
-    private struct ScrollMetrics: Equatable {
-        var isNearBottom: Bool
-        var contentHeight: CGFloat
     }
 
     var body: some View {
@@ -301,16 +308,12 @@ struct ChannelLogView: View, Equatable {
                 }
                 .background(AppColors.channelBackground)
                 .environment(\.timestampPreferences, displayPrefs)
-                .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
+                .onScrollGeometryChange(for: Bool.self) { geometry in
                     let distanceFromBottom = geometry.contentSize.height
                         - geometry.contentOffset.y
                         - geometry.containerSize.height
-                    let threshold = geometry.containerSize.height * 0.2
-                    return ScrollMetrics(
-                        isNearBottom: distanceFromBottom <= threshold,
-                        contentHeight: geometry.contentSize.height
-                    )
-                } action: { old, new in
+                    return distanceFromBottom <= geometry.containerSize.height * 0.2
+                } action: { _, nearBottom in
                     // Project rule: defer @State mutation out of scroll-geometry actions
                     // via DispatchQueue.main.async. The action callback fires rapidly during
                     // ScrollView animation/inertia; mutating @State synchronously triggers
@@ -318,17 +321,24 @@ struct ChannelLogView: View, Equatable {
                     // frame" warning when the resulting body re-evaluation re-attaches the
                     // modifier mid-frame.
                     DispatchQueue.main.async {
-                        isAtBottom = new.isNearBottom
-                        // Content grew but user didn't scroll -> keep auto-scroll on
-                        // Content same but user scrolled away -> disable auto-scroll
-                        if old.isNearBottom && !new.isNearBottom
-                            && new.contentHeight == old.contentHeight {
-                            autoScrollEnabled = false
-                        }
-                        if new.isNearBottom {
+                        isAtBottom = nearBottom
+                        if nearBottom {
+                            // Back at the bottom → resume tail-following and unfreeze the window.
                             autoScrollEnabled = true
+                            frozenWindowStart = nil
+                        } else if userInteracting {
+                            // The USER scrolled away (not content growth, which leaves
+                            // `userInteracting` false) → stop following and freeze the window's
+                            // top so streaming can't drag the viewport back down.
+                            autoScrollEnabled = false
+                            if frozenWindowStart == nil { frozenWindowStart = windowStartIndex() }
                         }
                     }
+                }
+                .onScrollPhaseChange { _, newPhase in
+                    userInteracting = newPhase == .interacting
+                        || newPhase == .decelerating
+                        || newPhase == .tracking
                 }
                 .onChange(of: messages.count) {
                     guard autoScrollEnabled, let lastID = messages.last?.id else { return }
@@ -373,14 +383,24 @@ struct ChannelLogView: View, Equatable {
     /// settles in a few hops; the guard caps it against any unexpected metadata pattern.
     private func windowStartIndex() -> Int {
         let count = messages.count
-        guard count > maxVisibleCount else { return 0 }
-        var start = count - maxVisibleCount
-        var guardHops = 0
-        while start > 0 && guardHops < 256 && isSuppressibleFollowUp(messages[start]) {
-            start -= 1
-            guardHops += 1
+        var tailStart = 0
+        if count > maxVisibleCount {
+            tailStart = count - maxVisibleCount
+            var guardHops = 0
+            while tailStart > 0 && guardHops < 256 && isSuppressibleFollowUp(messages[tailStart]) {
+                tailStart -= 1
+                guardHops += 1
+            }
         }
-        return start
+        // While the user has scrolled up, hold the top where it was (`frozen`) instead of
+        // sliding it forward as messages stream in. `min(frozen, tailStart)` still lets "Load
+        // earlier" extend backward (that lowers tailStart below frozen); the `max(_, count -
+        // cap)` bounds render if the frozen window grows huge or `frozen` went stale after a
+        // clear/restore.
+        if let frozen = frozenWindowStart {
+            return max(min(frozen, tailStart), count - Self.maxFrozenWindowRows)
+        }
+        return tailStart
     }
 
     /// Renders the right banner / row for a single channel message. Replaces the
