@@ -26,13 +26,17 @@ struct LLMTurnDisclosureRow: View, Equatable {
 
     @State private var showingFullContext = false
 
-    /// A recorded turn is immutable, so `turn.id` implies its rendered content; `turnNumber` and
-    /// `isExpanded` are the only other inputs. Gating on those lets `.equatable()` skip
-    /// re-evaluating every existing row when a new turn is appended (the streaming hot path),
-    /// while still re-rendering the single row whose expansion actually changed. Comparing the
-    /// id (not the whole `Equatable` turn) keeps the check O(1) instead of deep-diffing arrays.
+    /// Compares every input that affects rendering — the full `turn` (it's `Equatable`), the
+    /// number, and the expansion state — so `.equatable()` skips re-evaluating unchanged rows
+    /// when a new turn is appended (the streaming hot path) without missing a real change.
+    ///
+    /// We must NOT shortcut to `turn.id`: `LLMTurnRecord.contextSnapshot` is stripped on older
+    /// turns (`stripContextSnapshot`), so the same id can render differently (the "Full Context"
+    /// row appears/vanishes). The only excluded members are `onExpandedChange` (a closure — not
+    /// `Equatable`, which is the sole reason this can't be a synthesized conformance; its capture
+    /// is stable per row) and `showingFullContext` (`@State`, view-internal, never an input).
     nonisolated static func == (lhs: LLMTurnDisclosureRow, rhs: LLMTurnDisclosureRow) -> Bool {
-        lhs.turn.id == rhs.turn.id
+        lhs.turn == rhs.turn
         && lhs.turnNumber == rhs.turnNumber
         && lhs.isExpanded == rhs.isExpanded
     }
