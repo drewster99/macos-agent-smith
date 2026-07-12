@@ -49,27 +49,40 @@ public actor ChannelLogAppendWriter {
         }
     }
 
+    private static let maxAppendAttempts = 5
+
     private func drain() async {
         defer { inflight = nil }
         while !buffer.isEmpty {
             let batch = buffer
             buffer = []
             let seq = enqueueSeq
-            do {
-                try await append(batch)
-            } catch {
-                // A failed append must not park flush() forever. Re-queue the batch at the
-                // front so nothing is silently lost, then advance the watermark so waiters
-                // for already-satisfied targets aren't stranded — the re-queued batch will be
-                // retried on the next drain iteration (kicked by a later enqueue or flush).
-                logger.error("Channel log append failed: \(error.localizedDescription, privacy: .public)")
-                buffer.insert(contentsOf: batch, at: 0)
-                writtenSeq = seq
-                resumeFlushWaiters()
-                return
+            var attempt = 0
+            while true {
+                do {
+                    try await append(batch)
+                    writtenSeq = seq
+                    resumeFlushWaiters()
+                    break  // success → move on to any batch that accrued during the write
+                } catch {
+                    attempt += 1
+                    if attempt >= Self.maxAppendAttempts {
+                        // A likely-permanent failure (disk full / permissions). Keep the batch
+                        // buffered so a later enqueue retries it, but advance the watermark so
+                        // flush() can't hang forever, then STOP draining (returning, not
+                        // re-looping, so we don't busy-spin on a persistently failing disk). This
+                        // is the one path that reports "flushed" without durability — logged
+                        // loudly, and only after exhausting retries.
+                        logger.error("Channel log append failed after \(attempt, privacy: .public) attempts; \(batch.count, privacy: .public) message(s) retained for retry: \(error.localizedDescription, privacy: .public)")
+                        buffer.insert(contentsOf: batch, at: 0)
+                        writtenSeq = seq
+                        resumeFlushWaiters()
+                        return
+                    }
+                    logger.error("Channel log append attempt \(attempt, privacy: .public) failed, retrying: \(error.localizedDescription, privacy: .public)")
+                    try? await Task.sleep(for: .milliseconds(100 * attempt))
+                }
             }
-            writtenSeq = seq
-            resumeFlushWaiters()
         }
     }
 

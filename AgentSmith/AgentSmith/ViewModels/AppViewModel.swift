@@ -1504,8 +1504,9 @@ final class AppViewModel {
         agentToolNames.removeAll()
         inspectorStore.clearAll()
         clearCostCaches()
-        channelStreamTask?.cancel()
-        channelStreamTask = nil
+        // The channel stream is cancelled + awaited inside flushPersistence() below
+        // (quiesceChannelStream), so any messages still buffered in the channel are drained
+        // and persisted before we tear down rather than dropped here.
         self.runtime = nil
 
         if let store = taskStore {
@@ -1572,9 +1573,24 @@ final class AppViewModel {
         mcpHost = nil
     }
 
+    /// Stops channel-log production and waits for the stream loop to fully exit, so that no
+    /// message can be appended to `pendingChannelAppends` after this returns. Required before a
+    /// final drain: `AppViewModel` is reentrant at every `await`, so a still-live stream could
+    /// otherwise land a message in the pending buffer during `flushPersistence`'s later awaits
+    /// and never get it drained before the app terminates. `MessageChannel.stream()` is an
+    /// `AsyncStream`, so cancellation ends the `for await` and the task completes.
+    private func quiesceChannelStream() async {
+        guard let task = channelStreamTask else { return }
+        task.cancel()
+        await task.value
+        channelStreamTask = nil
+    }
+
     private func flushPersistence() async {
-        // Cancel the debounce so it can't fire a redundant append after this authoritative
-        // flush; draining below hands any un-persisted messages to the writer directly.
+        // Quiesce message production first, then cancel the debounce so it can't fire a
+        // redundant append after this authoritative flush; draining below hands any
+        // un-persisted messages to the writer directly.
+        await quiesceChannelStream()
         channelLogPersistTask?.cancel()
         channelLogPersistTask = nil
         await drainPendingChannelAppends()

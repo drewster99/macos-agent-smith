@@ -127,6 +127,67 @@ struct ChannelLogJSONLTests {
         #expect(all2.last?.content == "live-0")
     }
 
+    @Test("a partial final record is skipped (not fatal), and a later append isolates it")
+    func partialRecordTolerance() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dir = root.appendingPathComponent("AgentSmith", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let jsonl = dir.appendingPathComponent("channel_log.jsonl")
+
+        let pm = PersistenceManager(testingRoot: root)
+        try await pm.appendChannelMessages([message("a"), message("b")])
+
+        // Simulate a crash mid-append: a truncated final record with no trailing newline.
+        var poisoned = try Data(contentsOf: jsonl)
+        poisoned.append(Data(#"{"id":"broken","content": trunc"#.utf8))
+        try poisoned.write(to: jsonl)
+
+        // Tolerant load: the two clean records survive; the partial is skipped, not fatal.
+        let afterCrash = try await pm.loadChannelLogTail(limit: 100)
+        #expect(afterCrash.messages.map(\.content) == ["a", "b"])
+        #expect(try await pm.loadFullChannelLog().map(\.content) == ["a", "b"])
+
+        // A later append must not fuse with the partial record and corrupt the new one.
+        try await pm.appendChannelMessages([message("c")])
+        #expect(try await pm.loadFullChannelLog().map(\.content) == ["a", "b", "c"])
+    }
+
+    @Test("append writer preserves order across batches and flush waits for the write")
+    func appendWriterOrderAndFlush() async throws {
+        let recorder = Recorder()
+        let writer = ChannelLogAppendWriter { messages in recorder.add(messages.map(\.content)) }
+        await writer.enqueue([message("1"), message("2")])
+        await writer.enqueue([message("3")])
+        await writer.flush()
+        #expect(recorder.all() == ["1", "2", "3"])
+    }
+
+    @Test("append writer retries a transient failure and the message still lands")
+    func appendWriterRetriesTransient() async throws {
+        let recorder = Recorder(failuresLeft: 2)
+        let writer = ChannelLogAppendWriter { messages in try recorder.addThrowing(messages.map(\.content)) }
+        await writer.enqueue([message("x")])
+        await writer.flush()
+        #expect(recorder.all() == ["x"], "the message should land after transient failures are retried")
+    }
+
+    /// Thread-safe sink for the append-writer tests; can be told to fail its first N appends.
+    private final class Recorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var got: [String] = []
+        private var failuresLeft: Int
+        init(failuresLeft: Int = 0) { self.failuresLeft = failuresLeft }
+        func add(_ items: [String]) { lock.withLock { got += items } }
+        func addThrowing(_ items: [String]) throws {
+            try lock.withLock {
+                if failuresLeft > 0 { failuresLeft -= 1; throw NSError(domain: "test", code: 1) }
+                got += items
+            }
+        }
+        func all() -> [String] { lock.withLock { got } }
+    }
+
     /// Opt-in validation against a copy of a REAL channel log. Set
     /// `AGENTSMITH_REAL_CHANNEL_LOG` to a path (ideally a copy of a live
     /// `channel_log.json`); the test copies it under a temp root and exercises the

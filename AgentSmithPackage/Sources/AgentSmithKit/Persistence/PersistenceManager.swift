@@ -227,18 +227,32 @@ public actor PersistenceManager {
         return blob
     }
 
-    /// Decodes a JSONL blob, tolerating a missing trailing newline and blank lines.
-    private func decodeJSONL(_ data: Data, limit: Int? = nil) throws -> (messages: [ChannelMessage], totalCount: Int) {
+    /// Decodes a JSONL blob, tolerating blank lines and — critically — an undecodable line.
+    /// A crash or `kill -9` mid-append can leave a partial final record; rather than let one
+    /// truncated line fail the whole load (poisoning the transcript), such lines are skipped and
+    /// counted. When the entire file is read the returned total is the decoded count; for a tail
+    /// read older lines aren't inspected, so the raw line count is used (a stray partial record
+    /// then only slightly over-counts a large history, affecting just the restore-button label).
+    private func decodeJSONL(_ data: Data, limit: Int? = nil) -> (messages: [ChannelMessage], totalCount: Int) {
         let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
-        let total = lines.count
-        let slice = limit.map { $0 >= total ? lines[...] : lines.suffix($0) } ?? lines[...]
+        let lineCount = lines.count
+        let decodingAll = (limit == nil) || (limit! >= lineCount)
+        let slice = decodingAll ? lines[...] : lines.suffix(limit!)
         let decoder = JSONDecoder()
         var messages: [ChannelMessage] = []
         messages.reserveCapacity(slice.count)
+        var skipped = 0
         for line in slice {
-            messages.append(try decoder.decode(ChannelMessage.self, from: Data(line)))
+            if let message = try? decoder.decode(ChannelMessage.self, from: Data(line)) {
+                messages.append(message)
+            } else {
+                skipped += 1
+            }
         }
-        return (messages, total)
+        if skipped > 0 {
+            logger.error("channel_log.jsonl: skipped \(skipped, privacy: .public) undecodable line(s) — likely a partial record from an unclean shutdown")
+        }
+        return (messages, decodingAll ? messages.count : lineCount)
     }
 
     /// Seeds `channel_log.jsonl` from a legacy `channel_log.json` array on first use, stripping
@@ -271,9 +285,22 @@ public actor PersistenceManager {
         try migrateLegacyChannelLogIfNeeded()
         let blob = try encodeJSONL(messages)
         if FileManager.default.fileExists(atPath: channelLogJSONLURL.path) {
-            let handle = try FileHandle(forWritingTo: channelLogJSONLURL)
+            // `forUpdating` (read+write) so the boundary check below can read the last byte;
+            // a write-only handle would fault on read.
+            let handle = try FileHandle(forUpdating: channelLogJSONLURL)
             defer { try? handle.close() }
-            try handle.seekToEnd()
+            let end = try handle.seekToEnd()
+            // Guard the line boundary: if a prior unclean shutdown left a partial final record
+            // (no trailing newline), inject one so the partial stays on its own droppable line
+            // and can't fuse with — and corrupt — the first record of this batch.
+            if end > 0 {
+                try handle.seek(toOffset: end - 1)
+                let lastByte = try handle.read(upToCount: 1)
+                try handle.seekToEnd()
+                if lastByte != Data([0x0A]) {
+                    try handle.write(contentsOf: Data([0x0A]))
+                }
+            }
             try handle.write(contentsOf: blob)
         } else {
             try blob.write(to: channelLogJSONLURL, options: .atomic)
@@ -287,7 +314,7 @@ public actor PersistenceManager {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return ([], 0) }
         let data = try Data(contentsOf: channelLogJSONLURL)
-        return try decodeJSONL(data, limit: limit)
+        return decodeJSONL(data, limit: limit)
     }
 
     /// Loads the entire channel log. Used only by the user-initiated "Restore full history"
@@ -296,7 +323,7 @@ public actor PersistenceManager {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return [] }
         let data = try Data(contentsOf: channelLogJSONLURL)
-        return try decodeJSONL(data).messages
+        return decodeJSONL(data).messages
     }
 
     // MARK: - Tasks (per-session)
