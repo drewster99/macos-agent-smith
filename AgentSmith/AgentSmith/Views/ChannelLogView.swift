@@ -144,17 +144,42 @@ private enum ChannelBannerKind: String {
     case mcpFailed = "mcp_status"
 }
 
+/// Grouping lookups the channel log needs to fold tool-call follow-ups (security reviews,
+/// tool outputs) into their parent `tool_request` row and to de-duplicate scheduling banners.
+///
+/// Built fresh from the channel log's *rendered window* on each body pass. Previously these
+/// were four `@Observable` properties on `AppViewModel`, rebuilt over the entire `messages`
+/// array on every append — O(n) per message, O(n²) per session, plus the Observation macro's
+/// deep-equality comparison of the old vs new dictionaries on every assignment. Deriving them
+/// over the bounded window instead makes the cost O(window) and keeps nothing to trim: the
+/// lookups never outlive the rows they describe. Correct because `windowStartIndex()` never
+/// begins the window inside a follow-up group, so every visible follow-up's parent is present.
+private struct ChannelGroupingIndex {
+    var toolRequestIDs: Set<String> = []
+    var securityReviewByRequestID: [String: ChannelMessage] = [:]
+    var toolOutputByRequestID: [String: ChannelMessage] = [:]
+    var taskIDsWithSchedulingBanner: Set<String> = []
+
+    init(_ messages: some Sequence<ChannelMessage>) {
+        for message in messages {
+            let kind = message.stringMetadata("messageKind")
+            let requestID = message.stringMetadata("requestID")
+            if kind == "tool_request", let requestID { toolRequestIDs.insert(requestID) }
+            if message.metadata?["securityDisposition"] != nil, let requestID {
+                securityReviewByRequestID[requestID] = message
+            }
+            if kind == "tool_output", let requestID { toolOutputByRequestID[requestID] = message }
+            if kind == "task_created" || kind == "task_action_scheduled",
+               let taskID = message.stringMetadata("taskID") {
+                taskIDsWithSchedulingBanner.insert(taskID)
+            }
+        }
+    }
+}
+
 /// Color-coded scrolling message stream with attachment display.
 struct ChannelLogView: View, Equatable {
     var messages: [ChannelMessage]
-    /// Derived lookups maintained by `AppViewModel` (rebuilt on every channel-log mutation)
-    /// so this view doesn't re-scan `messages` inside `body`. They are a pure function of
-    /// `messages`, so `==` below intentionally does not compare them — count + last.id of
-    /// `messages` already implies they're current.
-    var toolRequestIDs: Set<String>
-    var securityReviewByRequestID: [String: ChannelMessage]
-    var toolOutputByRequestID: [String: ChannelMessage]
-    var taskIDsWithSchedulingBanner: Set<String>
     var persistedHistoryCount: Int
     var hasRestoredHistory: Bool
     var onRestoreHistory: () -> Void
@@ -170,8 +195,23 @@ struct ChannelLogView: View, Equatable {
 
     @State private var isAtBottom = true
     @State private var autoScrollEnabled = true
+    /// How many of the most-recent messages are eligible to render. Only a bounded tail of
+    /// `messages` is ever placed in the view tree — a non-lazy `VStack` materializes a
+    /// CoreAnimation layer for every row at once, so rendering an unbounded transcript
+    /// (sessions here reach tens of thousands of messages) allocates gigabytes of GPU
+    /// surfaces and wedges the render server. The window slides with the tail as new
+    /// messages arrive (bounded cost) and only grows past the default when the user pages
+    /// back via "Load earlier messages".
+    @State private var maxVisibleCount = ChannelLogView.initialWindowSize
     /// The attachment currently shown in the full-screen image viewer, managed by the parent.
     @Binding var selectedImageAttachment: Attachment?
+
+    /// Rows rendered on first display / while tracking the tail. Large enough to cover any
+    /// normal scrollback without a "Load earlier" click, small enough that its layers are a
+    /// rounding error against the render budget.
+    static let initialWindowSize = 400
+    /// How many additional older rows each "Load earlier messages" click reveals.
+    static let windowGrowStep = 800
 
     /// Prevents body re-evaluation when only unrelated parent properties change (e.g. inputText).
     /// Closures and Bindings are excluded — they can't be meaningfully compared, and
@@ -205,7 +245,16 @@ struct ChannelLogView: View, Equatable {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
+        let windowStart = windowStartIndex()
+        let visibleMessages = windowStart == 0 ? messages : Array(messages[windowStart...])
+        let hiddenEarlierCount = windowStart
+        // Grouping lookups are derived fresh from the *rendered window* (see
+        // ChannelGroupingIndex) rather than maintained as unbounded state on the view model.
+        // The window is bounded and `windowStartIndex()` never splits a tool-call group, so
+        // this is O(window) and correct for the suppression it drives.
+        let index = ChannelGroupingIndex(visibleMessages)
+
+        return ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
@@ -216,13 +265,33 @@ struct ChannelLogView: View, Equatable {
                             )
                         }
 
-                        ForEach(messages) { message in
-                            if !shouldSuppress(message, toolRequestIDs: toolRequestIDs) {
+                        if hiddenEarlierCount > 0 {
+                            ChannelLogLoadEarlierButton(
+                                hiddenEarlierCount: hiddenEarlierCount,
+                                onLoadEarlier: {
+                                    // Pin the reader's position: growing the window inserts
+                                    // older rows above the current top, which would otherwise
+                                    // shove the content the user is reading downward. Re-anchor
+                                    // to the previously-first visible row after the new rows
+                                    // exist (next runloop tick).
+                                    let anchorID = visibleMessages.first?.id
+                                    maxVisibleCount = min(messages.count, maxVisibleCount + Self.windowGrowStep)
+                                    if let anchorID {
+                                        DispatchQueue.main.async {
+                                            proxy.scrollTo(anchorID, anchor: .top)
+                                        }
+                                    }
+                                }
+                            )
+                        }
+
+                        ForEach(visibleMessages) { message in
+                            if !shouldSuppress(message, toolRequestIDs: index.toolRequestIDs) {
                                 bannerView(
                                     for: message,
-                                    reviewLookup: securityReviewByRequestID,
-                                    outputLookup: toolOutputByRequestID,
-                                    scheduledTaskBannerIDs: taskIDsWithSchedulingBanner
+                                    reviewLookup: index.securityReviewByRequestID,
+                                    outputLookup: index.toolOutputByRequestID,
+                                    scheduledTaskBannerIDs: index.taskIDsWithSchedulingBanner
                                 )
                                 .id(message.id)
                             }
@@ -280,14 +349,38 @@ struct ChannelLogView: View, Equatable {
         }
     }
 
+    /// True for security-review and tool-output rows, which are grouped into (and rendered
+    /// inline by) their parent `tool_request` row rather than standing on their own.
+    private func isSuppressibleFollowUp(_ message: ChannelMessage) -> Bool {
+        guard message.stringMetadata("requestID") != nil else { return false }
+        return message.metadata?["securityDisposition"] != nil
+            || message.stringMetadata("messageKind") == "tool_output"
+    }
+
     /// Suppresses security reviews and tool outputs that are grouped into a parent tool_request row.
     private func shouldSuppress(_ message: ChannelMessage, toolRequestIDs: Set<String>) -> Bool {
+        guard isSuppressibleFollowUp(message) else { return false }
         guard let reqID = message.stringMetadata("requestID") else { return false }
-        let isFollowUp = message.metadata?["securityDisposition"] != nil
-            || message.stringMetadata("messageKind") == "tool_output"
-        guard isFollowUp else { return false }
         // Only suppress if the parent tool_request exists in the messages array
         return toolRequestIDs.contains(reqID)
+    }
+
+    /// The index into `messages` where the rendered window begins. Renders at most
+    /// `maxVisibleCount` of the newest messages, but never *starts* on a suppressible
+    /// follow-up: those are grouped into a parent `tool_request` row that sits immediately
+    /// above them, so beginning the window mid-group would hide the parent and silently drop
+    /// the follow-up's content. Follow-up runs are short and contiguous, so the backward walk
+    /// settles in a few hops; the guard caps it against any unexpected metadata pattern.
+    private func windowStartIndex() -> Int {
+        let count = messages.count
+        guard count > maxVisibleCount else { return 0 }
+        var start = count - maxVisibleCount
+        var guardHops = 0
+        while start > 0 && guardHops < 256 && isSuppressibleFollowUp(messages[start]) {
+            start -= 1
+            guardHops += 1
+        }
+        return start
     }
 
     /// Renders the right banner / row for a single channel message. Replaces the
