@@ -234,6 +234,16 @@ struct PersistentClientErrorSurfaceTests {
         #expect(AgentActor.formatRetryDelay(129600) == "1.5 days")
     }
 
+    @Test("retryAfterFromErrorBody parses Gemini RetryInfo and 'retry in Ns'")
+    func retryFromBody() {
+        // Real Gemini 429 shape: RetryInfo.retryDelay plus a "Please retry in Ns" message.
+        let gemini = #"{"error":{"code":429,"message":"You exceeded your current quota. Please retry in 34.376085309s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"34s"}]}}"#
+        #expect(AgentActor.retryAfterFromErrorBody(gemini) == 34)     // retryDelay pattern wins
+        #expect(AgentActor.retryAfterFromErrorBody("Please retry in 12s") == 12)
+        #expect(AgentActor.retryAfterFromErrorBody("please retry in 5.5 s") == 5.5)
+        #expect(AgentActor.retryAfterFromErrorBody("some unrelated error text") == nil)
+    }
+
     @Test("formatRetryClock shows a bare time today and adds the date on another day")
     func retryClockFormatting() {
         let now = Date(timeIntervalSince1970: 800_000_000)

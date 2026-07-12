@@ -1463,9 +1463,12 @@ public actor AgentActor {
                 var httpStatus: Int? = nil
                 var serverRetryAfter: TimeInterval? = nil
                 if let providerError = error as? LLMProviderError,
-                   case .httpError(let statusCode, _, _, let retryAfter) = providerError {
+                   case .httpError(let statusCode, let body, _, let retryAfter) = providerError {
                     httpStatus = statusCode
-                    serverRetryAfter = retryAfter
+                    // Prefer the standard Retry-After header; if the provider didn't send one,
+                    // fall back to a delay stated in the body — Gemini/Google put it there as a
+                    // google.rpc.RetryInfo (`"retryDelay": "34s"`) rather than in the header.
+                    serverRetryAfter = retryAfter ?? Self.retryAfterFromErrorBody(body)
                 }
 
                 // Surface persistent HTTP 4xx (config/payload problems retrying won't fix — bad
@@ -3772,6 +3775,27 @@ public actor AgentActor {
         agentLogger.warning(
             "Unhandled HTTP 400 (not context overflow): url=\(url?.absoluteString ?? "unknown", privacy: .public) body=\(body.prefix(500), privacy: .public)"
         )
+    }
+
+    /// Extracts a server-requested retry delay (seconds) from an error *body* for providers that
+    /// don't use the `Retry-After` header. Handles Google/Gemini's `google.rpc.RetryInfo`
+    /// (`"retryDelay": "34s"`) and a "Please retry in 34.376s" phrasing in the message text.
+    static func retryAfterFromErrorBody(_ body: String) -> TimeInterval? {
+        let patterns = [
+            #""retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s""#,
+            #"retry in (\d+(?:\.\d+)?)\s*s"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(body.startIndex..<body.endIndex, in: body)
+            if let match = regex.firstMatch(in: body, options: [], range: range),
+               match.numberOfRanges >= 2,
+               let captured = Range(match.range(at: 1), in: body),
+               let value = TimeInterval(body[captured]), value >= 0 {
+                return value
+            }
+        }
+        return nil
     }
 
     /// Formats a retry delay for the transcript in the largest sensible whole unit —
