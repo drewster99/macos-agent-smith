@@ -27,10 +27,12 @@ struct PersistentClientErrorSurfaceTests {
         private var _hasFired = false
         let body: String
         let statusCode: Int
+        let retryAfter: TimeInterval?
 
-        init(statusCode: Int = 400, body: String = #"{"error":{"message":"Bad request: malformed parameter"}}"#) {
+        init(statusCode: Int = 400, body: String = #"{"error":{"message":"Bad request: malformed parameter"}}"#, retryAfter: TimeInterval? = nil) {
             self.statusCode = statusCode
             self.body = body
+            self.retryAfter = retryAfter
         }
 
         func send(
@@ -46,7 +48,7 @@ struct PersistentClientErrorSurfaceTests {
                 return false
             }
             if isFirst {
-                throw LLMProviderError.httpError(statusCode: statusCode, body: body, url: nil)
+                throw LLMProviderError.httpError(statusCode: statusCode, body: body, url: nil, retryAfter: retryAfter)
             }
             // Hang so the test deterministically observes state right after the
             // first error, before backoff sleeps or subsequent attempts.
@@ -136,8 +138,8 @@ struct PersistentClientErrorSurfaceTests {
         }
     }
 
-    @Test("HTTP 429 still suppressed until 5 consecutive failures")
-    func http429StaysSuppressedEarly() async throws {
+    @Test("HTTP 429 surfaces on the first failure with a retry ETA")
+    func http429SurfacesWithRetryETA() async throws {
         let channel = MessageChannel()
         let taskStore = TaskStore()
         let provider = SingleShot400Provider(
@@ -148,18 +150,57 @@ struct PersistentClientErrorSurfaceTests {
 
         await agent.start(initialInstruction: "do something")
 
-        // Give the loop ample time to land on the first error and then enter
-        // backoff. The first 429 must NOT surface — rate limits are transient.
-        try? await Task.sleep(for: .milliseconds(400))
+        await Self.waitUntil(deadline: 1.0) {
+            let msgs = await channel.allMessages()
+            return msgs.contains { $0.content.contains("Agent Brown error (1/") }
+        }
         await agent.stop()
 
-        let allMessages = await channel.allMessages()
-        let earlyErrorBanner = allMessages.first {
-            $0.content.contains("Agent Brown error (1/")
+        let banner = await channel.allMessages().first { $0.content.contains("Agent Brown error (1/") }
+        #expect(banner != nil, "a rate limit should surface on the first failure so the wait is visible")
+        if let banner {
+            #expect(banner.content.contains("Rate limited"))
+            // No server Retry-After here → our own backoff, shown in human units.
+            #expect(banner.content.contains("retrying after"))
+            #expect(!banner.content.contains("server Retry-After"))
         }
-        #expect(
-            earlyErrorBanner == nil,
-            "HTTP 429 (rate-limit) should stay suppressed on early attempts; the existing 5-error threshold still gates it"
+    }
+
+    @Test("A server Retry-After is honored and named in the transcript")
+    func http429HonorsServerRetryAfter() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let provider = SingleShot400Provider(
+            statusCode: 429,
+            body: #"{"error":{"message":"slow down"}}"#,
+            retryAfter: 120
         )
+        let agent = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
+
+        await agent.start(initialInstruction: "do something")
+
+        await Self.waitUntil(deadline: 1.0) {
+            let msgs = await channel.allMessages()
+            return msgs.contains { $0.content.contains("Agent Brown error (1/") }
+        }
+        await agent.stop()
+
+        let banner = await channel.allMessages().first { $0.content.contains("Agent Brown error (1/") }
+        #expect(banner != nil)
+        if let banner {
+            #expect(banner.content.contains("retrying after 2 minutes"))
+            #expect(banner.content.contains("server Retry-After"))
+        }
+    }
+
+    @Test("formatRetryDelay renders whole units")
+    func retryDelayFormatting() {
+        #expect(AgentActor.formatRetryDelay(3) == "3 seconds")
+        #expect(AgentActor.formatRetryDelay(1) == "1 second")
+        #expect(AgentActor.formatRetryDelay(180) == "3 minutes")
+        #expect(AgentActor.formatRetryDelay(600) == "10 minutes")
+        #expect(AgentActor.formatRetryDelay(3600) == "1 hour")
+        #expect(AgentActor.formatRetryDelay(18000) == "5 hours")
+        #expect(AgentActor.formatRetryDelay(5400) == "1.5 hours")
     }
 }
