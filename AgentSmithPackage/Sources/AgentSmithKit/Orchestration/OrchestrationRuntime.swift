@@ -823,6 +823,14 @@ public actor OrchestrationRuntime {
     func composeBrownTaskBriefing(for task: AgentTask) async -> String {
         var parts: [String] = []
         parts.append("Task: \"\(task.title)\" (ID: \(task.id.uuidString))\n\n\(task.description)")
+        // A prior acknowledgment means this is a resume (respawn after interruption, or a
+        // rejection sent back for revision). The synthetic ack hasn't run yet at briefing time,
+        // so the counter still reflects earlier attempts. State it explicitly here — Brown no
+        // longer sees a "Task continuing:" tool result in its history to infer it from, and the
+        // Prior Progress / Last Working State sections below can both be empty if it died early.
+        if task.acknowledgmentCount > 0 {
+            parts.append("You are RESUMING this task — a prior attempt was interrupted or sent back for revision. Continue from where you left off using the context below; do not restart from scratch.")
+        }
         if !task.descriptionAttachments.isEmpty {
             var lines: [String] = []
             for attachment in task.descriptionAttachments {

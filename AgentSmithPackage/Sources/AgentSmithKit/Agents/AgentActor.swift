@@ -1186,8 +1186,16 @@ public actor AgentActor {
                 debouncingForMessages = false
             }
 
-            // Synthetic first-turn tool call: execute the tool directly without
-            // calling the LLM. Used for task_acknowledged on fresh task assignments.
+            // Synthetic first-turn tool call: run the mandatory task_acknowledged for its side
+            // effects (task → running, ack counter, Smith notification) WITHOUT paying for an
+            // LLM round-trip. Deliberately NOT recorded in the conversation: it's a call the app
+            // fabricated, not one the model made. Appending it as an assistant `functionCall`
+            // both wastes context tokens and produces a history that providers like Gemini 2.5
+            // reject — its thinking mode requires a `thought_signature` on every replayed
+            // function call, and a call the model never made has none. Brown starts
+            // already-acknowledged (`taskAcknowledged`); its continuation context comes from the
+            // briefing (Prior Progress / Last Working State), and pruning already rebuilds Brown
+            // this way — [system, instruction] with no ack turn — so this is an exercised state.
             if let toolName = syntheticFirstToolCall {
                 syntheticFirstToolCall = nil
                 if let tool = tools.first(where: { $0.name == toolName }) {
@@ -1202,9 +1210,7 @@ public actor AgentActor {
                         name: toolName,
                         arguments: "{}"
                     )
-                    conversationHistory.append(.assistant(from: LLMResponse(toolCalls: [syntheticCall])))
-                    let result = await directExecute(syntheticCall, tool: tool)
-                    conversationHistory.append(.toolResult(Self.capToolResult(result), callID: syntheticCall.id))
+                    _ = await directExecute(syntheticCall, tool: tool)
                     if configuration.role == .brown && toolName == "task_acknowledged" {
                         lastTaskCommunicationAt = Date()
                         toolCallsSinceTaskCommunication = 0
