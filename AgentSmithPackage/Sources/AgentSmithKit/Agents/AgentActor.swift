@@ -159,7 +159,12 @@ public actor AgentActor {
     /// Tracks consecutive LLM errors for exponential backoff.
     private var consecutiveErrors = 0
     private static let maxConsecutiveErrors = 50
-    private static let maxBackoffSeconds: Double = 180
+    /// Cap on the self-computed exponential backoff, used when the server gives us no explicit
+    /// retry hint. Raised from 180s to 600s (10 min) so a time-windowed rate limit (e.g. a
+    /// provider's multi-hour session quota) can actually be waited out: at a 3-min cap, 50
+    /// consecutive errors exhaust in ~2.2h — shorter than a 5h window, so the agent died before
+    /// the window ever reset. At a 10-min cap, 50 errors span ~7h.
+    private static let maxBackoffSeconds: Double = 600
 
     /// Wall-clock seconds before the per-turn stall watchdog logs a warning and posts
     /// a system message. The watchdog itself doesn't unstick anything (per-tool timeouts
