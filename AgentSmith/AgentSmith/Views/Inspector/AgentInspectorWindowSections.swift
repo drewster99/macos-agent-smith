@@ -59,14 +59,13 @@ struct AgentInspectorWindowSections: View {
                                 LLMTurnDisclosureRow(
                                     turn: turn,
                                     turnNumber: i + 1,
-                                    isExpanded: Binding(
-                                        get: { expandedTurnIDs.contains(turn.id) },
-                                        set: { expand in
-                                            if expand { expandedTurnIDs.insert(turn.id) }
-                                            else { expandedTurnIDs.remove(turn.id) }
-                                        }
-                                    )
+                                    isExpanded: expandedTurnIDs.contains(turn.id),
+                                    onExpandedChange: { expand in
+                                        if expand { expandedTurnIDs.insert(turn.id) }
+                                        else { expandedTurnIDs.remove(turn.id) }
+                                    }
                                 )
+                                .equatable()
                             }
                         }
                     }

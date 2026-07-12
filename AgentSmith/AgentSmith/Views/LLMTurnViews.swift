@@ -13,15 +13,32 @@ private let inspectorTimestampFormatter: DateFormatter = {
 ///
 /// Shows a clear Outgoing (what was sent) / Response (what came back) structure
 /// with latency timing.
-struct LLMTurnDisclosureRow: View {
+struct LLMTurnDisclosureRow: View, Equatable {
     let turn: LLMTurnRecord
     let turnNumber: Int
-    @Binding var isExpanded: Bool
+    /// Plain Bool (not a `@Binding`) so the nonisolated `==` below can read it — a `@Binding`'s
+    /// wrapped value is main-actor-isolated and can't be touched from a nonisolated comparison.
+    let isExpanded: Bool
+    /// Toggle handler, `@MainActor` so building the DisclosureGroup's `Binding` from it is clean
+    /// (its `set` wants an isolated/Sendable closure). Excluded from `==` — closures can't be
+    /// compared and this one's capture (the row's turn id) is stable.
+    let onExpandedChange: @MainActor (Bool) -> Void
 
     @State private var showingFullContext = false
 
+    /// A recorded turn is immutable, so `turn.id` implies its rendered content; `turnNumber` and
+    /// `isExpanded` are the only other inputs. Gating on those lets `.equatable()` skip
+    /// re-evaluating every existing row when a new turn is appended (the streaming hot path),
+    /// while still re-rendering the single row whose expansion actually changed. Comparing the
+    /// id (not the whole `Equatable` turn) keeps the check O(1) instead of deep-diffing arrays.
+    nonisolated static func == (lhs: LLMTurnDisclosureRow, rhs: LLMTurnDisclosureRow) -> Bool {
+        lhs.turn.id == rhs.turn.id
+        && lhs.turnNumber == rhs.turnNumber
+        && lhs.isExpanded == rhs.isExpanded
+    }
+
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
+        DisclosureGroup(isExpanded: Binding(get: { isExpanded }, set: onExpandedChange)) {
             VStack(alignment: .leading, spacing: 8) {
                 // --- Outgoing ---
                 if !turn.inputDelta.isEmpty {
