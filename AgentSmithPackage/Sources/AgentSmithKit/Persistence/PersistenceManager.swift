@@ -199,6 +199,106 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([ChannelMessage].self, from: data)
     }
 
+    // MARK: - Channel Log — append-only JSONL (per-session)
+    //
+    // The transcript is stored as newline-delimited JSON (one compact `ChannelMessage` per
+    // line) so live messages append in O(1) instead of rewriting the whole file on every save,
+    // and the in-memory model only has to hold a bounded tail. The legacy `channel_log.json`
+    // (a single JSON array) is migrated to `.jsonl` once and then LEFT IN PLACE as a backup —
+    // it is never deleted or overwritten by this path. Splitting on 0x0A is safe because
+    // compact JSON never emits a raw newline byte outside a string and always escapes newlines
+    // inside strings as `\n`; multi-byte UTF-8 never contains a 0x0A byte.
+
+    private var channelLogJSONLURL: URL {
+        sessionDirectory.appendingPathComponent("channel_log.jsonl")
+    }
+    private var channelLogLegacyURL: URL {
+        sessionDirectory.appendingPathComponent("channel_log.json")
+    }
+
+    /// Encodes messages as newline-delimited compact JSON (a trailing newline after each).
+    private func encodeJSONL(_ messages: [ChannelMessage]) throws -> Data {
+        let encoder = JSONEncoder()
+        var blob = Data()
+        for message in messages {
+            blob.append(try encoder.encode(message))
+            blob.append(0x0A)
+        }
+        return blob
+    }
+
+    /// Decodes a JSONL blob, tolerating a missing trailing newline and blank lines.
+    private func decodeJSONL(_ data: Data, limit: Int? = nil) throws -> (messages: [ChannelMessage], totalCount: Int) {
+        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        let total = lines.count
+        let slice = limit.map { $0 >= total ? lines[...] : lines.suffix($0) } ?? lines[...]
+        let decoder = JSONDecoder()
+        var messages: [ChannelMessage] = []
+        messages.reserveCapacity(slice.count)
+        for line in slice {
+            messages.append(try decoder.decode(ChannelMessage.self, from: Data(line)))
+        }
+        return (messages, total)
+    }
+
+    /// Seeds `channel_log.jsonl` from a legacy `channel_log.json` array on first use, stripping
+    /// the stale `fileWrite*` diff metadata that used to bloat the log. The legacy file is
+    /// preserved as a backup. Written via a temp file + atomic rename so a crash mid-migration
+    /// can never leave a truncated `.jsonl`. No-op once the `.jsonl` exists.
+    private func migrateLegacyChannelLogIfNeeded() throws {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: channelLogJSONLURL.path) else { return }
+        guard fm.fileExists(atPath: channelLogLegacyURL.path) else { return }
+        try ensureDirectories()
+        let data = try Data(contentsOf: channelLogLegacyURL)
+        var legacy = try JSONDecoder().decode([ChannelMessage].self, from: data)
+        for i in legacy.indices {
+            guard var md = legacy[i].metadata else { continue }
+            let removedOld = md.removeValue(forKey: "fileWriteOldContent") != nil
+            let removedNew = md.removeValue(forKey: "fileWriteContent") != nil
+            if removedOld || removedNew { legacy[i].metadata = md }
+        }
+        let tmp = sessionDirectory.appendingPathComponent("channel_log.jsonl.tmp")
+        try encodeJSONL(legacy).write(to: tmp, options: .atomic)
+        try fm.moveItem(at: tmp, to: channelLogJSONLURL)
+    }
+
+    /// Appends messages to the session's JSONL channel log (creating/migrating it first).
+    /// A single `FileHandle` seek-to-end write; O(size of the appended batch).
+    public func appendChannelMessages(_ messages: [ChannelMessage]) throws {
+        guard !messages.isEmpty else { return }
+        try ensureDirectories()
+        try migrateLegacyChannelLogIfNeeded()
+        let blob = try encodeJSONL(messages)
+        if FileManager.default.fileExists(atPath: channelLogJSONLURL.path) {
+            let handle = try FileHandle(forWritingTo: channelLogJSONLURL)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: blob)
+        } else {
+            try blob.write(to: channelLogJSONLURL, options: .atomic)
+        }
+    }
+
+    /// Loads the most-recent `limit` messages plus the total on-disk count. Reads the file once
+    /// but only decodes the tail — decoding tens of thousands of objects is the expensive part,
+    /// and the UI only needs the tail on launch.
+    public func loadChannelLogTail(limit: Int) throws -> (messages: [ChannelMessage], totalCount: Int) {
+        try migrateLegacyChannelLogIfNeeded()
+        guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return ([], 0) }
+        let data = try Data(contentsOf: channelLogJSONLURL)
+        return try decodeJSONL(data, limit: limit)
+    }
+
+    /// Loads the entire channel log. Used only by the user-initiated "Restore full history"
+    /// path — the common launch/append paths never materialize the whole transcript.
+    public func loadFullChannelLog() throws -> [ChannelMessage] {
+        try migrateLegacyChannelLogIfNeeded()
+        guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return [] }
+        let data = try Data(contentsOf: channelLogJSONLURL)
+        return try decodeJSONL(data).messages
+    }
+
     // MARK: - Tasks (per-session)
 
     public func saveTasks(_ tasks: [AgentTask]) throws {

@@ -193,11 +193,19 @@ final class AppViewModel {
     /// Kept alive independently of `runtime` so task operations work even when agents aren't running.
     private var taskStore: TaskStore?
     private var channelStreamTask: Task<Void, Never>?
-    /// Coalesces channel-log persistence: every streamed message used to enqueue the full
-    /// `allPersistedMessages` array, making writes quadratic over a long session. We debounce
-    /// instead so only the last message in a burst triggers a single full-array snapshot.
+    /// Coalesces channel-log persistence. Messages are appended to an on-disk JSONL log; the
+    /// debounce batches a streaming burst into one append call rather than one per message.
     private var channelLogPersistTask: Task<Void, Never>?
     private static let channelLogPersistDebounce: Duration = .milliseconds(500)
+    /// Messages appended to the transcript but not yet handed to the append writer. Held
+    /// independently of `messages` so trimming the resident tail (below) never drops a message
+    /// before it reaches disk.
+    private var pendingChannelAppends: [ChannelMessage] = []
+    /// Upper bound on messages kept resident during normal operation. The full transcript lives
+    /// on disk (JSONL); only this bounded tail is held in memory and rendered, so a long session
+    /// can't grow the heap without bound. Trimming is suspended once the user pulls in the full
+    /// history via "Restore full history" — they've explicitly opted into holding it all.
+    private static let residentMessageCap = 5_000
     /// Monotonic generation tokens that serialize the application of store snapshots to the
     /// main-actor mirrors (`tasks`, `timerHistory`). Each `onChange` Task bumps the counter
     /// at body start (synchronously on the serial main actor), captures its generation, then
@@ -218,9 +226,6 @@ final class AppViewModel {
         return { id, filename in await pm.loadAttachmentData(id: id, filename: filename) }
     }
 
-    /// Full message history — a superset of `messages`. Never cleared; always written to disk.
-    private var allPersistedMessages: [ChannelMessage] = []
-
     /// Set to true while `loadPersistedState` is applying values from disk so that
     /// each field's didSet doesn't fire a `persistSessionStateAsync` that races
     /// with later loads. Without this, `agentAssignments = state.agentAssignments`
@@ -237,7 +242,7 @@ final class AppViewModel {
     /// newer one on disk. Each writer drains pending work in FIFO order and
     /// `flush()` actually waits for in-flight writes to complete (the
     /// `flushPersistence()` path used to race them).
-    private let channelLogWriter: SerialPersistenceWriter<[ChannelMessage]>
+    private let channelLogAppendWriter: ChannelLogAppendWriter
     private let tasksWriter: SerialPersistenceWriter<[AgentTask]>
     private let timerEventsWriter: SerialPersistenceWriter<[TimerEvent]>
     private let scheduledWakesWriter: SerialPersistenceWriter<[ScheduledWake]>
@@ -259,8 +264,8 @@ final class AppViewModel {
         self.shared = shared
         let pm = PersistenceManager(sessionID: session.id)
         self.persistenceManager = pm
-        self.channelLogWriter = SerialPersistenceWriter(label: "channelLog") { snapshot in
-            try await pm.saveChannelLog(snapshot)
+        self.channelLogAppendWriter = ChannelLogAppendWriter { messages in
+            try await pm.appendChannelMessages(messages)
         }
         self.tasksWriter = SerialPersistenceWriter(label: "tasks") { snapshot in
             try await pm.saveTasks(snapshot)
@@ -374,30 +379,15 @@ final class AppViewModel {
 
         // Load channel log.
         do {
-            var savedMessages = try await persistenceManager.loadChannelLog()
-            // One-time migration: strip file_write diff metadata. See previous implementation
-            // for rationale — this was a data-format cleanup that's idempotent on rerun.
-            var strippedCount = 0
-            for i in savedMessages.indices {
-                guard var md = savedMessages[i].metadata else { continue }
-                var changed = false
-                if md.removeValue(forKey: "fileWriteOldContent") != nil { changed = true }
-                if md.removeValue(forKey: "fileWriteContent") != nil { changed = true }
-                if changed {
-                    savedMessages[i].metadata = md
-                    strippedCount += 1
-                }
-            }
-            if strippedCount > 0 {
-                logger.notice("Stripped stale file_write diff metadata from \(strippedCount, privacy: .public) message(s) in session \(self.session.name, privacy: .public); re-saving channel log.")
-                do {
-                    try await persistenceManager.saveChannelLog(savedMessages)
-                } catch {
-                    logger.error("Failed to re-save channel log after migration: \(error)")
-                }
-            }
-            allPersistedMessages = savedMessages
-            persistedHistoryCount = savedMessages.count
+            // Load only the most-recent tail into memory; the full transcript stays on disk.
+            // Migration of a legacy channel_log.json (including the one-time file_write metadata
+            // strip) happens inside the persistence layer on first access — see
+            // `migrateLegacyChannelLogIfNeeded`.
+            let (tail, total) = try await persistenceManager.loadChannelLogTail(limit: Self.residentMessageCap)
+            messages = tail
+            persistedHistoryCount = total
+            // If the whole transcript already fit in the tail there's nothing older to restore.
+            hasRestoredHistory = tail.count >= total
         } catch {
             let msg = "Failed to load channel log: \(error)"
             logger.error("\(msg, privacy: .public)")
@@ -717,10 +707,8 @@ final class AppViewModel {
         channelStreamTask = Task { @MainActor [weak self] in
             for await message in channel.stream() {
                 guard let self else { break }
-                self.messages.append(message)
-                self.allPersistedMessages.append(message)
+                self.appendToTranscript(message)
                 self.shared.speechController.handle(message)
-                self.persistMessages()
             }
         }
 
@@ -1585,11 +1573,11 @@ final class AppViewModel {
     }
 
     private func flushPersistence() async {
-        // Cancel the debounce so it can't fire a redundant full-array write after this
-        // authoritative flush; the enqueue below already captures the final state.
+        // Cancel the debounce so it can't fire a redundant append after this authoritative
+        // flush; draining below hands any un-persisted messages to the writer directly.
         channelLogPersistTask?.cancel()
         channelLogPersistTask = nil
-        await channelLogWriter.enqueue(allPersistedMessages)
+        await drainPendingChannelAppends()
         await tasksWriter.enqueue(tasks)
         let finalState = SessionState(
             agentAssignments: agentAssignments,
@@ -1602,7 +1590,7 @@ final class AppViewModel {
         )
         logger.notice("flushPersistence: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(finalState.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(finalState.autoRunInterruptedTasks, privacy: .public)")
         await sessionStateWriter.enqueue(finalState)
-        await channelLogWriter.flush()
+        await channelLogAppendWriter.flush()
         await tasksWriter.flush()
         await sessionStateWriter.flush()
         await timerEventsWriter.flush()
@@ -1614,8 +1602,8 @@ final class AppViewModel {
         abortReason = ""
     }
 
-    /// Clears the visible channel transcript only — Ctrl-L. `allPersistedMessages` is
-    /// untouched, so `restoreHistory()` can bring the lines back.
+    /// Clears the visible channel transcript only — Ctrl-L. The on-disk JSONL log is untouched,
+    /// so `restoreHistory()` (or a relaunch) can bring the lines back.
     ///
     /// Deliberately does NOT touch `inspectorStore` or the cost caches: those hold the
     /// running agents' turn records, live context, and security evaluations. Clearing them
@@ -1623,6 +1611,8 @@ final class AppViewModel {
     /// reading "Not active" while its agent was still running.
     func clearLog() {
         messages.removeAll()
+        // The full transcript is still on disk; re-offer the restore affordance.
+        hasRestoredHistory = false
     }
 
     /// `/clear` and the toolbar trashcan: resets SMITH'S LLM CONTEXT (with a fresh
@@ -1657,17 +1647,43 @@ final class AppViewModel {
     /// channel) to post through. Mirrors the channel-stream append path so the message
     /// also survives in the persisted history.
     private func appendLocalSystemMessage(_ content: String) {
-        let message = ChannelMessage(sender: .system, content: content)
+        appendToTranscript(ChannelMessage(sender: .system, content: content))
+    }
+
+    /// Appends a message to the in-memory transcript and queues it for the on-disk JSONL log.
+    /// Trims the resident tail back to `residentMessageCap` unless the user has pulled in the
+    /// full history (then they've opted into holding everything until the next relaunch).
+    private func appendToTranscript(_ message: ChannelMessage) {
         messages.append(message)
-        allPersistedMessages.append(message)
+        persistedHistoryCount += 1
+        if !hasRestoredHistory && messages.count > Self.residentMessageCap {
+            messages.removeFirst(messages.count - Self.residentMessageCap)
+        }
+        pendingChannelAppends.append(message)
         persistMessages()
     }
 
+    /// Loads the full transcript from disk into memory. Trimming stays suspended afterward
+    /// (`hasRestoredHistory`), so the whole history remains visible for the rest of the session.
     func restoreHistory() {
-        let currentIDs = Set(messages.map(\.id))
-        let restoredHistory = allPersistedMessages.filter { !currentIDs.contains($0.id) }
-        messages = restoredHistory + messages
-        hasRestoredHistory = true
+        guard !hasRestoredHistory else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let full = try await self.persistenceManager.loadFullChannelLog()
+                // Read `messages` AFTER the await: messages that streamed in during the load are
+                // now resident. `full` is the authoritative ordered history; any resident message
+                // not yet on disk (a not-yet-flushed live append) is appended after it, deduped
+                // by id so a message that flushed mid-load isn't duplicated.
+                let fullIDs = Set(full.map(\.id))
+                let liveTail = self.messages.filter { !fullIDs.contains($0.id) }
+                self.messages = full + liveTail
+                self.persistedHistoryCount = self.messages.count
+                self.hasRestoredHistory = true
+            } catch {
+                self.logger.error("Failed to restore full channel history: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     // MARK: - Attachments
@@ -1834,10 +1850,9 @@ final class AppViewModel {
     }
 
     private func persistMessages() {
-        // Debounce: cancel any pending write and schedule a fresh one. During a streaming
-        // burst this collapses N full-array enqueues into a single snapshot taken once the
-        // stream goes quiet, avoiding the prior O(n)-per-message copy. The authoritative
-        // final write happens in flushPersistence(), which also cancels this task.
+        // Debounce: cancel any pending drain and schedule a fresh one. During a streaming burst
+        // this batches many appends into one append-writer call once the stream goes quiet. The
+        // authoritative final drain happens in flushPersistence(), which also cancels this task.
         channelLogPersistTask?.cancel()
         channelLogPersistTask = Task { @MainActor [weak self] in
             do {
@@ -1846,9 +1861,19 @@ final class AppViewModel {
                 return
             }
             guard !Task.isCancelled, let self else { return }
-            let snapshot = self.allPersistedMessages
-            await self.channelLogWriter.enqueue(snapshot)
+            await self.drainPendingChannelAppends()
         }
+    }
+
+    /// Hands accumulated appends to the JSONL append writer in FIFO order. The read-and-clear
+    /// runs synchronously on the main actor, so it can't interleave with another drain; awaiting
+    /// the enqueue (rather than spawning a detached task) preserves batch ordering and lets
+    /// `flushPersistence` guarantee everything is written before quit.
+    private func drainPendingChannelAppends() async {
+        guard !pendingChannelAppends.isEmpty else { return }
+        let batch = pendingChannelAppends
+        pendingChannelAppends = []
+        await channelLogAppendWriter.enqueue(batch)
     }
 
     private func persistTasks() {
