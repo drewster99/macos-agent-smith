@@ -1446,10 +1446,21 @@ public actor AgentActor {
                 consecutiveErrors += 1
                 consecutiveContextOverflows = 0  // Reset overflow counter on non-overflow errors
 
-                let backoff = min(
+                let providerError = error as? LLMProviderError
+                let httpStatus: Int? = {
+                    if case .httpError(let statusCode, _, _, _) = providerError { return statusCode }
+                    return nil
+                }()
+                // Honor a server-supplied Retry-After (e.g. on a 429) over our own guess: the
+                // server knows when its window resets. Floor at 1s so a `Retry-After: 0` can't
+                // spin a tight retry loop. No upper cap — a multi-hour session limit means we
+                // wait multiple hours, which is the point. Otherwise, exponential backoff.
+                let serverRetryAfter = providerError?.retryAfterSeconds
+                let computedBackoff = min(
                     3.0 * pow(2.0, Double(min(consecutiveErrors - 1, 10))),
                     Self.maxBackoffSeconds
                 )
+                let backoff = serverRetryAfter.map { max($0, 1.0) } ?? computedBackoff
 
                 // Surface persistent HTTP 4xx errors (anything in 4xx except 408 timeouts
                 // and 429 rate limits) on the first occurrence. These are config/payload
@@ -1462,23 +1473,30 @@ public actor AgentActor {
                 // Standard suppression (>=5 consecutive errors) still applies to
                 // genuinely transient classes (429, 408, 5xx, network) where the next
                 // attempt is reasonably expected to succeed.
-                let isPersistentClientError: Bool = {
-                    guard let providerError = error as? LLMProviderError,
-                          case .httpError(let statusCode, _, _) = providerError else {
-                        return false
-                    }
-                    return (400..<500).contains(statusCode)
-                        && statusCode != 429
-                        && statusCode != 408
-                }()
+                let isPersistentClientError = httpStatus.map {
+                    (400..<500).contains($0) && $0 != 429 && $0 != 408
+                } ?? false
+                // A rate limit is transient, but if the server told us when to come back the
+                // wait can be long — surface it on the first hit so it reads as a deliberate
+                // rate-limit wait, not a silent hang.
+                let isRateLimited = httpStatus == 429
 
                 let shouldSurfaceNow = consecutiveErrors >= 5
                     || (isPersistentClientError && consecutiveErrors == 1)
+                    || (isRateLimited && serverRetryAfter != nil && consecutiveErrors == 1)
 
                 if shouldSurfaceNow {
+                    let waitNote: String
+                    if let serverRetryAfter {
+                        waitNote = " — rate limited; server asked us to retry after \(Int(serverRetryAfter.rounded()))s"
+                    } else if isRateLimited {
+                        waitNote = " — rate limited; retrying in \(Int(backoff.rounded()))s"
+                    } else {
+                        waitNote = ""
+                    }
                     await toolContext.post(ChannelMessage(
                         sender: .system,
-                        content: "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)",
+                        content: "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)\(waitNote)",
                         metadata: ["isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
                     ))
                 }
@@ -3508,7 +3526,7 @@ public actor AgentActor {
     /// Matches the error body patterns from OpenAI-compatible APIs (DeepSeek, Mistral, etc.).
     private static func isContextOverflowError(_ error: Error) -> Bool {
         guard let providerError = error as? LLMProviderError,
-              case .httpError(let statusCode, let body, _) = providerError else {
+              case .httpError(let statusCode, let body, _, _) = providerError else {
             return false
         }
         // HTTP 400 with body indicating the request exceeded the model's context window.
@@ -3732,7 +3750,7 @@ public actor AgentActor {
 
     private static func logUnhandled400(_ error: Error) {
         guard let providerError = error as? LLMProviderError,
-              case .httpError(let statusCode, let body, let url) = providerError,
+              case .httpError(let statusCode, let body, let url, _) = providerError,
               statusCode == 400 else {
             return
         }
