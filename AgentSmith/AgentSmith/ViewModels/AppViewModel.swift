@@ -704,6 +704,11 @@ final class AppViewModel {
         }
 
         let channel = await newRuntime.channel
+        // Defensive: never leak a prior subscription. `start()` is guarded by `!isRunning` and
+        // the stop path nils this out via quiesceChannelStream, so it's normally already nil —
+        // but cancelling before reassigning keeps a single live stream an invariant regardless
+        // of how a future restart path is wired.
+        channelStreamTask?.cancel()
         channelStreamTask = Task { @MainActor [weak self] in
             for await message in channel.stream() {
                 guard let self else { break }
