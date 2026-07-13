@@ -59,42 +59,71 @@ struct FileWriteTool: AgentTool {
         let fm = FileManager.default
         let resolvedPath = resolvedURL.path
 
-        // Existing files require a prior file_read to prevent blind overwrites.
-        if fm.fileExists(atPath: resolvedPath) {
-            guard context.hasFileBeenRead(path) || context.hasFileBeenRead(resolvedPath) else {
-                return .failure("Error: File already exists at '\(path)'. You must read it with `file_read` before overwriting.")
-            }
-        }
-
-        // Check for hard links — if the target file exists and has multiple hard links,
-        // writing to it could silently modify data reachable from other paths.
-        if fm.fileExists(atPath: resolvedPath) {
-            do {
-                let attrs = try fm.attributesOfItem(atPath: resolvedPath)
-                if let linkCount = attrs[.referenceCount] as? Int, linkCount > 1 {
-                    return .failure("BLOCKED: File '\(path)' has \(linkCount) hard links. Writing would affect all linked paths.")
-                }
-            } catch {
-                return .failure("Error checking file attributes: \(error.localizedDescription)")
-            }
-        }
-
+        // Both paths need the parent directory to exist first.
         do {
-            let parentDir = resolvedURL.deletingLastPathComponent()
-            try fm.createDirectory(
-                at: parentDir,
-                withIntermediateDirectories: true
-            )
-            try content.write(to: resolvedURL, atomically: true, encoding: .utf8)
-
-            // Report if the path traversed symlinks so the caller knows where the file actually landed.
-            if resolvedURL.path != url.standardized.path {
-                return .success("File written successfully: \(path) (resolved to \(resolvedURL.path) via symlink)")
-            }
-            return .success("File written successfully: \(path)")
+            try fm.createDirectory(at: resolvedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         } catch {
-            return .failure("Error writing file: \(error.localizedDescription)")
+            return .failure("Error creating parent directory: \(error.localizedDescription)")
         }
+
+        let hasRead = context.hasFileBeenRead(path) || context.hasFileBeenRead(resolvedPath)
+
+        if hasRead {
+            // Brown has seen this file's contents, so overwriting is authorized — there's no gate
+            // to race here. Keep the hard-link guard, then an atomic replace (crash-safe temp +
+            // rename).
+            if fm.fileExists(atPath: resolvedPath) {
+                do {
+                    let attrs = try fm.attributesOfItem(atPath: resolvedPath)
+                    if let linkCount = attrs[.referenceCount] as? Int, linkCount > 1 {
+                        return .failure("BLOCKED: File '\(path)' has \(linkCount) hard links. Writing would affect all linked paths.")
+                    }
+                } catch {
+                    return .failure("Error checking file attributes: \(error.localizedDescription)")
+                }
+            }
+            do {
+                try content.write(to: resolvedURL, atomically: true, encoding: .utf8)
+            } catch {
+                return .failure("Error writing file: \(error.localizedDescription)")
+            }
+        } else {
+            // Not read → this must be a NEW file. Create it EXCLUSIVELY so the "read before
+            // overwrite" gate can't be bypassed by a TOCTOU race: the old `fileExists` check and
+            // the subsequent write were separate, so a file appearing in between got clobbered.
+            // `O_CREAT | O_EXCL` fails atomically if the path already exists — no window.
+            let fd = open(resolvedPath, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+            if fd == -1 {
+                if errno == EEXIST {
+                    return .failure("Error: File already exists at '\(path)'. You must read it with `file_read` before overwriting.")
+                }
+                return .failure("Error creating file '\(path)': \(String(cString: strerror(errno)))")
+            }
+            defer { close(fd) }
+            let data = Data(content.utf8)
+            let wrote: Bool = data.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return true }  // empty content → empty file
+                var offset = 0
+                while offset < raw.count {
+                    let n = write(fd, base + offset, raw.count - offset)
+                    if n > 0 { offset += n }
+                    else if n == -1 && errno == EINTR { continue }
+                    else { return false }
+                }
+                return true
+            }
+            if !wrote {
+                let message = String(cString: strerror(errno))
+                try? fm.removeItem(atPath: resolvedPath)  // don't leave a partial new file behind
+                return .failure("Error writing file '\(path)': \(message)")
+            }
+        }
+
+        // Report if the path traversed symlinks so the caller knows where the file actually landed.
+        if resolvedURL.path != url.standardized.path {
+            return .success("File written successfully: \(path) (resolved to \(resolvedURL.path) via symlink)")
+        }
+        return .success("File written successfully: \(path)")
     }
 
     /// Returns an error message if the resolved path is restricted, or nil if allowed.
