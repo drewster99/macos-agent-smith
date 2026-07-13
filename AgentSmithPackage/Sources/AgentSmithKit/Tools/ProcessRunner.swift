@@ -113,15 +113,21 @@ enum ProcessRunner {
                     let readSource = DispatchSource.makeReadSource(fileDescriptor: readFD, queue: DispatchQueue.global())
 
                     // Terminal step: drain → mark closed → cancel source → close → record status →
-                    // signal. Guarded by `closed` so the exit handler and timeout fallback can both
-                    // call it but only the first runs. Drain is BEFORE close+signal → no output lost.
+                    // signal. The waitpid thread and the timeout fallback can BOTH call this (e.g. a
+                    // timeout kills the child, waitpid finishes, then the +5 s fallback fires), so
+                    // everything past the first call MUST be skipped — most importantly close(readFD),
+                    // which on a second call would close an fd number already recycled by another
+                    // concurrent run/file op. The `firstCall` flag gates the whole tail, not just the
+                    // drain. Drain is BEFORE close+signal → no output lost.
                     @Sendable func finish(status: Int32?) {
-                        readState.withLock { state in
-                            guard !state.closed else { return }
+                        let firstCall = readState.withLock { state -> Bool in
+                            guard !state.closed else { return false }
                             _ = drainAvailable(into: &state.buffer)
                             state.closed = true
                             if let status { state.exitStatus = status }
+                            return true
                         }
+                        guard firstCall else { return }
                         readSource.cancel()
                         close(readFD)
                         done.signal()
@@ -132,7 +138,7 @@ enum ProcessRunner {
                             guard !state.closed else { return false }
                             return drainAvailable(into: &state.buffer)
                         }
-                        if eof { readSource.cancel() }   // write end closed; exit source drives completion
+                        if eof { readSource.cancel() }   // write end closed; the waitpid thread drives completion
                     }
                     readSource.resume()
 
