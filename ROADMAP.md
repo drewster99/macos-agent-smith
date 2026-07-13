@@ -854,6 +854,14 @@ When — and *only* when — a security re-eval changes the approved list, injec
 ### Harden `isRetryableError` in TaskSummarizer
 `TaskSummarizer.isRetryableError` currently matches on `error.localizedDescription` strings (e.g. `hasPrefix("HTTP 429")`, regex for `^HTTP 5\d\d`). This works because `LLMProviderError.httpError` formats its description as `"HTTP \(code): \(body)"`, but it's fragile — if error wrapping or formatting changes, retries silently stop working. Replace with direct pattern matching on `LLMProviderError.httpError(statusCode:body:url:)` to check the status code as an integer.
 
+### File-tool path hardening — component-safe writes (from codex review, 2026-07-12)
+`FileWriteTool` resolves symlinks and runs `checkPathRestriction` on the resolved path, then, as a *separate* syscall, opens/writes that path. Two time-of-check/time-of-use races remain (both **pre-existing**, and both surfaced by a codex pass over the O_CREAT|O_EXCL rewrite):
+
+- **Parent-directory swap.** Between path validation and `open(…, O_CREAT | O_EXCL)`, a concurrent process that can rename a parent directory could replace it with a symlink pointing into a restricted location, so the exclusive create lands beneath a blocked path. `O_EXCL` only protects the *final* component's existence, not the integrity of the directory chain above it.
+- **Cleanup deletes a swapped file.** On a write failure the exclusive path does `removeItem(atPath:)` while the descriptor it created is still open; a concurrent rename between the failed write and the remove could make cleanup delete an unrelated file at that pathname.
+
+**Not scheduled yet — deliberately.** Both require a *hostile concurrent process racing the agent's own writes on the user's machine*, which is outside Agent Smith's threat model: Brown is the sole writer, gated by the Security Agent, on a single-user Mac. Closing them properly means walking the path component-by-component from a directory fd with `openat` + `O_NOFOLLOW` (and unlinking via that dirfd rather than by absolute path) — real machinery that only pays off if we ever decide to treat the local filesystem as adversarial. Captured here so the decision is explicit rather than forgotten. The O_EXCL rewrite already *improved* the final-component race (see `FileWriteTool.execute`); this entry is only about the directory-chain and cleanup races above it.
+
 ### Decouple SecurityEvaluator iteration counters ✅
 **Already shipped** — this ROADMAP entry was stale. `SecurityEvaluator.evaluate` already tracks `fileReadRounds` (cap 20) and `retryCount` (cap 5) independently, with the loop condition `while retryCount < Self.maxRetries && fileReadRounds < maxFileReadRounds`. File-read rounds bump on tool-call responses, parse retries bump on parse failure or LLM error. Original design notes preserved below for context.
 
