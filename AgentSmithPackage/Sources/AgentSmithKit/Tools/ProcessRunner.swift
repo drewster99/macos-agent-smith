@@ -49,6 +49,11 @@ enum ProcessRunner {
             var exitStatus: Int32 = 0
         }
         let stateBox = OSAllocatedUnfairLock<State>(initialState: .pending)
+        // Set true the instant `waitpid` reaps the child. Once reaped, the pid (and its group id)
+        // are free for the kernel to recycle, so ANY kill afterward could hit an unrelated process.
+        // Every signal path checks this first, shrinking the recycle window from the 2 s SIGKILL
+        // delay down to the few instructions between waitpid returning and the flag being set.
+        let reaped = OSAllocatedUnfairLock<Bool>(initialState: false)
 
         // Child is a group leader (group id == pid), so the negative-pid form targets the whole
         // group; fall back to the bare pid if the group send fails.
@@ -56,9 +61,12 @@ enum ProcessRunner {
             if kill(-pid, sig) != 0 { kill(pid, sig) }
         }
         @Sendable func terminate(_ pid: pid_t) {
+            guard !reaped.withLock({ $0 }) else { return }
             signalGroup(pid, SIGTERM)
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                // Signal 0 probes liveness, gating the SIGKILL against a recycled pid.
+                // Skip if the child was reaped meanwhile — its pid may now belong to an unrelated
+                // process, and kill(…, 0) would only confirm that replacement exists.
+                guard !reaped.withLock({ $0 }) else { return }
                 guard kill(-pid, 0) == 0 || kill(pid, 0) == 0 else { return }
                 signalGroup(pid, SIGKILL)
             }
@@ -247,15 +255,17 @@ enum ProcessRunner {
                     // because the timeout/cancel killed its group.
                     DispatchQueue.global().async {
                         var status: Int32 = 0
+                        var reapedStatus: Int32? = nil
                         while true {
                             let r = waitpid(pid, &status, 0)
-                            if r == pid { finish(status: status); break }
-                            if r == -1 {
-                                if errno == EINTR { continue }   // interrupted — retry
-                                finish(status: nil); break       // ECHILD / other: already reaped
-                            }
-                            finish(status: nil); break           // r == 0 can't happen with options 0
+                            if r == pid { reapedStatus = status; break }   // reaped — real exit status
+                            if r == -1 && errno == EINTR { continue }      // interrupted — retry
+                            break   // r == -1 (ECHILD/other) or 0: child already gone, no status
                         }
+                        // Mark reaped BEFORE finishing so any in-flight terminate/SIGKILL bails out
+                        // rather than signalling a possibly-recycled pid.
+                        reaped.withLock { $0 = true }
+                        finish(status: reapedStatus)
                     }
 
                     // Timeout: kill the group; the killed child then exits and the waitpid thread
