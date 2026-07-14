@@ -736,17 +736,7 @@ public actor AgentActor {
             pushLiveContext()
         }
 
-        let role = configuration.role
-        let ctx = toolContext
-        let agentID = id
         runTask = Task { [weak self] in
-            // Announce on the public channel so all agents and the UI know we're alive.
-            await ctx.post(ChannelMessage(
-                sender: .agent(role),
-                content: "\(role.displayName) agent \(agentID) is online.",
-                metadata: ["messageKind": .string("agent_online")]
-            ))
-
             guard let self else { return }
             await self.runLoop()
         }
@@ -3087,10 +3077,10 @@ public actor AgentActor {
                 deferredMessages.append(contentsOf: taskCompleteMessages)
             }
 
-            // Lifecycle and agent_online messages are informational — drain them into
-            // history for context but don't trigger a new LLM call. Only messages that
-            // require Smith's action (user messages, task_complete, errors) should wake it.
-            let nonWakingKinds: Set<String> = ["task_lifecycle", "task_acknowledged", "agent_online"]
+            // Lifecycle messages are informational — drain them into history for context but
+            // don't trigger a new LLM call. Only messages that require Smith's action (user
+            // messages, task_complete, errors) should wake it.
+            let nonWakingKinds: Set<String> = ["task_lifecycle", "task_acknowledged"]
             let hasActionableMessage = pendingChannelMessages.contains { msg in
                 if case .string(let kind) = msg.metadata?["messageKind"],
                    nonWakingKinds.contains(kind) {

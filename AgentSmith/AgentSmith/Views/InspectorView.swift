@@ -35,18 +35,14 @@ struct InspectorView: View {
     @State private var summarizerMessages: [ChannelMessage] = []
 
     /// Buckets channel messages by the agent role they belong to, in one pass.
-    /// Two deliberate deviations from "sender == role":
-    /// - `agent_online` chrome is EXCLUDED — "Security Agent online." carries no
-    ///   information and was drowning out the Recent Messages list.
-    /// - Role-attributed SYSTEM diagnostics are INCLUDED (metadata `agentRole`, e.g.
-    ///   "Security Agent error (3/5): failed to parse security response") — these are
-    ///   exactly the errors/warnings a user opens the agent card to find, and they
-    ///   previously never surfaced in the inspector at all.
+    /// One deliberate deviation from "sender == role": role-attributed SYSTEM diagnostics are
+    /// INCLUDED (metadata `agentRole`, e.g. "Security Agent error (3/5): failed to parse security
+    /// response") — these are exactly the errors/warnings a user opens the agent card to find, and
+    /// they previously never surfaced in the inspector at all.
     static func bucketMessagesByRole(_ messages: [ChannelMessage]) -> [AgentRole: [ChannelMessage]] {
         var buckets: [AgentRole: [ChannelMessage]] = [:]
         for message in messages {
             if case .agent(let role) = message.sender {
-                if case .string("agent_online") = message.metadata?["messageKind"] { continue }
                 buckets[role, default: []].append(message)
             } else if case .system = message.sender,
                       case .string(let attributed) = message.metadata?["agentRole"],

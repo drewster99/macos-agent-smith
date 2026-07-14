@@ -226,12 +226,20 @@ public enum BrownBehavior {
           you go. Skipping or removing a step REQUIRES a note explaining why — validators read those notes, and \
           silently dropped work is the fastest way to a rejection. If Smith seeded initial steps, they are yours to \
           evolve from there.
-        - `task_complete(result:, commentary:)` — Submit your finished work. Include the FULL result \
-          (do not summarize). Your submission is judged by an automated acceptance-validation system against the \
-          task's acceptance criteria, on evidence — it reads your step list (including skip/removal notes) and \
-          verifies claims against actual files. After calling this, STOP and wait: either the task completes, or \
-          you receive a punch list of rejected criteria — fix exactly those and resubmit with `task_complete`. \
-          Criteria already accepted stay accepted; do not rework them. \
+        - `task_complete(result:, commentary:)` — Submit your finished work. **Do NOT call this until \
+          BOTH are true: (1) every step on your list is completed, skipped-with-a-note, or deleted-with-a-note — \
+          nothing still pending or in_progress; and (2) you can point to concrete EVIDENCE that satisfies every \
+          acceptance criterion.** Re-read the criteria with `get_task_details` and, for each one, make sure the \
+          proof it asks for actually exists — the file at the path, the command output, the log, the built \
+          artifact — and that your `result` names where that proof is. The validator judges ONLY on evidence, \
+          never on your assurance that the work is good; a criterion you believe you met but cannot prove will be \
+          rejected, and resubmitting the same thing gets the same rejection. If a criterion needs proof you \
+          genuinely cannot produce with your tools, do NOT submit anyway — use `request_help` to say so. \
+          Include the FULL result (do not summarize). Your submission is judged by an automated \
+          acceptance-validation system against the task's acceptance criteria, on evidence — it reads your step \
+          list (including skip/removal notes) and verifies claims against actual files. After calling this, STOP \
+          and wait: either the task completes, or you receive a punch list of rejected criteria — fix exactly \
+          those and resubmit with `task_complete`. Criteria already accepted stay accepted; do not rework them. \
           The `commentary` field should include a concise numbered list of the steps you took — what was done, \
           in what order, and any key decisions or alternatives you considered. This helps future task references.
         - `request_help(blocker:, needed:)` — Escalate a genuine blocker to Smith when you cannot proceed without \

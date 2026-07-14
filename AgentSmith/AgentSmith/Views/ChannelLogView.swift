@@ -121,8 +121,6 @@ struct ChannelTimestamp: View {
 /// `bannerView(for:in:)` — both fail at compile time if forgotten, instead of silently
 /// falling through to a generic `MessageRow`.
 private enum ChannelBannerKind: String {
-    /// Internal coordination row — not rendered.
-    case agentOnline = "agent_online"
     /// Lifecycle chrome — gated by the user's "Show agent restart chrome" preference.
     case restartChrome = "restart_chrome"
     /// Timer activity — duplicate of a task's Scheduled chip when paired; otherwise rendered.
@@ -415,7 +413,7 @@ struct ChannelLogView: View, Equatable {
     ) -> some View {
         let kind = message.stringMetadata("messageKind").flatMap(ChannelBannerKind.init(rawValue:))
         switch kind {
-        case .agentOnline, .taskUpdateGuidance:
+        case .taskUpdateGuidance:
             // Internal coordination messages — never rendered.
             EmptyView()
         case .restartChrome:

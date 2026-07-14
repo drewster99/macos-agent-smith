@@ -1670,8 +1670,9 @@ public actor OrchestrationRuntime {
             // in its conversation history (and they can distract from pending user messages).
             if case .agent(let role) = message.sender, message.recipientID == nil,
                role == .brown || role == .securityAgent || role == .summarizer {
-                guard case .string(let kind) = message.metadata?["messageKind"],
-                      kind == "agent_online" else { return false }
+                // Broadcasts from the worker cast are not Smith's to consume — it coordinates
+                // through directed messages and task lifecycle, not these.
+                return false
             }
             // Drop tool_request messages (Brown's approval requests).
             if case .string(let kind) = message.metadata?["messageKind"], kind == "tool_request" {
@@ -2885,12 +2886,6 @@ public actor OrchestrationRuntime {
         }
         supervisor.addSubscription(brownSubID, to: brownID)
 
-        // Announce Security Agent is online (evaluator is ready) for UI consistency.
-        await channel.post(ChannelMessage(
-            sender: .agent(.securityAgent),
-            content: "Security Agent online.",
-            metadata: ["messageKind": .string("agent_online")]
-        ))
         onAgentStarted?(.securityAgent, SecurityAgentBehavior.toolNames)
 
         await brownAgent.start()

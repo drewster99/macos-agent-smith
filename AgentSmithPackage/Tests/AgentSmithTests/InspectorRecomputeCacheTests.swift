@@ -61,7 +61,6 @@ struct InspectorRecomputeCacheTests {
             "changes_requested",
             "memory_saved",
             "memory_searched",
-            "agent_online",
             "restart_chrome",
             "timer_activity",
         ]
@@ -85,7 +84,7 @@ struct InspectorRecomputeCacheTests {
         #expect(bannerKinds.contains("task_created"))
         #expect(bannerKinds.contains("memory_saved"))
         #expect(nonBannerKinds.contains("tool_request"))
-        #expect(total == 20, "Expected 20 known messageKind strings (15 banner + 5 non-banner); update both this test and ChannelBannerKind together.")
+        #expect(total == 19, "Expected 19 known messageKind strings (14 banner + 5 non-banner); update both this test and ChannelBannerKind together.")
         #expect(bannerKinds.intersection(nonBannerKinds).isEmpty, "A kind should be either a banner or a plain row, not both")
     }
 
