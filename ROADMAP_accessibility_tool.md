@@ -303,7 +303,7 @@ CI machines don't grant AX.
 
 **Manual smoke** (document in `Accessibility/README.md` inside the package):
 
-1. Build via `mcp__xcode-mcp-server__build_project` (per CLAUDE.md, never
+1. Build via `mcp__drews-xcode-mcp__build_project` (per CLAUDE.md, never
    `xcodebuild`).
 2. Launch via `run_project_with_user_interaction`. Grant AX in System
    Settings → Privacy & Security → Accessibility. Click "Recheck."

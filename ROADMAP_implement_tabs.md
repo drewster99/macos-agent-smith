@@ -175,7 +175,7 @@ Custom tab bar at the top of the window (like Safari/Terminal tabs):
 - All tool implementations — unchanged
 
 ## Verification
-1. Build with xcode-mcp-server after each major step
+1. Build with drews-xcode-mcp after each major step
 2. Launch app — should auto-migrate legacy data into a "Default" session tab
 3. Create a second tab — should get independent message log, task list, and agent pair
 4. Start agents in both tabs — both should run independently

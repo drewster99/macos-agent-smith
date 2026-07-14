@@ -33,12 +33,12 @@ The full design history, rationale, and completed/planned features live in `ROAD
 
 ## Building and running
 
-Always build via the xcode-mcp-server tools — never `xcodebuild`, `swift build`, or `swift package build`. The app target requires Xcode (Assets.xcassets, entitlements, Info.plist).
+Always build via the drews-xcode-mcp tools — never `xcodebuild`, `swift build`, or `swift package build`. The app target requires Xcode (Assets.xcassets, entitlements, Info.plist).
 
-- Build: `mcp__xcode-mcp-server__build_project --project_path /Users/andrew/cursor/macos-agent-smith/AgentSmith/AgentSmith.xcodeproj` (scheme `AgentSmith`). (The repo is also reachable as `~/Documents/ncc_source/cursor/macos-agent-smith` — same directory.)
-- Run the app: `mcp__xcode-mcp-server__run_project_unmonitored` (or `run_project_until_terminated`) against the same project path, then `stop_project` + `get_runtime_output`. Do NOT use `run_project_with_user_interaction` — it blocks on a dialog click.
+- Build: `mcp__drews-xcode-mcp__build_project --project_path /Users/andrew/cursor/macos-agent-smith/AgentSmith/AgentSmith.xcodeproj` (scheme `AgentSmith`). (The repo is also reachable as `~/Documents/ncc_source/cursor/macos-agent-smith` — same directory.)
+- Run the app: `mcp__drews-xcode-mcp__run_project_unmonitored` (or `run_project_until_terminated`) against the same project path, then `stop_project` + `get_runtime_output`. Do NOT use `run_project_with_user_interaction` — it blocks on a dialog click.
 - Run tests: **two commands required, not one.**
-  - `mcp__xcode-mcp-server__run_project_tests` against `AgentSmith.xcodeproj` covers any tests that live in the .xcodeproj test bundle. Today there are none here, but it's the right hook if .xcodeproj-side tests ever get added.
+  - `mcp__drews-xcode-mcp__run_project_tests` against `AgentSmith.xcodeproj` covers any tests that live in the .xcodeproj test bundle. Today there are none here, but it's the right hook if .xcodeproj-side tests ever get added.
   - **Package tests** (everything under `AgentSmithPackage/Tests/AgentSmithTests/` — the bulk of the suite) must be run manually from the terminal:
     ```
     cd /Users/andrew/cursor/macos-agent-smith/AgentSmithPackage && swift test --skip MemoryStoreIntegrationTests
