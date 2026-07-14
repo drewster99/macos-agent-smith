@@ -319,9 +319,30 @@ struct TaskDetailWindow: View {
         }
     }
 
-    /// Status-driven default mode for a section. The user can override to/from `.preview`
-    /// and `.expanded` via the header chevron; `.hidden` is not user-toggleable.
-    private func defaultMode(_ kind: SectionKind, for status: AgentTask.Status) -> SectionMode {
+    /// True while the task is in an active validation loop. During that loop the status
+    /// OSCILLATES between `.validating` (judging) and `.running` (worker reworking a rejection)
+    /// once per round. If the acceptance section's default expansion keyed on the raw status it
+    /// would expand and collapse on every round, yanking the scroll position out from under the
+    /// user — so the sections key on this stable flag instead.
+    private func validationActive(_ task: AgentTask) -> Bool {
+        guard !task.acceptanceCriteria.isEmpty else { return false }
+        switch task.status {
+        case .validating, .awaitingReview:
+            return true
+        case .running, .paused, .interrupted:
+            // Mid-rework between rejection and resubmission still counts as "in the loop"
+            // once at least one validation round has run.
+            return (task.validation?.round ?? 0) > 0
+        default:
+            return false
+        }
+    }
+
+    /// Default mode for a section, driven by task status EXCEPT for acceptance, which keys on the
+    /// stable `validationActive` flag so it doesn't oscillate. The user can override to/from
+    /// `.preview` and `.expanded` via the header chevron; `.hidden` is not user-toggleable.
+    private func defaultMode(_ kind: SectionKind, for task: AgentTask) -> SectionMode {
+        let status = task.status
         switch (kind, status) {
         case (.error, .failed):                       return .expanded
         case (.error, _):                             return .hidden
@@ -332,10 +353,10 @@ struct TaskDetailWindow: View {
 
         case (.relatedContext, _):                    return .preview
 
-        // Front-and-center while validation is live or being resolved; compact otherwise.
-        case (.acceptance, .validating), (.acceptance, .awaitingReview):
-            return .expanded
-        case (.acceptance, _):                        return .preview
+        // Front-and-center throughout the validation loop; compact otherwise. Keyed on the
+        // stable flag, not the raw status, so the validating↔running oscillation doesn't flip it.
+        case (.acceptance, _):
+            return validationActive(task) ? .expanded : .preview
 
         case (.steps, _):                             return .preview
 
@@ -353,14 +374,14 @@ struct TaskDetailWindow: View {
         }
     }
 
-    private func currentMode(_ kind: SectionKind, for status: AgentTask.Status) -> SectionMode {
+    private func currentMode(_ kind: SectionKind, for task: AgentTask) -> SectionMode {
         if let overridden = modeOverrides[kind] { return overridden }
-        return defaultMode(kind, for: status)
+        return defaultMode(kind, for: task)
     }
 
-    private func toggleSection(_ kind: SectionKind, for status: AgentTask.Status) {
+    private func toggleSection(_ kind: SectionKind, for task: AgentTask) {
         let next: SectionMode
-        switch currentMode(kind, for: status) {
+        switch currentMode(kind, for: task) {
         case .preview, .hidden:  next = .expanded
         case .expanded:          next = .preview
         }
@@ -369,7 +390,7 @@ struct TaskDetailWindow: View {
 
     @ViewBuilder
     private func sectionView(_ kind: SectionKind, task: AgentTask) -> some View {
-        let mode = currentMode(kind, for: task.status)
+        let mode = currentMode(kind, for: task)
         if mode != .hidden {
             switch kind {
             case .error:           errorSection(task)
@@ -422,7 +443,7 @@ struct TaskDetailWindow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 if isExpandable {
                     DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                        toggleSection(.summary, for: task.status)
+                        toggleSection(.summary, for: task)
                     }
                 }
             }
@@ -544,13 +565,13 @@ struct TaskDetailWindow: View {
                         .foregroundStyle(.secondary)
                 } else {
                     VStack(alignment: .leading, spacing: mode == .expanded ? 12 : 6) {
-                        ForEach(task.acceptanceCriteria) { criterion in
-                            criterionRow(criterion, task: task, expanded: mode == .expanded)
+                        ForEach(Array(task.acceptanceCriteria.enumerated()), id: \.element.id) { index, criterion in
+                            criterionRow(criterion, number: index + 1, task: task, expanded: mode == .expanded)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                        toggleSection(.acceptance, for: task.status)
+                        toggleSection(.acceptance, for: task)
                     }
                 }
             }
@@ -664,30 +685,39 @@ struct TaskDetailWindow: View {
     }
 
     @ViewBuilder
-    private func criterionRow(_ criterion: AcceptanceCriterion, task: AgentTask, expanded: Bool) -> some View {
+    private func criterionRow(_ criterion: AcceptanceCriterion, number: Int, task: AgentTask, expanded: Bool) -> some View {
         let latest = task.validation?.latestVerdict(for: criterion.id)
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: Self.verdictSymbol(latest?.verdict))
                     .foregroundStyle(Self.verdictColor(latest?.verdict))
                     .font(.callout)
+                // Stable criterion number — matches the number in Brown's briefing, in
+                // get_task_details, and in the validator's rejection punch list ("Criterion 5").
+                Text("\(number).")
+                    .font(.body.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(criterion.text)
                         .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                     if let qualifiers = Self.criterionQualifiers(criterion) {
                         Text(qualifiers)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let latest, let detail = latest.verdict.detailText {
                         Text("\(latest.verdict.displayLabel): \(detail)")
                             .font(.callout)
                             .foregroundStyle(Self.verdictColor(latest.verdict))
                             .lineLimit(expanded ? nil : 2)
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             if expanded {
                 criterionExpandedDetail(criterion, task: task)
@@ -905,7 +935,7 @@ struct TaskDetailWindow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     if task.steps.contains(where: { !$0.isActive }) || mode == .expanded {
                         DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                            toggleSection(.steps, for: task.status)
+                            toggleSection(.steps, for: task)
                         }
                     }
                 }
@@ -1070,7 +1100,7 @@ struct TaskDetailWindow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if isExpandable {
                     DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                        toggleSection(.updates, for: task.status)
+                        toggleSection(.updates, for: task)
                     }
                 }
             }
@@ -1148,7 +1178,7 @@ struct TaskDetailWindow: View {
 
             if isExpandable && !isEditingDescription {
                 DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                    toggleSection(.description, for: task.status)
+                    toggleSection(.description, for: task)
                 }
             }
         }
