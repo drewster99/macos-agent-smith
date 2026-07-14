@@ -18,7 +18,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     public var completedAt: Date?
     /// Progress updates from Brown, persisted so a restarted Brown has context.
     public var updates: [TaskUpdate]
-    /// Number of times `task_acknowledged` has been called for this task. Starts at 0;
+    /// Number of times this task has been acknowledged (a first-turn runtime action). Starts at 0;
     /// incremented each time Brown acknowledges. A value > 1 means Brown is picking up
     /// after a prior run (rejection-revision or respawn), not a fresh assignment.
     /// Persisted so the signal survives app restart and new-Brown spawns.

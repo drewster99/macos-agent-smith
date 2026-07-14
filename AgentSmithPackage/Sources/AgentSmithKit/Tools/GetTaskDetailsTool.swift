@@ -103,28 +103,12 @@ struct GetTaskDetailsTool: AgentTool {
         parts.append("Disposition: \(task.disposition.rawValue)")
         parts.append("Description: \(task.description)")
 
-        if !task.acceptanceCriteria.isEmpty {
-            let ledger = task.validation
-            let criterionLines = task.acceptanceCriteria.map { criterion -> String in
-                var qualifiers: [String] = []
-                if criterion.waivable { qualifiers.append("waivable") }
-                if case .registry(let name) = criterion.validator { qualifiers.append("validator: \(name)") }
-                if case .inline(let definition) = criterion.validator { qualifiers.append("validator: \(definition.name) (inline)") }
-                if let prepare = criterion.prepare { qualifiers.append("prepare: \(prepare)") }
-                let suffix = qualifiers.isEmpty ? "" : " (\(qualifiers.joined(separator: ", ")))"
-                let verdict = (ledger?.latestVerdict(for: criterion.id)).map { " — \(OrchestrationRuntime.describeVerdict($0))" } ?? ""
-                return "  - \(criterion.text)\(suffix)\(verdict)"
-            }
-            parts.append("Acceptance criteria:\n\(criterionLines.joined(separator: "\n"))")
+        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: true) {
+            parts.append("Acceptance criteria (each judged independently; the number is stable):\n\(criteria)")
         }
 
-        if !task.steps.isEmpty {
-            let stepLines = task.steps.map { step -> String in
-                var line = "  - [\(step.status.rawValue)] \(step.text)"
-                if let note = step.note, !note.isEmpty { line += " — note: \(note)" }
-                return line
-            }
-            parts.append("Steps:\n\(stepLines.joined(separator: "\n"))")
+        if let steps = task.renderedSteps(includeIDs: true) {
+            parts.append("Steps (your working plan; the number is stable):\n\(steps)")
         }
 
         if let commentary = task.commentary, !commentary.isEmpty {

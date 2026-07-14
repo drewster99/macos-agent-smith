@@ -7,14 +7,19 @@ import Foundation
 public struct ManageStepsTool: AgentTool {
     public let name = "manage_steps"
     public let toolDescription = """
-        Manage your task's step list — your working plan, visible to the user and to the \
+        Manage your task's step list — your ORDERED working plan, visible to the user and to the \
         acceptance validators that judge your submission. Keep it current: add steps as you \
-        discover work, mark them in_progress/completed as you go. \
+        discover work, mark them in_progress/completed as you go, and keep them in the order you \
+        will do them. If a plan was seeded for you, it is YOURS — refine THIS list \
+        (update / set_status / reorder / delete). Do NOT start a second parallel plan; a \
+        duplicated, half-checked list is a direct path to rejection. \
         \
-        Actions: `add` (one `text` or several `texts`), `update` (reword a step: `step_id` + \
-        `text`), `set_status` (`step_id` + `status`; skipping or removing REQUIRES a `note` \
-        explaining why — validators read these notes, and a removed step is a permanent \
-        tombstone that cannot be edited again), and `list` (show the current list with ids). \
+        Actions: `add` (one `text` or several `texts`, appended in order), `update` (reword a \
+        step: `step_id` + `text`), `set_status` (`step_id` + `status`; skipping or removing \
+        REQUIRES a `note`), `delete` (`step_id` + `note` — tombstones the step; it stays on the \
+        record for validators but leaves your active list), `reorder` (`step_ids`: every active \
+        step id, in the new order), and `list` (show the current list with ids). \
+        Every action returns the full, numbered, current list. \
         \
         Honesty matters: validators see every skipped/removed step and its note. Quietly \
         dropping planned work is the fastest way to get your submission rejected.
@@ -25,7 +30,7 @@ public struct ManageStepsTool: AgentTool {
         "properties": .dictionary([
             "action": .dictionary([
                 "type": .string("string"),
-                "enum": .array([.string("add"), .string("update"), .string("set_status"), .string("list")]),
+                "enum": .array([.string("add"), .string("update"), .string("set_status"), .string("delete"), .string("reorder"), .string("list")]),
                 "description": .string("The step-list operation to perform.")
             ]),
             "text": .dictionary([
@@ -39,7 +44,12 @@ public struct ManageStepsTool: AgentTool {
             ]),
             "step_id": .dictionary([
                 "type": .string("string"),
-                "description": .string("For `update`/`set_status`: the step's UUID (shown by `list` and in every response).")
+                "description": .string("For `update`/`set_status`/`delete`: the step's UUID (shown by `list` and in every response).")
+            ]),
+            "step_ids": .dictionary([
+                "type": .string("array"),
+                "items": .dictionary(["type": .string("string")]),
+                "description": .string("For `reorder`: EVERY active step's UUID, exactly once, in the new order.")
             ]),
             "status": .dictionary([
                 "type": .string("string"),
@@ -48,7 +58,7 @@ public struct ManageStepsTool: AgentTool {
             ]),
             "note": .dictionary([
                 "type": .string("string"),
-                "description": .string("Why a step was skipped or removed. Required for those statuses; validators read it.")
+                "description": .string("Why a step was skipped, removed, or deleted. Required for those; validators read it.")
             ])
         ]),
         "required": .array([.string("action")])
@@ -65,7 +75,7 @@ public struct ManageStepsTool: AgentTool {
             return .failure("No active task assigned to you.")
         }
         guard case .string(let action) = arguments["action"] else {
-            return .failure("Missing required argument 'action' (add | update | set_status | list).")
+            return .failure("Missing required argument 'action' (add | update | set_status | delete | reorder | list).")
         }
 
         switch action {
@@ -119,8 +129,36 @@ public struct ManageStepsTool: AgentTool {
             }
             return .success("Step status set to \(statusRaw).\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
 
+        case "delete":
+            guard let stepID = Self.stepID(from: arguments) else {
+                return .failure("`delete` requires `step_id` (a UUID from `list`).")
+            }
+            guard case .string(let note) = arguments["note"], !note.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return .failure("`delete` requires a `note` explaining why — validators read it, and the step stays on the record as a tombstone.")
+            }
+            if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .delete(stepID: stepID, note: note)) {
+                return .failure(error)
+            }
+            return .success("Step deleted (tombstoned).\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
+
+        case "reorder":
+            guard case .array(let raw) = arguments["step_ids"] else {
+                return .failure("`reorder` requires `step_ids`: an array of every active step's UUID, in the new order.")
+            }
+            let ids = raw.compactMap { item -> UUID? in
+                if case .string(let s) = item { return UUID(uuidString: s) }
+                return nil
+            }
+            guard ids.count == raw.count else {
+                return .failure("`reorder` `step_ids` must all be valid UUIDs. Call `list` to see the current ids.")
+            }
+            if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .reorder(orderedActiveIDs: ids)) {
+                return .failure(error)
+            }
+            return .success("Steps reordered.\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
+
         default:
-            return .failure("Unknown action '\(action)'. Use add | update | set_status | list.")
+            return .failure("Unknown action '\(action)'. Use add | update | set_status | delete | reorder | list.")
         }
     }
 
@@ -144,26 +182,13 @@ public struct ManageStepsTool: AgentTool {
         }
     }
 
-    /// The worker's view: active steps with ids and statuses. Tombstoned (removed) steps
-    /// are counted but not listed — they're gone from the plan, though validators still
-    /// see them in full.
+    /// The worker's view: numbered active steps with ids and statuses, via the shared renderer
+    /// so the numbering matches the briefing, `get_task_details`, and the validator's punch list.
+    /// Tombstoned (removed) steps are counted but not numbered — they're gone from the active
+    /// plan, though validators still see them in full.
     private static func renderedStepList(taskID: UUID, context: ToolContext) async -> String {
         guard let task = await context.taskStore.task(id: taskID) else { return "(task not found)" }
-        let active = task.steps.filter(\.isActive)
-        let removedCount = task.steps.count - active.count
-        guard !active.isEmpty else {
-            return removedCount > 0
-                ? "Step list is empty (\(removedCount) removed step(s) remain on the record for validators)."
-                : "Step list is empty."
-        }
-        var lines = active.map { step -> String in
-            var line = "- [\(step.status.rawValue)] \(step.text) (id: \(step.id.uuidString))"
-            if let note = step.note, !note.isEmpty { line += " — note: \(note)" }
-            return line
-        }
-        if removedCount > 0 {
-            lines.append("(\(removedCount) removed step(s) remain on the record for validators)")
-        }
-        return "Current steps:\n" + lines.joined(separator: "\n")
+        guard let rendered = task.renderedSteps(includeIDs: true) else { return "Step list is empty." }
+        return "Current steps:\n\(rendered)"
     }
 }

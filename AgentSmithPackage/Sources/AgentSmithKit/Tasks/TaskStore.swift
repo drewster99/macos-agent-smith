@@ -526,6 +526,24 @@ public actor TaskStore {
             }
             task.steps[index].status = status
             if let note { task.steps[index].note = note }
+        case .delete(let stepID, let note):
+            guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
+            guard task.steps[index].status != .removed else { return "Step \(stepID) was already removed." }
+            guard !note.trimmingCharacters(in: .whitespaces).isEmpty else { return "Deleting a step requires a note explaining why." }
+            task.steps[index].status = .removed
+            task.steps[index].note = note
+        case .reorder(let orderedActiveIDs):
+            let active = task.steps.filter(\.isActive)
+            let activeIDs = Set(active.map(\.id))
+            guard Set(orderedActiveIDs) == activeIDs, orderedActiveIDs.count == active.count else {
+                return "reorder requires EXACTLY the current active step ids, each once, in the desired order. Call `list` to see them."
+            }
+            let byID = Dictionary(uniqueKeysWithValues: task.steps.map { ($0.id, $0) })
+            // Reordered active steps first (in the requested order), then removed tombstones in
+            // their original relative order — the record of removed steps is preserved.
+            let reordered = orderedActiveIDs.compactMap { byID[$0] }
+            let removed = task.steps.filter { !$0.isActive }
+            task.steps = reordered + removed
         }
         task.updatedAt = Date()
         tasks[taskID] = task
@@ -712,8 +730,8 @@ public actor TaskStore {
     }
 
     /// Increments the task's acknowledgment counter and returns the new value. Called
-    /// by `TaskAcknowledgedTool` on every ack so a respawned Brown can distinguish
-    /// a first-time ack (count == 1) from a continuation (count > 1) without relying
+    /// by the first-turn acknowledgement side effect on every ack so a respawned Brown can
+    /// distinguish a first-time ack (count == 1) from a continuation (count > 1) without relying
     /// on the fragile `updates.isEmpty` heuristic.
     @discardableResult
     public func incrementAcknowledgmentCount(id: UUID) -> Int {

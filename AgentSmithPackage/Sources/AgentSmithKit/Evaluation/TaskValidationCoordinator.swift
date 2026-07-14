@@ -347,10 +347,11 @@ extension OrchestrationRuntime {
             // Smith's judgment call.
             let progressed = records.contains { $0.verdict.isFinal }
             let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed)
-            if stallRounds >= maxValidationStallRounds {
+            if stallRounds >= maxConsecutiveValidationRoundsWithoutProgress {
                 await failValidation(
                     taskID: taskID,
-                    reason: "validation did not converge: \(stallRounds) consecutive round(s) with no newly accepted criterion — \(rejected.count) criterion(s) still rejected"
+                    stallRounds: stallRounds,
+                    stillRejected: rejected.count
                 )
             } else {
                 await returnRejectionsToWorker(taskID: taskID, rejected: rejected)
@@ -362,18 +363,19 @@ extension OrchestrationRuntime {
     /// worker is torn down, and Smith/user are informed. `run_task` retries reset the
     /// counters (sticky accepts survive), and Smith may fix the criteria first with
     /// `set_acceptance_criteria` if they were the problem.
-    private func failValidation(taskID: UUID, reason: String) async {
+    private func failValidation(taskID: UUID, stallRounds: Int, stillRejected: Int) async {
         // CAS: only fail if still validating — never overwrite a pause/stop that landed
         // after the coordinator's status snapshot.
         guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating]) else { return }
         guard let task = await taskStore.task(id: taskID) else { return }
-        await taskStore.addUpdate(id: taskID, message: "Task FAILED: \(reason).")
+        let reason = "No progress was made toward clearing any acceptance criterion for \(stallRounds) rounds in a row — \(stillRejected) criterion(s) still rejected."
+        await taskStore.addUpdate(id: taskID, message: "Task FAILED validation: \(reason)")
         for agentID in task.assigneeIDs {
             _ = await terminateAgent(id: agentID)
         }
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "Task \"\(task.title)\" FAILED acceptance validation: \(reason).",
+            content: "Task \"\(task.title)\" FAILED acceptance validation. \(reason)",
             metadata: [
                 "messageKind": .string("validation_failed"),
                 "taskID": .string(taskID.uuidString),
@@ -382,10 +384,13 @@ extension OrchestrationRuntime {
         ))
         if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
             await smithAgent.appendUserMessage("""
-                [System: Task "\(task.title)" (ID: \(taskID.uuidString)) FAILED acceptance validation — \(reason). \
-                The result was NOT delivered. Tell the user briefly. If the acceptance criteria themselves were \
-                too strict or ambiguous (read the rejection reasons in the task updates), fix them with \
-                `set_acceptance_criteria`; a `run_task` retry resets the validation counters.]
+                [System: Task "\(task.title)" (ID: \(taskID.uuidString)) FAILED acceptance validation. \(reason) \
+                The result was NOT delivered. Tell the user briefly. Then decide WHY it stalled by reading the \
+                rejection reasons in the task updates: if the criteria themselves were too strict, ambiguous, or \
+                demanded evidence the worker's tools cannot produce, fix them with `set_acceptance_criteria` before \
+                retrying; if the worker simply kept resubmitting incomplete work, a `run_task` retry (which resets \
+                the validation counters) with clearer instructions may be enough. Do NOT re-run it unchanged and \
+                expect a different outcome.]
                 """)
         }
     }
@@ -750,7 +755,7 @@ extension OrchestrationRuntime {
                 ## Your response
                 Judge only whether the criterion's substance is satisfied, treating every field other than the one under judgment as supporting context. Respond with your verdict on the FIRST line:
                 ACCEPT — the criterion is satisfied.
-                REJECT: <specific reason and what is missing — the worker acts on this verbatim>
+                REJECT: <the worker acts on this verbatim, so make it actionable. State TWO things in one message: (1) specifically what is missing, wrong, or unproven — judged on the evidence, not on tone; and (2) the concrete next steps that WOULD earn acceptance — what to do, and where the criterion calls for proof, exactly what evidence to provide and where to put it (e.g. "write the build log to a file and reference its path", "provide the command output showing X", "attach a screenshot of screen Y"). If the criterion is unclear about what evidence would satisfy it, say what you would accept. Do NOT reject for missing evidence without naming the evidence that would suffice.>
                 """
             if criterion.waivable {
                 prompt += "\nWAIVE: <why this criterion genuinely does not apply to this task>\n\nYou MAY WAIVE this criterion if it genuinely does not apply."
@@ -921,14 +926,10 @@ extension OrchestrationRuntime {
     /// respawn fallback, private unparking message).
     private func returnRejectionsToWorker(taskID: UUID, rejected: [CriterionVerdictRecord]) async {
         guard let task = await taskStore.task(id: taskID) else { return }
-        let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let punchList = rejected.map { record -> String in
-            let text = criteriaByID[record.criterionID]?.text ?? "criterion \(record.criterionID.uuidString)"
-            if case .rejected(let reason) = record.verdict {
-                return "- \(text)\n  REJECTED: \(reason)"
-            }
-            return "- \(text)"
-        }.joined(separator: "\n")
+        // Criterion NUMBER is its 1-based position in the acceptance list — the same number
+        // the briefing and get_task_details use, so "Criterion 5" means the same thing everywhere.
+        let numberByID = Dictionary(uniqueKeysWithValues: task.acceptanceCriteria.enumerated().map { ($0.element.id, $0.offset + 1) })
+        let punchList = Self.formatRejectionPunchList(rejected: rejected, task: task, numberByID: numberByID)
 
         // Secure the worker BEFORE mutating the task. The old order (set .running,
         // clear result, THEN spawn) crashed live 2026-07-09: the spawn was refused at
@@ -981,10 +982,18 @@ extension OrchestrationRuntime {
                 parts.append("## Prior Progress\n" + task.updates.map { "- \($0.message)" }.joined(separator: "\n"))
             }
         }
+        let count = rejected.count
+        let plural = count == 1 ? "criterion was" : "criteria were"
         parts.append("""
             ## Acceptance validation — changes required
-            The following acceptance criteria were REJECTED. Fix each, then resubmit with `task_complete`. \
-            Criteria already accepted stay accepted — do not rework them.
+            \(count) acceptance \(plural) rejected. Read each rejection below carefully — every one includes \
+            what was missing and concrete next steps toward acceptance. For efficiency, address ALL of them \
+            before you resubmit with `task_complete`; you MAY instead fix and resubmit one at a time if you \
+            prefer. Criteria that already passed stay accepted — do not rework them. \
+            **Do not resubmit unchanged: the same result gets the same rejection.** If a criterion demands \
+            evidence you genuinely cannot produce with your tools, say so through `request_help` rather than \
+            silently resubmitting.
+
             \(punchList)
             """)
 
@@ -999,6 +1008,30 @@ extension OrchestrationRuntime {
                 "taskID": .string(taskID.uuidString)
             ]
         ))
+    }
+
+    /// Renders the rejected criteria as a numbered punch list: one block per rejection,
+    /// each carrying the criterion's stable number, its full text, and the validator's
+    /// reason (which — per the validator prompt — states both what is missing and the
+    /// concrete next steps toward acceptance). Ordered by criterion number so the list
+    /// reads the same every round.
+    static func formatRejectionPunchList(
+        rejected: [CriterionVerdictRecord],
+        task: AgentTask,
+        numberByID: [UUID: Int]
+    ) -> String {
+        let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let ordered = rejected.sorted { (numberByID[$0.criterionID] ?? .max) < (numberByID[$1.criterionID] ?? .max) }
+        return ordered.enumerated().map { index, record -> String in
+            let number = numberByID[record.criterionID]
+            let label = number.map { "Criterion \($0)" } ?? "Criterion"
+            let text = criteriaByID[record.criterionID]?.text ?? "(criterion no longer in the list)"
+            var block = "### Rejection \(index + 1) — \(label)\nFull criterion: \(text)"
+            if case .rejected(let reason) = record.verdict {
+                block += "\nWhat's missing and how to satisfy it: \(reason)"
+            }
+            return block
+        }.joined(separator: "\n\n")
     }
 
     /// Escalation: the bounded loop failed to converge, a validator errored past retry,

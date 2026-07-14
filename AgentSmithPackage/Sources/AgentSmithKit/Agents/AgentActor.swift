@@ -26,7 +26,8 @@ public actor AgentActor {
     /// The current security-approved tool names (the scoping verdict). Drives `isApproved`.
     private var approvedToolNames: Set<String> = []
     /// Whether the worker has acknowledged its task yet — gates which forced lifecycle tools
-    /// are exposed (pre-ack: `task_acknowledged`; post-ack: `task_update` / `task_complete`).
+    /// are exposed. Acknowledgement itself is a runtime action (no tool); once done, the post-ack
+    /// tools `task_update` / `task_complete` / `request_help` become available.
     private var taskAcknowledged = false
     /// Fingerprint of the candidate set at the last scoping. A change (MCP added/removed/
     /// redefined) triggers a fresh stateless re-scope at the next turn boundary.
@@ -251,11 +252,11 @@ public actor AgentActor {
     private static let toolFailureStreakWarnThreshold = 5
     private static let toolFailureStreakStopThreshold = 10
 
-    /// Brown-only: time of the most recent successful task_acknowledged/task_update/task_complete.
-    /// Used by the silence nudge. Initialized when the run loop starts.
+    /// Brown-only: time of the most recent task communication (first-turn acknowledgement,
+    /// task_update, or task_complete). Used by the silence nudge. Initialized when the run loop starts.
     private var lastTaskCommunicationAt: Date?
     /// Brown-only: tool calls Brown has executed since his last task communication.
-    /// Reset on every successful task_acknowledged/task_update/task_complete.
+    /// Reset on acknowledgement and every successful task_update/task_complete.
     private var toolCallsSinceTaskCommunication = 0
     /// Brown-only: armed = the nudge is allowed to fire. Cleared once the nudge fires,
     /// re-armed when Brown sends a task communication. Prevents the nudge from re-firing
@@ -318,10 +319,10 @@ public actor AgentActor {
     /// Used to ensure task_complete messages get their own focused LLM turn.
     private var deferredMessages: [ChannelMessage] = []
 
-    /// When set, the agent executes this tool on its first turn without calling the LLM.
-    /// Used for `task_acknowledged` on fresh task assignments — saves tokens and latency
-    /// since the tool takes no arguments.
-    private var syntheticFirstToolCall: String?
+    /// When true, the agent acknowledges its assigned task on its first turn — as a runtime
+    /// side effect, WITHOUT an LLM round-trip and WITHOUT a callable tool. Acknowledgement moves
+    /// the task to `.running`, bumps the ack counter, and privately notifies Smith.
+    private var acknowledgesTaskOnFirstTurn = false
 
     /// Per-turn LLM call log for per-turn inspection.
     private var llmTurns: [LLMTurnRecord] = []
@@ -493,10 +494,10 @@ public actor AgentActor {
         maxToolCallsPerIteration = count
     }
 
-    /// Queues a synthetic tool call to execute on the agent's first turn, bypassing the LLM.
-    /// The tool must take no arguments. Cleared after execution.
-    public func setSyntheticFirstToolCall(_ toolName: String) {
-        syntheticFirstToolCall = toolName
+    /// Arranges for this agent to acknowledge its assigned task on its first turn, bypassing the
+    /// LLM. Cleared after it runs.
+    public func setAcknowledgesTaskOnFirstTurn() {
+        acknowledgesTaskOnFirstTurn = true
     }
 
     /// Enables per-task security scoping for this agent (Brown), seeding the initial approved
@@ -1066,12 +1067,12 @@ public actor AgentActor {
 
     /// Forces the small set of trusted built-in lifecycle tools available regardless of the
     /// security verdict, so the task lifecycle always functions. Phased on acknowledgement:
-    /// pre-ack only `task_acknowledged`; post-ack `task_update` / `task_complete`. `reply_to_user`
-    /// is forced throughout but remains gated by its own `isAvailable(in:)` context check
-    /// (user-has-messaged) at the definition/dispatch sites. Forcing is a deliberate security
-    /// bypass applied ONLY to these trusted built-ins.
+    /// acknowledgement itself is a runtime action (no tool), so once it has happened the
+    /// post-ack tools `task_update` / `task_complete` / `request_help` become available.
+    /// `reply_to_user` is forced throughout but remains gated by its own `isAvailable(in:)`
+    /// context check (user-has-messaged) at the definition/dispatch sites. Forcing is a
+    /// deliberate security bypass applied ONLY to these trusted built-ins.
     private func applyForcedLifecycleFlags() {
-        toolRegistry.setForcedAvailable("task_acknowledged", !taskAcknowledged)
         toolRegistry.setForcedAvailable("task_update", taskAcknowledged)
         toolRegistry.setForcedAvailable("task_complete", taskAcknowledged)
         toolRegistry.setForcedAvailable("request_help", taskAcknowledged)
@@ -1186,39 +1187,26 @@ public actor AgentActor {
                 debouncingForMessages = false
             }
 
-            // Synthetic first-turn tool call: run the mandatory task_acknowledged for its side
+            // First-turn task acknowledgement: run the mandatory acknowledgement for its side
             // effects (task → running, ack counter, Smith notification) WITHOUT paying for an
-            // LLM round-trip. Deliberately NOT recorded in the conversation: it's a call the app
-            // fabricated, not one the model made. Appending it as an assistant `functionCall`
-            // both wastes context tokens and produces a history that providers like Gemini 2.5
-            // reject — its thinking mode requires a `thought_signature` on every replayed
-            // function call, and a call the model never made has none. Brown starts
-            // already-acknowledged (`taskAcknowledged`); its continuation context comes from the
-            // briefing (Prior Progress / Last Working State), and pruning already rebuilds Brown
-            // this way — [system, instruction] with no ack turn — so this is an exercised state.
-            if let toolName = syntheticFirstToolCall {
-                syntheticFirstToolCall = nil
-                if let tool = tools.first(where: { $0.name == toolName }) {
-                    // Charset is non-empty so randomElement() never returns nil; the
-                    // "0" coalesce keeps us off force-unwrap and gives a known fallback
-                    // if the constant is ever emptied during refactoring.
-                    let callID = String((0..<9).map { _ in
-                        Self.toolCallIDCharset.randomElement() ?? "0"
-                    })
-                    let syntheticCall = LLMToolCall(
-                        id: callID,
-                        name: toolName,
-                        arguments: "{}"
-                    )
-                    _ = await directExecute(syntheticCall, tool: tool)
-                    if configuration.role == .brown && toolName == "task_acknowledged" {
-                        lastTaskCommunicationAt = Date()
-                        toolCallsSinceTaskCommunication = 0
-                        brownSilenceNudgeArmed = true
-                        taskAcknowledged = true
-                    }
-                    pushLiveContext()
+            // LLM round-trip, and WITHOUT it being a callable tool. It is a runtime action the
+            // app performs, not a call the model made — so nothing is recorded in the
+            // conversation (appending a fabricated assistant `functionCall` both wastes context
+            // tokens and produces a history that providers like Gemini 2.5 reject — their
+            // thinking mode requires a `thought_signature` on every replayed function call, and
+            // a call the model never made has none). Brown starts already-acknowledged
+            // (`taskAcknowledged`); its continuation context comes from the briefing, and pruning
+            // already rebuilds Brown this way — [system, instruction] with no ack turn.
+            if acknowledgesTaskOnFirstTurn {
+                acknowledgesTaskOnFirstTurn = false
+                await performTaskAcknowledgement()
+                if configuration.role == .brown {
+                    lastTaskCommunicationAt = Date()
+                    toolCallsSinceTaskCommunication = 0
+                    brownSilenceNudgeArmed = true
+                    taskAcknowledged = true
                 }
+                pushLiveContext()
                 continue
             }
 
@@ -1786,14 +1774,14 @@ public actor AgentActor {
         var calledCreateTask = false
 
         let taskLifecycleTools: Set<String> = [
-            "task_acknowledged", "task_update", "task_complete", "request_help", "reply_to_user",
+            "task_update", "task_complete", "request_help", "reply_to_user",
             "message_user", "message_brown"
         ]
 
         // Segment calls into contiguous runs of lifecycle vs approval-needing.
         // Each segment completes before the next starts, preserving ordering.
-        // e.g. [task_acknowledged, file_read x10, task_complete] becomes:
-        //   segment 0: lifecycle  [task_acknowledged]     → sequential
+        // e.g. [task_update, file_read x10, task_complete] becomes:
+        //   segment 0: lifecycle  [task_update]           → sequential
         //   segment 1: approval   [file_read x10]         → parallel
         //   segment 2: lifecycle  [task_complete]          → sequential
         struct CallSegment {
@@ -2273,6 +2261,32 @@ public actor AgentActor {
         }
     }
 
+    /// Acknowledges the agent's assigned task as a runtime side effect: bumps the ack counter,
+    /// moves the task to `.running`, and privately notifies Smith whether this is a fresh start
+    /// or a continuation. Formerly the `task_acknowledged` tool; now a first-turn runtime action
+    /// with no model-callable surface. The ack counter is authoritative across respawns,
+    /// rejections, and crash recovery (a `count == 1` post-increment is a fresh ack).
+    private func performTaskAcknowledgement() async {
+        guard let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) else { return }
+        guard task.status.isRunnable || task.status == .running else { return }
+
+        let newAckCount = await toolContext.taskStore.incrementAcknowledgmentCount(id: task.id)
+        let isContinuation = newAckCount > 1
+        await toolContext.taskStore.updateStatus(id: task.id, status: .running)
+
+        guard let smithID = await toolContext.agentIDForRole(.smith) else { return }
+        let content = isContinuation
+            ? "Continuing task '\(task.title)' — working on revisions."
+            : "Task '\(task.title)' acknowledged. Beginning work."
+        await toolContext.post(ChannelMessage(
+            sender: .agent(configuration.role),
+            recipientID: smithID,
+            recipient: .agent(.smith),
+            content: content,
+            metadata: ["messageKind": .string(isContinuation ? "task_continuing" : "task_acknowledged")]
+        ))
+    }
+
     private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> String {
         let agentIDPrefix = String(id.uuidString.prefix(8))
         let outcome = await Self.runToolWithTimeout(call, tool: tool, context: toolContext) { name, seconds in
@@ -2567,9 +2581,6 @@ public actor AgentActor {
         if configuration.role == .brown {
             let isSuccessfulTaskCommunication: Bool
             switch call.name {
-            case "task_acknowledged":
-                isSuccessfulTaskCommunication = result.hasPrefix("Task acknowledged:") || result.hasPrefix("Task continuing:")
-                if isSuccessfulTaskCommunication { taskAcknowledged = true }
             case "task_update":
                 isSuccessfulTaskCommunication = result == "Update sent to Agent Smith."
             case "task_complete":
@@ -3671,7 +3682,7 @@ public actor AgentActor {
             Your conversation history was cleared because it exceeded the model's context window. \
             The task progress above reflects your work so far. Continue working on this task from where you left off. \
             Do not repeat work that the progress updates show is already done. \
-            IMPORTANT: This task is already acknowledged and running — do NOT call `task_acknowledged` again.
+            This task is already running — continue from the progress above.
             """)
 
         let instruction = parts.joined(separator: "\n\n")

@@ -220,6 +220,14 @@ public enum TaskStepAction: Sendable {
     case add(text: String)
     case update(stepID: UUID, newText: String)
     case setStatus(stepID: UUID, status: TaskStep.Status, note: String?)
+    /// Tombstones a step (equivalent to `setStatus(.removed)`), exposed as its own verb because
+    /// "delete this step" is more discoverable than knowing `removed` is a status. Requires a note.
+    case delete(stepID: UUID, note: String)
+    /// Reorders the ACTIVE steps to match `orderedActiveIDs` (which must be exactly the current
+    /// active step ids, in the desired order). Removed tombstones keep their record but are not
+    /// reorderable. This is the missing capability that forced a worker with a different plan to
+    /// append a whole second list instead of rearranging the seeded one.
+    case reorder(orderedActiveIDs: [UUID])
 }
 
 /// The task's validation ledger: round counter, the append-only verdict audit, and the

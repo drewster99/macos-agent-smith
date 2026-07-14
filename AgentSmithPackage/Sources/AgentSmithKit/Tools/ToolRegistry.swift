@@ -20,7 +20,7 @@ import CryptoKit
 ///   code, never by the security agent.
 /// - `isForcedAvailableBySystem` — system override / security bypass. Short-circuits the
 ///   formula so the loop can expose a small set of trusted built-in lifecycle tools exactly
-///   when it needs them (e.g. `task_acknowledged` before the first turn). This is a deliberate
+///   when it needs them (e.g. `task_update` / `task_complete` once the task is acknowledged). This is a deliberate
 ///   security bypass: it may only ever be set by our own code on trusted built-in tools, never
 ///   derived from an MCP tool or any external input.
 ///

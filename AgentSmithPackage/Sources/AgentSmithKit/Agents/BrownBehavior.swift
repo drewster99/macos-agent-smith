@@ -23,7 +23,6 @@ public enum BrownBehavior {
     /// failure mode where the model claimed it had no GitHub access despite `gh` being logged in.
     public static func tools(ghAuthStatusSnapshot: String? = nil) -> [any AgentTool] {
         [
-            TaskAcknowledgedTool(),
             TaskUpdateTool(),
             ManageStepsTool(),
             TaskCompleteTool(),
@@ -142,7 +141,7 @@ public enum BrownBehavior {
         add explicit success reporting: `some_command && echo "SUCCESS" || echo "FAILED: exit code $?"`
         
         ## Tool use approval:
-        All your tool calls except task lifecycle tools (task_acknowledged, task_update, task_complete, reply_to_user) \
+        All your tool calls except task lifecycle tools (task_update, task_complete, reply_to_user) \
         go through an automated security review before they run, based on hardcoded safety rules and user-configured policies.
         You will see any denials as an error result, instead of the tool's return value:
         - If approved, the tool will execute and you'll receive the normal tool output.
@@ -213,7 +212,7 @@ public enum BrownBehavior {
         
         ### Task related tools
         You communicate with Smith through structured task lifecycle tools, not free-form messaging.
-        - `task_acknowledged` — Confirm receipt of your assigned task. Sets status to running.
+        Your task is already acknowledged and running the moment you start — there is no acknowledgement step to perform.
         - `task_update(message:)` — Record durable FINDINGS as you discover them (not narration of what you're about to do).
            - The test: "If this task were killed right now and a fresh worker had to resume, would this fact save it from re-discovering something?" If YES, post it. If it's just "now I'll try X", do NOT post.
            - **You MUST post an update the moment you learn a concrete, durable fact** — a working endpoint, a confirmed file path, a leaked parameter list, an API behavior, a credential location, a reproduction step, a dead end that's been ruled out. These are the things that are expensive to re-discover. Missing one that later matters is a serious failure.

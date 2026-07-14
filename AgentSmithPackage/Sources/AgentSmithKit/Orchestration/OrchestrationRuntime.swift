@@ -315,16 +315,12 @@ public actor OrchestrationRuntime {
     var validatorProvider: (any LLMProvider)?
     var validatorConfiguration: ModelConfiguration?
     /// Convergence rule for the worker↔validator loop: this many CONSECUTIVE rejection
-    /// rounds with nothing newly settled fails the task. Absolute round count is
-    /// unbounded as long as rounds keep making progress.
-    ///
-    /// Deliberately generous. A stalled round is cheap relative to throwing away a task that
-    /// was one insight away from converging, and a worker that has genuinely diverged from the
-    /// validator usually keeps producing identical rejections — which costs rounds but loses
-    /// nothing. Ending the loop is the last resort, not the budget.
-    var maxValidationStallRounds = 20
+    /// rounds that settle NOTHING new fail the task. The name is deliberately literal —
+    /// this is not a total-round cap. Absolute round count is unbounded as long as rounds
+    /// keep making progress (any criterion newly accepted or waived resets the counter).
+    var maxConsecutiveValidationRoundsWithoutProgress = 5
     /// Per-report criterion parallelism cap.
-    var validationParallelism = 3
+    var validationParallelism = 5
     /// Per-task reentrancy guard for validation runs.
     var tasksBeingValidated: Set<UUID> = []
     /// The in-flight validation Task per task, so a pause/stop can cancel it — the
@@ -843,6 +839,24 @@ public actor OrchestrationRuntime {
             }
             parts.append("## Attachments\n\(lines.joined(separator: "\n"))")
         }
+        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: task.acknowledgmentCount > 0) {
+            parts.append("""
+                ## Acceptance criteria — the contract your submission is judged against
+                Each is judged independently, on evidence. Your `task_complete` is accepted only when \
+                EVERY criterion below is satisfied (or waived). Provide the specific evidence each one asks \
+                for. These numbers are stable — a rejection referring to "Criterion 3" means this list's #3.
+                \(criteria)
+                """)
+        }
+        if let steps = task.renderedSteps(includeIDs: true) {
+            parts.append("""
+                ## Steps — your working plan
+                This plan is YOURS to own and evolve with `manage_steps` (update / set_status / reorder / \
+                delete). If it was seeded for you, adopt and refine it — do NOT start a second parallel plan. \
+                The validators read this list, so keep every step's status honest.
+                \(steps)
+                """)
+        }
         if !task.updates.isEmpty {
             var updateLines: [String] = []
             for update in task.updates {
@@ -1239,11 +1253,11 @@ public actor OrchestrationRuntime {
 
     /// Updates the global tool-security configuration (user Settings). Applied to each Brown at its
     /// next spawn (the per-call flag and pre-flight flag are read at spawn; the global policy too).
-    /// Overrides the worker↔validator convergence budget (see `maxValidationStallRounds`).
+    /// Overrides the convergence budget (see `maxConsecutiveValidationRoundsWithoutProgress`).
     /// Exists so the budget is tunable without a rebuild — and so tests can drive the
-    /// non-convergence path without scripting twenty rejection rounds.
-    public func setValidationStallBudget(_ rounds: Int) {
-        maxValidationStallRounds = max(1, rounds)
+    /// non-convergence path without scripting a full budget's worth of rejection rounds.
+    public func setMaxConsecutiveValidationRoundsWithoutProgress(_ rounds: Int) {
+        maxConsecutiveValidationRoundsWithoutProgress = max(1, rounds)
     }
 
     public func setToolSecurity(preflightScoping: Bool, perCallCheck: Bool, globalPolicy: [String: ToolPolicy]) async {
@@ -1489,7 +1503,7 @@ public actor OrchestrationRuntime {
         let briefing = await composeBrownTaskBriefing(for: refreshed)
         let attachmentsForBrown = await collectTaskAttachments(refreshed)
         if let brownAgent = supervisor.agent(id: brownID) {
-            await brownAgent.setSyntheticFirstToolCall("task_acknowledged")
+            await brownAgent.setAcknowledgesTaskOnFirstTurn()
             await brownAgent.appendUserMessage(briefing, attachments: attachmentsForBrown)
         }
 
@@ -1905,7 +1919,7 @@ public actor OrchestrationRuntime {
                         // Synthetic ack runs BEFORE any LLM call on Brown's first run-loop
                         // tick — set it before seeding so the synthetic-tool-call branch
                         // doesn't accidentally race with the seeded user message.
-                        await brownAgent.setSyntheticFirstToolCall("task_acknowledged")
+                        await brownAgent.setAcknowledgesTaskOnFirstTurn()
                         await brownAgent.appendUserMessage(briefing, attachments: attachmentsForBrown)
                     }
                     brownSpawned = true
@@ -2033,7 +2047,7 @@ public actor OrchestrationRuntime {
                     let briefing = await composeBrownTaskBriefing(for: task)
                     let attachmentsForBrown = await collectTaskAttachments(task)
                     if let brownAgent = supervisor.agent(id: brownID) {
-                        await brownAgent.setSyntheticFirstToolCall("task_acknowledged")
+                        await brownAgent.setAcknowledgesTaskOnFirstTurn()
                         await brownAgent.appendUserMessage(briefing, attachments: attachmentsForBrown)
                     }
                     autoResumedTasks.append(task)
