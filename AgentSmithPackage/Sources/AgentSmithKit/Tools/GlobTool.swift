@@ -64,8 +64,8 @@ final class GlobTool: AgentTool {
     let name = "glob"
 
     var toolDescription: String {
-        "Find files matching a glob pattern (supports *, **, ?, and {a,b}) under a specific directory. Returns paths newest-first as a JSON object: `search_root` + `matches` (paths relative to `search_root`) + `source` (\"spotlight_index\" or \"filesystem_walk\") + `stop_reason` + `total_matched` + `more_available` + `resume_token`. Use this instead of `find`/`ls`. "
-        + "`path` MUST be a specific project or subdirectory (e.g. `~/projects/my-app`, not `~`). Searching the home directory itself, `/`, `/Users`, `/Library`, or another system root is REFUSED — those are mostly system files and the search would be meaningless. If you do not know the right directory, find it out first: a refused search will be refused again no matter how the pattern is written, so re-running it with a different pattern under the same too-broad root only wastes turns. "
+        "Find files matching a glob pattern (supports *, **, ?, and {a,b}). Returns paths newest-first as a JSON object: `search_root` + `matches` (paths relative to `search_root`) + `source` (\"spotlight_index\" or \"filesystem_walk\") + `stop_reason` + `total_matched` + `more_available` + `resume_token`. Use this instead of `find`/`ls`. "
+        + "Backed by the macOS Spotlight index (`mdfind`), so a broad `path` — even the home directory — is fine; the query narrows it. TWO consequences of the index: (1) only INDEXED files are returned — anything Spotlight doesn't index (some system/hidden locations) won't appear; (2) a file created, moved, or renamed in the last few moments may not be in the index yet, so it can be briefly missing — retry shortly, or point `path` right at its directory (glob falls back to a direct filesystem walk when the index can't answer). "
         + FilesystemSearch.pruneSummary
     }
 
@@ -89,7 +89,7 @@ final class GlobTool: AgentTool {
                 ]),
                 "path": .dictionary([
                     "type": .string("string"),
-                    "description": .string("Absolute or ~-prefixed directory to search in. `~` expands as a path prefix (`~/projects/foo`) but resolving exactly to `~`/`$HOME` or a system root like `/` or `/System` is refused as too broad. Ignored when `resume` is set.")
+                    "description": .string("Absolute or ~-prefixed directory to search in. `~` expands as a path prefix (`~/projects/foo`); a broad scope like `~` or `/` is allowed because the Spotlight index makes it cheap. Narrower is still faster and less noisy when you know the project. Ignored when `resume` is set.")
                 ]),
                 "limit": .dictionary([
                     "type": .string("integer"),
@@ -220,18 +220,10 @@ final class GlobTool: AgentTool {
         }
         let resolvedBase = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
 
-        if FilesystemSearch.isOverlyBroadRoot(resolvedBase) {
-            // The escape hatch (a machine-wide `mdfind`) is only worth naming to a caller that
-            // actually holds `bash`. Suggesting it to an agent without the tool sends it off to
-            // call a tool it doesn't have — which is exactly what happened before this branch.
-            let escapeHatch = context.agentRole == .brown
-                ? " For a machine-wide filename lookup use `bash` with `mdfind -name <name>`."
-                : " Retrying the same root will fail again — establish the correct directory first, or ask for it."
-            return tooBroad(
-                searchRoot: resolvedBase, pattern: pattern,
-                message: "Refusing to search '\(expanded)' — that root is far too broad (mostly system files). Pass a specific project or subdirectory.\(escapeHatch)"
-            )
-        }
+        // No broad-root refusal: glob is Spotlight-first (`mdfind`), which handles a home-directory
+        // or even machine-wide scope in milliseconds, and the result-count ceiling below catches a
+        // genuinely unbounded match. The walk fallback is independently bounded (entry cap + timeout
+        // + resume token). So a broad `path` is fine — the query does the narrowing.
 
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: resolvedBase, isDirectory: &isDir), isDir.boolValue else {
