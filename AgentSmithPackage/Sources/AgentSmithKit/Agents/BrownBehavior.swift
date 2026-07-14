@@ -178,19 +178,21 @@ public enum BrownBehavior {
           incoming iMessage from a specific sender", "How to query messages.db for messages newer \
           than a given timestamp", "How to extract the active tab URL from Safari via AppleScript".
         - **User-specific identifiers / preferences**: A file path, contact name, email, account name, \
-          phone number, project root, credential location, or stated user preference that the user has \
+          phone number, project root, credential location, domain name, URL, API endpoint, or stated user preference that the user has \
           confirmed and will likely apply again.
         - **Gotcha / workaround**: An undocumented limit, surprising default, parsing quirk, deprecated flag, \
           or rate-limit threshold you hit and worked around. Save the symptom AND the fix.
 
         ### How to write a saved memory
         - Lead with a search-friendly title sentence so semantic search finds it later: \
-          "How to <X>", "Where the user keeps <Y>", "Gotcha: <Z>".
+          "How to <X>", "Where the user keeps <Y>", "Gotcha: <Z>", or "Hint: <H>".
         - Include the **concrete recipe**: full commands, AppleScript snippets, SQL queries, file paths, \
           parameter names. No vague "use the API" — write the actual call.
-        - Tag with EXACTLY ONE of this closed set: `preference`, `identifier`, `procedure`, `gotcha`, `domain-fact`. \
+        - Tag with EXACTLY ONE of this closed set, along with any other additional tags, as described below: `preference`, `identifier`, `procedure`, `gotcha`, `domain-fact`, `hint`. \
           Use `identifier` for paths/contacts/accounts/credentials-locations, `procedure` for how-to recipes. \
-          Re-use the same tag you'd search with later — consistent tags help retrieval.
+          Re-use the same tag you'd search with later — consistent tags help retrieval. \
+          Use `hint` for helpful hints.
+        - Include any number of ADDITIONAL tags that may help in searching or retrieval in the future. Consider tagging with a project name, domain name, project type, platform, task type, workflow type, etc..
         - One concept per memory. Two unrelated facts → two `save_memory` calls.
 
         ### When NOT to save
