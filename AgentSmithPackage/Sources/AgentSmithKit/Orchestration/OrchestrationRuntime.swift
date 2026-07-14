@@ -1239,6 +1239,13 @@ public actor OrchestrationRuntime {
 
     /// Updates the global tool-security configuration (user Settings). Applied to each Brown at its
     /// next spawn (the per-call flag and pre-flight flag are read at spawn; the global policy too).
+    /// Overrides the worker↔validator convergence budget (see `maxValidationStallRounds`).
+    /// Exists so the budget is tunable without a rebuild — and so tests can drive the
+    /// non-convergence path without scripting twenty rejection rounds.
+    public func setValidationStallBudget(_ rounds: Int) {
+        maxValidationStallRounds = max(1, rounds)
+    }
+
     public func setToolSecurity(preflightScoping: Bool, perCallCheck: Bool, globalPolicy: [String: ToolPolicy]) async {
         preflightScopingEnabled = preflightScoping
         perCallCheckEnabled = perCallCheck

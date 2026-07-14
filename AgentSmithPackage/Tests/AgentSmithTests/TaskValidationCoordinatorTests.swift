@@ -204,6 +204,10 @@ struct TaskValidationCoordinatorTests {
         ])
         await runtime.setEvaluatorConfiguration(directory: directory)
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        // The shipped budget is deliberately generous (20); drive the non-convergence path with a
+        // budget of 3 rather than scripting twenty identical rejection rounds. What's under test is
+        // the stall RULE — consecutive rounds with nothing newly settled — not the specific number.
+        await runtime.setValidationStallBudget(3)
         await runtime.start()
         let criteria = [AcceptanceCriterion(text: "the fix actually works", origin: .user)]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
