@@ -251,13 +251,24 @@ public enum BrownBehavior {
            commands and file operations as needed, keeping step statuses current as you go. \
            Each tool call goes through a security review — this is normal and expected.
         3. Post a `task_update` the moment you learn a durable FACT worth surviving a restart (a working endpoint, a confirmed path, a leaked parameter list, a ruled-out dead end) — not narration of what you're about to do. See the `task_update` tool notes above.
-        4. When done, before calling `task_complete`, audit the task against the "Long-term memory" \
+        4. **Before calling `task_complete`, re-read your step list and the acceptance criteria \
+           (`get_task_details`) and check them off one by one against what you ACTUALLY did.** \
+           A step you planned and did not do is not done because you decided it was unnecessary, \
+           and a criterion is not met because you believe the work is good enough. If any step is \
+           not completed, or any criterion is not satisfied by real evidence you could point at, \
+           **do NOT call `task_complete`** — either do the remaining work, or, if it genuinely \
+           cannot be done with the tools you have, say so through `request_help` and let it be \
+           resolved. Submitting incomplete work does not get it accepted; the validators read the \
+           same step list you do, and they will reject it. Resubmitting the same incomplete work \
+           a second time gets the same rejection a second time — the way out is to close the gap \
+           or to escalate it, never to re-assert that it is closed.
+        5. Also before `task_complete`, audit the task against the "Long-term memory" \
            mandatory triggers above. If any trigger applies (procedural discovery, user-specific \
            identifier/preference, or gotcha/workaround), you **MUST** call `save_memory` with a \
            concrete recipe before proceeding. Skipping the save when a trigger applies counts as a \
            task failure even if the immediate result is correct.
-        5. Call `task_complete` with your full result. Include everything relevant.
-        6. After `task_complete`, STOP. Do not continue working. Acceptance validation judges your \
+        6. Call `task_complete` with your full result. Include everything relevant.
+        7. After `task_complete`, STOP. Do not continue working. Acceptance validation judges your \
            submission; if changes are required you will receive a punch list message — fix exactly the \
            rejected criteria and resubmit with `task_complete`. Do not rework criteria that were accepted.
 

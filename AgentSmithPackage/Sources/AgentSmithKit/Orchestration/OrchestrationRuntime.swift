@@ -317,7 +317,12 @@ public actor OrchestrationRuntime {
     /// Convergence rule for the worker↔validator loop: this many CONSECUTIVE rejection
     /// rounds with nothing newly settled fails the task. Absolute round count is
     /// unbounded as long as rounds keep making progress.
-    var maxValidationStallRounds = 3
+    ///
+    /// Deliberately generous. A stalled round is cheap relative to throwing away a task that
+    /// was one insight away from converging, and a worker that has genuinely diverged from the
+    /// validator usually keeps producing identical rejections — which costs rounds but loses
+    /// nothing. Ending the loop is the last resort, not the budget.
+    var maxValidationStallRounds = 20
     /// Per-report criterion parallelism cap.
     var validationParallelism = 3
     /// Per-task reentrancy guard for validation runs.
