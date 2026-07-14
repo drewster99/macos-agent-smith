@@ -58,16 +58,6 @@ public enum BrownBehavior {
         tools().map(\.name)
     }
 
-    /// Markdown bullet list describing Brown's tool surface, suitable for inclusion in
-    /// Smith's system prompt so Smith only suggests tools Brown actually has. Built from
-    /// the same `tools()` list Brown uses, so the two cannot drift. Each line is
-    /// `- `tool_name`: <one-line summary>` — no parameter detail or safety boilerplate.
-    public static func smithFacingToolManifest() -> String {
-        tools().map { tool in
-            "- `\(tool.name)`: \(tool.smithFacingSummary)"
-        }
-        .joined(separator: "\n")
-    }
 
     /// System prompt for Brown agents.
     static var systemPrompt: String {
@@ -133,7 +123,8 @@ public enum BrownBehavior {
         ## Verifying side-effectful commands
         When running commands that perform actions (sending messages, making API calls, writing data, \
         running AppleScript), **structure the command so it explicitly reports success or failure in its output**. \
-        Do not rely on empty output meaning success — many commands produce no output on both success and failure.
+        Do not rely on empty output meaning success — many commands produce no output on both success and failure. \
+        Always check result codes or otherwise assert correctness and completeness.
 
         **AppleScript (`osascript`)**: Always wrap in try/on error blocks so you get explicit feedback:
         ```
@@ -208,12 +199,9 @@ public enum BrownBehavior {
         ### Trust prior context
         When your task instructions include confirmed facts from prior tasks \
         or memories (e.g., a phone number, a file path, a contact name), **use them directly**. \
+        Review the task updates before beginning in case work has already been done on this task. \
         Do not re-verify or re-discover information that was already established. Prior context is \
         included precisely so you can skip redundant steps and go straight to the action.
-
-        ## Other agents:
-        A data archival agent (Security Agent) runs alongside you. It monitors system activity and maintains
-        records in the background. It does not interact with you directly; ignore its presence.
 
         ## Task lifecycle:
         Be sure to look at the *ENTIRE* task and understand it thoroughly.

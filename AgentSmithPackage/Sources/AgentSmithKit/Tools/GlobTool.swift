@@ -64,7 +64,9 @@ final class GlobTool: AgentTool {
     let name = "glob"
 
     var toolDescription: String {
-        "Find files matching a glob pattern (supports *, **, ?, and {a,b}). Returns paths newest-first as a JSON object: `search_root` + `matches` (paths relative to `search_root`) + `source` (\"spotlight_index\" or \"filesystem_walk\") + `stop_reason` + `total_matched` + `more_available` + `resume_token`. Use this instead of `find`/`ls`. " + FilesystemSearch.pruneSummary
+        "Find files matching a glob pattern (supports *, **, ?, and {a,b}) under a specific directory. Returns paths newest-first as a JSON object: `search_root` + `matches` (paths relative to `search_root`) + `source` (\"spotlight_index\" or \"filesystem_walk\") + `stop_reason` + `total_matched` + `more_available` + `resume_token`. Use this instead of `find`/`ls`. "
+        + "`path` MUST be a specific project or subdirectory (e.g. `~/projects/my-app`, not `~`). Searching the home directory itself, `/`, `/Users`, `/Library`, or another system root is REFUSED — those are mostly system files and the search would be meaningless. If you do not know the right directory, find it out first: a refused search will be refused again no matter how the pattern is written, so re-running it with a different pattern under the same too-broad root only wastes turns. "
+        + FilesystemSearch.pruneSummary
     }
 
     public func description(for role: AgentRole) -> String {
@@ -219,9 +221,15 @@ final class GlobTool: AgentTool {
         let resolvedBase = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
 
         if FilesystemSearch.isOverlyBroadRoot(resolvedBase) {
+            // The escape hatch (a machine-wide `mdfind`) is only worth naming to a caller that
+            // actually holds `bash`. Suggesting it to an agent without the tool sends it off to
+            // call a tool it doesn't have — which is exactly what happened before this branch.
+            let escapeHatch = context.agentRole == .brown
+                ? " For a machine-wide filename lookup use `bash` with `mdfind -name <name>`."
+                : " Retrying the same root will fail again — establish the correct directory first, or ask for it."
             return tooBroad(
                 searchRoot: resolvedBase, pattern: pattern,
-                message: "Refusing to search '\(expanded)' — that root is far too broad (mostly system files). Pass a specific project or subdirectory. For a machine-wide filename lookup use `bash` with `mdfind -name <name>`."
+                message: "Refusing to search '\(expanded)' — that root is far too broad (mostly system files). Pass a specific project or subdirectory.\(escapeHatch)"
             )
         }
 

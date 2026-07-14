@@ -257,13 +257,27 @@ struct WebToolsWiringTests {
         #expect(ToolSafetyClassification.knownBuiltInNames.contains("instant_answer"))
     }
 
-    @Test("Brown exposes both tools and Smith's manifest lists them")
-    func brownWiringAndManifest() {
+    @Test("Brown and Smith both expose the web tools")
+    func brownAndSmithWiring() {
         #expect(BrownBehavior.toolNames.contains("web_search"))
         #expect(BrownBehavior.toolNames.contains("instant_answer"))
-        let manifest = BrownBehavior.smithFacingToolManifest()
-        #expect(manifest.contains("web_search"))
-        #expect(manifest.contains("instant_answer"))
+        #expect(SmithBehavior.toolNames.contains("web_search"))
+        #expect(SmithBehavior.toolNames.contains("instant_answer"))
+    }
+
+    /// Brown's toolset is chosen by the Security Agent's scoping pass AFTER Smith writes the task
+    /// description, so any hardcoded list of Brown's tools in Smith's prompt is a guess — and one
+    /// Smith was observed acting on, calling `bash` (which it does not have) because the prompt
+    /// showed it as available. Smith's prompt must describe capabilities, never name Brown's tools.
+    /// Matches a tool-manifest bullet (`- \`bash\`: run a shell command…`) — the shape the injected
+    /// manifest used. Telling Smith it does NOT have `bash` is fine (and deliberate); advertising
+    /// Brown's tools to Smith as a menu is not.
+    @Test("Smith's prompt does not inject a hardcoded list of Brown's tools")
+    func smithPromptCarriesNoBrownToolManifest() {
+        let prompt = SmithBehavior.systemPrompt()
+        for brownOnlyTool in ["bash", "gh", "run_applescript", "file_write", "file_edit", "manage_steps"] {
+            #expect(!prompt.contains("- `\(brownOnlyTool)`:"), "Smith's prompt advertises Brown-only tool '\(brownOnlyTool)'")
+        }
     }
 }
 

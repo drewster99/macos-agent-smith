@@ -124,7 +124,7 @@ struct WebFetchTests {
 
     // MARK: - Classification & wiring
 
-    @Test("web_fetch is open-world, non-destructive, read-only, and wired into Brown")
+    @Test("web_fetch is open-world, non-destructive, read-only, and wired into Brown and Smith")
     func classificationAndWiring() {
         let tool = WebFetchTool()
         #expect(tool.isOpenWorld)
@@ -132,7 +132,7 @@ struct WebFetchTests {
         #expect(!ToolSafetyClassification.hasSideEffects(toolName: "web_fetch"))
         #expect(ToolSafetyClassification.knownBuiltInNames.contains("web_fetch"))
         #expect(BrownBehavior.toolNames.contains("web_fetch"))
-        #expect(BrownBehavior.smithFacingToolManifest().contains("web_fetch"))
+        #expect(SmithBehavior.toolNames.contains("web_fetch"))
     }
 
     @Test("missing url throws; non-http and empty url are refused")
