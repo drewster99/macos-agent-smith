@@ -55,10 +55,6 @@ struct GetAppScriptingSchemaTool: AgentTool {
 
     public init() {}
 
-    public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown
-    }
-
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         let bundleID: String? = {
             if case .string(let s) = arguments["bundle_id"], !s.isEmpty { return s }

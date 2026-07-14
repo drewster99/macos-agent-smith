@@ -53,10 +53,6 @@ struct DirectoryListingTool: AgentTool {
         "required": .array([.string("path")])
     ]
 
-    public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown
-    }
-
     var executionTimeout: Duration { .seconds(120) }
 
     private static let defaultLimit = 50

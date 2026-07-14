@@ -72,10 +72,6 @@ struct WebSearchTool: AgentTool {
         "required": .array([.string("query")])
     ]
 
-    public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown
-    }
-
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         guard case .string(let query) = arguments["query"] else {
             throw ToolCallError.missingRequiredArgument("query")

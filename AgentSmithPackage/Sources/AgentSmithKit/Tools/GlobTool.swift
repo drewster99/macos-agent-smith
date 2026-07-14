@@ -134,10 +134,6 @@ final class GlobTool: AgentTool {
         self.walkStore = WalkStore(capacity: walkStoreCapacity)
     }
 
-    public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown
-    }
-
     // MARK: - Result shape
 
     /// JSON-serialised tool output. `nil` optionals are omitted by the synthesised encoder —

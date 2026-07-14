@@ -57,10 +57,6 @@ struct ListScriptableAppsTool: AgentTool {
 
     public init() {}
 
-    public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown
-    }
-
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         let query: String? = {
             if case .string(let q) = arguments["query"], !q.isEmpty { return q }

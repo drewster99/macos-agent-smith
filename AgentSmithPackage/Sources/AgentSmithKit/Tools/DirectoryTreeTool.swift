@@ -37,10 +37,6 @@ struct DirectoryTreeTool: AgentTool {
         "required": .array([.string("path")])
     ]
 
-    public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown
-    }
-
     var executionTimeout: Duration { .seconds(30) }
 
     /// Fixed internal budgets — `max_depth` is the natural bound; these are runaway guards.
