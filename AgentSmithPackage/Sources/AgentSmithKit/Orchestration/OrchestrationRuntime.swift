@@ -1718,6 +1718,26 @@ public actor OrchestrationRuntime {
         await smithAgent.setUsageStore(usageStore)
         await smithAgent.setSessionID(currentSessionID)
 
+        // Egress filter: Smith is unscoped and holds the user's memories + file-read, so its
+        // open-world tools (web_fetch / web_search / instant_answer) are the softest exfiltration
+        // surface in the system. Give Smith its own Security Agent evaluator and gate ONLY those
+        // open-world calls through it — local read-only and messaging tools stay un-reviewed. Without
+        // a Security Agent provider we can't gate, so Smith's egress runs unreviewed (logged), the
+        // pre-existing behavior.
+        if let securityAgentProvider = llmProviders[.securityAgent] {
+            let smithEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
+            if let evalCallback = onEvaluationRecorded {
+                await smithEvaluator.setOnEvaluationRecorded(evalCallback)
+            }
+            if let turnCallback = onTurnRecorded {
+                await smithEvaluator.setOnTurnRecorded { turn in turnCallback(.securityAgent, turn) }
+            }
+            await smithAgent.setSecurityEvaluator(smithEvaluator)
+            await smithAgent.setEvaluatesOpenWorldToolsOnly(true)
+        } else {
+            stopLogger.warning("No Security Agent provider — Smith's open-world (egress) tool calls will run WITHOUT security review.")
+        }
+
         // Auto-run wake fires bypass Smith and drive `restartForNewTask` directly. This
         // is what "scheduled task → run at fire time" was always meant to be: fully
         // mechanical, no LLM in the loop. Smith learns about the new run when its fresh
@@ -2556,6 +2576,32 @@ public actor OrchestrationRuntime {
         abortHandler?("ABORT triggered by \(callerName): \(reason)")
     }
 
+    /// Builds a SecurityEvaluator bound to the Security Agent's LLM config. Shared by Brown (which
+    /// reviews every tool call) and Smith (which reviews only open-world/egress calls). `executionTracker`
+    /// is the instance the requesting agent's tool context writes to, so the evaluator can see whether a
+    /// prior approved call actually succeeded — pass the agent's own tracker to keep them consistent.
+    private func makeSecurityEvaluator(provider: any LLMProvider, executionTracker: ToolExecutionTracker) -> SecurityEvaluator {
+        SecurityEvaluator(
+            provider: provider,
+            systemPrompt: SecurityAgentBehavior.systemPrompt,
+            channel: channel,
+            abort: { [weak self] reason, callerRole in
+                guard let self else { return }
+                await self.abort(reason: reason, callerRole: callerRole)
+            },
+            usageStore: usageStore,
+            configuration: llmConfigs[.securityAgent],
+            providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
+            sessionID: currentSessionID,
+            hasToolSucceeded: { [executionTracker] toolCallID in
+                await executionTracker.hasSucceeded(toolCallID: toolCallID)
+            },
+            hasToolFailed: { [executionTracker] toolCallID in
+                await executionTracker.hasFailed(toolCallID: toolCallID)
+            }
+        )
+    }
+
     /// Spawns a Brown+Security Agent pair. Terminates any existing Brown first (single Brown policy).
     public func spawnBrown(for task: AgentTask? = nil) async -> UUID? {
         await lifecycleQueue.run { [weak self] in
@@ -2614,26 +2660,7 @@ public actor OrchestrationRuntime {
 
         // Create the SecurityEvaluator with the Security Agent's LLM config — this evaluator
         // IS the Security Agent (it runs as a lightweight evaluator, not a full agent actor).
-        let securityAgentConfig = llmConfigs[.securityAgent]
-        let evaluator = SecurityEvaluator(
-            provider: securityAgentProvider,
-            systemPrompt: SecurityAgentBehavior.systemPrompt,
-            channel: channel,
-            abort: { [weak self] reason, callerRole in
-                guard let self else { return }
-                await self.abort(reason: reason, callerRole: callerRole)
-            },
-            usageStore: usageStore,
-            configuration: securityAgentConfig,
-            providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
-            sessionID: currentSessionID,
-            hasToolSucceeded: { [executionTracker] toolCallID in
-                await executionTracker.hasSucceeded(toolCallID: toolCallID)
-            },
-            hasToolFailed: { [executionTracker] toolCallID in
-                await executionTracker.hasFailed(toolCallID: toolCallID)
-            }
-        )
+        let evaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: executionTracker)
         // The evaluator stays a LOCAL until Brown's registration attaches it to the agent's
         // handle — a spawn that fails before registration simply drops it, with no staging
         // entry to clean up on every failure path.
