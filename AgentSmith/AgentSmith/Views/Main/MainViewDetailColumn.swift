@@ -33,6 +33,7 @@ struct MainViewDetailColumn: View {
 
             ChannelLogView(
                 messages: viewModel.messages,
+                toolRequestIDs: viewModel.renderedToolRequestIDs,
                 persistedHistoryCount: viewModel.persistedHistoryCount,
                 hasRestoredHistory: viewModel.hasRestoredHistory,
                 onRestoreHistory: { viewModel.restoreHistory() },

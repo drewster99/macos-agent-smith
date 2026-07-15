@@ -178,6 +178,11 @@ private struct ChannelGroupingIndex {
 /// Color-coded scrolling message stream with attachment display.
 struct ChannelLogView: View, Equatable {
     var messages: [ChannelMessage]
+    /// `requestID`s of every resident `tool_request`, maintained incrementally by `AppViewModel`
+    /// (O(1) per append) so suppression doesn't rebuild it over the whole transcript each render.
+    /// Not part of `==`: it changes only when `messages` does, which `messages.count`/`.last?.id`
+    /// already detect.
+    var toolRequestIDs: Set<String>
     var persistedHistoryCount: Int
     var hasRestoredHistory: Bool
     var onRestoreHistory: () -> Void
@@ -257,14 +262,11 @@ struct ChannelLogView: View, Equatable {
         // fresh from the *rendered window* — they're only consumed by in-window tool rows, so
         // windowing them keeps the render O(window) with nothing retained beyond the visible rows.
         let index = ChannelGroupingIndex(visibleMessages)
-        // Suppression, however, must see EVERY tool_request id — not just the window's — so a
+        // Suppression must see EVERY resident tool_request id — not just the window's — so a
         // security-review / tool-output row whose parent tool_request has scrolled past the
-        // window's top edge still collapses into that parent instead of leaking into the
-        // transcript as a loose row. A Set<String> over all messages is O(n) and cheap: it holds
-        // ids only, no message references, so it doesn't reintroduce the unbounded-state cost.
-        let allToolRequestIDs: Set<String> = Set(messages.compactMap {
-            $0.stringMetadata("messageKind") == "tool_request" ? $0.stringMetadata("requestID") : nil
-        })
+        // window's top edge still collapses into that parent instead of leaking as a loose row.
+        // The set is maintained incrementally by `AppViewModel` (O(1) per append) and passed in,
+        // rather than rebuilt over the whole transcript on every render.
 
         return ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
@@ -298,7 +300,7 @@ struct ChannelLogView: View, Equatable {
                         }
 
                         ForEach(visibleMessages) { message in
-                            if !shouldSuppress(message, toolRequestIDs: allToolRequestIDs) {
+                            if !shouldSuppress(message, toolRequestIDs: toolRequestIDs) {
                                 bannerView(
                                     for: message,
                                     reviewLookup: index.securityReviewByRequestID,

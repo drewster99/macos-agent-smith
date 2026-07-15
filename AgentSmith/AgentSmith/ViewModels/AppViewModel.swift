@@ -17,6 +17,26 @@ final class AppViewModel {
 
     var messages: [ChannelMessage] = []
 
+    /// Set of `requestID`s for every resident `tool_request` message, maintained incrementally as
+    /// `messages` mutates (O(1) per append) so `ChannelLogView` doesn't have to rebuild it over the
+    /// whole transcript on every render. It must cover ALL resident messages — not just the render
+    /// window — so a security-review / tool-output row whose parent scrolled out of the window still
+    /// collapses into that parent instead of leaking as a loose row.
+    private(set) var renderedToolRequestIDs: Set<String> = []
+
+    /// The `requestID` of `message` if it is a `tool_request`, else nil.
+    private func toolRequestID(of message: ChannelMessage) -> String? {
+        guard case .string(let kind)? = message.metadata?["messageKind"], kind == "tool_request",
+              case .string(let requestID)? = message.metadata?["requestID"] else { return nil }
+        return requestID
+    }
+
+    /// Rebuilds `renderedToolRequestIDs` from scratch — used by the infrequent bulk mutations
+    /// (initial load, restore-full-history, clear) where incremental maintenance doesn't apply.
+    private func rebuildRenderedToolRequestIDs() {
+        renderedToolRequestIDs = Set(messages.compactMap(toolRequestID(of:)))
+    }
+
     var tasks: [AgentTask] = [] {
         didSet { rebucketTasks() }
     }
@@ -385,6 +405,7 @@ final class AppViewModel {
             // `migrateLegacyChannelLogIfNeeded`.
             let (tail, total) = try await persistenceManager.loadChannelLogTail(limit: Self.residentMessageCap)
             messages = tail
+            rebuildRenderedToolRequestIDs()
             persistedHistoryCount = total
             // If the whole transcript already fit in the tail there's nothing older to restore.
             hasRestoredHistory = tail.count >= total
@@ -1648,6 +1669,7 @@ final class AppViewModel {
     /// reading "Not active" while its agent was still running.
     func clearLog() {
         messages.removeAll()
+        renderedToolRequestIDs.removeAll()
         // The full transcript is still on disk; re-offer the restore affordance.
         hasRestoredHistory = false
     }
@@ -1692,9 +1714,14 @@ final class AppViewModel {
     /// full history (then they've opted into holding everything until the next relaunch).
     private func appendToTranscript(_ message: ChannelMessage) {
         messages.append(message)
+        if let rid = toolRequestID(of: message) { renderedToolRequestIDs.insert(rid) }
         persistedHistoryCount += 1
         if !hasRestoredHistory && messages.count > Self.residentMessageCap {
-            messages.removeFirst(messages.count - Self.residentMessageCap)
+            let removeCount = messages.count - Self.residentMessageCap
+            for trimmed in messages.prefix(removeCount) {
+                if let rid = toolRequestID(of: trimmed) { renderedToolRequestIDs.remove(rid) }
+            }
+            messages.removeFirst(removeCount)
         }
         pendingChannelAppends.append(message)
         persistMessages()
@@ -1715,6 +1742,7 @@ final class AppViewModel {
                 let fullIDs = Set(full.map(\.id))
                 let liveTail = self.messages.filter { !fullIDs.contains($0.id) }
                 self.messages = full + liveTail
+                self.rebuildRenderedToolRequestIDs()
                 self.persistedHistoryCount = self.messages.count
                 self.hasRestoredHistory = true
             } catch {
