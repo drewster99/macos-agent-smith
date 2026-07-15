@@ -332,22 +332,39 @@ actor SecurityEvaluator {
         let parsedParams = Self.parseToolParams(toolParams)
 
         // Fast-path: a read-only filesystem evidence call from an eligible caller (Smith /
-        // validator) is approved without an LLM round-trip. Still recorded (below) and posted to
-        // the channel by the caller, so it stays visible. Gated by TOOL NAME, not just the
-        // eligibility flag, so nothing mutating or network-bound can ride this path.
+        // validator) is approved without an LLM round-trip. It still goes ALL THE WAY through the
+        // evaluator's normal recording path (`recordEvaluation` — same as an LLM verdict, minus the
+        // network call), producing a synthetic SAFE response and firing `onEvaluationRecorded` so
+        // the inspector and any downstream review posting treat it identically to a real verdict.
+        // Gated by TOOL NAME, not just the eligibility flag, so nothing mutating or network-bound
+        // can ride this path.
         if autoApproveReadOnlyEvidence, readOnlyAutoApproveEligible,
            Self.readOnlyFilesystemEvidenceTools.contains(toolName) {
+            let disposition = SecurityDisposition(approved: true, message: "read-only evidence", isAutoApproval: true)
             appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved read-only evidence)", toolCallID: toolCallID)
-            return SecurityDisposition(approved: true, message: "read-only evidence", isAutoApproval: true)
+            recordEvaluation(
+                toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
+                prompt: "(auto-approved without LLM evaluation: read-only filesystem evidence tool)",
+                response: "SAFE — auto-approved read-only evidence tool",
+                disposition: disposition, startTime: Date(), toolCallID: toolCallID ?? ""
+            )
+            return disposition
         }
 
-        // Auto-approve identical retry of a WARN'd request.
+        // Auto-approve identical retry of a WARN'd request — same full recording path as above.
         if let matchIndex = pendingWarnRetries.firstIndex(where: {
             $0.toolName == toolName && $0.toolParams == parsedParams
         }) {
             pendingWarnRetries.remove(at: matchIndex)
+            let disposition = SecurityDisposition(approved: true, message: "WARN retry", isAutoApproval: true)
             appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved retry of prior WARN)", toolCallID: toolCallID)
-            return SecurityDisposition(approved: true, message: "WARN retry", isAutoApproval: true)
+            recordEvaluation(
+                toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
+                prompt: "(auto-approved without LLM evaluation: identical retry of a prior WARN)",
+                response: "SAFE — auto-approved identical retry of a prior WARN",
+                disposition: disposition, startTime: Date(), toolCallID: toolCallID ?? ""
+            )
+            return disposition
         }
 
         let evalPrompt = await buildEvalPrompt(
