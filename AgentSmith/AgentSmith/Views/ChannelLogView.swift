@@ -253,11 +253,18 @@ struct ChannelLogView: View, Equatable {
         let windowStart = windowStartIndex()
         let visibleMessages = windowStart == 0 ? messages : Array(messages[windowStart...])
         let hiddenEarlierCount = windowStart
-        // Grouping lookups are derived fresh from the *rendered window* (see
-        // ChannelGroupingIndex) rather than maintained as unbounded state on the view model.
-        // The window is bounded and `windowStartIndex()` never splits a tool-call group, so
-        // this is O(window) and correct for the suppression it drives.
+        // Grouping lookups that hold message references (the review/output dicts) are derived
+        // fresh from the *rendered window* — they're only consumed by in-window tool rows, so
+        // windowing them keeps the render O(window) with nothing retained beyond the visible rows.
         let index = ChannelGroupingIndex(visibleMessages)
+        // Suppression, however, must see EVERY tool_request id — not just the window's — so a
+        // security-review / tool-output row whose parent tool_request has scrolled past the
+        // window's top edge still collapses into that parent instead of leaking into the
+        // transcript as a loose row. A Set<String> over all messages is O(n) and cheap: it holds
+        // ids only, no message references, so it doesn't reintroduce the unbounded-state cost.
+        let allToolRequestIDs: Set<String> = Set(messages.compactMap {
+            $0.stringMetadata("messageKind") == "tool_request" ? $0.stringMetadata("requestID") : nil
+        })
 
         return ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
@@ -291,7 +298,7 @@ struct ChannelLogView: View, Equatable {
                         }
 
                         ForEach(visibleMessages) { message in
-                            if !shouldSuppress(message, toolRequestIDs: index.toolRequestIDs) {
+                            if !shouldSuppress(message, toolRequestIDs: allToolRequestIDs) {
                                 bannerView(
                                     for: message,
                                     reviewLookup: index.securityReviewByRequestID,
@@ -618,6 +625,8 @@ private struct MessageRow: View, Equatable {
 
     @State private var isExpanded = false
     @State private var isHovering = false
+    /// Drives the popover shown when the security-disposition indicator (the ✅/⚠️/🚫) is clicked.
+    @State private var showSecurityPopover = false
 
     /// Pre-decoded fields cached on the row so that `body` doesn't re-parse JSON or
     /// re-split the message content on every re-evaluation. Populated by the
@@ -763,13 +772,63 @@ private struct MessageRow: View, Equatable {
         }
     }
 
+    /// The Security Agent's verdict rationale, shown in the popover when the disposition
+    /// indicator is clicked. Prefers the parsed `dispositionMessage`; falls back to the review
+    /// message content with the "Security Agent → Role: " routing prefix stripped.
+    private var securityReviewPopoverText: String? {
+        guard let review = securityReviewMessage else { return nil }
+        if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
+            return msg
+        }
+        let content = review.content
+        if let colon = content.range(of: ": ") {
+            let tail = String(content[colon.upperBound...])
+            return tail.isEmpty ? content : tail
+        }
+        return content.isEmpty ? nil : content
+    }
+
+    /// The disposition indicator rendered as its own control. Clicking it opens a popover with
+    /// the Security Agent's verdict text — kept separate from the row's expand toggle so the
+    /// checkmark reveals the safety rationale without expanding the tool-call data. Nested inside
+    /// the toggle button's label; like the file-path button, it consumes its own hits.
+    @ViewBuilder
+    private func securityDispositionControl() -> some View {
+        if let indicator = dispositionIndicator {
+            Button(action: { showSecurityPopover.toggle() }, label: {
+                Text(indicator)
+            })
+            .buttonStyle(.plain)
+            .help(dispositionTooltipText ?? "Security review")
+            .popover(isPresented: $showSecurityPopover, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(dispositionTooltipText ?? "Security review")
+                        .font(.caption.bold())
+                        .foregroundStyle(dispositionCommentColor)
+                    if let text = securityReviewPopoverText {
+                        Text(text)
+                            .font(AppFonts.channelBody)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("No details provided.")
+                            .font(AppFonts.channelBody)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: 420)
+            }
+        }
+    }
+
     /// Human-readable tooltip text describing what the safety monitor determined.
     private var dispositionTooltipText: String? {
         guard let review = securityReviewMessage,
               case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
         switch d {
         case "approved": return "Safety: Approved"
-        case "autoApproved": return "Safety: Auto-approved (identical retry)"
+        case "autoApproved": return "Safety: Auto-approved"
         case "warning": return "Safety: Warning"
         case "denied": return "Safety: Denied"
         case "abort": return "Safety: Abort triggered"
@@ -782,7 +841,12 @@ private struct MessageRow: View, Equatable {
               case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
         switch d {
         case "autoApproved":
-            return "Auto-approved (identical WARN retry)"
+            // The reason varies (read-only evidence vs identical WARN retry) — use the actual
+            // disposition message rather than assuming one kind of auto-approval.
+            if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
+                return "Auto-approved (\(msg))"
+            }
+            return "Auto-approved"
         case "warning", "denied", "abort":
             // Use the full disposition message from metadata (includes retry instruction for WARN)
             if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
@@ -1021,13 +1085,7 @@ private struct MessageRow: View, Equatable {
                         .font(.caption)
                         .foregroundStyle(AppColors.disclosureToggle)
                 }
-                if let indicator = dispositionIndicator {
-                    if let tooltip = dispositionTooltipText {
-                        Text(indicator).hoverTooltip(tooltip)
-                    } else {
-                        Text(indicator)
-                    }
-                }
+                securityDispositionControl()
             }
             .contentShape(Rectangle())
         })
@@ -1181,13 +1239,7 @@ private struct MessageRow: View, Equatable {
                         .font(.caption)
                         .foregroundStyle(AppColors.disclosureToggle)
                 }
-                if let indicator = dispositionIndicator {
-                    if let tooltip = dispositionTooltipText {
-                        Text(indicator).hoverTooltip(tooltip)
-                    } else {
-                        Text(indicator)
-                    }
-                }
+                securityDispositionControl()
             }
             .contentShape(Rectangle())
         })
