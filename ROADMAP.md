@@ -2,6 +2,22 @@
 
 ## Planned
 
+### Re-running a completed task must re-judge, not rubber-stamp (2026-07-15)
+
+`TaskStore.reopenCompletedTask` resets the validation round/stall counters but KEEPS
+`validation.verdictRecords` — the sticky ACCEPTs from the prior run. Since a task only
+reaches `.completed` when every criterion is sticky-final, a `run_task` on a completed
+task finds all criteria already "settled": `performTaskValidation` skips straight to
+`completeValidatedTask` and marks the re-run complete with NO criterion re-judged, no
+matter what the new run actually produced. This voids acceptance validation on every
+reopen-and-rerun. Root fix is the "scope sticky-ACCEPT to a single run" design discussed
+2026-07-15: on reopen/reset, clear the ledger (`validation = nil`, letting criteria
+re-materialize) so each run is judged fresh against its own result. A criterion is a
+REUSABLE contract; "completed" means "the last run passed," and re-running is a new run.
+`resetFailedTask` shares the same root (weaker: a failed task retains a rejected
+criterion, so some judging still happens) — decide both together. Confirmed as a HIGH in
+the 2026-07-15 July-1→today code review.
+
 ### Guard against Smith "cheating" by loosening criteria after a failure (2026-07-14)
 
 Smith is prone to editing/weakening acceptance criteria (or making them waivable)
