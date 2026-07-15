@@ -320,10 +320,14 @@ public actor OrchestrationRuntime {
     /// per-task persistent evidence directories (`<root>/tasks/<taskID>/evidence`). When nil,
     /// tasks still get an ephemeral temp dir but no persistent evidence dir.
     var taskWorkspaceRoot: URL?
-    /// Dedicated validator-slot model, once the app configures one. Definitions using
-    /// `.validator` fail visibly until then (no fallback chains).
+    /// Dedicated validator-slot model, once the app configures one. When unset, definitions
+    /// using `.validator` fall back to the Summarizer's model — the historical validation
+    /// behavior — so existing installs and non-onboarded sessions keep validating unchanged.
     var validatorProvider: (any LLMProvider)?
     var validatorConfiguration: ModelConfiguration?
+    /// The API type of the dedicated validator provider, so `.validator` runs get the same
+    /// provider-specific request handling the role dictionaries carry for other slots.
+    var validatorProviderAPIType: ProviderAPIType?
     /// Shared Security Agent evaluator for acceptance validators' read-only evidence calls. The
     /// evaluator auto-approves them (no LLM), so this is a central choke point we can tighten
     /// later — not a gate that blocks validation today. Created at `start()` when a Security Agent
@@ -3244,6 +3248,18 @@ public actor OrchestrationRuntime {
     /// Wires the session directory used as the per-task evidence root. Call before `start()`.
     public func setTaskWorkspaceRoot(_ url: URL?) {
         taskWorkspaceRoot = url
+    }
+
+    /// Wires the dedicated validator-slot model. Pass all three nil to clear the slot and let
+    /// `.validator` definitions fall back to the Summarizer's model. Call before `start()`.
+    public func setValidatorModel(
+        provider: (any LLMProvider)?,
+        configuration: ModelConfiguration?,
+        apiType: ProviderAPIType?
+    ) {
+        validatorProvider = provider
+        validatorConfiguration = configuration
+        validatorProviderAPIType = apiType
     }
 
     /// The workspace (temp + evidence directories) for a task.

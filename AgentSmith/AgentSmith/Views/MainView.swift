@@ -13,8 +13,10 @@ struct MainView: View {
     @Bindable var viewModel: AppViewModel
     @Bindable var sessionManager: SessionManager
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @State private var showValidationSheet = false
     @State private var showWelcomeSheet = false
+    @State private var showOnboarding = false
     @State private var isDropTargeted = false
     /// The attachment currently shown in the full-screen image viewer.
     @State private var selectedImageAttachment: Attachment?
@@ -59,26 +61,11 @@ struct MainView: View {
             )
         }
         .navigationTitle(viewModel.session.name)
-        .onChange(of: viewModel.hasLoadedPersistedState) { _, loaded in
-            guard loaded, shared.hasLoadedPersistedState else { return }
-            // Project rule: defer @State mutations out of .onChange.
-            if shared.nickname.isEmpty {
-                DispatchQueue.main.async { showWelcomeSheet = true }
-            } else if !viewModel.allAgentConfigsValid {
-                DispatchQueue.main.async { showValidationSheet = true }
-            } else if shared.autoStartEnabled && !viewModel.isRunning {
-                Task { await viewModel.start() }
-            }
+        .onChange(of: viewModel.hasLoadedPersistedState) { _, _ in
+            evaluateStartupGate()
         }
-        .onChange(of: shared.hasLoadedPersistedState) { _, loaded in
-            guard loaded, viewModel.hasLoadedPersistedState else { return }
-            if shared.nickname.isEmpty {
-                DispatchQueue.main.async { showWelcomeSheet = true }
-            } else if !viewModel.allAgentConfigsValid {
-                DispatchQueue.main.async { showValidationSheet = true }
-            } else if shared.autoStartEnabled && !viewModel.isRunning {
-                Task { await viewModel.start() }
-            }
+        .onChange(of: shared.hasLoadedPersistedState) { _, _ in
+            evaluateStartupGate()
         }
         .onAppear {
             // Project rule: defer @State mutations out of lifecycle closures.
@@ -86,6 +73,23 @@ struct MainView: View {
         }
         .onDisappear {
             DispatchQueue.main.async { removeEscapeMonitor() }
+        }
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingView(
+                viewModel: viewModel,
+                shared: shared,
+                onComplete: {
+                    showOnboarding = false
+                    Task { await viewModel.start() }
+                },
+                onManualSetup: {
+                    showOnboarding = false
+                    openSettings()
+                }
+            )
+            // First-run setup must be finished or explicitly skipped ("Configure everything
+            // manually") — not casually dismissed, which would leave the app unconfigured.
+            .interactiveDismissDisabled()
         }
         .sheet(isPresented: $showWelcomeSheet, onDismiss: {
             if !viewModel.allAgentConfigsValid {
@@ -151,6 +155,23 @@ struct MainView: View {
         if let monitor = escapeKeyMonitor {
             NSEvent.removeMonitor(monitor)
             escapeKeyMonitor = nil
+        }
+    }
+
+    /// Decides what a freshly-loaded session shows first: first-run onboarding, the nickname
+    /// prompt (edge case), the configuration gate, or an auto-start. Runs once both the shared
+    /// and per-session persisted state have loaded. `@State` mutations are deferred per the
+    /// project rule against mutating state inside `.onChange`.
+    private func evaluateStartupGate() {
+        guard viewModel.hasLoadedPersistedState, shared.hasLoadedPersistedState else { return }
+        if !shared.didCompleteOnboarding {
+            DispatchQueue.main.async { showOnboarding = true }
+        } else if shared.nickname.isEmpty {
+            DispatchQueue.main.async { showWelcomeSheet = true }
+        } else if !viewModel.allAgentConfigsValid {
+            DispatchQueue.main.async { showValidationSheet = true }
+        } else if shared.autoStartEnabled && !viewModel.isRunning {
+            Task { await viewModel.start() }
         }
     }
 

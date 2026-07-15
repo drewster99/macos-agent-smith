@@ -33,6 +33,12 @@ public struct SessionState: Codable, Sendable {
     public var toolsEnabled: [String: Bool]
     public var autoRunNextTask: Bool
     public var autoRunInterruptedTasks: Bool
+    /// The `ModelConfiguration.id` the acceptance-validator runs on. Kept OUT of
+    /// `agentAssignments` on purpose: `AgentRole` has no validator case, and its
+    /// dictionary-key decoding gets no unknown-key fallback (a stray key would clobber an
+    /// existing role). Optional — nil means "validation uses the Summarizer's model," the
+    /// historical behavior, so older session files (which lack the key) decode unchanged.
+    public var validatorAssignment: UUID?
 
     public init(
         agentAssignments: [AgentRole: UUID] = [:],
@@ -41,7 +47,8 @@ public struct SessionState: Codable, Sendable {
         agentMessageDebounceIntervals: [AgentRole: TimeInterval] = [:],
         toolsEnabled: [String: Bool] = [:],
         autoRunNextTask: Bool = true,
-        autoRunInterruptedTasks: Bool = true
+        autoRunInterruptedTasks: Bool = true,
+        validatorAssignment: UUID? = nil
     ) {
         self.agentAssignments = agentAssignments
         self.agentPollIntervals = agentPollIntervals
@@ -50,5 +57,6 @@ public struct SessionState: Codable, Sendable {
         self.toolsEnabled = toolsEnabled
         self.autoRunNextTask = autoRunNextTask
         self.autoRunInterruptedTasks = autoRunInterruptedTasks
+        self.validatorAssignment = validatorAssignment
     }
 }

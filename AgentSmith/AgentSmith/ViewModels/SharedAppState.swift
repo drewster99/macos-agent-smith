@@ -22,6 +22,10 @@ enum SettingsTab: Hashable {
 final class SharedAppState {
     /// The user's preferred nickname, shown in the UI and injected into system prompts.
     var nickname: String = ""
+    /// Whether the first-run setup flow has been completed (or skipped via "configure
+    /// manually"). Gates the onboarding sheet. Loaded — with a migration for pre-onboarding
+    /// installs — in `performLoadPersistedState`; persist changes via `persistOnboardingComplete()`.
+    var didCompleteOnboarding: Bool = true
     /// Whether to auto-start sessions when all their agent configs are valid on launch.
     var autoStartEnabled: Bool = {
         if UserDefaults.standard.object(forKey: "autoStartEnabled") == nil { return true }
@@ -481,6 +485,26 @@ final class SharedAppState {
         nickname = UserDefaults.standard.string(forKey: "userNickname") ?? ""
         AgentRole.userNickname = nickname
 
+        // Onboarding gate. Migration: an install that predates the onboarding flow has no key
+        // stored — treat a user who already picked a nickname as already onboarded so existing
+        // users never see the first-run setup, while a truly fresh install (no nickname) does.
+        if UserDefaults.standard.object(forKey: Self.didCompleteOnboardingKey) != nil {
+            didCompleteOnboarding = UserDefaults.standard.bool(forKey: Self.didCompleteOnboardingKey)
+        } else {
+            didCompleteOnboarding = !nickname.isEmpty
+        }
+
+        #if DEBUG
+        // Debug-only override: pass `--force-onboarding` as a launch argument to force the
+        // first-run setup to appear regardless of stored state, without touching the persisted
+        // flag or nickname. Nothing is written unless you actually complete or skip the flow,
+        // so it's safe to launch against real data just to look.
+        if CommandLine.arguments.contains("--force-onboarding") {
+            didCompleteOnboarding = false
+            logger.notice("DEBUG: --force-onboarding launch argument present — forcing onboarding to show")
+        }
+        #endif
+
         // Configure verbose logging for SwiftLLMKit services and providers.
         // Release builds default OFF — verbose logging dumps full request/response
         // bodies (user messages, file contents, tool I/O, possibly pasted secrets)
@@ -923,6 +947,16 @@ final class SharedAppState {
     func persistNickname() {
         UserDefaults.standard.set(nickname, forKey: "userNickname")
         AgentRole.userNickname = nickname
+    }
+
+    // MARK: - Onboarding
+
+    fileprivate static let didCompleteOnboardingKey = "didCompleteOnboarding"
+
+    /// Marks first-run setup as done and persists it, so onboarding never shows again.
+    func markOnboardingComplete() {
+        didCompleteOnboarding = true
+        UserDefaults.standard.set(true, forKey: Self.didCompleteOnboardingKey)
     }
 
     // MARK: - Model Configuration (shared catalog)

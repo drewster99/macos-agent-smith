@@ -55,7 +55,7 @@ public enum EvaluatorDefaults {
             .init(token: "REJECT", requiresReason: true),
             .init(token: "WAIVE", requiresReason: true)
         ]),
-        modelSlot: .summarizer,
+        modelSlot: .validator,
         toolNames: EvaluatorDefaults.validatorEvidenceToolNames,
         maxTurns: 10,
         timeoutSeconds: 300,
@@ -110,7 +110,7 @@ public enum EvaluatorDefaults {
             kind: kind,
             systemPrompt: trimmedPrompt,
             outputGrammar: grammar,
-            modelSlot: .summarizer,
+            modelSlot: .validator,
             toolNames: validatorEvidenceToolNames,
             maxTurns: 10,
             timeoutSeconds: 300,
@@ -907,8 +907,10 @@ extension OrchestrationRuntime {
         return digest.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// V1 model references are role slots only. `.validator` resolves to a dedicated
-    /// provider once the app configures one; unconfigured slots fail visibly.
+    /// V1 model references are role slots only. `.validator` resolves to a dedicated provider
+    /// once the app configures one, and otherwise falls back to the Summarizer's model (where
+    /// acceptance validation has always run). `.smith`/`.summarizer` return nil only if that
+    /// role itself was never configured.
     private func providerForModelSlot(_ slot: EvaluatorDefinition.ModelSlot) -> (any LLMProvider, ModelConfiguration, AgentRole, String)? {
         switch slot {
         case .smith:
@@ -918,10 +920,15 @@ extension OrchestrationRuntime {
             guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
             return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "")
         case .validator:
-            guard let provider = validatorProvider, let config = validatorConfiguration else { return nil }
-            // Attributed to .summarizer until AgentRole gains a validator case (the
+            // Attributed to .summarizer for usage until AgentRole gains a validator case (the
             // decode shims are in; the dictionary-key migration is deliberately staged).
-            return (provider, config, .summarizer, "")
+            if let provider = validatorProvider, let config = validatorConfiguration {
+                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "")
+            }
+            // No dedicated validator model configured: fall back to the Summarizer's model,
+            // which is where acceptance validation has always run.
+            guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
+            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "")
         }
     }
 
