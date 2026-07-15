@@ -91,6 +91,9 @@ final class SpeechController {
             handleUserMessage(message)
         case .system:
             handleSystemMessage(message)
+        case .validator:
+            // A validator's evidence tool calls are background activity — not spoken.
+            break
         }
     }
 

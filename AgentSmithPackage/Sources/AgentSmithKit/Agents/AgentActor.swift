@@ -1962,7 +1962,8 @@ public actor AgentActor {
                     if shouldSignalEnd { securityAgentCallback(false) }
 
                     await AgentActor.postSecurityReviewToChannel(
-                        disposition: disposition, call: entry.call, role: role, roleName: roleName, context: ctx
+                        disposition: disposition, callID: entry.call.id, roleName: roleName,
+                        agentRoleValue: role.rawValue, post: { await ctx.post($0) }
                     )
 
                     let result: String
@@ -2281,8 +2282,8 @@ public actor AgentActor {
 
         // Post approval/denial status.
         await Self.postSecurityReviewToChannel(
-            disposition: disposition, call: call, role: configuration.role,
-            roleName: configuration.role.displayName, context: toolContext
+            disposition: disposition, callID: call.id, roleName: configuration.role.displayName,
+            agentRoleValue: configuration.role.rawValue, post: { await toolContext.post($0) }
         )
 
         if disposition.approved {
@@ -2541,8 +2542,19 @@ public actor AgentActor {
         ))
     }
 
-    /// Posts a security review status message to the channel. Static so it can be called from `withTaskGroup`.
-    static func postSecurityReviewToChannel(disposition: SecurityDisposition, call: LLMToolCall, role: AgentRole, roleName: String, context: ToolContext) async {
+    /// Posts a security review status message to the channel. Static so it can be called from
+    /// `withTaskGroup`. Takes a `post` closure rather than a `ToolContext` so the SAME poster
+    /// serves every caller on the security path — per-agent tool calls (via the agent's context)
+    /// and acceptance-validator evidence calls (via the validation channel) — so an auto-approval
+    /// is surfaced identically no matter who made the call. `agentRoleValue` stamps the reviewed
+    /// agent's role for callers that have one (nil for validators, which aren't an `AgentRole`).
+    static func postSecurityReviewToChannel(
+        disposition: SecurityDisposition,
+        callID: String,
+        roleName: String,
+        agentRoleValue: String?,
+        post: @Sendable (ChannelMessage) async -> Void
+    ) async {
         let statusContent: String
         let securityDisposition: String
         if disposition.approved && disposition.isAutoApproval {
@@ -2560,14 +2572,14 @@ public actor AgentActor {
             securityDisposition = "denied"
         }
         var reviewMetadata: [String: AnyCodable] = [
-            "requestID": .string(call.id),
-            "securityDisposition": .string(securityDisposition),
-            "agentRole": .string(role.rawValue)
+            "requestID": .string(callID),
+            "securityDisposition": .string(securityDisposition)
         ]
+        if let agentRoleValue { reviewMetadata["agentRole"] = .string(agentRoleValue) }
         if let msg = disposition.message, !msg.isEmpty {
             reviewMetadata["dispositionMessage"] = .string(msg)
         }
-        await context.post(ChannelMessage(
+        await post(ChannelMessage(
             sender: .system,
             content: statusContent,
             metadata: reviewMetadata
@@ -3118,6 +3130,8 @@ public actor AgentActor {
                 senderLabel = "AGENT \(message.sender.displayName)"
             case .system:
                 senderLabel = "SYSTEM"
+            case .validator:
+                senderLabel = "VALIDATOR"
             }
             let formatted = "[\(senderLabel)]: \(message.content)"
 

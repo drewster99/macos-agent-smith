@@ -8,6 +8,7 @@ enum AppColors {
     static let brownAgent = Color.orange
     static let securityAgent = Color.red
     static let summarizerAgent = Color.blue
+    static let validatorAgent = Color.teal
     private static let userMessage = Color.blue
     static let systemMessage = Color.gray
     static let background = Color(.windowBackgroundColor)
@@ -156,6 +157,7 @@ enum AppColors {
         case .agent(.summarizer): return summarizerAgent
         case .user: return userMessage
         case .system: return systemMessage
+        case .validator: return validatorAgent
         }
     }
 

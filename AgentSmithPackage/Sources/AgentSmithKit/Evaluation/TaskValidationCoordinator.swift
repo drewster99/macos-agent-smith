@@ -695,8 +695,8 @@ extension OrchestrationRuntime {
                 // Surface the validator's tool call in the transcript before it runs, so acceptance
                 // validators' evidence reads aren't invisible.
                 await gateChannel.post(ChannelMessage(
-                    sender: .agent(.securityAgent),
-                    content: "validator \(call.name): \(call.arguments.prefix(160))",
+                    sender: .validator,
+                    content: "\(call.name): \(call.arguments.prefix(160))",
                     metadata: [
                         "messageKind": .string("tool_request"),
                         "requestID": .string(call.id),
@@ -716,6 +716,16 @@ extension OrchestrationRuntime {
                     agentRoleName: "Acceptance validator",
                     readOnlyAutoApproveEligible: true,
                     toolCallID: call.id
+                )
+                // Surface the verdict on the SAME path as an agent's tool call — the shared
+                // review poster — so a validator's auto-approved evidence read gets the same
+                // ✅/verdict treatment (collapsed into its tool_request chip by requestID).
+                await AgentActor.postSecurityReviewToChannel(
+                    disposition: disposition,
+                    callID: call.id,
+                    roleName: "Validator",
+                    agentRoleValue: nil,
+                    post: { await gateChannel.post($0) }
                 )
                 return disposition.approved
             }

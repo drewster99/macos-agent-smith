@@ -99,6 +99,10 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
         case agent(AgentRole)
         case user
         case system
+        /// An acceptance validator's own activity (e.g. its evidence tool calls). A display-only
+        /// sender — validators are ephemeral evaluation functions, not configurable `AgentRole`s —
+        /// kept distinct from the Security Agent that merely gates those calls.
+        case validator
 
         /// Display name for the sender.
         public var displayName: String {
@@ -108,6 +112,7 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
                 let nickname = AgentRole.userNickname
                 return nickname.isEmpty ? "User" : nickname
             case .system: return "System"
+            case .validator: return "Validator"
             }
         }
     }
