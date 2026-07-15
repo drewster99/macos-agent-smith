@@ -124,11 +124,8 @@ struct WebFetchTool: AgentTool {
         // non-public address. An IP literal or an explicit local name (localhost/.local) the model
         // typed directly is left alone — direct-to-private is an intended capability (e.g. a local
         // dev server), and only a deceptive public name is refused.
-        let host = url.host?.lowercased() ?? ""
-        let isExplicitLocalTarget = host == "localhost" || host == "localhost."
-            || host.hasSuffix(".localhost") || host.hasSuffix(".local")
-            || EgressPolicy.classifyLiteral(host) != nil
-        if !isExplicitLocalTarget, await EgressPolicy.destinationIsNonPublic(url) {
+        let host = url.host ?? ""
+        if !EgressPolicy.isExplicitLocalTarget(host), await EgressPolicy.destinationIsNonPublic(url) {
             return .failure(Self.render(.error(
                 "blocked",
                 "\(urlString) resolves to a non-public address. web_fetch will not fetch a public hostname that points into loopback / link-local / private network ranges. If you intend to reach a local address, request it directly by IP or localhost.")))
@@ -792,23 +789,36 @@ final class WebFetchDownloader: NSObject, URLSessionDataDelegate, @unchecked Sen
     /// Verifies the ACTUAL remote address of every connection this task made. `URLSession` won't let
     /// us pin the socket to the IP the pre-flight vetted, but it reports the real peer here — so a
     /// DNS-rebinding answer that pointed the connect at loopback / link-local / a private range is
-    /// caught and the response is refused. `remoteAddress` is a bare IP literal (no port); a
-    /// link-local IPv6 peer may carry a `%zone` suffix that `inet_pton` rejects, so strip it before
-    /// classifying. A nil / reused-from-cache address is simply skipped.
+    /// caught and the response is refused.
     ///
-    /// This is delivered before `didCompleteWithError` in the URLSession delegate call sequence, so
-    /// the flag is reliably set by the time the completion path reads it. If that ordering were ever
-    /// violated the fetch degrades to the name-resolution pre-flight's protection (a possible missed
-    /// peer-check), never to a hang or an unchecked-fail-open — completion still returns normally.
+    /// Decided PER TRANSACTION (each hop, incl. redirects, is its own transaction with its own URL):
+    /// - Proxied transactions are skipped — `remoteAddress` is then the PROXY, not the origin, so a
+    ///   public fetch through a local/RFC1918 proxy must not be misread as a private origin. Those
+    ///   fall back to the name-resolution pre-flight.
+    /// - A public peer is fine.
+    /// - A non-public peer is refused ONLY when this transaction's own host was a public-looking
+    ///   NAME — i.e. a name that resolved into private space (the rebinding attack). A host the model
+    ///   explicitly chose as local (an IP literal or localhost/.local) is the intended direct-to-
+    ///   private capability and is allowed, matching the request pre-flight. A localhost page that
+    ///   redirects to a rebinding hostname is still caught: the redirect is a separate transaction
+    ///   whose host is that public-looking name.
+    ///
+    /// `remoteAddress` is a bare IP literal (no port); a link-local IPv6 peer may carry a `%zone`
+    /// suffix that `inet_pton` rejects, so strip it. A nil / reused-from-cache address is skipped.
+    /// Delivered before `didCompleteWithError` in the delegate sequence, so the flag is set by the
+    /// time the completion path reads it; if that ordering were ever violated the fetch degrades to
+    /// the pre-flight's protection, never to a hang or an unchecked fail-open.
     func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
         for transaction in metrics.transactionMetrics {
+            if transaction.isProxyConnection { continue }
             guard let raw = transaction.remoteAddress, !raw.isEmpty else { continue }
             let address = String(raw.split(separator: "%").first ?? "")   // drop any IPv6 %zone id
-            if EgressPolicy.classifyLiteral(address) == true {
-                lock.withLock { if peerBlockedAddress == nil { peerBlockedAddress = address } }
-                settle(.failure(DownloadError.peerBlocked(address)))
-                return
-            }
+            guard EgressPolicy.classifyLiteral(address) == true else { continue }   // public peer — fine
+            let host = transaction.request.url?.host ?? ""
+            if EgressPolicy.isExplicitLocalTarget(host) { continue }   // intended direct-to-private
+            lock.withLock { if peerBlockedAddress == nil { peerBlockedAddress = address } }
+            settle(.failure(DownloadError.peerBlocked(address)))
+            return
         }
     }
 

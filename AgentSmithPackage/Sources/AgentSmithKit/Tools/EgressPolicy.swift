@@ -41,6 +41,17 @@ enum EgressPolicy {
         return resolved.contains { isNonPublic($0) }
     }
 
+    /// True when `host` is one the model explicitly chose as a *local* target — an IP literal, or a
+    /// `localhost` / `.local` name — for which reaching a non-public address is the intended
+    /// capability (e.g. a local dev server), NOT a rebinding attack. Used by both the request
+    /// pre-flight and the actual-peer verification so the two apply the same exemption.
+    static func isExplicitLocalTarget(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "localhost" || h == "localhost."
+            || h.hasSuffix(".localhost") || h.hasSuffix(".local")
+            || classifyLiteral(h) != nil
+    }
+
     /// Classifies a host that is an IP **literal**. Returns `nil` when `host` is not an IP literal
     /// (i.e. it's a name that must be resolved first).
     static func classifyLiteral(_ host: String) -> Bool? {

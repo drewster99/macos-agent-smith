@@ -68,6 +68,22 @@ struct EgressPolicyTests {
         #expect(EgressPolicy.classifyLiteral("999.999.999.999") == nil)
     }
 
+    @Test("isExplicitLocalTarget: IP literals + localhost/.local are exempt; public names are not")
+    func explicitLocalTargets() {
+        // Explicitly-local: the model chose these, direct-to-private is intended.
+        #expect(EgressPolicy.isExplicitLocalTarget("localhost"))
+        #expect(EgressPolicy.isExplicitLocalTarget("LOCALHOST"))
+        #expect(EgressPolicy.isExplicitLocalTarget("printer.local"))
+        #expect(EgressPolicy.isExplicitLocalTarget("127.0.0.1"))       // loopback literal
+        #expect(EgressPolicy.isExplicitLocalTarget("192.168.1.10"))    // private literal
+        #expect(EgressPolicy.isExplicitLocalTarget("8.8.8.8"))         // public literal — still model-chosen
+        #expect(EgressPolicy.isExplicitLocalTarget("[::1]"))
+        // Public-looking NAMES are not exempt — these are the rebinding-attack shape.
+        #expect(!EgressPolicy.isExplicitLocalTarget("example.com"))
+        #expect(!EgressPolicy.isExplicitLocalTarget("metadata.evil.com"))
+        #expect(!EgressPolicy.isExplicitLocalTarget(""))
+    }
+
     @Test("newly-covered non-public IPv4 ranges: reserved, broadcast, benchmarking, protocol-assignment")
     func additionalNonPublicV4() {
         #expect(EgressPolicy.classifyLiteral("255.255.255.255") == true)   // limited broadcast
