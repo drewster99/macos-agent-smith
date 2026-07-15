@@ -2,6 +2,29 @@
 
 ## Planned
 
+### Guard against Smith "cheating" by loosening criteria after a failure (2026-07-14)
+
+Smith is prone to editing/weakening acceptance criteria (or making them waivable)
+right after a validation failure to force a completion. Sometimes that's correct
+(the criteria were genuinely wrong — e.g. the validator misread an OR), but as a
+standing habit it defeats the point of acceptance validation. We may need to
+distinguish CLARIFYING an ambiguous criterion (fine) from WEAKENING a substantive
+one (not fine) — e.g. flag/annotate criteria edits made on a failed task, require
+a reason, surface them prominently, or disallow lowering the bar without user
+sign-off. Watch for the pattern before deciding how heavy-handed to be.
+
+### Criteria as a boolean-logic expression, evaluated in code (2026-07-14)
+
+Today each acceptance criterion is judged independently and the task passes only
+if ALL settle. That can't express real logic ("A AND (B OR C)"), and it pushes
+disjunctions INTO a single criterion's prose where the weak validator misreads
+them (the "GitHub URL OR docs link" failure). Idea: let the criteria set carry a
+boolean expression over named atoms. Each ATOM is an independent LLM-judged
+predicate (cheap, unambiguous — "has a GitHub URL for each tool"), but the
+BOOLEAN COMBINATION (AND/OR/NOT/grouping) is evaluated by our own code, not the
+LLM. The model never has to reason about disjunction; it only answers true/false
+per atom. This is the structural fix for the OR-misread class of bugs.
+
 ### Evidence sweep: recurse into subdirectories (2026-07-14)
 
 `TaskCompleteTool.ingestEvidenceDirectory` ingests files DIRECTLY in the task's
