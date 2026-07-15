@@ -542,14 +542,17 @@ public actor AgentActor {
         evaluatesOpenWorldToolsOnly = enabled
     }
 
-    /// Whether this tool call must be evaluated by the Security Agent before it runs.
-    /// Brown reviews every tool (`requiresToolApproval`); Smith reviews only open-world tools
-    /// (`evaluatesOpenWorldToolsOnly`). Either way it's a no-op without a configured evaluator or
-    /// when per-call review is switched off.
+    /// Whether this tool call must go through the Security Agent before it runs.
+    /// Brown reviews every tool (`requiresToolApproval`). Smith routes its open-world tools
+    /// (really evaluated — the egress filter) AND its read-only filesystem evidence tools (which
+    /// the evaluator auto-approves without an LLM call, but which then appear in the transcript and
+    /// stay countable). Smith's messaging/task tools never touch the security path. It's a no-op
+    /// without a configured evaluator or when per-call review is switched off.
     private func mustEvaluate(_ tool: any AgentTool) -> Bool {
         guard perCallApprovalEnabled, securityEvaluator != nil else { return false }
         if configuration.requiresToolApproval { return true }
-        return evaluatesOpenWorldToolsOnly && tool.isOpenWorld
+        guard evaluatesOpenWorldToolsOnly else { return false }
+        return tool.isOpenWorld || SecurityEvaluator.readOnlyFilesystemEvidenceTools.contains(tool.name)
     }
 
     /// The last few user-role messages, concatenated, for the Security Agent's context when this
@@ -2251,6 +2254,9 @@ public actor AgentActor {
         // With no task to describe (Smith's egress calls), give the Security Agent the recent user
         // request(s) as the justification context instead — that is what the call must be consistent with.
         let agentContext = currentTask == nil ? recentUserMessagesForEvaluation() : nil
+        // Smith's read-only filesystem reads are auto-approved by the evaluator (no LLM), but still
+        // routed through it so they're visible and centrally gated. Brown is fully evaluated.
+        let readOnlyAutoApproveEligible = configuration.role == .smith
         toolContext.onSecurityAgentProcessingStateChange(true)
         let disposition = await evaluator.evaluate(
             toolName: call.name,
@@ -2263,6 +2269,7 @@ public actor AgentActor {
             siblingCalls: siblings,
             agentRoleName: configuration.role.displayName,
             agentContext: agentContext,
+            readOnlyAutoApproveEligible: readOnlyAutoApproveEligible,
             toolCallID: call.id
         )
         toolContext.onSecurityAgentProcessingStateChange(false)
@@ -2534,7 +2541,7 @@ public actor AgentActor {
         let statusContent: String
         let securityDisposition: String
         if disposition.approved && disposition.isAutoApproval {
-            statusContent = "Auto-approved (WARN retry)"
+            statusContent = "Auto-approved\(disposition.message.map { " (\($0))" } ?? "")"
             securityDisposition = "autoApproved"
         } else if disposition.approved {
             statusContent = "Security Agent → \(roleName): SAFE\(disposition.message.map { " \($0)" } ?? "")"

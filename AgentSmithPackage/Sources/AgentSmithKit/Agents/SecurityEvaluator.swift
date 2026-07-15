@@ -147,6 +147,22 @@ actor SecurityEvaluator {
     private var pendingWarnRetries: [WarnedRequest] = []
     private static let maxPendingWarnRetries = 10
 
+    /// Local-filesystem read-only tools eligible for auto-approval (skip the LLM) when the caller
+    /// is a trusted internal reader (Smith or an acceptance validator). Named explicitly — NOT
+    /// derived from a role — so a future mutating or network tool can never ride this path even if
+    /// added to Smith's set. Excludes web tools (open-world: always really evaluated) and non-fs
+    /// reads like `search_memory`/`get_task_details` (not a filesystem-exfiltration surface).
+    static let readOnlyFilesystemEvidenceTools: Set<String> = [
+        "file_read", "directory_listing", "directory_tree", "glob", "grep"
+    ]
+
+    /// When true, a read-only filesystem evidence call from an eligible caller (Smith / validator)
+    /// is approved WITHOUT an LLM round-trip — but still recorded and posted to the channel, so the
+    /// call stays visible and countable and the gate can be tightened later (e.g. real evaluation,
+    /// or the roadmap's scope-a-folder approval). The single choke point is deliberately kept even
+    /// when it's a no-op, so these calls are never out of sight / out of mind.
+    private var autoApproveReadOnlyEvidence = true
+
     /// Consecutive evaluation-level failures (each evaluation exhausted its retries).
     /// Triggers abort at threshold. Only incremented when a full evaluation fails,
     /// not on individual retry attempts — prevents false aborts under concurrency
@@ -309,9 +325,20 @@ actor SecurityEvaluator {
         siblingCalls: String?,
         agentRoleName: String,
         agentContext: String? = nil,
+        readOnlyAutoApproveEligible: Bool = false,
         toolCallID: String? = nil
     ) async -> SecurityDisposition {
         let parsedParams = Self.parseToolParams(toolParams)
+
+        // Fast-path: a read-only filesystem evidence call from an eligible caller (Smith /
+        // validator) is approved without an LLM round-trip. Still recorded (below) and posted to
+        // the channel by the caller, so it stays visible. Gated by TOOL NAME, not just the
+        // eligibility flag, so nothing mutating or network-bound can ride this path.
+        if autoApproveReadOnlyEvidence, readOnlyAutoApproveEligible,
+           Self.readOnlyFilesystemEvidenceTools.contains(toolName) {
+            appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved read-only evidence)", toolCallID: toolCallID)
+            return SecurityDisposition(approved: true, message: "read-only evidence", isAutoApproval: true)
+        }
 
         // Auto-approve identical retry of a WARN'd request.
         if let matchIndex = pendingWarnRetries.firstIndex(where: {
@@ -319,7 +346,7 @@ actor SecurityEvaluator {
         }) {
             pendingWarnRetries.remove(at: matchIndex)
             appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved retry of prior WARN)", toolCallID: toolCallID)
-            return SecurityDisposition(approved: true, isAutoApproval: true)
+            return SecurityDisposition(approved: true, message: "WARN retry", isAutoApproval: true)
         }
 
         let evalPrompt = await buildEvalPrompt(

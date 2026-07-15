@@ -673,6 +673,34 @@ extension OrchestrationRuntime {
         let evaluationContext = makeToolContext(agentID: UUID(), role: .securityAgent)
         let sessionID = currentSessionID
         let usageStore = usageStore
+        // Route each validator tool call through the shared Security Agent evaluator (auto-approved
+        // for read-only evidence tools — no LLM). A central choke point, tightenable later, so these
+        // reads are never off the security path. Nil when no Security Agent provider is configured;
+        // then reads execute directly, exactly as before.
+        let securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)?
+        if let evaluator = validationSecurityEvaluator {
+            let gateTaskTitle = task.title
+            let gateTaskID = task.id.uuidString
+            let gateTaskDescription = task.description
+            securityGate = { (call: LLMToolCall, tool: any AgentTool) async -> Bool in
+                let disposition = await evaluator.evaluate(
+                    toolName: call.name,
+                    toolParams: call.arguments,
+                    toolDescription: tool.definition(for: .securityAgent).description,
+                    toolParameterDefs: "",
+                    taskTitle: gateTaskTitle,
+                    taskID: gateTaskID,
+                    taskDescription: gateTaskDescription,
+                    siblingCalls: nil,
+                    agentRoleName: "Acceptance validator",
+                    readOnlyAutoApproveEligible: true,
+                    toolCallID: call.id
+                )
+                return disposition.approved
+            }
+        } else {
+            securityGate = nil
+        }
         return await EvaluationRunner.runMessages(
             definition: definition,
             systemPrompt: systemPrompt,
@@ -696,7 +724,8 @@ extension OrchestrationRuntime {
                     latencyMs: latencyMs,
                     to: usageStore
                 )
-            }
+            },
+            securityGate: securityGate
         )
     }
 

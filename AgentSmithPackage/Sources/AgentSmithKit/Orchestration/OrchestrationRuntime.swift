@@ -314,6 +314,11 @@ public actor OrchestrationRuntime {
     /// `.validator` fail visibly until then (no fallback chains).
     var validatorProvider: (any LLMProvider)?
     var validatorConfiguration: ModelConfiguration?
+    /// Shared Security Agent evaluator for acceptance validators' read-only evidence calls. The
+    /// evaluator auto-approves them (no LLM), so this is a central choke point we can tighten
+    /// later — not a gate that blocks validation today. Created at `start()` when a Security Agent
+    /// provider exists; when absent, validators execute their reads directly (unchanged).
+    var validationSecurityEvaluator: SecurityEvaluator?
     /// Convergence rule for the worker↔validator loop: this many CONSECUTIVE rejection
     /// rounds that settle NOTHING new fail the task. The name is deliberately literal —
     /// this is not a total-round cap. Absolute round count is unbounded as long as rounds
@@ -1735,6 +1740,14 @@ public actor OrchestrationRuntime {
             }
             await smithAgent.setSecurityEvaluator(smithEvaluator)
             await smithAgent.setEvaluatesOpenWorldToolsOnly(true)
+
+            // A shared evaluator for acceptance validators' read-only evidence calls (auto-approved,
+            // so it's a choke point, not a blocker). Separate instance from Smith's so their
+            // recent-request histories don't cross-contaminate.
+            validationSecurityEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
+            if let evalCallback = onEvaluationRecorded {
+                await validationSecurityEvaluator?.setOnEvaluationRecorded(evalCallback)
+            }
         } else {
             stopLogger.warning("No Security Agent provider — Smith's open-world (egress) tool calls will run WITHOUT security review.")
         }

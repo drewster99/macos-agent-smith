@@ -65,7 +65,8 @@ public enum EvaluationRunner {
         tools: [any AgentTool],
         toolContext: ToolContext,
         temperature: Double? = nil,
-        onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil
+        onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil,
+        securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)? = nil
     ) async -> (outcome: Outcome, transcript: Transcript) {
         var transcript = Transcript()
         transcript.renderedInput = userMessage
@@ -112,11 +113,19 @@ public enum EvaluationRunner {
                 for call in response.toolCalls {
                     let result: String
                     if let tool = tools.first(where: { $0.name == call.name }) {
-                        do {
-                            let outcome = try await tool.execute(arguments: try call.parsedArguments(), context: toolContext)
-                            result = outcome.output
-                        } catch {
-                            result = "Tool error: \(error.localizedDescription)"
+                        // When a security gate is provided (validators), every tool call is routed
+                        // through it first. For read-only evidence tools it auto-approves without an
+                        // LLM call, so this is a central choke point (tightenable later) rather than
+                        // a behavior change. A denial short-circuits execution.
+                        if let securityGate, await securityGate(call, tool) == false {
+                            result = "Tool execution denied by security."
+                        } else {
+                            do {
+                                let outcome = try await tool.execute(arguments: try call.parsedArguments(), context: toolContext)
+                                result = outcome.output
+                            } catch {
+                                result = "Tool error: \(error.localizedDescription)"
+                            }
                         }
                     } else {
                         result = "Tool '\(call.name)' is not permitted for this evaluation."

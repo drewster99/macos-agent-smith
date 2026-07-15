@@ -90,8 +90,12 @@ struct SmithEgressFilterTests {
         #expect(result?.contains("denied") == true, "web_search must be blocked by the egress gate")
     }
 
-    @Test("Smith's local read-only tool is NOT gated — glob runs despite the denying Security Agent")
-    func localToolNotGated() async throws {
+    @Test("Smith's read-only glob is auto-approved and RUNS even though the Security Agent would deny")
+    func readOnlyAutoApprovedAndRuns() async throws {
+        // glob is a read-only filesystem evidence tool. Smith routes it through the security path
+        // (so it's visible + centrally gated), but the evaluator auto-approves it without an LLM
+        // call — so even with a DENYING evaluator, it executes. This proves the auto-approve
+        // fast-path fires BEFORE the LLM verdict is consulted.
         let dir = TempDir()
         defer { dir.cleanup() }
         _ = try dir.write("hello", to: "a.txt")
@@ -99,7 +103,7 @@ struct SmithEgressFilterTests {
                                arguments: #"{"pattern":"**/*.txt","path":"\#(dir.path)"}"#)
         let result = await runSmith(tool: GlobTool(useSpotlight: false), call: call)
         #expect(result != nil, "glob should have executed")
-        #expect(result?.contains("denied") != true, "a local read-only tool must bypass the egress gate")
+        #expect(result?.contains("denied") != true, "a read-only evidence tool is auto-approved, not denied")
         #expect(result?.contains("a.txt") == true, "glob should have found the file")
     }
 }
