@@ -38,12 +38,17 @@ public enum EvaluationRunner {
     public struct Transcript: Sendable, Equatable {
         /// The input template with all slots rendered — the user message the model saw.
         public var renderedInput: String
+        /// The FULL system message the model saw — the composed prompt including the criterion
+        /// and the response-format contract, not just the definition's base text. This is what the
+        /// inspector needs to show what the validator was actually told.
+        public var renderedSystemPrompt: String
         /// One entry per LLM turn: text responses verbatim (including grammar-retry
         /// nudge rounds), tool rounds summarized as call → result-preview lines.
         public var turnLog: [String]
 
-        public init(renderedInput: String = "", turnLog: [String] = []) {
+        public init(renderedInput: String = "", renderedSystemPrompt: String = "", turnLog: [String] = []) {
             self.renderedInput = renderedInput
+            self.renderedSystemPrompt = renderedSystemPrompt
             self.turnLog = turnLog
         }
     }
@@ -70,6 +75,7 @@ public enum EvaluationRunner {
     ) async -> (outcome: Outcome, transcript: Transcript) {
         var transcript = Transcript()
         transcript.renderedInput = userMessage
+        transcript.renderedSystemPrompt = systemPrompt
 
         var messages: [LLMMessage] = [
             .system(systemPrompt),

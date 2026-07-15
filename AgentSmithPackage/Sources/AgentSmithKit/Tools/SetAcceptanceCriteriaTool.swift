@@ -76,7 +76,10 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             file and its contents, the command output, a log at a path, a URL/path to the artifact). \
             Phrase as "X must be true; evidence of completion: <the artifact/output that proves it>". \
             A criterion asserting an outcome with no checkable proof cannot be accepted and will stall \
-            the task. The validator is EXTREMELY strict and literal: write each criterion so a CORRECT \
+            the task. Write each criterion as STRUCTURED MARKDOWN — not a run-on sentence — and make \
+            its logic explicit: all-required parts → a list under "must include ALL of:"; alternatives \
+            (this OR that) → a nested list under "must be ONE of:". \
+            The validator is EXTREMELY strict and literal: write each criterion so a CORRECT \
             result passes even in edge cases — ties, zero/empty results, nonexistent targets (e.g. \
             "identifies the most-starred repository, or reports a tie / that none exists, whichever \
             the data shows"). If the worker can do the task correctly and still fail the criterion as \

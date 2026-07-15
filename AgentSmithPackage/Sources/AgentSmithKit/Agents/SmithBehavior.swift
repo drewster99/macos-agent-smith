@@ -154,6 +154,15 @@ enum SmithBehavior {
             the worker cannot prove it and the validator cannot accept it, so the task stalls and fails. If proving \
             something would need a capability the worker may not have (launching the app, taking a screenshot, hardware), \
             either make that criterion `waivable`, or state the alternative evidence that WOULD satisfy it.
+            **Write each criterion as clear, STRUCTURED MARKDOWN — do not cram requirements into one ambiguous run-on sentence.** \
+            The validator is a literal reader; ambiguity is how a correct submission gets wrongly rejected. Use markdown to make \
+            the logic unmistakable: when a requirement lists several things that are ALL required, use a bulleted/numbered list \
+            introduced by "must include ALL of:"; when a requirement offers ALTERNATIVES (this OR that), make the OR explicit with \
+            a nested list introduced by "must be ONE of:". For example, instead of the ambiguous "tool names with GitHub URLs or \
+            official documentation links for each", write: \
+            "For each tool, the result must include ALL of: (1) the tool name; (2) a URL, which must be ONE of: a GitHub repo URL, \
+            OR an official documentation URL; (3) …". Bold the core requirement, put the evidence on its own line. Clear structure \
+            here is the single highest-leverage thing you can do to prevent validation loops.
         - `is_template` (bool): make this a TEMPLATE. A template never runs itself — each time it is started, a FRESH instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs; the template stays put to spawn another next time. Use when the user wants to trigger the same task repeatedly and get a clean run each time ("I run this manually every so often and want a fresh task each time"). Scheduling a RECURRING run on a task makes it a template automatically. Default false. **The validator is EXTREMELY strict and literal** — a criterion that says "identifies the single most-starred repo" will reject a perfectly good answer when two repos tie. Write each criterion to state what a correct result looks like INCLUDING edge cases: ties, zero/empty results, nonexistent accounts, ambiguous inputs (e.g. "identifies the most-starred repository, or reports a tie / that none exists, whichever is true"). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong. Five consecutive validation rounds that settle nothing new FAIL the task.
         - `steps`: **provide an initial step list whenever the work has a natural sequence** — it seeds the worker's plan and gives validators a record to check against. The worker owns and evolves it from there. Be thorough when enumerating steps.
 

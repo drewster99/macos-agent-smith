@@ -10,10 +10,15 @@ extension AgentTask {
     /// `acceptanceCriteria`. When `includeVerdicts` is true, each line carries the latest
     /// verdict (ACCEPT / REJECT — reason / …) from the validation ledger, so a resuming worker
     /// sees at a glance which criteria still need work. Returns `nil` when there are no criteria.
+    /// Each criterion renders as a markdown block — a bold `**Criterion N**` header (with any
+    /// qualifiers/verdict) followed by the criterion's own text on the next line. A header (rather
+    /// than a `N. ` list prefix) so a criterion whose text is itself structured markdown — nested
+    /// lists making "must be ONE of …" / "must include ALL of …" explicit — renders cleanly instead
+    /// of colliding with the outer numbering.
     func renderedAcceptanceCriteria(includeVerdicts: Bool) -> String? {
         guard !acceptanceCriteria.isEmpty else { return nil }
         let ledger = validation
-        let lines = acceptanceCriteria.enumerated().map { index, criterion -> String in
+        let blocks = acceptanceCriteria.enumerated().map { index, criterion -> String in
             var qualifiers: [String] = []
             if criterion.waivable { qualifiers.append("waivable") }
             switch criterion.validator {
@@ -22,13 +27,13 @@ extension AgentTask {
             case .none: break
             }
             if let prepare = criterion.prepare { qualifiers.append("prepare: \(prepare)") }
-            let suffix = qualifiers.isEmpty ? "" : " (\(qualifiers.joined(separator: ", ")))"
+            let suffix = qualifiers.isEmpty ? "" : " _(\(qualifiers.joined(separator: ", ")))_"
             let verdict = includeVerdicts
                 ? (ledger?.latestVerdict(for: criterion.id)).map { " — \(OrchestrationRuntime.describeVerdict($0))" } ?? ""
                 : ""
-            return "\(index + 1). \(criterion.text)\(suffix)\(verdict)"
+            return "**Criterion \(index + 1)**\(suffix)\(verdict)\n\(criterion.text)"
         }
-        return lines.joined(separator: "\n")
+        return blocks.joined(separator: "\n\n")
     }
 
     /// The step list as a numbered list. Step N is its 1-based position among the ACTIVE

@@ -461,6 +461,7 @@ extension OrchestrationRuntime {
             validatorHash: definition.contentHash,
             round: round,
             renderedInput: Self.capDebugText(transcript.renderedInput, limit: Self.maxPersistedInputChars),
+            renderedSystemPrompt: Self.capDebugText(transcript.renderedSystemPrompt, limit: Self.maxPersistedInputChars),
             responseLog: Self.capDebugText(transcript.turnLog.joined(separator: "\n---\n"), limit: Self.maxPersistedLogChars)
         )
     }
@@ -1080,9 +1081,9 @@ extension OrchestrationRuntime {
             let number = numberByID[record.criterionID]
             let label = number.map { "Criterion \($0)" } ?? "Criterion"
             let text = criteriaByID[record.criterionID]?.text ?? "(criterion no longer in the list)"
-            var block = "### Rejection \(index + 1) — \(label)\nFull criterion: \(text)"
+            var block = "### Rejection \(index + 1) — \(label)\n**Criterion:**\n\(text)"
             if case .rejected(let reason) = record.verdict {
-                block += "\nWhat's missing and how to satisfy it: \(reason)"
+                block += "\n\n**What's missing and how to satisfy it:**\n\(reason)"
             }
             return block
         }.joined(separator: "\n\n")

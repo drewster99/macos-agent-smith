@@ -751,7 +751,7 @@ struct TaskDetailWindow: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(AppColors.disclosureToggle)
                 if expandedValidatorPromptIDs.contains(criterion.id) {
-                    debugTextBox(title: "System prompt", text: pinned.systemPrompt)
+                    debugTextBox(title: "Validator definition — base prompt (the criterion & response format are appended at judge time; see a round's debug for the full sent prompt)", text: pinned.systemPrompt)
                 }
             }
             ForEach(records.reversed()) { record in
@@ -797,8 +797,11 @@ struct TaskDetailWindow: View {
             }
             if expandedDebugRecordIDs.contains(record.id) {
                 VStack(alignment: .leading, spacing: 6) {
+                    if let sys = record.renderedSystemPrompt, !sys.isEmpty {
+                        debugTextBox(title: "System prompt (exactly as sent — includes the criterion & response format)", text: sys)
+                    }
                     if let input = record.renderedInput, !input.isEmpty {
-                        debugTextBox(title: "Rendered input (what the validator saw)", text: input)
+                        debugTextBox(title: "User message (the results/evidence the validator judged)", text: input)
                     }
                     if let log = record.responseLog, !log.isEmpty {
                         debugTextBox(title: "Validator output (turn by turn)", text: log)

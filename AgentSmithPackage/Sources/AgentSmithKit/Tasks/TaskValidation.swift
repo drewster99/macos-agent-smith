@@ -163,6 +163,10 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
     /// pinned definition body this makes any verdict reproducible and debuggable.
     /// Optional-and-synthesized: records written before the field decode unchanged.
     public let renderedInput: String?
+    /// The FULL system message the validator's model actually saw (capped) — the composed
+    /// prompt including the criterion and the response-format contract, not just the pinned
+    /// definition's base text. Optional-and-synthesized for pre-field records.
+    public let renderedSystemPrompt: String?
     /// The validator's turn-by-turn output (capped): tool rounds as call→result
     /// previews, text turns verbatim including grammar-retry rounds. For dynamic
     /// criteria this is the prepare exchange followed by each item's exchange.
@@ -177,6 +181,7 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
         round: Int,
         recordedAt: Date = Date(),
         renderedInput: String? = nil,
+        renderedSystemPrompt: String? = nil,
         responseLog: String? = nil
     ) {
         self.id = id
@@ -187,6 +192,7 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
         self.round = round
         self.recordedAt = recordedAt
         self.renderedInput = renderedInput
+        self.renderedSystemPrompt = renderedSystemPrompt
         self.responseLog = responseLog
     }
 }
