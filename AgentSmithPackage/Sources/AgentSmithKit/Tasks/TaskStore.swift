@@ -301,9 +301,14 @@ public actor TaskStore {
         task.completedAt = nil
         task.status = .pending
         task.disposition = .active
+        // Re-running a completed task is a NEW run against a discarded result, so its verdict ledger
+        // is reset just like a failed-task retry (`resetFailedTask`): drop the sticky ACCEPTs so every
+        // criterion is re-judged against the new result instead of the task completing instantly on
+        // verdicts earned by the old one. Pinned validator definitions are kept for the re-judge.
         if var validation = task.validation {
             validation.round = 0
             validation.consecutiveStallRounds = 0
+            validation.verdictRecords.removeAll()
             task.validation = validation
         }
         task.updatedAt = Date()
@@ -597,15 +602,31 @@ public actor TaskStore {
         return updated
     }
 
-    /// Appends verdict records to the task's audit ledger.
-    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord]) {
-        guard var task = tasks[id], !records.isEmpty else { return }
+    /// Appends verdict records to the task's audit ledger — but ONLY for records whose criterion
+    /// still has the SAME contract (validator / prepare / waivable) it was judged against, per the
+    /// `judgedAgainst` snapshot. If a `set_acceptance_criteria` edit changed a same-text criterion
+    /// mid-round (the ID is retained and the old records are dropped by `setAcceptanceCriteria`), a
+    /// record produced by the now-stale validator would otherwise settle the edited criterion on an
+    /// obsolete verdict and skip the new validator. The check runs HERE, on the actor that owns the
+    /// live criteria, so it's atomic against a concurrent edit. Dropped criteria stay unjudged and are
+    /// re-judged against the new contract next round. Returns the records actually recorded.
+    @discardableResult
+    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord], judgedAgainst: [AcceptanceCriterion]) -> [CriterionVerdictRecord] {
+        guard var task = tasks[id], !records.isEmpty else { return [] }
+        let judgedByID = Dictionary(judgedAgainst.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let currentByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let fresh = records.filter { record in
+            guard let judged = judgedByID[record.criterionID], let current = currentByID[record.criterionID] else { return false }
+            return current.validator == judged.validator && current.prepare == judged.prepare && current.waivable == judged.waivable
+        }
+        guard !fresh.isEmpty else { return [] }
         var validation = task.validation ?? TaskValidationState()
-        validation.verdictRecords.append(contentsOf: records)
+        validation.verdictRecords.append(contentsOf: fresh)
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
+        return fresh
     }
 
     /// Pins a definition body on the task at first use — later registry edits apply to

@@ -1546,7 +1546,17 @@ public actor OrchestrationRuntime {
             return
         }
 
-        await taskStore.updateStatus(id: taskID, status: .running)
+        // Finalize the claim: .starting → .running, but ONLY if the task is STILL .starting. A
+        // scheduled-interrupt wake (`dispatchAutoRunWake` runs on this actor but OUTSIDE the lifecycle
+        // queue) can flip a `.starting` task to `.paused` while we were suspended in the spawn above;
+        // an unconditional set to `.running` would silently clobber that pause and run the task Smith
+        // was told to interrupt. If the CAS loses, honor the new status and tear down the worker we
+        // just spawned — the paused task resumes later via its queued wake.
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.starting]) else {
+            stopLogger.notice("performStart: task \(taskID.uuidString, privacy: .public) left .starting during spawn (e.g. paused by a wake) — tearing down the freshly spawned worker")
+            _ = await performTerminateAgent(id: brownID)
+            return
+        }
         await taskStore.assignAgent(taskID: taskID, agentID: brownID)
         let refreshed = await taskStore.task(id: taskID) ?? task
 

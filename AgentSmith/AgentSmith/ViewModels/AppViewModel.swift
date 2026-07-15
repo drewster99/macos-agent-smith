@@ -1654,7 +1654,9 @@ final class AppViewModel {
         )
         logger.notice("flushPersistence: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(finalState.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(finalState.autoRunInterruptedTasks, privacy: .public)")
         await sessionStateWriter.enqueue(finalState)
-        await channelLogAppendWriter.flush()
+        if await channelLogAppendWriter.flush() == false {
+            logger.error("flushPersistence: channel-log flush did NOT reach disk (disk full / permissions) — the trailing transcript batch was retained in memory only and is lost on exit.")
+        }
         await tasksWriter.flush()
         await sessionStateWriter.flush()
         await timerEventsWriter.flush()

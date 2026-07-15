@@ -314,8 +314,10 @@ extension OrchestrationRuntime {
             }
         }
 
-        await taskStore.recordCriterionVerdicts(id: taskID, records: records)
-        await postRoundSummary(taskID: taskID, records: records)
+        // Record against the snapshot we judged; any criterion whose contract changed mid-round is
+        // dropped atomically inside the store, so `recorded` is what actually landed in the ledger.
+        let recorded = await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria)
+        await postRoundSummary(taskID: taskID, records: recorded)
 
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard let judged = await taskStore.task(id: taskID), judged.status == .validating else { return }

@@ -1121,35 +1121,6 @@ public actor AgentActor {
               let task = await currentTaskForScoping() else { return }
         // Light the Security Agent card while it re-scopes (a real Security Agent LLM call).
         toolContext.onSecurityAgentProcessingStateChange(true)
-        //TODO: CLAUDE RIGHT HERE
-        // TEMP DEBUG — complete tool-registry dump (remove me).
-        do {
-            func pad(_ s: String, _ n: Int) -> String {
-                s.count >= n ? s : s + String(repeating: " ", count: n - s.count)
-            }
-            let dumpEntries = toolRegistry.entries
-            print("\n==================== TOOL REGISTRY DUMP ====================")
-            print("agent      : \(configuration.role.displayName)  id=\(id)")
-            print("task       : \(task.title)  id=\(task.id.uuidString)")
-            print("counts     : candidates=\(dumpEntries.count)  available=\(dumpEntries.filter(\.isAvailable).count)  approved=\(dumpEntries.filter(\.isApproved).count)  forced=\(dumpEntries.filter(\.isForcedAvailableBySystem).count)  ctxBlocked=\(dumpEntries.filter(\.isUnavailableDueToContext).count)")
-            print("fingerprint: \(toolRegistry.candidateFingerprint)")
-            print("-----------------------------------------------------------")
-            print("  #  avail  A C F  D O  kind      name  [identity]")
-            for (index, entry) in dumpEntries.enumerated() {
-                let flagA = entry.isApproved ? "A" : "."
-                let flagC = entry.isUnavailableDueToContext ? "C" : "."
-                let flagF = entry.isForcedAvailableBySystem ? "F" : "."
-                let riskD = entry.tool.isDestructive ? "D" : "."
-                let riskO = entry.tool.isOpenWorld ? "O" : "."
-                let kind = entry.tool.identityToken == nil ? "built-in" : "mcp"
-                let avail = entry.isAvailable ? " YES " : " no  "
-                var line = "\(pad(String(index), 3))  \(avail)  \(flagA) \(flagC) \(flagF)  \(riskD) \(riskO)  \(pad(kind, 8))  \(entry.tool.name)"
-                if let token = entry.tool.identityToken { line += "  [\(token)]" }
-                print(line)
-            }
-            print("legend     : avail=usable this turn | A=Approved C=ContextUnavailable F=Forced(bypass) | D=Destructive O=OpenWorld")
-            print("===========================================================\n")
-        }
         let result = await evaluator.scopeTools(
             candidateTools: toolRegistry.candidateTools,
             taskTitle: task.title,

@@ -117,7 +117,7 @@ struct ReviewWorkTool: AgentTool {
                         validatorHash: "-",
                         round: round
                     )
-                })
+                }, judgedAgainst: task.acceptanceCriteria)
                 let overriddenList = unsettled.map { "- \($0.text)" }.joined(separator: "\n")
                 await context.taskStore.addUpdate(
                     id: taskID,

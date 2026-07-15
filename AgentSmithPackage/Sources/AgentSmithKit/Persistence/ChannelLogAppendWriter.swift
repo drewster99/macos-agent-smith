@@ -22,6 +22,11 @@ public actor ChannelLogAppendWriter {
     private var writtenSeq: UInt64 = 0
     private var flushWaiters: [(target: UInt64, continuation: CheckedContinuation<Void, Never>)] = []
 
+    /// True when the last drain GAVE UP on a persistently-failing append (disk full / permissions):
+    /// the retained batch is in memory only, so a caller that treats a completed `flush()` as durable
+    /// would be over-claiming. Cleared on the next successful append; surfaced via `flush()`'s return.
+    public private(set) var lastFlushFailed = false
+
     public init(
         logger: Logger = Logger(subsystem: "com.agentsmith", category: "ChannelLogAppendWriter"),
         append: @escaping @Sendable ([ChannelMessage]) async throws -> Void
@@ -40,13 +45,18 @@ public actor ChannelLogAppendWriter {
         }
     }
 
-    /// Returns once every message enqueued before this call has been written.
-    public func flush() async {
+    /// Returns once every message enqueued before this call has been written. The result is `true`
+    /// when the log is durable (everything reached disk) and `false` when a drain gave up on a
+    /// persistently-failing append and the tail is retained in memory only — so a termination path can
+    /// surface that instead of exiting as though the disk reflected memory.
+    @discardableResult
+    public func flush() async -> Bool {
         let target = enqueueSeq
-        if writtenSeq >= target { return }
+        if writtenSeq >= target { return !lastFlushFailed }
         await withCheckedContinuation { continuation in
             flushWaiters.append((target, continuation))
         }
+        return !lastFlushFailed
     }
 
     private static let maxAppendAttempts = 5
@@ -62,6 +72,7 @@ public actor ChannelLogAppendWriter {
                 do {
                     try await append(batch)
                     writtenSeq = seq
+                    lastFlushFailed = false
                     resumeFlushWaiters()
                     break  // success → move on to any batch that accrued during the write
                 } catch {
@@ -75,7 +86,12 @@ public actor ChannelLogAppendWriter {
                         // loudly, and only after exhausting retries.
                         logger.error("Channel log append failed after \(attempt, privacy: .public) attempts; \(batch.count, privacy: .public) message(s) retained for retry: \(error.localizedDescription, privacy: .public)")
                         buffer.insert(contentsOf: batch, at: 0)
-                        writtenSeq = seq
+                        // Advance the watermark to the CURRENT enqueue seq (not this failed batch's
+                        // `seq`): messages that streamed in during the ~1.5s of retries bumped
+                        // `enqueueSeq` past `seq`, and their `flush()` waiters (target > seq) would
+                        // otherwise hang until a future enqueue since we return without re-draining.
+                        writtenSeq = enqueueSeq
+                        lastFlushFailed = true
                         resumeFlushWaiters()
                         return
                     }
