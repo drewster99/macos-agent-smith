@@ -2366,43 +2366,47 @@ public actor OrchestrationRuntime {
     private func recoverLostTrailingUserMessage() async {
         guard let loadRecent = loadRecentChannelMessages else { return }
         let recent = await loadRecent()
-        let alreadyQueued = Set(pendingUserMessages.map { $0.id })
-        guard let recovered = Self.lostMessageToRecover(recentTail: recent, alreadyQueuedIDs: alreadyQueued) else { return }
+        // Known ids = still-queued messages AND incorporated tombstones — both live in the buffer now,
+        // so this one set covers "already queued" and "already handled" together.
+        let knownIDs = Set(pendingUserMessages.map { $0.id })
+        guard let recovered = Self.lostMessageToRecover(recentTail: recent, knownMessageIDs: knownIDs) else { return }
         pendingUserMessages.append(recovered)
         pendingUserMessages.sort { $0.receivedAt < $1.receivedAt }
         await persistPendingUserMessages?(pendingUserMessages)
         stopLogger.notice("Recovered a user message lost to a send-during-restart race: \(recovered.id.uuidString, privacy: .public)")
     }
 
-    /// Decides whether the transcript tail ends with a user message that was lost to a
-    /// send-during-restart race, and if so returns the `PendingUserMessage` to re-enqueue.
+    /// Decides whether a trailing user message was lost to a send-during-restart race, and if so
+    /// returns the `PendingUserMessage` to re-enqueue.
     ///
-    /// Returns non-nil ONLY when the LAST conversational message (user or agent — system/chrome/tool
-    /// rows are ignored) is a USER message that carries a `pendingUserMessageID` NOT in
-    /// `alreadyQueuedIDs`. That combination means: no agent replied to it (so it wasn't handled) AND
-    /// it isn't already queued for delivery (so the normal drain won't cover it) — i.e. it was lost.
-    /// A normally-processed last message has an agent reply after it and returns nil; an
-    /// already-queued message is filtered by id and returns nil. Pure and deterministic for testing.
-    static func lostMessageToRecover(recentTail: [ChannelMessage], alreadyQueuedIDs: Set<UUID>) -> PendingUserMessage? {
-        let lastConversational = recentTail.last { message in
-            switch message.sender {
-            case .user, .agent: return true
-            default: return false
-            }
+    /// `knownMessageIDs` is the set of `pendingUserMessageID`s the runtime already knows about — both
+    /// still-queued messages AND incorporated tombstones (messages Smith has handled). The scan walks
+    /// the transcript tail newest→oldest to the first USER echo carrying a `pendingUserMessageID`:
+    ///  - a KNOWN id means that message was queued or already handled, and anything older is covered
+    ///    too, so nothing trailing is lost → nil;
+    ///  - an UNKNOWN id means the message was received (its UI echo persisted) but never handled — its
+    ///    buffer entry was lost to the restart race → recover it.
+    ///
+    /// Searching USER echoes INDEPENDENTLY (not just the last conversational row) is what fixes the
+    /// silent-loss case: a later Brown/agent message about an unrelated task is not an acknowledgement
+    /// of this user message and must not mask it. Checking `knownMessageIDs` (which now includes
+    /// incorporated tombstones) is what fixes the duplicate-redelivery case: a handled message is
+    /// known, so it is never recovered. Pure and deterministic for testing.
+    static func lostMessageToRecover(recentTail: [ChannelMessage], knownMessageIDs: Set<UUID>) -> PendingUserMessage? {
+        for message in recentTail.reversed() {
+            guard case .user = message.sender,
+                  case .string(let pidString)? = message.metadata?["pendingUserMessageID"],
+                  let pendingID = UUID(uuidString: pidString) else { continue }
+            if knownMessageIDs.contains(pendingID) { return nil }
+            return PendingUserMessage(
+                id: pendingID,
+                channelMessageID: message.id,
+                text: message.content,
+                attachments: message.attachments,
+                receivedAt: message.timestamp
+            )
         }
-        guard let candidate = lastConversational, case .user = candidate.sender,
-              case .string(let pidString)? = candidate.metadata?["pendingUserMessageID"],
-              let pendingID = UUID(uuidString: pidString),
-              !alreadyQueuedIDs.contains(pendingID) else {
-            return nil
-        }
-        return PendingUserMessage(
-            id: pendingID,
-            channelMessageID: candidate.id,
-            text: candidate.content,
-            attachments: candidate.attachments,
-            receivedAt: candidate.timestamp
-        )
+        return nil
     }
 
     /// Sends a user message (with optional attachments) to Smith.
@@ -2427,8 +2431,11 @@ public actor OrchestrationRuntime {
             receivedAt: Date()
         )
         pendingUserMessages.append(pending)
-        if pendingUserMessages.count > Self.pendingUserMessageSoftCap {
-            stopLogger.notice("pendingUserMessages large count=\(self.pendingUserMessages.count, privacy: .public)")
+        // Warn on a large UNDELIVERED backlog (the real "messages piling up" signal); incorporated
+        // tombstones are bounded by the prune and aren't a problem, so exclude them from the count.
+        let undeliveredCount = pendingUserMessages.lazy.filter { !$0.incorporated }.count
+        if undeliveredCount > Self.pendingUserMessageSoftCap {
+            stopLogger.notice("pendingUserMessages large undelivered count=\(undeliveredCount, privacy: .public)")
         }
         await persistPendingUserMessages?(pendingUserMessages)
 
@@ -2493,7 +2500,7 @@ public actor OrchestrationRuntime {
         // the same message to a Smith that has it queued but hasn't processed it yet. Re-snapshot
         // each pass so messages appended mid-drain are picked up; stop when a pass delivers none.
         while !Task.isCancelled {
-            let undelivered = pendingUserMessages.filter { !deliveredUserMessageChannelIDs.contains($0.channelMessageID) }
+            let undelivered = pendingUserMessages.filter { !$0.incorporated && !deliveredUserMessageChannelIDs.contains($0.channelMessageID) }
             if undelivered.isEmpty { break }
 
             var deliveredAny = false
@@ -2502,8 +2509,10 @@ public actor OrchestrationRuntime {
                 // Re-verify the same Smith is still current and running after each suspension —
                 // `stopAll`/abort can tear it down while we're awaiting.
                 guard let liveSmith = smith, smithID == startSmithID, await liveSmith.running else { return }
-                // The incorporation callback may have removed/consumed it during an await.
-                guard pendingUserMessages.contains(where: { $0.id == pending.id }),
+                // The incorporation callback may have tombstoned it during an await — a tombstoned
+                // (incorporated) message must not be re-delivered.
+                guard let current = pendingUserMessages.first(where: { $0.id == pending.id }),
+                      !current.incorporated,
                       !deliveredUserMessageChannelIDs.contains(pending.channelMessageID) else { continue }
 
                 var resolved: [Attachment] = []
@@ -2539,12 +2548,38 @@ public actor OrchestrationRuntime {
     /// a message is durably handled, so it's finally removed from the persisted buffer.
     private func handleInboundUserMessagesIncorporated(_ channelMessageIDs: [UUID]) async {
         let incorporated = Set(channelMessageIDs)
-        let before = pendingUserMessages.count
-        pendingUserMessages.removeAll { incorporated.contains($0.channelMessageID) }
+        var changed = false
+        // TOMBSTONE, don't delete: flag the message `incorporated` (durably) so lost-message recovery
+        // can tell "handled" apart from "never enqueued/lost". Deleting it here made "absent from the
+        // buffer" ambiguous — the root of both the duplicate-redelivery and the silent-loss bugs. The
+        // drain skips incorporated messages; the prune below keeps the buffer bounded.
+        for index in pendingUserMessages.indices
+        where incorporated.contains(pendingUserMessages[index].channelMessageID) && !pendingUserMessages[index].incorporated {
+            pendingUserMessages[index].incorporated = true
+            changed = true
+        }
+        if pruneIncorporatedTombstones() { changed = true }
         deliveredUserMessageChannelIDs.subtract(incorporated)
-        if pendingUserMessages.count != before {
+        if changed {
             await persistPendingUserMessages?(pendingUserMessages)
         }
+    }
+
+    /// Retention cap for incorporated tombstones. Must exceed the recovery scan window (the last 32
+    /// channel messages) so any user echo still visible to recovery keeps its tombstone.
+    private static let maxIncorporatedTombstones = 100
+
+    /// Drops the oldest incorporated tombstones beyond `maxIncorporatedTombstones` — not-yet-handled
+    /// messages are always kept. Returns whether anything was removed.
+    @discardableResult
+    private func pruneIncorporatedTombstones() -> Bool {
+        let tombstones = pendingUserMessages.filter { $0.incorporated }
+        guard tombstones.count > Self.maxIncorporatedTombstones else { return false }
+        let keep = Set(tombstones.sorted { $0.receivedAt < $1.receivedAt }
+            .suffix(Self.maxIncorporatedTombstones).map { $0.id })
+        let before = pendingUserMessages.count
+        pendingUserMessages.removeAll { $0.incorporated && !keep.contains($0.id) }
+        return pendingUserMessages.count != before
     }
 
     /// Stops all agents and the monitoring timer.
