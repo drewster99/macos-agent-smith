@@ -206,6 +206,31 @@ struct Phase2LongLivedSmithTests {
         await runtime.stopAll()
     }
 
+    @Test("A per-run amendment lands on the cloned instance, never the template")
+    func templateAmendmentAppliesToCloneNotTemplate() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.start()
+        let store = await runtime.taskStore
+        let template = await store.addTask(title: "Nightly", description: "base description", isTemplate: true)
+
+        await runtime.restartForNewTask(taskID: template.id, amendment: "run only the smoke suite")
+        await runtime.waitForPendingRestarts()
+
+        // The reusable template's description is untouched — no welded per-run text.
+        let templateAfter = await store.task(id: template.id)
+        #expect(templateAfter?.description == "base description")
+
+        // The cloned instance — which is what Brown's briefing reads fresh by id — carries BOTH the
+        // base description and the per-run amendment.
+        let instance = await store.allTasks().first { $0.parentTaskID == template.id }
+        #expect(instance != nil)
+        #expect(instance?.description.contains("base description") == true)
+        #expect(instance?.description.contains("run only the smoke suite") == true)
+
+        await runtime.stopAll()
+    }
+
     @Test("Auto-advance never starts a template")
     func autoAdvanceSkipsTemplates() async {
         let runtime = makeRuntime()

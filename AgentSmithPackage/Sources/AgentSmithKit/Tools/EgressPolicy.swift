@@ -10,11 +10,12 @@ import Foundation
 /// intended capability — e.g. fetching a local dev server). Hostnames are resolved before
 /// classification so a public name pointing at a private IP is caught.
 ///
-/// LIMITATION (DNS rebinding): this resolves the host itself, then hands the request back to
-/// `URLSession`, which re-resolves independently at connect time. A low-TTL attacker name that
-/// answers a public address here and a private one at connect can still slip the guard — closing
-/// that fully requires pinning the connection to the vetted IP, which `URLSession` doesn't expose.
-/// This is best-effort, not a guarantee.
+/// DNS rebinding: this resolves the host itself, then hands the request back to `URLSession`, which
+/// re-resolves independently at connect time — so a low-TTL attacker name that answers a public
+/// address here and a private one at connect could slip THIS check. That gap is closed downstream by
+/// `WebFetchDownloader`, which verifies the connection's ACTUAL peer address (from transaction
+/// metrics) and refuses to return a body fetched from non-public space. `URLSession` exposes no hook
+/// to pin the socket to the vetted IP, so post-connect verification is the enforcement point.
 enum EgressPolicy {
 
     /// An IP address as a family + raw network-order bytes (4 for IPv4, 16 for IPv6).

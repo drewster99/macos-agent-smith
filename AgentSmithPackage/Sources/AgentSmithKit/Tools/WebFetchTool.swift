@@ -167,6 +167,10 @@ struct WebFetchTool: AgentTool {
                 return .failure(Self.render(.error(
                     "redirect_blocked",
                     "\(urlString) redirected to a non-public address (\(blockedURL.absoluteString)). web_fetch does not follow redirects into loopback / link-local / private network ranges. Request that address directly if you intend to reach it.")))
+            case .peerBlocked(let address):
+                return .failure(Self.render(.error(
+                    "blocked",
+                    "\(urlString) connected to a non-public address (\(address)) — its hostname resolves into loopback / link-local / private network space. web_fetch will not return content fetched from there. If you intend to reach a local address, request it directly by IP or localhost.")))
             case .tooLarge(let limit):
                 let limitString = ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)
                 // Only point at `bash` when the caller actually holds it.
@@ -692,17 +696,24 @@ struct WebFetchTool: AgentTool {
     }
 }
 
-/// Downloads a URL into memory for `web_fetch` with two protections the default `data(for:)` lacks:
-/// a hard byte ceiling (so a huge or chunked/dishonest response can't exhaust memory) and a redirect
-/// guard that refuses 30x hops into non-public address space (so a benign URL can't be silently
-/// redirected onto the local machine or LAN, bypassing the security agent). **Direct** requests are
-/// never gated — only redirect hops. Delegate-driven so reads are chunked and the transfer is
-/// cancelled the instant a limit is hit. Single-use: create one per fetch.
+/// Downloads a URL into memory for `web_fetch` with three protections the default `data(for:)`
+/// lacks: a hard byte ceiling (so a huge or chunked/dishonest response can't exhaust memory), a
+/// redirect guard that refuses 30x hops into non-public address space, and a check of the ACTUAL
+/// connected peer address that refuses to return a body fetched from a non-public IP. That last one
+/// closes the DNS-rebinding TOCTOU the name-resolution pre-flight can't: the pre-flight resolves the
+/// host, then `URLSession` re-resolves at connect, so a low-TTL name could answer public up front
+/// and private at connect. `URLSession` gives no hook to pin the socket to the vetted IP, but its
+/// transaction metrics report the real remote address of each connection — so we verify that
+/// post-transfer and discard the response if the peer was non-public. The request still reaches the
+/// host (a GET with no returned body), but the model never sees internal data. Delegate-driven so
+/// reads are chunked and the transfer is cancelled the instant a limit is hit. Single-use.
 final class WebFetchDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
 
     enum DownloadError: Error {
         case tooLarge(limit: Int)
         case redirectBlocked(URL)
+        /// The connection's actual remote address was non-public (DNS-rebinding defense).
+        case peerBlocked(String)
     }
 
     private let maxBytes: Int
@@ -710,6 +721,9 @@ final class WebFetchDownloader: NSObject, URLSessionDataDelegate, @unchecked Sen
     private var buffer = Data()
     private var response: URLResponse?
     private var settled = false
+    /// Set when a transaction's real peer address classified as non-public. Enforced on both the
+    /// metrics path and the completion path so ordering between them doesn't matter.
+    private var peerBlockedAddress: String?
     private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
 
     init(maxBytes: Int) {
@@ -761,11 +775,40 @@ final class WebFetchDownloader: NSObject, URLSessionDataDelegate, @unchecked Sen
             settle(.failure(error))
             return
         }
-        let snapshot: (Data, URLResponse?) = lock.withLock { (buffer, response) }
+        let snapshot: (Data, URLResponse?, String?) = lock.withLock { (buffer, response, peerBlockedAddress) }
+        // Never hand back a body whose connection landed on a non-public peer, even if the buffer
+        // is fully populated — the DNS-rebinding defense (see the metrics delegate below).
+        if let blocked = snapshot.2 {
+            settle(.failure(DownloadError.peerBlocked(blocked)))
+            return
+        }
         if let resp = snapshot.1 {
             settle(.success((snapshot.0, resp)))
         } else {
             settle(.failure(URLError(.badServerResponse)))
+        }
+    }
+
+    /// Verifies the ACTUAL remote address of every connection this task made. `URLSession` won't let
+    /// us pin the socket to the IP the pre-flight vetted, but it reports the real peer here — so a
+    /// DNS-rebinding answer that pointed the connect at loopback / link-local / a private range is
+    /// caught and the response is refused. `remoteAddress` is a bare IP literal (no port); a
+    /// link-local IPv6 peer may carry a `%zone` suffix that `inet_pton` rejects, so strip it before
+    /// classifying. A nil / reused-from-cache address is simply skipped.
+    ///
+    /// This is delivered before `didCompleteWithError` in the URLSession delegate call sequence, so
+    /// the flag is reliably set by the time the completion path reads it. If that ordering were ever
+    /// violated the fetch degrades to the name-resolution pre-flight's protection (a possible missed
+    /// peer-check), never to a hang or an unchecked-fail-open — completion still returns normally.
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        for transaction in metrics.transactionMetrics {
+            guard let raw = transaction.remoteAddress, !raw.isEmpty else { continue }
+            let address = String(raw.split(separator: "%").first ?? "")   // drop any IPv6 %zone id
+            if EgressPolicy.classifyLiteral(address) == true {
+                lock.withLock { if peerBlockedAddress == nil { peerBlockedAddress = address } }
+                settle(.failure(DownloadError.peerBlocked(address)))
+                return
+            }
         }
     }
 

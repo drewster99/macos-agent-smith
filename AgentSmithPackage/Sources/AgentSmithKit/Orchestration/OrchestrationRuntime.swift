@@ -1443,17 +1443,20 @@ public actor OrchestrationRuntime {
         guard let instance = await taskStore.cloneTemplateInstance(templateID: taskID) else { return taskID }
         // Apply any per-run instructions to the fresh INSTANCE, never the reusable template — else
         // one run's one-off text would weld onto the template and every future clone would inherit it.
+        // Re-read after amending so the announced description reflects the applied instructions
+        // (Brown's briefing already reads the task fresh by id; this keeps the banner consistent).
         if let amendment, !amendment.isEmpty {
             await taskStore.amendDescription(id: instance.id, amendment: amendment)
         }
+        let announced = await taskStore.task(id: instance.id) ?? instance
         await taskStore.addUpdate(id: taskID, message: "Started instance \(instance.id.uuidString) from this template.")
         await channel.post(ChannelMessage(
             sender: .system,
-            content: instance.title,
+            content: announced.title,
             metadata: [
                 "messageKind": .string("task_created"),
-                "taskID": .string(instance.id.uuidString),
-                "taskDescription": .string(instance.description),
+                "taskID": .string(announced.id.uuidString),
+                "taskDescription": .string(announced.description),
                 "clonedFromTemplate": .string(taskID.uuidString)
             ]
         ))
