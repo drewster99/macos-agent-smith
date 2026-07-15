@@ -1922,6 +1922,7 @@ public actor AgentActor {
                 let role = configuration.role
                 let roleName = configuration.role.displayName
                 let ctx = toolContext
+                let sanctionedDirectories = [toolContext.taskEvidenceDirectory, toolContext.taskTemporaryDirectory].compactMap { $0?.path }
                 let taskTitleForChannel = channelTaskTitle
                 let agentIDPrefix = String(id.uuidString.prefix(8))
 
@@ -1950,6 +1951,7 @@ public actor AgentActor {
                         taskDescription: entry.taskDescription,
                         siblingCalls: entry.siblings.isEmpty ? nil : entry.siblings,
                         agentRoleName: roleName,
+                        sanctionedDirectories: sanctionedDirectories,
                         toolCallID: entry.call.id
                     )
 
@@ -2257,6 +2259,8 @@ public actor AgentActor {
         // Smith's read-only filesystem reads are auto-approved by the evaluator (no LLM), but still
         // routed through it so they're visible and centrally gated. Brown is fully evaluated.
         let readOnlyAutoApproveEligible = configuration.role == .smith
+        // The worker's task-scoped working dirs — writes here are expected, not suspicious.
+        let sanctionedDirectories = [toolContext.taskEvidenceDirectory, toolContext.taskTemporaryDirectory].compactMap { $0?.path }
         toolContext.onSecurityAgentProcessingStateChange(true)
         let disposition = await evaluator.evaluate(
             toolName: call.name,
@@ -2270,6 +2274,7 @@ public actor AgentActor {
             agentRoleName: configuration.role.displayName,
             agentContext: agentContext,
             readOnlyAutoApproveEligible: readOnlyAutoApproveEligible,
+            sanctionedDirectories: sanctionedDirectories,
             toolCallID: call.id
         )
         toolContext.onSecurityAgentProcessingStateChange(false)

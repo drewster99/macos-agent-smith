@@ -80,7 +80,13 @@ public struct TaskCompleteTool: AgentTool {
         if let failureMessage = resolution.failure {
             return .failure(failureMessage)
         }
-        let attachments = resolution.attachments
+        // Ingest everything the worker placed in its evidence directory (text reports, logs,
+        // screenshots it copied in) so those artifacts become clickable result attachments. This is
+        // the ONE place the sweep runs — `setResult` replaces the attachment list each submission,
+        // so a resubmission re-sweeps without accumulating. Merged AFTER the worker's explicit
+        // attachments and deduped by filename so an explicitly-referenced file isn't doubled.
+        var attachments = resolution.attachments
+        attachments += await Self.ingestEvidenceDirectory(context: context, existing: attachments)
 
         // Store result on the task (survives restarts) and hand it to acceptance
         // validation — the evaluator system, not Smith, judges submissions now. The
@@ -110,6 +116,51 @@ public struct TaskCompleteTool: AgentTool {
         }
         let names = attachments.map { $0.filename }.joined(separator: ", ")
         return .success("Task submitted with \(attachments.count) attachment(s) (\(names)). Acceptance validation will judge it; you'll receive a punch list if changes are needed. Wait.")
+    }
+
+    /// Ingests every regular file in the task's evidence directory as an attachment, skipping any
+    /// whose filename already appears in `existing` (the worker's explicitly-referenced attachments)
+    /// so nothing is doubled. Best-effort: a file that can't be read or ingested is skipped. Returns
+    /// the newly ingested attachments. No-op when the task has no evidence directory.
+    static func ingestEvidenceDirectory(context: ToolContext, existing: [Attachment]) async -> [Attachment] {
+        guard let evidenceDir = context.taskEvidenceDirectory else { return [] }
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: evidenceDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+            return []
+        }
+        var existingNames = Set(existing.map { $0.filename })
+        var ingested: [Attachment] = []
+        for fileURL in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let isRegular = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
+            guard isRegular else { continue }
+            let filename = fileURL.lastPathComponent
+            guard !existingNames.contains(filename), let data = try? Data(contentsOf: fileURL) else { continue }
+            let mimeType = Self.mimeType(forExtension: fileURL.pathExtension)
+            let (attachment, _) = await context.ingestAttachmentData(data, filename, mimeType)
+            if let attachment {
+                ingested.append(attachment)
+                existingNames.insert(filename)
+            }
+        }
+        return ingested
+    }
+
+    /// Minimal extension→MIME mapping for evidence ingest. Unknown types fall back to
+    /// `application/octet-stream`; the attachment layer sniffs images/PDFs from the bytes regardless.
+    static func mimeType(forExtension ext: String) -> String {
+        switch ext.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        case "heic": return "image/heic"
+        case "pdf": return "application/pdf"
+        case "md", "markdown", "txt", "log": return "text/plain"
+        case "json": return "application/json"
+        case "html", "htm": return "text/html"
+        case "csv": return "text/csv"
+        default: return "application/octet-stream"
+        }
     }
 
     /// Posts a system channel message recording an auto-rejection of an empty/missing-result

@@ -45,47 +45,65 @@ struct TaskWorkspaceTests {
     }
 }
 
-@Suite("FileWriteTool evidence auto-ingest")
-struct FileWriteEvidenceIngestTests {
+@Suite("TaskCompleteTool evidence sweep")
+struct EvidenceSweepTests {
 
-    @Test("a write into the evidence dir is auto-ingested; a writable path outside is not")
-    func autoIngest() async throws {
-        // /tmp resolves to /private/tmp, which FileWriteTool does NOT block (unlike /var/folders,
-        // the OS temp dir). Both the evidence dir and the "outside" file live here so both writes
-        // are genuinely permitted, isolating the ingest behavior from the path restriction.
-        let base = URL(fileURLWithPath: "/tmp", isDirectory: true)
-            .appendingPathComponent("fwtest-\(UUID().uuidString)", isDirectory: true)
-        let evidenceDir = base.appendingPathComponent("evidence", isDirectory: true)
-        try FileManager.default.createDirectory(at: evidenceDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: base) }
-
-        let ingested = IngestRecorder()
-        let context = TestToolContext.make(
+    private func makeContext(evidenceDir: URL, recorder: IngestRecorder) -> ToolContext {
+        TestToolContext.make(
             attachmentDataIngestor: { data, filename, mimeType in
-                await ingested.record(filename)
+                await recorder.record(filename)
                 return (Attachment(filename: filename, mimeType: mimeType, byteCount: data.count, data: data), nil)
             },
             taskEvidenceDirectory: evidenceDir
         )
+    }
 
-        // Inside the evidence dir → ingested, and the result notes it.
-        let insidePath = evidenceDir.appendingPathComponent("PROOF.md").path
-        let inside = try await FileWriteTool().execute(
-            arguments: ["path": .string(insidePath), "content": .string("evidence")],
-            context: context
-        )
-        #expect(inside.succeeded)
-        #expect(inside.output.contains("ingested"))
-        #expect(await ingested.contains("PROOF.md"))
+    @Test("every file in the evidence dir is ingested, including binaries like screenshots")
+    func sweepIngestsAll() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "report".write(to: dir.appendingPathComponent("PHASE1.md"), atomically: true, encoding: .utf8)
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: dir.appendingPathComponent("shot.png"))
 
-        // Outside the evidence dir (but writable) → NOT ingested.
-        let outsidePath = base.appendingPathComponent("scratch.md").path
-        let outside = try await FileWriteTool().execute(
-            arguments: ["path": .string(outsidePath), "content": .string("scratch")],
-            context: context
+        let recorder = IngestRecorder()
+        let context = makeContext(evidenceDir: dir, recorder: recorder)
+        let ingested = await TaskCompleteTool.ingestEvidenceDirectory(context: context, existing: [])
+
+        #expect(ingested.count == 2)
+        #expect(await recorder.contains("PHASE1.md"))
+        #expect(await recorder.contains("shot.png"))
+        #expect(ingested.first { $0.filename == "shot.png" }?.mimeType == "image/png")
+    }
+
+    @Test("a file already referenced by the worker is not doubled")
+    func sweepDedupesByFilename() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "x".write(to: dir.appendingPathComponent("PHASE1.md"), atomically: true, encoding: .utf8)
+
+        let recorder = IngestRecorder()
+        let context = makeContext(evidenceDir: dir, recorder: recorder)
+        let already = Attachment(filename: "PHASE1.md", mimeType: "text/plain", byteCount: 1, data: Data("x".utf8))
+        let ingested = await TaskCompleteTool.ingestEvidenceDirectory(context: context, existing: [already])
+
+        #expect(ingested.isEmpty, "the already-referenced file must not be ingested again")
+    }
+
+    @Test("no evidence directory → no-op")
+    func noEvidenceDir() async {
+        let recorder = IngestRecorder()
+        let context = TestToolContext.make(
+            attachmentDataIngestor: { data, filename, mimeType in
+                await recorder.record(filename)
+                return (Attachment(filename: filename, mimeType: mimeType, byteCount: data.count, data: data), nil)
+            }
         )
-        #expect(outside.succeeded)
-        #expect(!outside.output.contains("ingested"))
+        let ingested = await TaskCompleteTool.ingestEvidenceDirectory(context: context, existing: [])
+        #expect(ingested.isEmpty)
     }
 
     private actor IngestRecorder {

@@ -856,11 +856,12 @@ public actor OrchestrationRuntime {
         parts.append("""
             ## Your working directories
             \(workspaceLines.joined(separator: "\n"))
-            Write throwaway intermediates to the SCRATCH dir. Write files that serve as EVIDENCE for \
-            the acceptance criteria into the EVIDENCE dir — files you write there are auto-attached and \
-            become clickable references in your submission. **Do NOT create working files, evidence, or \
-            screenshots inside the user's own project unless the task is specifically about adding files \
-            to that project** — use these directories instead so you don't litter the user's repo.
+            Write throwaway intermediates to the SCRATCH dir. Put anything that serves as EVIDENCE for \
+            the acceptance criteria into the EVIDENCE dir (reports, logs, screenshots you capture) — \
+            everything in the evidence dir at submission is attached and becomes a clickable reference, \
+            and validators can read it there. **Unless the task is specifically about creating or \
+            modifying files in a particular place, do NOT scatter your own working files, evidence, or \
+            screenshots into the user's directories — use these two directories instead.**
             """)
 
         if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: task.acknowledgmentCount > 0) {
