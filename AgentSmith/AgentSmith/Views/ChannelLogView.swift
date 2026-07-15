@@ -418,16 +418,10 @@ struct ChannelLogView: View, Equatable {
             EmptyView()
         case .restartChrome:
             // Lifecycle chrome ("All agents stopped", "Smith agent active") — gated by
-            // the user's "Show agent restart chrome" preference.
+            // the user's "Show agent restart chrome" preference. Rendered as a centered
+            // marker, not a chat row, so it reads as a lifecycle event.
             if displayPrefs.showRestartChrome {
-                MessageRow(
-                    message: message,
-                    securityReviewMessage: message.stringMetadata("requestID").flatMap { reviewLookup[$0] },
-                    toolOutputMessage: message.stringMetadata("requestID").flatMap { outputLookup[$0] },
-                    displayPrefs: displayPrefs,
-                    selectedImageAttachment: $selectedImageAttachment
-                )
-                .equatable()
+                LifecycleChromeBanner(message: message)
             }
         case .timerActivity:
             // Suppress the "scheduled HH:MM — run_task: …" row when paired with a Task
@@ -1399,3 +1393,39 @@ private extension ChannelMessage {
     }
 }
 
+
+/// A centered lifecycle marker for `restart_chrome` messages ("System online. Smith agent active.",
+/// "All agents stopped") — a small capsule with a status dot, flanked by hairline rules, so it reads
+/// as a boot/shutdown event rather than a chat message.
+private struct LifecycleChromeBanner: View {
+    let message: ChannelMessage
+
+    private var isStop: Bool {
+        message.stringMetadata("restartChromeKind") == "agents_stopped"
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+            HStack(spacing: 5) {
+                Image(systemName: isStop ? "moon.zzz.fill" : "bolt.horizontal.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(isStop ? Color.secondary : AppColors.smithAgent)
+                Text(message.content)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().fill(Color.secondary.opacity(0.10))
+            )
+            .overlay(
+                Capsule().strokeBorder(Color.secondary.opacity(0.18), lineWidth: 1)
+            )
+            Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity)
+    }
+}

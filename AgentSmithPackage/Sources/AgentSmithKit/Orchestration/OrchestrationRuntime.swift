@@ -216,6 +216,12 @@ public actor OrchestrationRuntime {
     /// log via the app's logger but never block the runtime.
     private var persistPendingUserMessages: (@Sendable ([PendingUserMessage]) async -> Void)?
 
+    /// Loads the recent persisted transcript tail. Used at `start()` to recover a user message that
+    /// was echoed to the transcript but whose pending-buffer write didn't survive a restart (the
+    /// "sent a message right as the app restarted" race) — the channel log captured it even though
+    /// the pending buffer didn't.
+    private var loadRecentChannelMessages: (@Sendable () async -> [ChannelMessage])?
+
     /// Per-session attachment registry. Set by the app layer once the runtime is
     /// constructed (the registry needs the per-session `PersistenceManager`, which the
     /// runtime itself doesn't carry). When unset, attachment-aware tools degrade to
@@ -445,6 +451,12 @@ public actor OrchestrationRuntime {
     ) {
         loadPendingUserMessages = load
         persistPendingUserMessages = persist
+    }
+
+    /// Wires the recent-transcript loader used to recover a user message lost to a send-during-restart
+    /// race. Target the session-scoped `PersistenceManager`. Wire before `start()`.
+    public func setRecentChannelMessagesLoader(_ load: @escaping @Sendable () async -> [ChannelMessage]) {
+        loadRecentChannelMessages = load
     }
 
     // MARK: - Smith context management (/clear and /compact)
@@ -2306,7 +2318,61 @@ public actor OrchestrationRuntime {
                 pendingUserMessages = merged.sorted { $0.receivedAt < $1.receivedAt }
             }
         }
+        await recoverLostTrailingUserMessage()
         await drainPendingUserMessages()
+    }
+
+    /// Recovers a user message that reached the transcript but never reached Smith — the
+    /// "typed and hit send right as the app restarted" race, where the UI-echo persisted to the
+    /// channel log but the pending-buffer disk write didn't land before teardown.
+    ///
+    /// Runs at `start()`, AFTER the pending buffer is reseeded from disk, so it only fires for a
+    /// genuinely-lost message. The condition is precise, so a normal restart never re-delivers an
+    /// already-processed message: the LAST user-or-agent message in the transcript tail must be a
+    /// USER message (i.e. no agent replied to it), carrying a `pendingUserMessageID` that is NOT in
+    /// the reseeded pending buffer (i.e. not already queued for delivery). Only then is it
+    /// re-enqueued — with its ORIGINAL id and channel-message id, so it dedupes and does not post a
+    /// second transcript echo.
+    private func recoverLostTrailingUserMessage() async {
+        guard let loadRecent = loadRecentChannelMessages else { return }
+        let recent = await loadRecent()
+        let alreadyQueued = Set(pendingUserMessages.map { $0.id })
+        guard let recovered = Self.lostMessageToRecover(recentTail: recent, alreadyQueuedIDs: alreadyQueued) else { return }
+        pendingUserMessages.append(recovered)
+        pendingUserMessages.sort { $0.receivedAt < $1.receivedAt }
+        await persistPendingUserMessages?(pendingUserMessages)
+        stopLogger.notice("Recovered a user message lost to a send-during-restart race: \(recovered.id.uuidString, privacy: .public)")
+    }
+
+    /// Decides whether the transcript tail ends with a user message that was lost to a
+    /// send-during-restart race, and if so returns the `PendingUserMessage` to re-enqueue.
+    ///
+    /// Returns non-nil ONLY when the LAST conversational message (user or agent — system/chrome/tool
+    /// rows are ignored) is a USER message that carries a `pendingUserMessageID` NOT in
+    /// `alreadyQueuedIDs`. That combination means: no agent replied to it (so it wasn't handled) AND
+    /// it isn't already queued for delivery (so the normal drain won't cover it) — i.e. it was lost.
+    /// A normally-processed last message has an agent reply after it and returns nil; an
+    /// already-queued message is filtered by id and returns nil. Pure and deterministic for testing.
+    static func lostMessageToRecover(recentTail: [ChannelMessage], alreadyQueuedIDs: Set<UUID>) -> PendingUserMessage? {
+        let lastConversational = recentTail.last { message in
+            switch message.sender {
+            case .user, .agent: return true
+            default: return false
+            }
+        }
+        guard let candidate = lastConversational, case .user = candidate.sender,
+              case .string(let pidString)? = candidate.metadata?["pendingUserMessageID"],
+              let pendingID = UUID(uuidString: pidString),
+              !alreadyQueuedIDs.contains(pendingID) else {
+            return nil
+        }
+        return PendingUserMessage(
+            id: pendingID,
+            channelMessageID: candidate.id,
+            text: candidate.content,
+            attachments: candidate.attachments,
+            receivedAt: candidate.timestamp
+        )
     }
 
     /// Sends a user message (with optional attachments) to Smith.

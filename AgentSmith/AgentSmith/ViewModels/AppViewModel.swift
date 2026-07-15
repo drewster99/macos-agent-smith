@@ -865,6 +865,18 @@ final class AppViewModel {
             }
         )
 
+        // Lets the runtime recover a user message that reached the transcript but not the pending
+        // buffer (send-during-restart race). A small tail is enough — recovery only inspects the
+        // last conversational message.
+        await newRuntime.setRecentChannelMessagesLoader {
+            do {
+                return try await persistence.loadChannelLogTail(limit: 32).messages
+            } catch {
+                logger.error("Failed to load channel-log tail for message recovery: \(error.localizedDescription)")
+                return []
+            }
+        }
+
         await newRuntime.setLoadPersistedWakes {
             do {
                 return try await persistence.loadScheduledWakes()
