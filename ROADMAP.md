@@ -2,6 +2,15 @@
 
 ## Planned
 
+### Evidence sweep: recurse into subdirectories (2026-07-14)
+
+`TaskCompleteTool.ingestEvidenceDirectory` ingests files DIRECTLY in the task's
+evidence dir (non-recursive `contentsOfDirectory`). Evidence dirs are normally
+flat, so this is fine today, but if a worker organizes evidence into
+subdirectories, nested files are missed. Make the sweep walk the tree (bounded
+by a sane file-count/size cap so a runaway evidence dir can't flood the
+attachment store) and ingest nested files too.
+
 ### Security: scope-approve a file/folder for read-only evidence tools (2026-07-14)
 
 Today every `file_read` / `directory_listing` / `directory_tree` (and `glob`/`grep`)
