@@ -2,21 +2,17 @@
 
 ## Planned
 
-### Re-running a completed task must re-judge, not rubber-stamp (2026-07-15)
+### Tool-execution timeout is cooperative, not a hard wall-clock cap (2026-07-15)
 
-`TaskStore.reopenCompletedTask` resets the validation round/stall counters but KEEPS
-`validation.verdictRecords` — the sticky ACCEPTs from the prior run. Since a task only
-reaches `.completed` when every criterion is sticky-final, a `run_task` on a completed
-task finds all criteria already "settled": `performTaskValidation` skips straight to
-`completeValidatedTask` and marks the re-run complete with NO criterion re-judged, no
-matter what the new run actually produced. This voids acceptance validation on every
-reopen-and-rerun. Root fix is the "scope sticky-ACCEPT to a single run" design discussed
-2026-07-15: on reopen/reset, clear the ledger (`validation = nil`, letting criteria
-re-materialize) so each run is judged fresh against its own result. A criterion is a
-REUSABLE contract; "completed" means "the last run passed," and re-running is a new run.
-`resetFailedTask` shares the same root (weaker: a failed task retains a rejected
-criterion, so some judging still happens) — decide both together. Confirmed as a HIGH in
-the 2026-07-15 July-1→today code review.
+`AgentActor.runToolWithTimeout` races the tool against a sleep in a `withThrowingTaskGroup`,
+but a task group waits for ALL children at scope exit. When the timer wins, `cancelAll()`
+only REQUESTS cooperative cancellation — a tool that never checks `Task.isCancelled` keeps
+the group (and Brown) suspended past the advertised timeout; the stall watchdog only posts a
+warning. In-tree tools cooperate today, so exposure is limited, but the generic `AgentTool`
+boundary (and future in-process / MCP tools) doesn't enforce it. Options: run the tool in a
+detached task and abandon it on timeout (return the timeout result without awaiting the
+child), or document/require cancellation-responsiveness at the `AgentTool` boundary and add a
+hard kill for the shell path. Flagged by codex in the 2026-07-15 July-1→today review.
 
 ### Guard against Smith "cheating" by loosening criteria after a failure (2026-07-14)
 
