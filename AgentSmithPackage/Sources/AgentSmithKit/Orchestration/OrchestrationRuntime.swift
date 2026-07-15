@@ -1946,7 +1946,10 @@ public actor OrchestrationRuntime {
             }
         }
 
-        let initialInstruction: String
+        // Optional: `nil` starts Smith idle with NO LLM call — used when there's nothing to report
+        // on boot. The startup chrome ("System online. Smith agent active.") signals readiness; we
+        // do not spend a model round-trip just to emit a canned greeting.
+        let initialInstruction: String?
 
         // Fast path: restarting for a specific task (triggered by run_task).
         // Auto-spawn Brown, deliver task briefing, and tell Smith to monitor.
@@ -2236,9 +2239,9 @@ public actor OrchestrationRuntime {
             }
 
             if parts.isEmpty {
-                initialInstruction = """
-                    No tasks are pending. Introduce yourself with "Hello <user's nickname>, how can I help?" - and nothing more.
-                    """
+                // Nothing to report — start Smith idle and silent. The startup chrome already
+                // signals it's online; greeting an empty room would just burn a model call.
+                initialInstruction = nil
             } else {
                 initialInstruction = """
                     \(parts.joined(separator: "\n\n"))
