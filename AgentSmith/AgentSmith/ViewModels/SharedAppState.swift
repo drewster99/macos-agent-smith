@@ -812,7 +812,13 @@ final class SharedAppState {
         var union: [UUID: AgentTask] = [:]
         for session in sessions {
             let pm = PersistenceManager(sessionID: session.id)
-            guard let tasks = try? await pm.loadTasks() else { continue }
+            let tasks: [AgentTask]
+            do {
+                tasks = try await pm.loadTasks()
+            } catch {
+                logger.error("Inactive-task migration: could not read session \(session.id.uuidString, privacy: .public)'s tasks (\(error.localizedDescription, privacy: .public)) — skipping it")
+                continue
+            }
             for task in tasks where task.disposition != .active {
                 if let existing = union[task.id], existing.updatedAt >= task.updatedAt { continue }
                 union[task.id] = task
@@ -828,10 +834,22 @@ final class SharedAppState {
         let sessions = (try? await basePersistence.loadSessionList()) ?? []
         for session in sessions {
             let pm = PersistenceManager(sessionID: session.id)
-            guard let tasks = try? await pm.loadTasks() else { continue }
+            let tasks: [AgentTask]
+            do {
+                tasks = try await pm.loadTasks()
+            } catch {
+                logger.error("Inactive-task strip: could not read session \(session.id.uuidString, privacy: .public)'s tasks (\(error.localizedDescription, privacy: .public)) — skipping it")
+                continue
+            }
             let active = tasks.filter { $0.disposition == .active }
             if active.count != tasks.count {
-                try? await pm.saveTasks(active)
+                do {
+                    try await pm.saveTasks(active)
+                } catch {
+                    // Non-fatal: the global file was already durably saved before this strip runs, so
+                    // nothing is lost — the stray inactive copies just get re-migrated next launch.
+                    logger.error("Inactive-task strip: could not rewrite session \(session.id.uuidString, privacy: .public)'s tasks (\(error.localizedDescription, privacy: .public)) — will re-migrate next launch")
+                }
             }
         }
     }

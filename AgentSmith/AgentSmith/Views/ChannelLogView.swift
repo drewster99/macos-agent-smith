@@ -198,11 +198,13 @@ struct ChannelLogView: View, Equatable {
 
     @State private var isAtBottom = true
     @State private var autoScrollEnabled = true
-    /// Non-nil while the user has scrolled up: the window's top is pinned here so streaming
-    /// messages append *below* the visible area instead of sliding rows off the top (which
-    /// shifts the ScrollView content up and drags the viewport toward the bottom — the "can't
-    /// stop scrolling" regression). Cleared when the user returns to the bottom.
-    @State private var frozenWindowStart: Int?
+    /// Non-nil while the user has scrolled up: the id of the message the window's top is pinned
+    /// to, so streaming messages append *below* the visible area instead of sliding rows off the
+    /// top (which shifts the ScrollView content up and drags the viewport toward the bottom — the
+    /// "can't stop scrolling" regression). Anchored by id, not absolute index, so front-trimming
+    /// the resident tail (at the message cap) can't slide the pinned row out from under the reader.
+    /// Cleared when the user returns to the bottom.
+    @State private var frozenAnchorID: ChannelMessage.ID?
     /// True while the user is actively driving the scroll (drag/momentum), as opposed to the
     /// view scrolling because content grew. Only a user-driven move off the bottom breaks
     /// auto-follow — content growth must not.
@@ -332,13 +334,17 @@ struct ChannelLogView: View, Equatable {
                         if nearBottom {
                             // Back at the bottom → resume tail-following and unfreeze the window.
                             autoScrollEnabled = true
-                            frozenWindowStart = nil
+                            frozenAnchorID = nil
                         } else if userInteracting {
                             // The USER scrolled away (not content growth, which leaves
                             // `userInteracting` false) → stop following and freeze the window's
-                            // top so streaming can't drag the viewport back down.
+                            // top on the id of the current top row so streaming can't drag the
+                            // viewport back down.
                             autoScrollEnabled = false
-                            if frozenWindowStart == nil { frozenWindowStart = windowStartIndex() }
+                            if frozenAnchorID == nil {
+                                let start = windowStartIndex()
+                                frozenAnchorID = start < messages.count ? messages[start].id : nil
+                            }
                         }
                     }
                 }
@@ -347,7 +353,11 @@ struct ChannelLogView: View, Equatable {
                         || newPhase == .decelerating
                         || newPhase == .tracking
                 }
-                .onChange(of: messages.count) {
+                // Follow the tail on the id of the newest message, NOT messages.count: once a
+                // session reaches the resident-message cap, every append trims one off the front,
+                // so count is pinned and an `.onChange(of: messages.count)` would stop firing —
+                // silently killing auto-scroll. last.id changes on every appended message.
+                .onChange(of: messages.last?.id) {
                     guard autoScrollEnabled, let lastID = messages.last?.id else { return }
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(lastID, anchor: .bottom)
@@ -399,12 +409,14 @@ struct ChannelLogView: View, Equatable {
                 guardHops += 1
             }
         }
-        // While the user has scrolled up, hold the top where it was (`frozen`) instead of
-        // sliding it forward as messages stream in. `min(frozen, tailStart)` still lets "Load
-        // earlier" extend backward (that lowers tailStart below frozen); the `max(_, count -
-        // cap)` bounds render if the frozen window grows huge or `frozen` went stale after a
-        // clear/restore.
-        if let frozen = frozenWindowStart {
+        // While the user has scrolled up, hold the top on the anchored message (resolved to its
+        // CURRENT index each pass, so front-trimming can't drift it) instead of sliding forward as
+        // messages stream in. `min(frozen, tailStart)` still lets "Load earlier" extend backward
+        // (that lowers tailStart below frozen); the `max(_, count - cap)` bounds render if the
+        // frozen window grows huge. If the anchor has been trimmed away entirely, fall through to
+        // the tail.
+        if let anchorID = frozenAnchorID,
+           let frozen = messages.firstIndex(where: { $0.id == anchorID }) {
             return max(min(frozen, tailStart), count - Self.maxFrozenWindowRows)
         }
         return tailStart

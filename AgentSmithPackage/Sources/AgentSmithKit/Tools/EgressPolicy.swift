@@ -3,10 +3,18 @@ import Foundation
 /// Decides whether a URL's destination is a **non-public** address — loopback, link-local,
 /// RFC1918 private, CGNAT (RFC 6598), IPv6 ULA, IPv4-mapped-private, or the unspecified address.
 ///
-/// Used only by `web_fetch`'s redirect guard: a *direct* request is never gated here (the security
-/// agent, Security Agent, evaluates the URL the model explicitly chose), but a silent 30x redirect into
-/// private space bypasses that review entirely, so those hops are refused. Hostnames are resolved
-/// before classification so a public name that points at a private IP is still caught.
+/// Used by `web_fetch` to gate hops into private space that the text-based Security Agent review
+/// can't catch (it sees only the URL string and can't resolve DNS): every 30x redirect hop, and the
+/// initial request when its host is a *name* that resolves to a non-public address (an IP literal or
+/// localhost the model typed directly is left to the Security Agent, since direct-to-private is an
+/// intended capability — e.g. fetching a local dev server). Hostnames are resolved before
+/// classification so a public name pointing at a private IP is caught.
+///
+/// LIMITATION (DNS rebinding): this resolves the host itself, then hands the request back to
+/// `URLSession`, which re-resolves independently at connect time. A low-TTL attacker name that
+/// answers a public address here and a private one at connect can still slip the guard — closing
+/// that fully requires pinning the connection to the vetted IP, which `URLSession` doesn't expose.
+/// This is best-effort, not a guarantee.
 enum EgressPolicy {
 
     /// An IP address as a family + raw network-order bytes (4 for IPv4, 16 for IPv6).
@@ -75,7 +83,10 @@ enum EgressPolicy {
         case 169: return b[1] == 254                // 169.254.0.0/16 link-local
         case 172: return (16...31).contains(b[1])   // 172.16.0.0/12
         case 192: return b[1] == 168                // 192.168.0.0/16
+                    || (b[1] == 0 && b[2] == 0)      // 192.0.0.0/24 IETF protocol assignments
+        case 198: return (18...19).contains(b[1])   // 198.18.0.0/15 benchmarking (RFC 2544)
         case 100: return (64...127).contains(b[1])  // 100.64.0.0/10 CGNAT (RFC 6598)
+        case 240...255: return true                 // 240.0.0.0/4 reserved + 255.255.255.255 broadcast
         default:  return false
         }
     }
@@ -88,6 +99,15 @@ enum EgressPolicy {
         if b[0..<15].allSatisfy({ $0 == 0 }) && b[15] == 1 { return true }    // ::1 loopback
         if b[0..<10].allSatisfy({ $0 == 0 }) && b[10] == 0xff && b[11] == 0xff {
             return isNonPublicV4(Array(b[12..<16]))                           // ::ffff:0:0/96
+        }
+        // Transition ranges that embed an IPv4 address — a known SSRF-filter evasion when the
+        // embedded v4 is private. Classify by that embedded address.
+        if b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b
+            && b[4..<12].allSatisfy({ $0 == 0 }) {
+            return isNonPublicV4(Array(b[12..<16]))                           // 64:ff9b::/96 NAT64
+        }
+        if b[0] == 0x20 && b[1] == 0x02 {
+            return isNonPublicV4(Array(b[2..<6]))                             // 2002::/16 6to4
         }
         if b[0] == 0xfe && (b[1] & 0xc0) == 0x80 { return true }              // fe80::/10 link-local
         if (b[0] & 0xfe) == 0xfc { return true }                             // fc00::/7 ULA

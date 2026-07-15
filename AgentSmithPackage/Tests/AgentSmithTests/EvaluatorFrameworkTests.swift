@@ -99,6 +99,28 @@ struct EvaluationRunnerParsingTests {
         }
     }
 
+    @Test("A mis-cased token is a verdict, not an escalation, and returns the canonical token")
+    func caseInsensitiveToken() {
+        guard case .success(.verdict(let token, let reason)) =
+                EvaluationRunner.parseVerdictLine("Reject: not done", allowed: verdicts) else {
+            Issue.record("expected a rejection, not a parse failure that would escalate")
+            return
+        }
+        #expect(token == "REJECT")   // canonical spec token, regardless of input case
+        #expect(reason == "not done")
+    }
+
+    @Test("A tab between token and reason still isolates the verdict")
+    func tabSeparatedToken() {
+        guard case .success(.verdict(let token, let reason)) =
+                EvaluationRunner.parseVerdictLine("REJECT\tmissing tests", allowed: verdicts) else {
+            Issue.record("expected success on a tab-separated verdict")
+            return
+        }
+        #expect(token == "REJECT")
+        #expect(reason == "missing tests")
+    }
+
     @Test("JSON array parses through prose wrapping, mixed element types")
     func jsonArrayParsing() {
         let text = """

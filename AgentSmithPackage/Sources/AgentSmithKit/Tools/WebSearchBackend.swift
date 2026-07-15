@@ -67,6 +67,40 @@ public enum WebSearchError: Error, LocalizedError, Equatable {
     }
 }
 
+/// Reads an HTTP response body into memory with a hard byte ceiling, so a hostile, MITM'd, or
+/// misbehaving response can't force an unbounded allocation the way an uncapped `URLSession.data`
+/// call would. Search-result pages and instant-answer JSON are small; the ceiling is a safety
+/// valve, not a normal limit. Streams via `URLSession.bytes` and aborts as soon as the ceiling is
+/// crossed (or the server declares an oversized body up front). Throws
+/// `URLError(.dataLengthExceedsMaximum)` on overflow — every backend already funnels read
+/// failures into its own transport error, so no per-backend handling is needed.
+enum BoundedResponseReader {
+    /// Far larger than any SERP / JSON answer needs, small enough to bound worst-case memory.
+    static let defaultByteCeiling = 8 * 1024 * 1024
+
+    static func data(
+        for request: URLRequest,
+        using session: URLSession,
+        maxBytes: Int = defaultByteCeiling
+    ) async throws -> (Data, URLResponse) {
+        let (byteStream, response) = try await session.bytes(for: request)
+        if response.expectedContentLength > Int64(maxBytes) {
+            byteStream.task.cancel()
+            throw URLError(.dataLengthExceedsMaximum)
+        }
+        var data = Data()
+        data.reserveCapacity(min(maxBytes, 256 * 1024))
+        for try await byte in byteStream {
+            data.append(byte)
+            if data.count > maxBytes {
+                byteStream.task.cancel()
+                throw URLError(.dataLengthExceedsMaximum)
+            }
+        }
+        return (data, response)
+    }
+}
+
 /// Pluggable source of web-search results behind the `web_search` tool.
 ///
 /// This protocol exists specifically so the current **temporary** DuckDuckGo HTML-scrape

@@ -181,15 +181,21 @@ struct RunTaskTool: AgentTool {
         // must name it (amend_task or an explicit run_task).
         let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         var amendmentNote = ""
+        // For a template, the amendment must NOT be written onto the template itself (it clones a
+        // fresh instance downstream, and welding here would contaminate every future clone). Defer
+        // it to the clone by handing it to restartForNewTask. A non-template amends in place now.
+        var deferredTemplateAmendment: String? = nil
         if !trimmed.isEmpty {
             if autoResolved {
                 amendmentNote = " NOTE: your `instructions` were NOT applied to the task description because task_id was auto-resolved — the task runs with its existing description. If the instructions matter, call amend_task with this task's ID."
+            } else if task.isTemplate {
+                deferredTemplateAmendment = trimmed
             } else {
                 await context.taskStore.amendDescription(id: taskID, amendment: trimmed)
             }
         }
 
-        await context.restartForNewTask(task.id)
+        await context.restartForNewTask(task.id, deferredTemplateAmendment)
 
         let autoNote = autoResolved
             ? " (auto-resolved task_id because it was omitted from the call and only one task was eligible)"

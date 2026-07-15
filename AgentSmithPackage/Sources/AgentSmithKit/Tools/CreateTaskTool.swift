@@ -323,7 +323,7 @@ public struct CreateTaskTool: AgentTool {
             (other.status == .starting || other.status == .running || other.status == .awaitingReview || other.status == .validating)
         }
         if slotHolders.count < capacity {
-            await context.restartForNewTask(task.id)
+            await context.restartForNewTask(task.id, nil)
             return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote) A worker is being spawned to begin work on it now.")
         }
 

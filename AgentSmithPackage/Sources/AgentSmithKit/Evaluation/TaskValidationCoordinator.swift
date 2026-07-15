@@ -321,6 +321,11 @@ extension OrchestrationRuntime {
 
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard let judged = await taskStore.task(id: taskID), judged.status == .validating else { return }
+        // If a `set_acceptance_criteria` edit landed at a suspension point in this round, it reset
+        // the round counter to 0 and granted the edited contract a fresh convergence budget. Acting
+        // on this now-stale outcome would consume a round of that fresh budget against a contract we
+        // didn't judge. Bail; the next round judges the new contract cleanly.
+        guard (judged.validation?.round ?? 0) == round else { return }
         let ledger = judged.validation ?? TaskValidationState()
         let latestByCriterion = judged.acceptanceCriteria.compactMap { ledger.latestVerdict(for: $0.id) }
 
@@ -347,7 +352,11 @@ extension OrchestrationRuntime {
             // but consecutive rounds with nothing newly settled mean the worker and
             // validator disagree irreconcilably — the task FAILS. Exhaustion is never
             // Smith's judgment call.
-            let progressed = records.contains { $0.verdict.isFinal }
+            // Measure progress by what actually LANDED in the ledger (`recorded`), not the raw
+            // `records` we produced — a verdict dropped by the store's contract-match filter (its
+            // criterion was edited mid-round) didn't settle anything, so counting it would wrongly
+            // reset the stall counter and let a non-converging task spin.
+            let progressed = recorded.contains { $0.verdict.isFinal }
             let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed)
             if stallRounds >= maxConsecutiveValidationRoundsWithoutProgress {
                 await failValidation(
@@ -470,10 +479,11 @@ extension OrchestrationRuntime {
 
     /// Dynamic (prepare/map) judging: the prepare function emits a JSON array of items,
     /// each judged by the criterion's per-item validator with `{{item}}` bound. The
-    /// criterion passes only when EVERY item passes; an empty item list is an automatic
-    /// ACCEPT (the prepare determined nothing applies — the dynamic analogue of WAIVE).
-    /// One `CriterionVerdictRecord` summarizes the whole map so the ledger shape is
-    /// unchanged.
+    /// criterion passes only when EVERY item passes; an empty item list is the dynamic
+    /// analogue of WAIVE — honored as a pass ONLY when the criterion is waivable, and
+    /// otherwise escalated as an ERROR (an over-narrow / hallucinated-empty prepare must
+    /// not silently pass an unexamined requirement). One `CriterionVerdictRecord`
+    /// summarizes the whole map so the ledger shape is unchanged.
     private func judgeDynamicCriterion(
         _ criterion: AcceptanceCriterion,
         task: AgentTask,

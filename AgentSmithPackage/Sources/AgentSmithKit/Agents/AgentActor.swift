@@ -1466,9 +1466,12 @@ public actor AgentActor {
                 // Surface persistent HTTP 4xx (config/payload problems retrying won't fix — bad
                 // API key, unsupported parameter, DeepSeek's reasoning_content replay demand) and
                 // rate limits on the first occurrence: the former never recovers, the latter can
-                // impose a long wait that should read as deliberate, not a silent hang. Other
-                // transient classes (408, 5xx, network) fall back to the >=5-consecutive gate so
-                // a brief blip doesn't spam the transcript.
+                // impose a long wait that should read as deliberate, not a silent hang. Transient
+                // classes with NO server-directed wait (a brief 5xx/network blip) fall back to the
+                // >=5-consecutive gate so they don't spam the transcript — but a server-supplied
+                // Retry-After on ANY status (a 503/408 asking for a long wait) is surfaced on the
+                // first occurrence too, so the honored delay never reads as a silent hang. See the
+                // `serverRetryAfter` clause in `shouldSurfaceNow`.
                 let isPersistentClientError = httpStatus.map {
                     (400..<500).contains($0) && $0 != 429 && $0 != 408
                 } ?? false
@@ -1487,6 +1490,9 @@ public actor AgentActor {
                 let shouldSurfaceNow = consecutiveErrors >= 5
                     || (isPersistentClientError && consecutiveErrors == 1)
                     || (isRateLimited && consecutiveErrors == 1)
+                    // Any server-directed wait (e.g. 503/408 + Retry-After), so honoring a long
+                    // delay is announced and the ridiculous-wait flag is reachable — never silent.
+                    || (serverRetryAfter != nil && consecutiveErrors == 1)
 
                 if shouldSurfaceNow {
                     var content = "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)"
@@ -3828,11 +3834,14 @@ public actor AgentActor {
 
     /// Extracts a server-requested retry delay (seconds) from an error *body* for providers that
     /// don't use the `Retry-After` header. Handles Google/Gemini's `google.rpc.RetryInfo`
-    /// (`"retryDelay": "34s"`) and a "Please retry in 34.376s" phrasing in the message text.
+    /// (`"retryDelay": "34s"`) and its "Please retry in 34.376s" phrasing in the message text.
+    /// The prose pattern is anchored on "please retry in" so incidental error prose that merely
+    /// mentions some other "retry in N s" (e.g. describing a background job) can't be mistaken for
+    /// a directive to this client.
     static func retryAfterFromErrorBody(_ body: String) -> TimeInterval? {
         let patterns = [
             #""retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s""#,
-            #"retry in (\d+(?:\.\d+)?)\s*s"#
+            #"please retry in (\d+(?:\.\d+)?)\s*s"#
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }

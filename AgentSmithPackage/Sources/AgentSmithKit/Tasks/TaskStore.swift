@@ -16,6 +16,14 @@ public actor TaskStore {
     private var onTaskTerminated: (@Sendable (UUID) -> Void)?
     /// The shared global store for archived + recently-deleted tasks. See the type doc.
     private let inactiveStore: InactiveTaskStore?
+    /// Durably writes the global inactive store to disk *now*, returning whether it succeeded.
+    /// Injected by the app so a cross-store move can guarantee the destination file is on disk
+    /// before the source is removed — a crash in the gap must never leave a task absent from both
+    /// files. Nil in standalone/test construction (the move is then best-effort, as before).
+    private var durablyPersistInactiveNow: (@Sendable () async -> Bool)?
+    /// Durably writes this session's active-task snapshot to disk *now*, returning success. Same
+    /// purpose as `durablyPersistInactiveNow`, for the restore direction (global → active).
+    private var durablyPersistActiveNow: (@Sendable ([AgentTask]) async -> Bool)?
 
     public init(inactiveStore: InactiveTaskStore? = nil) {
         self.inactiveStore = inactiveStore
@@ -24,6 +32,17 @@ public actor TaskStore {
     /// Registers a callback fired whenever tasks change.
     public func setOnChange(_ handler: @escaping @Sendable () -> Void) {
         onChange = handler
+    }
+
+    /// Injects the durable-write hooks that make cross-store disposition moves crash-safe. The
+    /// `inactive` hook durably persists the global inactive store; `active` durably persists the
+    /// given snapshot of this session's active tasks. Both return whether the write succeeded.
+    public func setDurablePersistHooks(
+        inactive: @escaping @Sendable () async -> Bool,
+        active: @escaping @Sendable ([AgentTask]) async -> Bool
+    ) {
+        durablyPersistInactiveNow = inactive
+        durablyPersistActiveNow = active
     }
 
     /// Registers a callback fired when a task transitions to a terminal status for the first time.
@@ -166,16 +185,33 @@ public actor TaskStore {
             $0.status == .completed && $0.disposition == .active && $0.updatedAt < cutoff
         }
         guard !stale.isEmpty else { return }
+        guard let inactiveStore else {
+            for task in stale {
+                var moved = task
+                moved.disposition = .archived
+                tasks[task.id] = moved
+            }
+            onChange?()
+            return
+        }
+        // Batch move with the same destination-durable-before-source-removal ordering as `move`,
+        // but a SINGLE durable write for the whole batch (not one per task): insert every stale
+        // task into the global store, durably persist it once, then strip them from active. A crash
+        // in the gap leaves them in both files; load-time reconciliation drops the duplicate. On a
+        // failed global write, roll the inserts back and leave the tasks active — the load-time
+        // stale-archive path re-archives them safely next launch. `updatedAt` is intentionally NOT
+        // bumped, preserving the original completion time as the archive sort key (and letting the
+        // reconciliation's `>=` tiebreak still resolve an equal-timestamp crash-duplicate).
         for task in stale {
             var moved = task
             moved.disposition = .archived
-            if let inactiveStore {
-                tasks.removeValue(forKey: task.id)
-                await inactiveStore.insert(moved)
-            } else {
-                tasks[task.id] = moved
-            }
+            await inactiveStore.insert(moved)
         }
+        if let durablyPersistInactiveNow, await durablyPersistInactiveNow() == false {
+            for task in stale { await inactiveStore.remove(id: task.id) }
+            return
+        }
+        for task in stale { tasks.removeValue(forKey: task.id) }
         onChange?()
     }
 
@@ -822,17 +858,32 @@ public actor TaskStore {
                 setDisposition(id: id, disposition: .archived)
                 return true
             }
-            var moved = task
-            moved.disposition = .archived
-            moved.updatedAt = Date()
-            tasks.removeValue(forKey: id)
-            await inactiveStore.insert(moved)
-            onChange?()
-            return true
+            return await move(task, to: .archived, in: inactiveStore)
         }
         // Already out in the global store (e.g. re-archiving, or archiving a deleted task).
         if let inactiveStore { return await inactiveStore.setDisposition(id: id, to: .archived) }
         return false
+    }
+
+    /// Moves an active task out to the global inactive store with the destination-durable-before-
+    /// source-removal ordering that keeps a crash from losing it from both files. Inserts the task
+    /// (with its new disposition) into the global store, durably persists that store, and only then
+    /// removes the active copy. If the durable write fails, rolls the insert back and leaves the
+    /// task active — nothing is lost. A crash between the durable global write and the (coalesced)
+    /// active-file write leaves the task in both files; load-time reconciliation drops the duplicate
+    /// by newest `updatedAt`, which the global copy always wins here.
+    private func move(_ task: AgentTask, to disposition: AgentTask.TaskDisposition, in inactiveStore: InactiveTaskStore) async -> Bool {
+        var moved = task
+        moved.disposition = disposition
+        moved.updatedAt = Date()
+        await inactiveStore.insert(moved)
+        if let durablyPersistInactiveNow, await durablyPersistInactiveNow() == false {
+            await inactiveStore.remove(id: moved.id)   // roll back; keep the task active
+            return false
+        }
+        tasks.removeValue(forKey: task.id)
+        onChange?()
+        return true
     }
 
     /// Soft-deletes a task by moving it to the (global) Deleted bucket.
@@ -846,13 +897,7 @@ public actor TaskStore {
                 setDisposition(id: id, disposition: .recentlyDeleted)
                 return true
             }
-            var moved = task
-            moved.disposition = .recentlyDeleted
-            moved.updatedAt = Date()
-            tasks.removeValue(forKey: id)
-            await inactiveStore.insert(moved)
-            onChange?()
-            return true
+            return await move(task, to: .recentlyDeleted, in: inactiveStore)
         }
         // Already out in the global store (e.g. deleting an archived task).
         if let inactiveStore { return await inactiveStore.setDisposition(id: id, to: .recentlyDeleted) }
@@ -883,11 +928,22 @@ public actor TaskStore {
             setDisposition(id: id, disposition: .active)
             return
         }
-        guard var task = await inactiveStore.remove(id: id) else { return }
+        guard let existing = await inactiveStore.task(id: id) else { return }
+        var task = existing
         task.disposition = .active
         task.updatedAt = Date()
         task.assigneeIDs.removeAll()
         tasks[task.id] = task
+        // Symmetric to `move`: durably land the task in this session's active file BEFORE removing
+        // it from the global store, so a crash can't lose it from both. On a failed active write,
+        // roll back and leave it in the global store. A crash between the durable active write and
+        // the (coalesced) global-removal write leaves it in both files; load-time reconciliation
+        // keeps the newer copy, which the freshly-stamped active copy always wins here.
+        if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
+            tasks.removeValue(forKey: task.id)
+            return
+        }
+        await inactiveStore.remove(id: id)
         onChange?()
     }
 

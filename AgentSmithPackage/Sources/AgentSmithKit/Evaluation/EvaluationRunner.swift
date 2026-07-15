@@ -184,11 +184,15 @@ public enum EvaluationRunner {
         guard let first = lines.first?.trimmingCharacters(in: .whitespaces), !first.isEmpty else {
             return .failure("empty response")
         }
+        // Split on any whitespace (space OR tab — a tab-separated verdict is still a verdict) and
+        // match the token case-insensitively (a judge emitting "Reject" instead of "REJECT" is a
+        // rejection, not an unparseable line that would wrongly escalate to Smith). The canonical
+        // `spec.token` is what we return, so downstream comparisons stay exact.
         let firstWord = first
-            .split(separator: " ", maxSplits: 1)
+            .split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
             .first.map(String.init)?
             .trimmingCharacters(in: CharacterSet(charactersIn: ":.,")) ?? ""
-        guard let spec = allowed.first(where: { $0.token == firstWord }) else {
+        guard let spec = allowed.first(where: { $0.token.caseInsensitiveCompare(firstWord) == .orderedSame }) else {
             return .failure("first word '\(firstWord)' is not one of: \(allowed.map(\.token).joined(separator: ", "))")
         }
         var reasonParts: [String] = []

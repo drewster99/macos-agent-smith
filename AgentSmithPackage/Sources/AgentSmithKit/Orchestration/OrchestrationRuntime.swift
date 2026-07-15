@@ -1408,15 +1408,16 @@ public actor OrchestrationRuntime {
     /// Routed through `lifecycleQueue` so it serializes with every other lifecycle
     /// transition. Fire-and-forget by design (tools cannot await a transition that may
     /// tear down the very agent making the call).
-    public func restartForNewTask(taskID: UUID) {
+    public func restartForNewTask(taskID: UUID, amendment: String? = nil) {
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
             // Template interception: starting a template never runs the template — it
             // clones a fresh instance and runs THAT. The template stays put (gets a
             // "started instance" note) so it can spawn another instance next time. This
             // is the single chokepoint every start path funnels through (run_task, the
-            // play button, auto-advance, scheduled wakes), so all of them clone.
-            let startID = await self.resolveStartTarget(taskID: taskID)
+            // play button, auto-advance, scheduled wakes), so all of them clone. Any
+            // per-run amendment lands on the started (cloned) task, not the template.
+            let startID = await self.resolveStartTarget(taskID: taskID, amendment: amendment)
             if await self.hasLiveSmith() {
                 await self.performStartTaskWithLiveSmith(taskID: startID)
                 return
@@ -1437,9 +1438,14 @@ public actor OrchestrationRuntime {
     /// If `taskID` is a template, clone a fresh instance, note it on the template, and
     /// announce the instance; return the ID to actually start (the instance, or the
     /// original for a non-template). Runs on the lifecycle queue via `restartForNewTask`.
-    private func resolveStartTarget(taskID: UUID) async -> UUID {
+    private func resolveStartTarget(taskID: UUID, amendment: String? = nil) async -> UUID {
         guard let task = await taskStore.task(id: taskID), task.isTemplate else { return taskID }
         guard let instance = await taskStore.cloneTemplateInstance(templateID: taskID) else { return taskID }
+        // Apply any per-run instructions to the fresh INSTANCE, never the reusable template — else
+        // one run's one-off text would weld onto the template and every future clone would inherit it.
+        if let amendment, !amendment.isEmpty {
+            await taskStore.amendDescription(id: instance.id, amendment: amendment)
+        }
         await taskStore.addUpdate(id: taskID, message: "Started instance \(instance.id.uuidString) from this template.")
         await channel.post(ChannelMessage(
             sender: .system,
@@ -2477,6 +2483,12 @@ public actor OrchestrationRuntime {
     /// buffered rather than losing them.
     public func drainPendingUserMessages() async {
         guard !isDrainingUserMessages else { return }
+        // Claim the guard SYNCHRONOUSLY, before any `await` — otherwise two callers can both pass
+        // the check above and suspend at `currentSmith.running` before either sets the flag, then
+        // both run the delivery loop concurrently (matches the synchronous set in the sibling
+        // task-queue drains). `defer` resets it on every return path, including the early guards.
+        isDrainingUserMessages = true
+        defer { isDrainingUserMessages = false }
 
         // No Smith yet. Kick a cold start (whose end-of-start drain will deliver) — but ONLY
         // when a start can actually succeed. Kicking while aborted or without a configured
@@ -2496,9 +2508,6 @@ public actor OrchestrationRuntime {
         // Not running yet (subscribed-but-not-running startup window). Leave everything
         // buffered; the in-flight / next `start()`'s end-of-start drain delivers it.
         guard await currentSmith.running else { return }
-
-        isDrainingUserMessages = true
-        defer { isDrainingUserMessages = false }
 
         // Deliver every not-yet-delivered buffered message to Smith. Delivery does NOT remove
         // the message from the persisted buffer — that happens only when Smith incorporates it
@@ -3392,9 +3401,9 @@ public actor OrchestrationRuntime {
                 guard let followUpScheduler else { return false }
                 return await followUpScheduler.cancelWake(id: id)
             },
-            restartForNewTask: { [weak self] taskID in
+            restartForNewTask: { [weak self] taskID, amendment in
                 guard let self else { return }
-                await self.restartForNewTask(taskID: taskID)
+                await self.restartForNewTask(taskID: taskID, amendment: amendment)
             },
             currentResumingTaskID: currentResumingTaskID,
             memoryStore: memoryStore,

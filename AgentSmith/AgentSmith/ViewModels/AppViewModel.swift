@@ -421,7 +421,21 @@ final class AppViewModel {
             // global migration; later calls return the shared instance.
             let inactiveStore = try await shared.ensureInactiveTaskStore()
 
-            var savedTasks = try await persistenceManager.loadTasks()
+            var savedTasks: [AgentTask]
+            do {
+                savedTasks = try await persistenceManager.loadTasks()
+            } catch let decodeError as DecodingError {
+                // Corrupt tasks.json: move it aside (preserving it for manual recovery) and start
+                // this session with an empty active list rather than failing the entire session
+                // load over one bad element. Mirrors the inactive-store / channel-log resilience.
+                // Non-decode errors (IO/permissions) still propagate to the outer catch below.
+                if let moved = try? await persistenceManager.quarantineCorruptTasksFile() {
+                    logger.error("tasks.json was corrupt (\(decodeError.localizedDescription, privacy: .public)); quarantined to \(moved.lastPathComponent, privacy: .public) and starting with an empty task list")
+                } else {
+                    logger.error("tasks.json was corrupt and could not be quarantined: \(decodeError.localizedDescription, privacy: .public)")
+                }
+                savedTasks = []
+            }
 
             // Running tasks didn't survive the last quit — mark them interrupted.
             var anyStatusChanged = false
@@ -456,11 +470,34 @@ final class AppViewModel {
                 await inactiveStore.merge(staleArchived)
             }
 
+            // Cross-store reconciliation for a crash mid-move: a task can transiently exist in BOTH
+            // this session's active file and the global inactive store (the disposition move writes
+            // the destination durably, then the source removal lands on a separate coalesced write —
+            // a crash in that gap leaves a duplicate). Resolve by newest `updatedAt`, which every
+            // move stamps: a newer-or-equal global copy means the task belongs inactive → drop it
+            // from the active set here; a newer active copy means an unfinished restore → drop the
+            // stale global copy.
+            let globalInactive = await inactiveStore.all()
+            var removedStaleGlobal = false
+            if !globalInactive.isEmpty {
+                var inactiveByID: [UUID: AgentTask] = [:]
+                for t in globalInactive { inactiveByID[t.id] = t }
+                var staleGlobalIDs: [UUID] = []
+                savedTasks.removeAll { active in
+                    guard let g = inactiveByID[active.id] else { return false }
+                    if g.updatedAt >= active.updatedAt { return true }   // inactive wins → drop active copy
+                    staleGlobalIDs.append(active.id)                     // active wins → global copy is stale
+                    return false
+                }
+                for id in staleGlobalIDs { await inactiveStore.remove(id: id) }
+                removedStaleGlobal = !staleGlobalIDs.isEmpty
+            }
+
             // Before stripping these inactive tasks from this session's file, make sure the global
             // file durably has them. If the global store can't be persisted (corrupt/failed file),
             // KEEP the per-session copies — don't strip — so nothing is lost. The status-change-only
             // case (no inactive moved) always persists.
-            let movedToGlobal = !strayInactive.isEmpty || !staleArchived.isEmpty
+            let movedToGlobal = !strayInactive.isEmpty || !staleArchived.isEmpty || removedStaleGlobal
             let canStripSessionFile = movedToGlobal ? await shared.persistInactiveTasksNow() : true
 
             // `tasks` now holds only this session's active tasks.
@@ -471,6 +508,7 @@ final class AppViewModel {
 
             let standaloneStore = TaskStore(inactiveStore: inactiveStore)
             taskStore = standaloneStore
+            await wireDurablePersistHooks(on: standaloneStore)
             await standaloneStore.restore(savedTasks)
             await standaloneStore.setOnChange { [weak self, weak standaloneStore] in
                 Task { @MainActor [weak self, weak standaloneStore] in
@@ -746,6 +784,7 @@ final class AppViewModel {
             await oldStore.setOnChange { }
         }
         self.taskStore = liveTaskStore
+        await wireDurablePersistHooks(on: liveTaskStore)
         await liveTaskStore.setOnChange { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -1953,6 +1992,28 @@ final class AppViewModel {
         let tasksToSave = tasks
         let writer = tasksWriter
         Task { await writer.enqueue(tasksToSave) }
+    }
+
+    /// Durably writes the given active-task snapshot to this session's `tasks.json` right now,
+    /// returning whether it succeeded. Injected into `TaskStore` as its durable-active hook so a
+    /// restore lands the task on disk before it's removed from the global inactive store.
+    private func persistActiveTasksNow(_ snapshot: [AgentTask]) async -> Bool {
+        do {
+            try await persistenceManager.saveTasks(snapshot)
+            return true
+        } catch {
+            logger.error("Failed to durably persist tasks.json: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    /// Wires the crash-safe durable-move hooks onto a session `TaskStore`. Kept in one place so the
+    /// initial standalone store and the live runtime store are wired identically.
+    private func wireDurablePersistHooks(on store: TaskStore) async {
+        await store.setDurablePersistHooks(
+            inactive: { [weak self] in await self?.shared.persistInactiveTasksNow() ?? false },
+            active: { [weak self] snapshot in await self?.persistActiveTasksNow(snapshot) ?? false }
+        )
     }
 
     private func persistSessionStateAsync(callerFile: String = #fileID, callerLine: Int = #line, callerFunction: String = #function) {

@@ -225,6 +225,15 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         case archived
         /// Soft-deleted; recoverable from the Recently Deleted bucket.
         case recentlyDeleted
+
+        /// Forward-compatibility fallback: a disposition rawValue this build doesn't know (written
+        /// by a NEWER build) must not brick the decode of the entire task list — the tasks file is
+        /// one array, so one unknown value would fail every task. `.active` is the safe bucket: the
+        /// task stays visible and recoverable rather than silently vanishing into a hidden bucket.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = TaskDisposition(rawValue: raw) ?? .active
+        }
     }
 
     public init(

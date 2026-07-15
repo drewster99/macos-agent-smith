@@ -922,7 +922,9 @@ actor SecurityEvaluator {
         for rawLine in trimmed.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
             let line = String(rawLine).trimmingCharacters(in: stripSet)
             guard !line.isEmpty else { continue }
-            let words = line.split(separator: " ", maxSplits: 1)
+            // Split on space OR tab so a tab-separated "SAFE\treason" still isolates the keyword.
+            // Case is deliberately NOT folded (see the method doc) — only the separator is widened.
+            let words = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
             guard let first = words.first else { continue }
             // Strip punctuation but do NOT case-fold — verdict keywords MUST be ALL-CAPS.
             let keyword = first.trimmingCharacters(in: CharacterSet.punctuationCharacters)
@@ -1177,7 +1179,9 @@ actor SecurityEvaluator {
         for (index, rawLine) in lines.enumerated() {
             let line = String(rawLine).trimmingCharacters(in: stripSet)
             guard !line.isEmpty else { continue }
-            let words = line.split(separator: " ", maxSplits: 1)
+            // Split on space OR tab so a tab-separated "SAFE\treason" still isolates the keyword.
+            // Case is deliberately NOT folded (see the method doc) — only the separator is widened.
+            let words = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
             guard let first = words.first else { continue }
             // Strip punctuation but do NOT case-fold — verdict keywords MUST be ALL-CAPS.
             let keywordCandidate = first.trimmingCharacters(in: CharacterSet.punctuationCharacters)

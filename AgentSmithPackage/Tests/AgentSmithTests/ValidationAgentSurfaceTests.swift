@@ -366,7 +366,7 @@ struct ValidationAgentSurfaceTests {
         _ = await taskStore.beginValidationRound(id: task.id)
         await taskStore.recordCriterionVerdicts(id: task.id, records: [
             CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "wrongly rejected"), validatorName: "default", validatorHash: "x", round: 1)
-        ])
+        ], judgedAgainst: [criterion])
         await taskStore.updateStatus(id: task.id, status: .awaitingReview)
 
         let context = TestToolContext.make(agentRole: .smith, channel: channel, taskStore: taskStore)

@@ -36,7 +36,7 @@ enum CriterionArgumentParsing {
 
             case .dictionary(let fields):
                 guard case .string(let text) = fields["text"],
-                      !text.trimmingCharacters(in: .whitespaces).isEmpty else {
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return .failure(EvaluatorDefaults.AuthoringError("Every criterion must be a string, or an object with a non-empty 'text'."))
                 }
                 var waivable = false

@@ -399,17 +399,20 @@ struct TaskValidationCoordinatorTests {
         #expect(final?.validation?.pinnedDefinitions["list-items"] != nil, "the prepare body pins like a validator")
     }
 
-    @Test("A dynamic criterion with an empty prepare result auto-accepts")
+    @Test("A dynamic criterion with an empty prepare result waives (when waivable) → completes")
     func dynamicCriterionEmptyItemsAccepts() async throws {
         let (runtime, directory) = makeRuntime(verdictScript: ["[]"])
         try installPrepareDefinition(named: "list-items", in: directory)
         await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(text: "every item is valid", origin: .user, prepare: "list-items")]
+        // Empty enumeration is honored as a pass only when the criterion is WAIVABLE — a misfiring
+        // or hallucinated-empty prepare on a NON-waivable criterion escalates instead of silently
+        // passing an unexamined requirement (see judgeDynamicCriterion's empty-items gate).
+        let criteria = [AcceptanceCriterion(text: "every item is valid", waivable: true, origin: .user, prepare: "list-items")]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
         let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
-        #expect(status == .completed, "nothing applies → the dynamic analogue of a waive")
+        #expect(status == .completed, "nothing applies on a waivable criterion → the dynamic analogue of a waive")
     }
 
     @Test("A rejected item returns the task to the worker with the per-item reason")

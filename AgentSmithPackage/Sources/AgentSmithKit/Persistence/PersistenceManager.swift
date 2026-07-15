@@ -347,6 +347,19 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([AgentTask].self, from: data)
     }
 
+    /// Moves an unreadable `tasks.json` aside to a timestamped `.corrupt-…` name so a fresh one can
+    /// be written without destroying the original — the user can attempt manual recovery. Returns
+    /// the destination URL, or nil if there was no file to move. Throws on filesystem failure. Never
+    /// deletes data. Mirrors `quarantineCorruptInactiveTasksFile` for the per-session task file.
+    public func quarantineCorruptTasksFile() throws -> URL? {
+        let url = sessionDirectory.appendingPathComponent("tasks.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let dest = sessionDirectory.appendingPathComponent("tasks.corrupt-\(stamp)-\(UUID().uuidString.prefix(8)).json")
+        try FileManager.default.moveItem(at: url, to: dest)
+        return dest
+    }
+
     // MARK: - Timer Events (per-session)
 
     public func saveTimerEvents(_ events: [TimerEvent]) throws {

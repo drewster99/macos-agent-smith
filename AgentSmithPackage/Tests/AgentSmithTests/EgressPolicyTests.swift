@@ -68,6 +68,31 @@ struct EgressPolicyTests {
         #expect(EgressPolicy.classifyLiteral("999.999.999.999") == nil)
     }
 
+    @Test("newly-covered non-public IPv4 ranges: reserved, broadcast, benchmarking, protocol-assignment")
+    func additionalNonPublicV4() {
+        #expect(EgressPolicy.classifyLiteral("255.255.255.255") == true)   // limited broadcast
+        #expect(EgressPolicy.classifyLiteral("240.0.0.1") == true)         // 240.0.0.0/4 reserved
+        #expect(EgressPolicy.classifyLiteral("250.1.2.3") == true)
+        #expect(EgressPolicy.classifyLiteral("198.18.0.1") == true)        // 198.18.0.0/15 benchmarking
+        #expect(EgressPolicy.classifyLiteral("198.19.255.1") == true)
+        #expect(EgressPolicy.classifyLiteral("192.0.0.171") == true)       // 192.0.0.0/24 protocol assignments
+        // Nearby public addresses stay public.
+        #expect(EgressPolicy.classifyLiteral("198.20.0.1") == false)
+        #expect(EgressPolicy.classifyLiteral("192.0.1.1") == false)
+        #expect(EgressPolicy.classifyLiteral("8.8.8.8") == false)
+    }
+
+    @Test("IPv6 transition ranges classify by their embedded IPv4 (NAT64, 6to4)")
+    func ipv6TransitionRanges() {
+        // 64:ff9b::/96 NAT64 embedding a private v4 → non-public; embedding a public v4 → public.
+        #expect(EgressPolicy.classifyLiteral("64:ff9b::7f00:1") == true)    // ::127.0.0.1
+        #expect(EgressPolicy.classifyLiteral("64:ff9b::a9fe:a9fe") == true) // ::169.254.169.254
+        #expect(EgressPolicy.classifyLiteral("64:ff9b::808:808") == false)  // ::8.8.8.8
+        // 2002::/16 6to4 embeds the v4 in the next two octets.
+        #expect(EgressPolicy.classifyLiteral("2002:7f00:1::") == true)      // 2002:127.0.0.1
+        #expect(EgressPolicy.classifyLiteral("2002:0808:0808::") == false)  // 2002:8.8.8.8
+    }
+
     @Test("destinationIsNonPublic: localhost names and literal private hosts are blocked; missing host blocked")
     func destinationChecks() async throws {
         let local = try #require(URL(string: "http://localhost:8080/admin"))

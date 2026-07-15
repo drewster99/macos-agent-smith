@@ -10,6 +10,15 @@ public enum TaskAuthorship: String, Codable, Sendable {
     /// Synthesized by the runtime (e.g. the implicit default criterion
     /// materialized for a criterion-less task).
     case system
+
+    /// Forward-compatibility fallback: an authorship rawValue this build doesn't know (written by a
+    /// NEWER build) must not brick the decode of the whole task — `.system` is the safe bucket (it
+    /// asserts no requester/worker authority, so it can't wrongly let the judged worker edit its own
+    /// acceptance contract).
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = TaskAuthorship(rawValue: raw) ?? .system
+    }
 }
 
 /// One item of a task's acceptance contract. Judged by an evaluator at `.validating`;

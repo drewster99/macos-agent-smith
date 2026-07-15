@@ -117,6 +117,23 @@ struct WebFetchTool: AgentTool {
             return .failure(Self.render(.error("invalid_url", "web_fetch only supports http(s) URLs. Got: \(urlString)")))
         }
 
+        // SSRF preflight on the INITIAL request. The text-based Security Agent sees only the URL
+        // string and can't resolve DNS, so a public-looking hostname that secretly resolves into
+        // private space would slip past it (and past the redirect guard, which only fires on 30x).
+        // Block exactly that deception: a *name* that is not obviously local yet resolves to a
+        // non-public address. An IP literal or an explicit local name (localhost/.local) the model
+        // typed directly is left alone — direct-to-private is an intended capability (e.g. a local
+        // dev server), and only a deceptive public name is refused.
+        let host = url.host?.lowercased() ?? ""
+        let isExplicitLocalTarget = host == "localhost" || host == "localhost."
+            || host.hasSuffix(".localhost") || host.hasSuffix(".local")
+            || EgressPolicy.classifyLiteral(host) != nil
+        if !isExplicitLocalTarget, await EgressPolicy.destinationIsNonPublic(url) {
+            return .failure(Self.render(.error(
+                "blocked",
+                "\(urlString) resolves to a non-public address. web_fetch will not fetch a public hostname that points into loopback / link-local / private network ranges. If you intend to reach a local address, request it directly by IP or localhost.")))
+        }
+
         var prompt: String?
         if case .string(let promptValue) = arguments["prompt"] {
             let trimmed = promptValue.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -47,6 +47,12 @@ enum ProcessRunner {
             var buffer = Data()
             var closed = false
             var exitStatus: Int32 = 0
+            // Set once the event handler drains to EOF. After EOF the write end is fully closed
+            // (no more data can arrive) and the handler calls `cancel()`, whose async cancel
+            // handler closes readFD. `finish()` must NOT re-`read` readFD after that — the fd
+            // may already be closed and its number recycled by a concurrent op — so it consults
+            // this flag and skips its own drain when EOF was already reached.
+            var eofDrained = false
         }
         let stateBox = OSAllocatedUnfairLock<State>(initialState: .pending)
         // Set true the instant `waitpid` reaps the child. Once reaped, the pid (and its group id)
@@ -138,7 +144,11 @@ enum ProcessRunner {
                     @Sendable func finish(status: Int32?) {
                         let firstCall = readState.withLock { state -> Bool in
                             guard !state.closed else { return false }
-                            _ = drainAvailable(into: &state.buffer)
+                            // Skip the drain if the EOF path already drained and cancelled — re-reading
+                            // readFD here could hit the fd after its async close (and a recycled number).
+                            // On the timeout/kill path EOF is never reached, so `eofDrained` stays false
+                            // and we still drain-before-signal as the header invariant requires.
+                            if !state.eofDrained { _ = drainAvailable(into: &state.buffer) }
                             state.closed = true
                             if let status { state.exitStatus = status }
                             return true
@@ -151,7 +161,9 @@ enum ProcessRunner {
                     readSource.setEventHandler {
                         let eof = readState.withLock { state -> Bool in
                             guard !state.closed else { return false }
-                            return drainAvailable(into: &state.buffer)
+                            let hitEOF = drainAvailable(into: &state.buffer)
+                            if hitEOF { state.eofDrained = true }
+                            return hitEOF
                         }
                         if eof { readSource.cancel() }   // write end closed; the waitpid thread drives completion
                     }
@@ -280,6 +292,10 @@ enum ProcessRunner {
                     // never returns (e.g. an unkillable D-state child) — and it drains first, so no
                     // output is lost.
                     let timeoutItem = DispatchWorkItem {
+                        // If the child was already reaped, it exited on its own right as the deadline
+                        // fired — not a timeout. Bail so we don't mislabel a clean finish as timedOut
+                        // (and don't signal a possibly-recycled pid).
+                        guard !reaped.withLock({ $0 }) else { return }
                         didTimeout.withLock { $0 = true }
                         terminate(pid)
                         DispatchQueue.global().asyncAfter(deadline: .now() + 5) { finish(status: nil) }

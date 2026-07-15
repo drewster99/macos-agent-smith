@@ -178,12 +178,16 @@ final class SessionManager {
     /// flush regardless of whether each session's runtime is running, so a normal Cmd-Q does
     /// not lose buffered channel-log, usage, or retrieval-stat writes.
     func flushAll() async {
+        // Flush the global inactive-task store BEFORE the per-session task writers. A disposition
+        // move writes the destination (inactive) durably before removing the source (active); if a
+        // kill lands mid-flush, inactive-first preserves that ordering so a moved task can't be
+        // stripped from its session file before it's durable in the global file.
+        await shared.flushInactiveTasks()
         for vm in viewModels.values {
             await vm.flushForTermination()
         }
         await shared.usageStore.flush()
         await shared.flushMemories()
-        await shared.flushInactiveTasks()
     }
 
     /// Is any session currently running?

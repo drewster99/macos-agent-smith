@@ -237,8 +237,11 @@ public struct ToolContext: Sendable {
     public let listScheduledWakes: @Sendable () async -> [ScheduledWake]
     /// Cancels a single wake by id. Returns true on success.
     public let cancelScheduledWake: @Sendable (UUID) async -> Bool
-    /// Signals a full system restart for a new task. Called by create_task.
-    public let restartForNewTask: @Sendable (UUID) async -> Void
+    /// Signals a full system restart for a new task. Called by create_task and run_task. The
+    /// optional `amendment` is applied to the *started* task — for a template start that means the
+    /// cloned instance, never the reusable template itself (pass nil for a non-template, whose
+    /// amendment is applied in place by the caller before the restart).
+    public let restartForNewTask: @Sendable (UUID, String?) async -> Void
     /// The task ID that the current session was started/restarted for, if any.
     /// Used by `run_task` to prevent restart loops when Smith re-invokes it on the same task.
     public let currentResumingTaskID: UUID?
@@ -348,7 +351,7 @@ public struct ToolContext: Sendable {
         scheduleWake: @escaping @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome = { _, _, _, _, _, _ in .error("Scheduling not configured.") },
         listScheduledWakes: @escaping @Sendable () async -> [ScheduledWake] = { [] },
         cancelScheduledWake: @escaping @Sendable (UUID) async -> Bool = { _ in false },
-        restartForNewTask: @escaping @Sendable (UUID) async -> Void = { _ in },
+        restartForNewTask: @escaping @Sendable (UUID, String?) async -> Void = { _, _ in },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
         summarizeCompletedTask: @escaping @Sendable (UUID) async -> Void = { _ in },
