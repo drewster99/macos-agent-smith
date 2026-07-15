@@ -1519,7 +1519,11 @@ public actor OrchestrationRuntime {
         // and terminations serialize — the loser is PENDED, never failed and never
         // evicting anyone; the auto-advance drain starts it when a slot frees.
         if supervisor.handles(role: .brown).count >= maxConcurrentWorkers {
-            await taskStore.updateStatus(id: taskID, status: .pending)
+            // Revert only OUR claim: a wake can flip this `.starting` task to `.paused` during the
+            // idle-worker cycling above, and an unconditional `.pending` would clobber that pause and
+            // let the auto-advance drain run a task that was meant to stay paused. If the CAS loses,
+            // honor the new status silently (no misleading "queued" message).
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.starting]) else { return }
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees.",
@@ -1534,7 +1538,10 @@ public actor OrchestrationRuntime {
         guard let brownID = await performSpawnBrown(for: task) else {
             // An abort/stop mid-spawn is not the task's failure (same rule as performStart).
             guard !aborted, !stopRequested else { return }
-            await taskStore.updateStatus(id: taskID, status: .failed)
+            // Only fail the task if it's STILL our `.starting` claim. A wake may have paused it during
+            // the spawn (same race as the `.running` finalize below); don't clobber that pause or tell
+            // Smith it FAILED when it was actually paused — the paused task retries its spawn on resume.
+            guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.starting]) else { return }
             if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
                 await smithAgent.appendUserMessage("""
                     [System: Task "\(task.title)" (ID: \(taskID.uuidString)) could not be started — the worker \
