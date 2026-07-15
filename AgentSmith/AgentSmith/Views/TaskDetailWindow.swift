@@ -224,22 +224,102 @@ struct TaskDetailWindow: View {
 
     // MARK: - Body
 
-    private func taskContent(_ task: AgentTask) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                headerRow(task)
-                metadataSection(for: task)
-                Divider()
-                ForEach(orderedSections(for: task.status), id: \.self) { kind in
-                    sectionView(kind, task: task)
+    /// A pinned bar of section chips at the top of the window: always visible, highlights the
+    /// section currently under the viewport top, and jumps to a section on tap. Addresses "the
+    /// detail view is long and I can't tell what section I'm in."
+    @ViewBuilder
+    private func sectionJumpBar(sections: [SectionKind], proxy: ScrollViewProxy) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(sections, id: \.self) { kind in
+                    let isCurrent = kind == currentSection
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            proxy.scrollTo(kind, anchor: .top)
+                        }
+                        currentSection = kind
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: kind.icon)
+                                .font(.caption2)
+                            Text(kind.label)
+                                .font(.caption.weight(isCurrent ? .semibold : .regular))
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().fill(isCurrent ? AppColors.disclosureToggle.opacity(0.18) : Color.secondary.opacity(0.08))
+                        )
+                        .foregroundStyle(isCurrent ? AppColors.disclosureToggle : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-                Divider()
-                Text("ID: \(task.id.uuidString)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
             }
-            .padding(24)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
+        .background(.bar)
+    }
+
+    /// Sections that actually have content to show (or are editable), in canonical order — the set
+    /// the jump bar offers.
+    private func presentSections(_ task: AgentTask) -> [SectionKind] {
+        orderedSections(for: task.status).filter { kind in
+            switch kind {
+            case .description:    return true
+            case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
+            case .summary:        return !(task.summary ?? "").isEmpty
+            case .result:         return !(task.result ?? "").isEmpty
+            case .acceptance:     return !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable
+            case .steps:          return !task.steps.isEmpty || task.status.isValidationContractEditable
+            case .updates:        return !task.updates.isEmpty
+            case .relatedContext: return (task.relevantMemories?.isEmpty == false) || (task.relevantPriorTasks?.isEmpty == false)
+            }
+        }
+    }
+
+    private func taskContent(_ task: AgentTask) -> some View {
+        let sections = presentSections(task)
+        return ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                sectionJumpBar(sections: sections, proxy: proxy)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        headerRow(task)
+                        metadataSection(for: task)
+                        Divider()
+                        ForEach(orderedSections(for: task.status), id: \.self) { kind in
+                            sectionView(kind, task: task)
+                                .id(kind)
+                                .background(
+                                    GeometryReader { geo in
+                                        Color.clear.preference(
+                                            key: SectionOffsetKey.self,
+                                            value: [SectionOffset(kind: kind, minY: geo.frame(in: .named("taskScroll")).minY)]
+                                        )
+                                    }
+                                )
+                        }
+                        Divider()
+                        Text("ID: \(task.id.uuidString)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(24)
+                }
+                .coordinateSpace(name: "taskScroll")
+                .onPreferenceChange(SectionOffsetKey.self) { offsets in
+                    // The current section is the last one whose top has crossed above a small band
+                    // below the viewport top (so it counts as "current" just before it reaches the
+                    // top). Falls back to the first present section.
+                    let threshold: CGFloat = 80
+                    let crossed = offsets.filter { $0.minY <= threshold }.max { $0.minY < $1.minY }
+                    let next = crossed?.kind ?? sections.first ?? .description
+                    if next != currentSection { currentSection = next }
+                }
+            }
         }
         .frame(minWidth: 600, minHeight: 400)
         .navigationTitle(task.title)
@@ -296,6 +376,49 @@ struct TaskDetailWindow: View {
         case updates
         case description
         case relatedContext
+
+        var label: String {
+            switch self {
+            case .error:          return "Error"
+            case .summary:        return "Summary"
+            case .result:         return "Result"
+            case .acceptance:     return "Acceptance"
+            case .steps:          return "Steps"
+            case .updates:        return "Updates"
+            case .description:    return "Description"
+            case .relatedContext: return "Context"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .error:          return "exclamationmark.triangle.fill"
+            case .summary:        return "text.quote"
+            case .result:         return "checkmark.seal.fill"
+            case .acceptance:     return "checklist"
+            case .steps:          return "list.bullet"
+            case .updates:        return "clock.arrow.circlepath"
+            case .description:    return "doc.text"
+            case .relatedContext: return "link"
+            }
+        }
+    }
+
+    /// The section whose top is currently nearest the scroll viewport top — highlighted in the jump
+    /// bar so the user always knows where they are. Updated from scroll-offset preferences.
+    @State private var currentSection: SectionKind = .description
+
+    /// Reports each section's top offset within the scroll coordinate space so `currentSection`
+    /// can be derived on scroll.
+    private struct SectionOffsetKey: PreferenceKey {
+        static let defaultValue: [SectionOffset] = []
+        static func reduce(value: inout [SectionOffset], nextValue: () -> [SectionOffset]) {
+            value.append(contentsOf: nextValue())
+        }
+    }
+    private struct SectionOffset: Equatable {
+        let kind: SectionKind
+        let minY: CGFloat
     }
 
     private enum SectionMode {
