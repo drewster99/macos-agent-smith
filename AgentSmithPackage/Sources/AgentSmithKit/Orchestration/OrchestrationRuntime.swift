@@ -310,6 +310,10 @@ public actor OrchestrationRuntime {
     /// (after seeding shipped defaults). Nil = validation unconfigured → escalates
     /// visibly, never silently passes.
     var evaluatorsDirectory: URL?
+    /// The session directory, wired from the app's `PersistenceManager`. Used as the root for
+    /// per-task persistent evidence directories (`<root>/tasks/<taskID>/evidence`). When nil,
+    /// tasks still get an ephemeral temp dir but no persistent evidence dir.
+    var taskWorkspaceRoot: URL?
     /// Dedicated validator-slot model, once the app configures one. Definitions using
     /// `.validator` fail visibly until then (no fallback chains).
     var validatorProvider: (any LLMProvider)?
@@ -844,6 +848,21 @@ public actor OrchestrationRuntime {
             }
             parts.append("## Attachments\n\(lines.joined(separator: "\n"))")
         }
+        let workspace = taskWorkspace(for: task.id)
+        var workspaceLines = ["- Scratch (throwaway, may be cleared): \(workspace.temporaryDirectory.path)"]
+        if let evidence = workspace.evidenceDirectory {
+            workspaceLines.append("- Evidence (persistent): \(evidence.path)")
+        }
+        parts.append("""
+            ## Your working directories
+            \(workspaceLines.joined(separator: "\n"))
+            Write throwaway intermediates to the SCRATCH dir. Write files that serve as EVIDENCE for \
+            the acceptance criteria into the EVIDENCE dir — files you write there are auto-attached and \
+            become clickable references in your submission. **Do NOT create working files, evidence, or \
+            screenshots inside the user's own project unless the task is specifically about adding files \
+            to that project** — use these directories instead so you don't litter the user's repo.
+            """)
+
         if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: task.acknowledgmentCount > 0) {
             parts.append("""
                 ## Acceptance criteria — the contract your submission is judged against
@@ -2708,11 +2727,17 @@ public actor OrchestrationRuntime {
         }
 
         let filesRead = FileReadTracker()
+        // Provision this task's working directories (ephemeral temp + persistent evidence) and
+        // hand Brown its evidence dir so file_write can auto-ingest artifacts written there.
+        let brownWorkspace = task.map { taskWorkspace(for: $0.id) }
+        brownWorkspace?.ensureDirectories()
         let brownContext = makeToolContext(
             agentID: brownID,
             role: .brown,
             filesReadInSession: filesRead,
-            executionTracker: executionTracker
+            executionTracker: executionTracker,
+            taskEvidenceDirectory: brownWorkspace?.evidenceDirectory,
+            taskTemporaryDirectory: brownWorkspace?.temporaryDirectory
         )
 
         // Pre-flight `gh auth status` so Brown sees verified GitHub auth state in his tool list
@@ -3047,6 +3072,16 @@ public actor OrchestrationRuntime {
         await agent.updateSystemPrompt(prompt)
     }
 
+    /// Wires the session directory used as the per-task evidence root. Call before `start()`.
+    public func setTaskWorkspaceRoot(_ url: URL?) {
+        taskWorkspaceRoot = url
+    }
+
+    /// The workspace (temp + evidence directories) for a task.
+    func taskWorkspace(for taskID: UUID) -> TaskWorkspace {
+        TaskWorkspace(taskID: taskID, workspaceRoot: taskWorkspaceRoot)
+    }
+
     /// Updates the idle poll interval for the active agent with the given role.
     public func updatePollInterval(for role: AgentRole, interval: TimeInterval) async {
         guard let agent = supervisor.firstHandle(role: role)?.agent else { return }
@@ -3106,7 +3141,9 @@ public actor OrchestrationRuntime {
         followUpScheduler: FollowUpScheduler? = nil,
         currentResumingTaskID: UUID? = nil,
         filesReadInSession: FileReadTracker? = nil,
-        executionTracker: ToolExecutionTracker? = nil
+        executionTracker: ToolExecutionTracker? = nil,
+        taskEvidenceDirectory: URL? = nil,
+        taskTemporaryDirectory: URL? = nil
     ) -> ToolContext {
         // Strong-capture the tracker so it survives beyond this stack frame. Callers that
         // also need to read tool-execution outcomes (e.g. SecurityEvaluator) must pass the
@@ -3274,6 +3311,8 @@ public actor OrchestrationRuntime {
                 let entries = attachments.map { (attachment: $0, detail: detail) }
                 await agent.stageAttachments(entries)
             },
+            taskEvidenceDirectory: taskEvidenceDirectory,
+            taskTemporaryDirectory: taskTemporaryDirectory,
             maxAttachmentBytesPerMessage: { [weak self] in
                 guard let self else { return 50 * 1024 * 1024 }
                 return await self.maxAttachmentBytesPerMessage

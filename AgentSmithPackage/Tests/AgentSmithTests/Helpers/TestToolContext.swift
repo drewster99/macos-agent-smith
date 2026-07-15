@@ -60,6 +60,7 @@ enum TestToolContext {
         },
         stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
+        taskEvidenceDirectory: URL? = nil,
         loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
         saveEvaluatorDefinition: @escaping @Sendable (EvaluatorDefinition, Bool) async -> String? = { _, _ in "no evaluator registry is configured in test" }
     ) -> ToolContext {
@@ -89,6 +90,7 @@ enum TestToolContext {
             stageAttachmentsForNextTurn: { attachments, detail in
                 await stagedAttachmentRecorder.record(attachments: attachments, detail: detail)
             },
+            taskEvidenceDirectory: taskEvidenceDirectory,
             maxAttachmentBytesPerMessage: { maxAttachmentBytesPerMessage }
         )
     }

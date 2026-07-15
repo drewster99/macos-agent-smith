@@ -26,6 +26,11 @@ public actor PersistenceManager {
         baseDirectory.appendingPathComponent("evaluators", isDirectory: true)
     }
     private let sessionDirectory: URL
+
+    /// The session directory, used by the runtime as the root for per-task persistent evidence
+    /// directories (`<sessionDirectory>/tasks/<taskID>/evidence`). For the root-flavored manager
+    /// this is the base `AgentSmith/` dir; task evidence is only meaningful under a session.
+    public nonisolated var sessionWorkspaceDirectory: URL { sessionDirectory }
     private let attachmentsDirectory: URL
 
     /// Real-data init. Resolves to `~/Library/Application Support/AgentSmith/` —

@@ -840,6 +840,10 @@ final class AppViewModel {
         EvaluatorDefaults.migrateLegacySeededBuiltIns(in: evaluatorsDirectory)
         await newRuntime.setEvaluatorConfiguration(directory: evaluatorsDirectory)
 
+        // Root for per-task persistent evidence directories (worker/validator evidence artifacts
+        // live under <session>/tasks/<taskID>/evidence, out of the user's project tree).
+        await newRuntime.setTaskWorkspaceRoot(persistence.sessionWorkspaceDirectory)
+
         // Per-session persistence for the pending-user-message buffer (messages typed while
         // Smith was stopped / starting). Wired before the runtime starts so enqueues persist
         // and a fresh runtime reseeds undelivered messages after a crash.

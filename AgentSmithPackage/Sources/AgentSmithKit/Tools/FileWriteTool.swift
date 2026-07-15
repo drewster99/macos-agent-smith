@@ -53,7 +53,13 @@ struct FileWriteTool: AgentTool {
         let url = URL(fileURLWithPath: path)
         let resolvedURL = url.resolvingSymlinksInPath()
 
-        if let rejection = Self.checkPathRestriction(resolvedPath: resolvedURL.path) {
+        // The task's own workspace dirs (evidence + scratch) are app-created, sanctioned locations.
+        // They sit under otherwise-restricted trees (the OS temp dir is under /var/folders; the
+        // evidence dir is under Application Support), so permit writes there explicitly — the path
+        // restriction below still guards every other location.
+        let sanctionedWorkspaceDirs = [context.taskEvidenceDirectory, context.taskTemporaryDirectory].compactMap { $0 }
+        let isInSanctionedWorkspace = sanctionedWorkspaceDirs.contains { TaskWorkspace.path(resolvedURL.path, isInside: $0) }
+        if !isInSanctionedWorkspace, let rejection = Self.checkPathRestriction(resolvedPath: resolvedURL.path) {
             return .failure(rejection)
         }
         let fm = FileManager.default
@@ -119,11 +125,41 @@ struct FileWriteTool: AgentTool {
             }
         }
 
+        // A file written into the task's evidence directory is auto-ingested as an attachment so
+        // it becomes a clickable, persisted reference (not just an untracked file on disk).
+        // Best-effort: a failed ingest never fails the write.
+        var evidenceNote = ""
+        if let evidenceDir = context.taskEvidenceDirectory,
+           TaskWorkspace.path(resolvedPath, isInside: evidenceDir),
+           let data = try? Data(contentsOf: resolvedURL) {
+            let mimeType = Self.mimeType(forExtension: resolvedURL.pathExtension)
+            let (attachment, _) = await context.ingestAttachmentData(data, resolvedURL.lastPathComponent, mimeType)
+            if attachment != nil {
+                evidenceNote = " (ingested as an evidence attachment)"
+            }
+        }
+
         // Report if the path traversed symlinks so the caller knows where the file actually landed.
         if resolvedURL.path != url.standardized.path {
-            return .success("File written successfully: \(path) (resolved to \(resolvedURL.path) via symlink)")
+            return .success("File written successfully: \(path) (resolved to \(resolvedURL.path) via symlink)\(evidenceNote)")
         }
-        return .success("File written successfully: \(path)")
+        return .success("File written successfully: \(path)\(evidenceNote)")
+    }
+
+    /// Minimal extension→MIME mapping for evidence auto-ingest. Unknown types fall back to
+    /// `application/octet-stream`; the attachment layer sniffs images/PDFs regardless.
+    static func mimeType(forExtension ext: String) -> String {
+        switch ext.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "pdf": return "application/pdf"
+        case "md", "markdown", "txt", "log": return "text/plain"
+        case "json": return "application/json"
+        case "html", "htm": return "text/html"
+        case "csv": return "text/csv"
+        default: return "application/octet-stream"
+        }
     }
 
     /// Returns an error message if the resolved path is restricted, or nil if allowed.

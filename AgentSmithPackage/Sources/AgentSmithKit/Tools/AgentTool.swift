@@ -301,6 +301,16 @@ public struct ToolContext: Sendable {
     /// detail tier ("thumbnail" / "standard" / "full"); unknown values fall back to
     /// "standard".
     public let stageAttachmentsForNextTurn: @Sendable ([Attachment], String) async -> Void
+    /// The current task's persistent evidence directory, when one exists. Files the worker writes
+    /// here are auto-ingested as attachments (`FileWriteTool`), so evidence artifacts become
+    /// clickable references instead of untracked files in the user's project. Nil for agents/tasks
+    /// without a workspace (Smith, tests).
+    public let taskEvidenceDirectory: URL?
+    /// The current task's ephemeral scratch directory, when one exists. The worker may write
+    /// throwaway intermediates here. Like `taskEvidenceDirectory`, this is a sanctioned app-created
+    /// location, so `FileWriteTool` permits writes here even though it sits under the OS temp tree
+    /// (`/var/folders/…`) that writes are otherwise blocked from.
+    public let taskTemporaryDirectory: URL?
     /// Per-message aggregate attachment cap in bytes. Tool resolvers sum
     /// `Attachment.byteCount` across the resolved set and reject when the total exceeds
     /// this cap. Sourced from `OrchestrationRuntime.maxAttachmentBytesPerMessage`, which
@@ -371,6 +381,8 @@ public struct ToolContext: Sendable {
         },
         attachmentURLProvider: @escaping @Sendable (UUID, String) -> URL? = { _, _ in nil },
         stageAttachmentsForNextTurn: @escaping @Sendable ([Attachment], String) async -> Void = { _, _ in },
+        taskEvidenceDirectory: URL? = nil,
+        taskTemporaryDirectory: URL? = nil,
         maxAttachmentBytesPerMessage: @escaping @Sendable () async -> Int = { 50 * 1024 * 1024 },
         onLearnedModelOutputLimit: @escaping @Sendable (String, String, Int) -> Void = { _, _, _ in }
     ) {
@@ -414,6 +426,8 @@ public struct ToolContext: Sendable {
         self.ingestAttachmentData = ingestAttachmentData
         self.attachmentURLProvider = attachmentURLProvider
         self.stageAttachmentsForNextTurn = stageAttachmentsForNextTurn
+        self.taskEvidenceDirectory = taskEvidenceDirectory
+        self.taskTemporaryDirectory = taskTemporaryDirectory
         self.maxAttachmentBytesPerMessage = maxAttachmentBytesPerMessage
         self.onLearnedModelOutputLimit = onLearnedModelOutputLimit
     }
