@@ -212,6 +212,7 @@ struct SettingsView: View {
     /// (providerID, modelID) of the model whose behavior flags are being edited.
     /// Drives the `BehaviorFlagsEditorSheet` presentation.
     @State private var editingFlagsFor: FlagsEditTarget?
+    @State private var editingCapabilitiesFor: FlagsEditTarget?
 
     private struct FlagsEditTarget: Identifiable {
         let providerID: String
@@ -297,6 +298,13 @@ struct SettingsView: View {
                 modelID: target.modelID
             )
         }
+        .sheet(item: $editingCapabilitiesFor) { target in
+            CapabilitiesEditorSheet(
+                shared: shared,
+                providerID: target.providerID,
+                modelID: target.modelID
+            )
+        }
         .alert("Export Error", isPresented: Binding(
             get: { exportError != nil },
             set: { if !$0 { exportError = nil } }
@@ -367,6 +375,14 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Edit per-model behavior flags (GLM salvage, max_completion_tokens, parallel tools)")
+                Button("Caps") {
+                    editingCapabilitiesFor = FlagsEditTarget(
+                        providerID: config.providerID,
+                        modelID: config.modelID
+                    )
+                }
+                .buttonStyle(.borderless)
+                .help("Override per-model capability flags (vision, tool use, …) when the catalog is wrong")
                 Button("Edit") {
                     editingConfig = config
                 }
