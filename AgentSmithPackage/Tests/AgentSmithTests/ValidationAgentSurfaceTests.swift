@@ -121,6 +121,39 @@ struct ValidationAgentSurfaceTests {
         #expect(posted.contains { if case .string("criteria_updated") = $0.metadata?["messageKind"] { return true }; return false })
     }
 
+    @Test("set_acceptance_criteria works on a FAILED task (recovery) but not a COMPLETED one")
+    func setCriteriaAllowedOnFailedBlockedOnCompleted() async throws {
+        let taskStore = TaskStore()
+        let context = TestToolContext.make(
+            agentRole: .smith,
+            taskStore: taskStore,
+            loadEvaluatorRegistry: makeSeededRegistryLoader()
+        )
+        let tool = SetAcceptanceCriteriaTool()
+
+        // Failed task: editing criteria is the recovery path (run_task then resets it), so allowed.
+        let failed = await taskStore.addTask(title: "f", description: "d")
+        await taskStore.updateStatus(id: failed.id, status: .failed)
+        let onFailed = try await tool.execute(
+            arguments: ["task_id": .string(failed.id.uuidString),
+                        "criteria": .array([.dictionary(["text": .string("fixed criterion")])])],
+            context: context
+        )
+        #expect(onFailed.succeeded, "a failed task's criteria must be editable so it can be corrected and re-run")
+
+        // Completed task: result was accepted and delivered — closed to criteria edits.
+        let completed = await taskStore.addTask(title: "c", description: "d")
+        await taskStore.setResult(id: completed.id, result: "done", commentary: nil)
+        await taskStore.updateStatus(id: completed.id, status: .completed)
+        let onCompleted = try await tool.execute(
+            arguments: ["task_id": .string(completed.id.uuidString),
+                        "criteria": .array([.dictionary(["text": .string("too late")])])],
+            context: context
+        )
+        #expect(!onCompleted.succeeded)
+        #expect(onCompleted.output.contains("completed"))
+    }
+
     @Test("set_acceptance_criteria rejects an unknown validator name, listing what exists")
     func setCriteriaRejectsUnknownValidator() async throws {
         let taskStore = TaskStore()

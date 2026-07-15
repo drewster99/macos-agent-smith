@@ -805,7 +805,7 @@ extension OrchestrationRuntime {
                 \(criterion.text)
 
                 ## Your response
-                Judge only whether the criterion's substance is satisfied, treating every field other than the one under judgment as supporting context. Respond with your verdict on the FIRST line:
+                Judge only whether the criterion's substance is satisfied, treating every field other than the one under judgment as supporting context. If the criterion offers ALTERNATIVES — "X OR Y", "A or B, whichever applies", "provide P or Q" — then satisfying ANY ONE alternative is a PASS; do NOT require the others. (E.g. "GitHub URLs OR official documentation links for each" is met by a GitHub URL for each — the missing docs link is irrelevant.) Only require every listed item when the criterion joins them with AND / "and" / "including". Respond with your verdict on the FIRST line:
                 ACCEPT — the criterion is satisfied.
                 REJECT: <the worker acts on this verbatim, so make it actionable. State TWO things in one message: (1) specifically what is missing, wrong, or unproven — judged on the evidence, not on tone; and (2) the concrete next steps that WOULD earn acceptance — what to do, and where the criterion calls for proof, exactly what evidence to provide and where to put it (e.g. "write the build log to a file and reference its path", "provide the command output showing X", "attach a screenshot of screen Y"). If the criterion is unclear about what evidence would satisfy it, say what you would accept. Do NOT reject for missing evidence without naming the evidence that would suffice.>
                 """

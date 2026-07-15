@@ -107,8 +107,12 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         guard let task = await context.taskStore.task(id: taskID) else {
             return .failure("No task with id \(taskID.uuidString). Use list_tasks to find the right id.")
         }
-        guard task.status != .completed && task.status != .failed else {
-            return .failure("Task '\(task.title)' is \(task.status.rawValue) — its acceptance criteria can no longer be changed.")
+        // A FAILED task is recoverable: fixing its criteria is exactly how you recover from a
+        // failure whose criteria were wrong, then `run_task` (which resets failed → pending) re-runs
+        // it against the corrected contract. Only a COMPLETED task — result accepted and delivered —
+        // is truly closed to criteria edits.
+        guard task.status != .completed else {
+            return .failure("Task '\(task.title)' is completed — its acceptance criteria can no longer be changed.")
         }
         guard case .array(let rawCriteria) = arguments["criteria"], !rawCriteria.isEmpty else {
             return .failure("'criteria' must be a non-empty array of {text, waivable?, validator?} objects.")
