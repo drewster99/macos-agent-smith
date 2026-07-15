@@ -2,6 +2,18 @@
 
 ## Planned
 
+### Security: scope-approve a file/folder for read-only evidence tools (2026-07-14)
+
+Today every `file_read` / `directory_listing` / `directory_tree` (and `glob`/`grep`)
+call is evaluated (or, once the auto-approve model lands, waved through) one at a
+time. For an agent that reads many files under one tree — a validator gathering
+evidence, Smith surveying a project — that's a lot of individual calls. Let the
+Security Agent approve a FILE, a FOLDER, or a set of FOLDERS for read-only access
+for the remainder of a task/evaluation, so subsequent reads under an approved root
+skip re-evaluation. Reduces call volume without loosening the trust boundary (the
+approval is explicit and bounded to the granted paths). Pairs with the
+"read-only tools through security, auto-approved for Smith/validators" work.
+
 ### Validation UI follow-ups (2026-07-09)
 
 - ✅ (2026-07-10) **Task overlay bar**: retractable top-of-window bar with one live
