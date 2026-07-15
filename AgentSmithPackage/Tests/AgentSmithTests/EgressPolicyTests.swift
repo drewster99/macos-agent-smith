@@ -78,8 +78,13 @@ struct EgressPolicyTests {
         #expect(EgressPolicy.isExplicitLocalTarget("192.168.1.10"))    // private literal
         #expect(EgressPolicy.isExplicitLocalTarget("8.8.8.8"))         // public literal — still model-chosen
         #expect(EgressPolicy.isExplicitLocalTarget("[::1]"))
+        // Fully-qualified forms with a trailing root dot are the same names — still exempt.
+        #expect(EgressPolicy.isExplicitLocalTarget("localhost."))
+        #expect(EgressPolicy.isExplicitLocalTarget("printer.local."))
+        #expect(EgressPolicy.isExplicitLocalTarget("dev.localhost."))
         // Public-looking NAMES are not exempt — these are the rebinding-attack shape.
         #expect(!EgressPolicy.isExplicitLocalTarget("example.com"))
+        #expect(!EgressPolicy.isExplicitLocalTarget("example.com."))
         #expect(!EgressPolicy.isExplicitLocalTarget("metadata.evil.com"))
         #expect(!EgressPolicy.isExplicitLocalTarget(""))
     }

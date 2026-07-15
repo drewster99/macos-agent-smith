@@ -46,8 +46,9 @@ enum EgressPolicy {
     /// capability (e.g. a local dev server), NOT a rebinding attack. Used by both the request
     /// pre-flight and the actual-peer verification so the two apply the same exemption.
     static func isExplicitLocalTarget(_ host: String) -> Bool {
-        let h = host.lowercased()
-        return h == "localhost" || h == "localhost."
+        var h = host.lowercased()
+        if h.hasSuffix(".") { h.removeLast() }   // normalize a trailing root dot (FQDN form)
+        return h == "localhost"
             || h.hasSuffix(".localhost") || h.hasSuffix(".local")
             || classifyLiteral(h) != nil
     }

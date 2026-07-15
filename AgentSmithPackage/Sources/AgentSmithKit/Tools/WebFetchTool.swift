@@ -761,8 +761,16 @@ final class WebFetchDownloader: NSObject, URLSessionDataDelegate, @unchecked Sen
     ) async -> URLRequest? {
         guard let target = request.url else { return nil }
         if await EgressPolicy.destinationIsNonPublic(target) {
-            settle(.failure(DownloadError.redirectBlocked(target)))
-            return nil   // do not follow the redirect
+            // A redirect INTO non-public space is refused — UNLESS this is a local server
+            // redirecting within local space (both the hop redirecting FROM and the target are
+            // explicit-local, e.g. a localhost dev server's own `/` → `/login`). A PUBLIC page
+            // redirecting to a private address is the SSRF we block.
+            let sourceLocal = EgressPolicy.isExplicitLocalTarget(response.url?.host ?? "")
+            let targetLocal = EgressPolicy.isExplicitLocalTarget(target.host ?? "")
+            if !(sourceLocal && targetLocal) {
+                settle(.failure(DownloadError.redirectBlocked(target)))
+                return nil   // do not follow the redirect
+            }
         }
         return request
     }
@@ -794,7 +802,11 @@ final class WebFetchDownloader: NSObject, URLSessionDataDelegate, @unchecked Sen
     /// Decided PER TRANSACTION (each hop, incl. redirects, is its own transaction with its own URL):
     /// - Proxied transactions are skipped — `remoteAddress` is then the PROXY, not the origin, so a
     ///   public fetch through a local/RFC1918 proxy must not be misread as a private origin. Those
-    ///   fall back to the name-resolution pre-flight.
+    ///   fall back to the name-resolution pre-flight. LIMITATION: when a proxy is in play the proxy
+    ///   (not us) resolves and connects, so a rebinding name that the proxy sends to a private origin
+    ///   is not caught here — this defense assumes direct connections. Closing that would mean
+    ///   disabling proxies for the session (breaks users who require one) or requiring the proxy to
+    ///   enforce equivalent policy; not done, since this is defense-in-depth over the pre-flight.
     /// - A public peer is fine.
     /// - A non-public peer is refused ONLY when this transaction's own host was a public-looking
     ///   NAME — i.e. a name that resolved into private space (the rebinding attack). A host the model
