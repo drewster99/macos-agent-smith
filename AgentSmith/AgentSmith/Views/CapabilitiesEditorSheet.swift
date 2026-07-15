@@ -154,7 +154,7 @@ struct CapabilitiesEditorSheet: View {
                 }
                 .disabled(!hasAnyOverride)
                 Spacer()
-                Text("Default = inherit LiteLLM/provider resolution. Force on/off writes a per-model override.")
+                Text("Default = inherit LiteLLM/provider resolution. Force on/off writes a per-model override. Takes effect after a model-list refresh (or next launch).")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.trailing)
