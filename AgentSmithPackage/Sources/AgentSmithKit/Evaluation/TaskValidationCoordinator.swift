@@ -373,6 +373,8 @@ extension OrchestrationRuntime {
         for agentID in task.assigneeIDs {
             _ = await terminateAgent(id: agentID)
         }
+        // Reclaim the ephemeral scratch dir; the persistent evidence dir stays for review/retry.
+        taskWorkspace(for: taskID).cleanupTemporary()
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Task \"\(task.title)\" FAILED acceptance validation. \(reason)",
@@ -660,6 +662,11 @@ extension OrchestrationRuntime {
             "workerActivity": await workerActivityDigest(for: task),
             "workerSteps": Self.renderSteps(task.steps)
         ]
+        // The worker's evidence directory: a criterion may reference an evidence file by name, and
+        // the validator resolves it here with `file_read`/`directory_listing`.
+        if let evidenceDir = taskWorkspace(for: task.id).evidenceDirectory {
+            fields["evidenceDirectory"] = evidenceDir.path
+        }
         if let item = extraSlots["item"] {
             fields["itemToEvaluate"] = item
         }
@@ -682,7 +689,20 @@ extension OrchestrationRuntime {
             let gateTaskTitle = task.title
             let gateTaskID = task.id.uuidString
             let gateTaskDescription = task.description
+            let gateChannel = channel
             securityGate = { (call: LLMToolCall, tool: any AgentTool) async -> Bool in
+                // Surface the validator's tool call in the transcript before it runs, so acceptance
+                // validators' evidence reads aren't invisible.
+                await gateChannel.post(ChannelMessage(
+                    sender: .agent(.securityAgent),
+                    content: "validator \(call.name): \(call.arguments.prefix(160))",
+                    metadata: [
+                        "messageKind": .string("tool_request"),
+                        "requestID": .string(call.id),
+                        "tool": .string(call.name),
+                        "params": .string(call.arguments)
+                    ]
+                ))
                 let disposition = await evaluator.evaluate(
                     toolName: call.name,
                     toolParams: call.arguments,
@@ -767,6 +787,9 @@ extension OrchestrationRuntime {
             - `workerTools` — the worker's capabilities, which differ from yours (context).
             - `workerActivity` — the SYSTEM-OBSERVED tool-call log; trust it over narrative claims.
             - `workerSteps` — the worker's plan with statuses and tombstones.
+            - `evidenceDirectory` — (when present) the folder the worker was told to place evidence \
+            artifacts in. If a criterion names an evidence file, read it from here with `file_read`, or \
+            list the folder with `directory_listing`.
             """
         if hasItem {
             prompt += "\n- `itemToEvaluate` — the specific item to judge for this criterion; when present, judge IT, using the other fields as context."
@@ -929,6 +952,8 @@ extension OrchestrationRuntime {
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
         }
+        // Reclaim the ephemeral scratch dir; the persistent evidence dir stays.
+        taskWorkspace(for: taskID).cleanupTemporary()
         var bannerMetadata: [String: AnyCodable] = [
             "messageKind": .string("task_completed"),
             "taskID": .string(taskID.uuidString)

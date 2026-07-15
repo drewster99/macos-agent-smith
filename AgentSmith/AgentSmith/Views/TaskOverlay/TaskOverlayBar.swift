@@ -204,8 +204,10 @@ struct TaskOverlayColumn: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 3) {
                     if entry.showsCriteria && !task.acceptanceCriteria.isEmpty {
+                        sectionLabel("Acceptance criteria")
                         criteriaRows()
                     } else if !task.steps.filter(\.isActive).isEmpty {
+                        sectionLabel("Steps")
                         stepRows()
                         if entry.allStepsDoneAt != nil && !entry.showsCriteria {
                             DwellCountdown(since: entry.allStepsDoneAt ?? Date())
@@ -258,6 +260,16 @@ struct TaskOverlayColumn: View {
                 .help("Remove from the bar (task is unaffected)")
             }
         }
+    }
+
+    /// A small uppercased caption telling the user which list this is — steps vs acceptance
+    /// criteria — since the two look similar at a glance.
+    @ViewBuilder
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(AppFonts.taskOverlayChip)
+            .foregroundStyle(.secondary)
+            .padding(.bottom, 1)
     }
 
     @ViewBuilder
