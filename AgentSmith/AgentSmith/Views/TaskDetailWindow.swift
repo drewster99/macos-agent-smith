@@ -235,7 +235,7 @@ struct TaskDetailWindow: View {
                     let isCurrent = kind == currentSection
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
-                            proxy.scrollTo(kind, anchor: .top)
+                            proxy.scrollTo(SectionAnchorID(kind: kind), anchor: .top)
                         }
                         currentSection = kind
                     } label: {
@@ -291,7 +291,7 @@ struct TaskDetailWindow: View {
                         Divider()
                         ForEach(orderedSections(for: task.status), id: \.self) { kind in
                             sectionView(kind, task: task)
-                                .id(kind)
+                                .id(SectionAnchorID(kind: kind))
                                 .background(
                                     GeometryReader { geo in
                                         Color.clear.preference(
@@ -367,6 +367,13 @@ struct TaskDetailWindow: View {
 
     /// All sections that could ever render in this window, in the canonical order
     /// `orderedSections(for:)` filters from based on status.
+    /// Distinct scroll-anchor identity for a content section. Kept separate from `SectionKind`
+    /// (which the jump-bar chips already use as their `ForEach` id) so `scrollTo` resolves only
+    /// to the section in the vertical scroll view, not the same-id chip in the jump bar.
+    private struct SectionAnchorID: Hashable {
+        let kind: SectionKind
+    }
+
     private enum SectionKind: Hashable {
         case error
         case summary
