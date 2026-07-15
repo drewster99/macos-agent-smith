@@ -83,6 +83,7 @@ struct TaskPDFDocumentView: View {
             }
             return "Failed"
         case .awaitingReview: return "Awaiting Review"
+        case .starting:       return "Starting"
         case .running:        return "Running"
         case .paused:         return "Paused"
         case .interrupted:    return "Interrupted"

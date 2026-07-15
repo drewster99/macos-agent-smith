@@ -134,6 +134,14 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
 
     public enum Status: String, Codable, Sendable, CaseIterable {
         case pending
+        /// Transient: a start has been claimed for this task and its worker (Brown) is being
+        /// spawned — the multi-second Security-Agent scoping call happens here. Holds a worker
+        /// slot and shows a "Starting…" indicator so the UI isn't blank during the spawn. The
+        /// atomic `.pending → .starting` transition (CAS) also fences the start: a duplicate start
+        /// enqueued while the task was still `.pending` finds the CAS already lost and bails, so a
+        /// live worker can never be orphaned or double-spawned. Exits to `.running` once Brown is
+        /// live; demoted back to `.pending` at cold boot (a crash mid-spawn left no live worker).
+        case starting
         case running
         case completed
         case failed
@@ -163,7 +171,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
 
         /// Whether this status represents work that is actively running — prevents archiving or deletion.
         public var isInProgress: Bool {
-            self == .running || self == .paused || self == .awaitingReview || self == .validating
+            self == .starting || self == .running || self == .paused || self == .awaitingReview || self == .validating
         }
 
         /// Whether this status is a terminal outcome — the task's `UsageRecord`s
@@ -191,7 +199,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             switch self {
             case .pending, .paused, .interrupted, .scheduled, .completed, .failed:
                 return true
-            case .running, .awaitingReview, .validating:
+            case .starting, .running, .awaitingReview, .validating:
                 return false
             }
         }
@@ -204,7 +212,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             switch self {
             case .pending, .paused, .interrupted, .scheduled, .failed, .awaitingReview:
                 return true
-            case .running, .validating, .completed:
+            case .starting, .running, .validating, .completed:
                 return false
             }
         }

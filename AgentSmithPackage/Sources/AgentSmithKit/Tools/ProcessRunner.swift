@@ -120,13 +120,21 @@ enum ProcessRunner {
 
                     let readSource = DispatchSource.makeReadSource(fileDescriptor: readFD, queue: DispatchQueue.global())
 
-                    // Terminal step: drain → mark closed → cancel source → close → record status →
-                    // signal. The waitpid thread and the timeout fallback can BOTH call this (e.g. a
-                    // timeout kills the child, waitpid finishes, then the +5 s fallback fires), so
-                    // everything past the first call MUST be skipped — most importantly close(readFD),
-                    // which on a second call would close an fd number already recycled by another
-                    // concurrent run/file op. The `firstCall` flag gates the whole tail, not just the
-                    // drain. Drain is BEFORE close+signal → no output lost.
+                    // Close readFD in the source's CANCEL HANDLER, not inline after cancel().
+                    // `DispatchSource.cancel()` is asynchronous — GCD hasn't finished deregistering the
+                    // fd from its shared kqueue when cancel() returns, so closing the fd inline lets its
+                    // number be recycled (by another concurrent run/file op) inside that teardown window,
+                    // and our late deregistration could then tear down the new owner's read source. The
+                    // cancel handler runs exactly once after teardown completes, so the fd is released
+                    // only when GCD is fully done with it — and running once makes it double-close-safe
+                    // regardless of whether finish() or the eof handler triggered the cancel.
+                    readSource.setCancelHandler { close(readFD) }
+
+                    // Terminal step: drain → mark closed → cancel source (→ close via the handler above) →
+                    // record status → signal. The waitpid thread and the timeout fallback can BOTH call
+                    // this (e.g. a timeout kills the child, waitpid finishes, then the +5 s fallback
+                    // fires), so everything past the first call MUST be skipped. The `firstCall` flag
+                    // gates the tail; drain is BEFORE cancel+signal → no output lost.
                     @Sendable func finish(status: Int32?) {
                         let firstCall = readState.withLock { state -> Bool in
                             guard !state.closed else { return false }
@@ -137,7 +145,6 @@ enum ProcessRunner {
                         }
                         guard firstCall else { return }
                         readSource.cancel()
-                        close(readFD)
                         done.signal()
                     }
 

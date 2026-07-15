@@ -250,7 +250,7 @@ struct TaskRowButton: View {
                 Label("Delete", systemImage: "trash")
             })
 
-        case .running, .validating:
+        case .starting, .running, .validating:
             Button(action: {
                 let slug = task.id.uuidString.prefix(8)
                 stopLogger.notice("UI.taskCard contextMenu Pause clicked task=\(slug, privacy: .public)")

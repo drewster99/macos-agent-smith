@@ -121,7 +121,7 @@ struct RunTaskTool: AgentTool {
         let capacity = await context.workerCapacity()
         let slotHolders = allTasks.filter {
             $0.disposition == .active && $0.id != taskID &&
-            ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
+            ($0.status == .starting || $0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
         }
         if slotHolders.count >= capacity {
             // Help requests and reviews deserve a pointed message — resolving one is

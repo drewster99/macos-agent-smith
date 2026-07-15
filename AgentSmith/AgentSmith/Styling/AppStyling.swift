@@ -275,6 +275,7 @@ enum TaskStatusBadge {
     static func color(for status: AgentTask.Status) -> Color {
         switch status {
         case .pending: return .gray
+        case .starting: return .cyan
         case .running: return .blue
         case .completed: return .green
         case .failed: return .red
@@ -289,6 +290,7 @@ enum TaskStatusBadge {
     static func icon(for status: AgentTask.Status) -> String {
         switch status {
         case .pending: return "circle"
+        case .starting: return "hourglass"
         case .running: return "arrow.trianglehead.2.clockwise.rotate.90"
         case .completed: return "checkmark.circle.fill"
         case .failed: return "xmark.circle.fill"

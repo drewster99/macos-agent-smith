@@ -667,7 +667,7 @@ public actor OrchestrationRuntime {
     private func dispatchAutoRunWake(taskID: UUID) async {
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let inFlight = activeTasks.first {
-            $0.status == .running || $0.status == .awaitingReview || $0.status == .validating
+            $0.status == .starting || $0.status == .running || $0.status == .awaitingReview || $0.status == .validating
         }
 
         // A free worker slot means the scheduled task can start right now, no interrupt
@@ -1473,6 +1473,19 @@ public actor OrchestrationRuntime {
             return
         }
 
+        // Atomically CLAIM the start: pending/paused/interrupted → starting. This does two things at
+        // once. (1) UX: the row shows "Starting…" during the multi-second Brown spawn (the Security
+        // Agent scoping call) instead of sitting blank as `.pending`. (2) RACE GUARD: it fences the
+        // start. A duplicate start enqueued while the task was still `.pending` — e.g. a
+        // termination-driven `drainPendingTaskQueue` racing this call — runs after us on the
+        // lifecycle queue, finds the task already `.starting` (or `.running`), the CAS returns false,
+        // and it bails. Without this, the loser could flip a live `.running` task back to `.pending`
+        // (orphaning its worker) or respawn Brown and discard its in-progress context.
+        guard await taskStore.updateStatus(id: taskID, to: .starting, ifCurrentlyIn: [.pending, .paused, .interrupted]) else {
+            stopLogger.notice("performStart: task \(taskID.uuidString, privacy: .public) not claimable (already starting/running) — duplicate start ignored")
+            return
+        }
+
         // Cycle out IDLE workers: any whose task is terminal, inactive, or gone is a
         // leftover from a previous task and frees its slot here. Workers on live tasks
         // are untouchable — capacity never evicts. Resumable outgoing tasks (e.g. a
@@ -1928,6 +1941,13 @@ public actor OrchestrationRuntime {
         let leftoverRunningTasks = activeTasks.filter { $0.status == .running && $0.id != resumingTaskID }
         for task in leftoverRunningTasks {
             await taskStore.updateStatus(id: task.id, status: .interrupted)
+        }
+
+        // A task left `.starting` by a crash mid-spawn never got a live worker (no context was
+        // saved), so demote it to `.pending` — a fresh start, re-picked by the cold-boot
+        // auto-advance below rather than resumed as if it had in-progress work.
+        for task in activeTasks where task.status == .starting && task.id != resumingTaskID {
+            await taskStore.updateStatus(id: task.id, status: .pending)
         }
 
         // Validation is idempotent and restartable: tasks caught mid-validation by a
@@ -2563,8 +2583,23 @@ public actor OrchestrationRuntime {
         await monitoringTimer?.stop()
         monitoringTimer = nil
 
-        // Save Brown's context summary to its task before stopping agents
-        if let brownHandle = handles.first(where: { $0.role == .brown }) {
+        // Cancel any in-flight acceptance validation and clear its tracking. Validation runs in a
+        // DETACHED Task (not an agent handle), so endGeneration()/agent.stop() don't touch it. Without
+        // this, a validation could finish its LLM call after teardown and either deliver a result or
+        // spawn a fresh Brown on a torn-down runtime (the zombie class this file guards against).
+        // `stopRequested` is reset at entry, so the coordinator's guards can't rely on it here — the
+        // Task cancellation plus the `Task.isCancelled` guard checks are what actually stop it.
+        for id in tasksBeingValidated {
+            validationTasks[id]?.cancel()
+        }
+        tasksBeingValidated.removeAll()
+        validationTasks.removeAll()
+
+        // Save EVERY running Brown's context summary to its task before stopping agents. With the
+        // worker pool there can be multiple concurrent Browns; saving only the first left the other
+        // tasks without their recent-work digest (persisted in `task.lastBrownContext`) on the next
+        // launch's resume, so they re-oriented from `task.updates` alone.
+        for brownHandle in handles where brownHandle.role == .brown {
             await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
         }
 

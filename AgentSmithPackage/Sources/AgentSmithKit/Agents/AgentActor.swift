@@ -1886,7 +1886,14 @@ public actor AgentActor {
                 var preRejections: [(batchIndex: Int, callID: String, toolName: String, result: String)] = []
                 for (batchIndex, call) in segment.calls.enumerated() {
                     guard isRunning else { break }
-                    guard let tool = activeTools.first(where: { $0.name == call.name }) else { continue }
+                    guard let tool = activeTools.first(where: { $0.name == call.name }) else {
+                        // Unknown / hallucinated tool: return a real error to the model, matching the
+                        // sequential path. Previously this bare `continue` left the call to the generic
+                        // "cancelled (agent stopped)" backfill, which implies a transient shutdown and
+                        // misleads the model into retrying a tool that doesn't exist.
+                        preRejections.append((batchIndex: batchIndex, callID: call.id, toolName: call.name, result: "Unknown tool: \(call.name)"))
+                        continue
+                    }
                     if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                         preRejections.append((batchIndex: batchIndex, callID: call.id, toolName: call.name, result: rejection))
                         continue

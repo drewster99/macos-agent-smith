@@ -245,7 +245,7 @@ extension OrchestrationRuntime {
         // swallowed by the reentrancy guard — re-check on the way out so the task can't
         // strand in `.validating`. Abort/stop paths intentionally leave that status for
         // the cold-boot re-enqueue, so they must not respin here.
-        guard !aborted, !stopRequested else { return }
+        guard !aborted, !stopRequested, !Task.isCancelled else { return }
         if let task = await taskStore.task(id: taskID), task.status == .validating {
             startTaskValidation(taskID: taskID)
         }
@@ -254,7 +254,7 @@ extension OrchestrationRuntime {
     // MARK: - The round
 
     private func performTaskValidation(taskID: UUID) async {
-        guard !aborted, !stopRequested else { return }
+        guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard var task = await taskStore.task(id: taskID), task.status == .validating else { return }
 
         guard let directory = evaluatorsDirectory else {
@@ -317,7 +317,7 @@ extension OrchestrationRuntime {
         await taskStore.recordCriterionVerdicts(id: taskID, records: records)
         await postRoundSummary(taskID: taskID, records: records)
 
-        guard !aborted, !stopRequested else { return }
+        guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard let judged = await taskStore.task(id: taskID), judged.status == .validating else { return }
         let ledger = judged.validation ?? TaskValidationState()
         let latestByCriterion = judged.acceptanceCriteria.compactMap { ledger.latestVerdict(for: $0.id) }
@@ -532,7 +532,14 @@ extension OrchestrationRuntime {
             return record(.error(message: "prepare '\(prepareName)' emitted \(items.count) items (cap \(Self.maxPrepareItems)) — narrow the prepare or split the criterion"), validator: prepareDefinition)
         }
         guard !items.isEmpty else {
-            return record(.accepted, validator: prepareDefinition)
+            // An empty enumeration is the dynamic analogue of "nothing to check". Honor it as a pass
+            // only when the criterion is WAIVABLE (mirroring the static WAIVE gate ~line 445);
+            // otherwise a misfiring / over-narrow / hallucinated-empty prepare would silently pass an
+            // unexamined requirement, so escalate as an ERROR rather than auto-accepting.
+            if criterion.waivable {
+                return record(.waived(reason: "prepare '\(prepareName)' enumerated no items"), validator: prepareDefinition)
+            }
+            return record(.error(message: "prepare '\(prepareName)' enumerated no items for a non-waivable criterion — cannot confirm the requirement"), validator: prepareDefinition)
         }
 
         let resolution = await resolveValidator(for: criterion, taskID: task.id, registry: registry)

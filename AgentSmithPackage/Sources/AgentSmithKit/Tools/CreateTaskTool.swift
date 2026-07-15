@@ -320,7 +320,7 @@ public struct CreateTaskTool: AgentTool {
         let slotHolders = existingTasks.filter { other in
             other.id != task.id &&
             other.disposition == .active &&
-            (other.status == .running || other.status == .awaitingReview || other.status == .validating)
+            (other.status == .starting || other.status == .running || other.status == .awaitingReview || other.status == .validating)
         }
         if slotHolders.count < capacity {
             await context.restartForNewTask(task.id)

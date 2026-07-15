@@ -683,6 +683,7 @@ struct MemoryEditorView: View {
     private func statusColor(_ status: AgentTask.Status) -> Color {
         switch status {
         case .pending: return .secondary
+        case .starting: return .cyan
         case .running: return .blue
         case .awaitingReview: return .orange
         case .completed: return .green

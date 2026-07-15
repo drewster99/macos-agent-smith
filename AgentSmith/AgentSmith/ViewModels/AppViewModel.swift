@@ -1229,12 +1229,18 @@ final class AppViewModel {
     /// Registry names the task-detail criteria editor can offer/validate against,
     /// loaded fresh from the session's evaluators directory (the registry hot-loads;
     /// a stale snapshot here would refuse names that are actually installed).
-    nonisolated func availableEvaluatorNames() -> (validators: [String], prepares: [String]) {
-        let registry = EvaluatorRegistry.load(from: persistenceManager.evaluatorsDirectory)
-        return (
-            registry.definitions(ofKind: .validator).map(\.name),
-            registry.definitions(ofKind: .prepare).map(\.name)
-        )
+    /// Registry validator/prepare names, loaded OFF the main thread. `EvaluatorRegistry.load`
+    /// enumerates a directory and decodes its `*.json` files — synchronous disk I/O that must not
+    /// run on the UI thread when the user taps the acceptance-criteria editor.
+    nonisolated func availableEvaluatorNames() async -> (validators: [String], prepares: [String]) {
+        let dir = persistenceManager.evaluatorsDirectory
+        return await Task.detached {
+            let registry = EvaluatorRegistry.load(from: dir)
+            return (
+                registry.definitions(ofKind: .validator).map(\.name),
+                registry.definitions(ofKind: .prepare).map(\.name)
+            )
+        }.value
     }
 
     func pauseTask(id: UUID) async {
@@ -1403,7 +1409,7 @@ final class AppViewModel {
         // `tasks` with a non-active disposition, so presence alone isn't enough).
         let activeTasks = tasks.filter { $0.disposition == .active }
         let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let inFlightStatuses: Set<AgentTask.Status> = [.running, .validating, .awaitingReview]
+        let inFlightStatuses: Set<AgentTask.Status> = [.starting, .running, .validating, .awaitingReview]
 
         // Drop entries whose task vanished (deleted/archived elsewhere).
         taskOverlayEntries.removeAll { byID[$0.id] == nil }
@@ -1486,7 +1492,7 @@ final class AppViewModel {
         }
         let slotHolders = tasks.filter {
             $0.id != task.id &&
-            ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
+            ($0.status == .starting || $0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
         }
         let capacity = await runtime?.workerSlots().capacity ?? 1
         if slotHolders.count >= capacity {

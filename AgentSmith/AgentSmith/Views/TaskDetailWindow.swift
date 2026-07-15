@@ -440,7 +440,7 @@ struct TaskDetailWindow: View {
         switch status {
         case .pending, .scheduled:
             return [.description, .acceptance, .steps, .relatedContext]
-        case .running, .paused, .interrupted, .awaitingReview, .validating:
+        case .starting, .running, .paused, .interrupted, .awaitingReview, .validating:
             return [.updates, .acceptance, .steps, .description, .relatedContext]
         case .completed:
             return [.summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
@@ -712,10 +712,15 @@ struct TaskDetailWindow: View {
     private func beginEditingAcceptance(_ task: AgentTask) {
         editedCriteria = task.acceptanceCriteria.map(EditableCriterion.init)
         if editedCriteria.isEmpty { editedCriteria = [EditableCriterion()] }
-        let names = viewModel.availableEvaluatorNames()
-        knownValidatorNames = names.validators
-        knownPrepareNames = names.prepares
         isEditingAcceptance = true
+        // Load the known evaluator names OFF the main thread; the editor opens immediately and the
+        // name lists (used only to flag unknown typed names at Save time) populate when ready. The
+        // @State lists persist across opens, so only the very first open sees them momentarily empty.
+        Task {
+            let names = await viewModel.availableEvaluatorNames()
+            knownValidatorNames = names.validators
+            knownPrepareNames = names.prepares
+        }
     }
 
     /// Registry names typed into the editor that don't exist — saving with these would

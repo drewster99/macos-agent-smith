@@ -269,12 +269,15 @@ public actor TaskStore {
         task.completedAt = nil
         task.status = .pending
         task.disposition = .active
-        // A fresh attempt gets fresh validation counters — a task that failed on the
-        // stall rule would otherwise insta-fail its first rejection after the retry.
-        // Sticky accepts survive.
+        // A fresh attempt against a discarded result gets a fresh ledger: counters reset (so a
+        // stall-failed task doesn't insta-fail its first rejection) AND the sticky ACCEPTs are
+        // dropped, so every criterion is re-judged against the NEW result rather than inheriting
+        // an accept earned against the old one. A criterion is a reusable contract; a re-run is a
+        // new run. (Pinned definitions are kept so the re-judge uses the same validator bodies.)
         if var validation = task.validation {
             validation.round = 0
             validation.consecutiveStallRounds = 0
+            validation.verdictRecords.removeAll()
             task.validation = validation
         }
         task.updatedAt = Date()
@@ -361,7 +364,7 @@ public actor TaskStore {
     /// consistent with the startup migration's `windows.last(where:)` preference.
     public func currentActiveTask() -> AgentTask? {
         tasks.values
-            .filter { $0.disposition == .active && ($0.status == .running || $0.status == .awaitingReview) }
+            .filter { $0.disposition == .active && ($0.status == .starting || $0.status == .running || $0.status == .awaitingReview) }
             .max(by: { ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast) })
     }
 
