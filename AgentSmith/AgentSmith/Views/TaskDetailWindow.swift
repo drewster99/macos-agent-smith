@@ -616,10 +616,8 @@ struct TaskDetailWindow: View {
         // tags. Skipped for tasks that never produced structured items.
         if !task.resultItems.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                sectionHeader("Deliverables", copyText: Self.formattedDeliverables(task.resultItems))
-                ForEach(Array(task.resultItems.enumerated()), id: \.offset) { index, item in
-                    deliverableRow(item)
-                }
+                sectionHeader("Deliverables", copyText: DeliverablesView.plainText(task.resultItems))
+                DeliverablesView(items: task.resultItems)
             }
             Divider()
         }
@@ -638,52 +636,6 @@ struct TaskDetailWindow: View {
             }
             Divider()
         }
-    }
-
-    @ViewBuilder
-    private func deliverableRow(_ item: ResultItem) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if !item.refs.isEmpty {
-                Text("for: \(item.refs.joined(separator: ", "))")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-            switch item.content {
-            case .text(let text):
-                MarkdownText(content: text, baseFont: .body)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            case .attachment(let attachment):
-                Label(attachment.filename, systemImage: "paperclip")
-                    .font(.callout)
-            case .attachmentGroup(let attachments, let description):
-                if let description, !description.isEmpty {
-                    Text(description)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(attachments) { attachment in
-                    Label(attachment.filename, systemImage: "paperclip")
-                        .font(.callout)
-                }
-            }
-        }
-        .padding(.vertical, 2)
-    }
-
-    /// Plain-text rendering of structured deliverables for the section's copy button.
-    private static func formattedDeliverables(_ items: [ResultItem]) -> String {
-        items.map { item in
-            let tag = item.refs.isEmpty ? "" : "[for: \(item.refs.joined(separator: ", "))] "
-            switch item.content {
-            case .text(let text):
-                return "\(tag)\(text)"
-            case .attachment(let attachment):
-                return "\(tag)\(attachment.filename)"
-            case .attachmentGroup(let attachments, let description):
-                let head = description.map { "\($0): " } ?? ""
-                return "\(tag)\(head)\(attachments.map(\.filename).joined(separator: ", "))"
-            }
-        }.joined(separator: "\n")
     }
 
     private func aiCommentaryInset(_ commentary: String) -> some View {

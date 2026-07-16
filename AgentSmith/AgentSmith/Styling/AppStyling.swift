@@ -13,6 +13,13 @@ enum AppColors {
     static let systemMessage = Color.gray
     static let background = Color(.windowBackgroundColor)
     static let secondaryBackground = Color(.controlBackgroundColor)
+
+    // Structured result deliverables (task detail)
+    static let deliverableCardBackground = Color(.controlBackgroundColor)
+    static let deliverableCardBorder = Color(.separatorColor)
+    static let deliverableTagBackground = Color.accentColor.opacity(0.14)
+    static let deliverableTagForeground = Color.accentColor
+
     static let channelBackground = Color(.textBackgroundColor)
     static let errorBackground = Color.red.opacity(0.12)
     /// Subtle highlight for Smith→User private messages to draw attention to agent output.
