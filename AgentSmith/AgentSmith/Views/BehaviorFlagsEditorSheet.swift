@@ -63,7 +63,7 @@ struct BehaviorFlagsEditorSheet: View {
 
     @State private var glmTemplateSalvage: FlagState = .default
     @State private var useMaxCompletionTokens: FlagState = .default
-    @State private var forceParallelToolCalls: FlagState = .default
+    @State private var disableParallelToolCalls: FlagState = .default
 
     private var key: String { "\(providerID)/\(modelID)" }
 
@@ -74,7 +74,7 @@ struct BehaviorFlagsEditorSheet: View {
     private var hasUnsavedDefault: Bool {
         glmTemplateSalvage == .default
             && useMaxCompletionTokens == .default
-            && forceParallelToolCalls == .default
+            && disableParallelToolCalls == .default
     }
 
     var body: some View {
@@ -118,10 +118,10 @@ struct BehaviorFlagsEditorSheet: View {
                 )
 
                 flagRow(
-                    title: "Force parallel tool calls",
-                    description: "Send `parallel_tool_calls: true` regardless of the catalog capability flag. Used by Mistral models that support parallel calls but where LiteLLM metadata doesn't flag the capability.",
-                    state: $forceParallelToolCalls,
-                    resolved: resolvedFlags.forceParallelToolCalls
+                    title: "Disable parallel tool calls",
+                    description: "Omit `parallel_tool_calls` from the request. `parallel_tool_calls: true` is sent by default; turn this ON only for a strict endpoint that rejects the field with HTTP 400.",
+                    state: $disableParallelToolCalls,
+                    resolved: resolvedFlags.disableParallelToolCalls
                 )
             }
 
@@ -131,7 +131,7 @@ struct BehaviorFlagsEditorSheet: View {
                 Button("Reset to defaults") {
                     glmTemplateSalvage = .default
                     useMaxCompletionTokens = .default
-                    forceParallelToolCalls = .default
+                    disableParallelToolCalls = .default
                 }
                 .disabled(hasUnsavedDefault)
                 Spacer()
@@ -181,7 +181,7 @@ struct BehaviorFlagsEditorSheet: View {
         let existing = shared.userModelOverrides[key]?.behaviorFlags
         glmTemplateSalvage = FlagState(existing?.glmTemplateSalvage)
         useMaxCompletionTokens = FlagState(existing?.useMaxCompletionTokens)
-        forceParallelToolCalls = FlagState(existing?.forceParallelToolCalls)
+        disableParallelToolCalls = FlagState(existing?.disableParallelToolCalls)
     }
 
     /// Builds an override patch from the tri-state pickers and writes it. If every
@@ -194,7 +194,7 @@ struct BehaviorFlagsEditorSheet: View {
         let flagsPatch = BehaviorFlagsOverride(
             glmTemplateSalvage: glmTemplateSalvage.asOptional,
             useMaxCompletionTokens: useMaxCompletionTokens.asOptional,
-            forceParallelToolCalls: forceParallelToolCalls.asOptional
+            disableParallelToolCalls: disableParallelToolCalls.asOptional
         )
         let merged = ModelMetadataOverride(
             displayName: existing?.displayName,
