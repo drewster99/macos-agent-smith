@@ -89,7 +89,7 @@ struct MetadataCoverageView: View {
                         .foregroundStyle(provider.liteLLMProviderName == nil ? .orange : .secondary)
                 }
                 Spacer()
-                Text("\(hits)/\(total)")
+                Text(total == 0 ? "no models" : "\(hits)/\(total)")
                     .font(.caption.monospaced())
                     .foregroundStyle(hits == total && total > 0 ? .green : .secondary)
                 Button("Change\u{2026}") {
@@ -135,7 +135,11 @@ struct MetadataCoverageView: View {
     private func statusIcon(providerIsMapped: Bool, hits: Int, total: Int) -> some View {
         if !providerIsMapped {
             Image(systemName: "minus.circle.fill").foregroundStyle(.orange)
-        } else if total > 0 && hits == total {
+        } else if total == 0 {
+            // No models listed (no key, or never fetched) — there is nothing to match, which is
+            // not a mapping failure and must not read as one.
+            Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+        } else if hits == total {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
         } else if hits == 0 {
             Image(systemName: "xmark.circle.fill").foregroundStyle(.red)

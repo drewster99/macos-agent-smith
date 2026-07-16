@@ -478,7 +478,7 @@ private struct AgentCard: View {
 
             // Model info subtitle — aligned with agent name text (past the dot)
             if let config = modelConfig {
-                AgentCardModelInfoLine(modelConfig: config, llmTurns: llmTurns, role: role)
+                AgentCardModelInfoLine(modelConfig: config, llmTurns: llmTurns, role: role, shared: viewModel.shared)
                     .padding(.leading, 28) // 12 (container) + 8 (dot) + 8 (spacing)
                     .padding(.trailing, 12)
                     .padding(.bottom, 2)
