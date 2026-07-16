@@ -29,34 +29,67 @@ enum AttachmentSanitizer {
         return data
     }
 
-    /// Drops ALL image metadata (EXIF / GPS / IPTC / XMP / TIFF) by decoding the pixels and
-    /// re-encoding them with no properties dictionary. A lossless `CopyImageSource` copy only
-    /// removes the XMP container, leaving EXIF/TIFF (where a payload can hide) intact — so a real
-    /// re-encode is required. For JPEG this is a high-quality (0.95) re-compression that is visually
-    /// negligible; PNG and other lossless formats stay lossless. Returns the original bytes if the
-    /// data isn't a decodable image.
+    /// Re-encodes an image dropping the metadata sub-dictionaries that can carry an injection payload
+    /// (EXIF / GPS / IPTC / TIFF free-text / maker notes; XMP rides a separate `CGImageMetadata`
+    /// object that a plain `AddImage` never copies, so it is dropped implicitly). STRUCTURAL
+    /// properties — orientation, dimensions, colour, and each format's frame-timing / loop-count
+    /// dictionaries — are carried forward, so a multi-frame image (animated GIF / APNG / HEICS /
+    /// multi-page TIFF) keeps every frame and its timing rather than being flattened. Returns the
+    /// original bytes if the data isn't a decodable image or the format can't be re-encoded.
     static func stripImageMetadata(_ data: Data) -> Data {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let type = CGImageSourceGetType(source),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+              let type = CGImageSourceGetType(source) else {
             return data
         }
-        // Re-encoding only frame 0 would silently flatten an animated GIF / multi-page TIFF or HEIC.
-        // Rather than destroy frames, leave a multi-frame source untouched (its metadata channel is
-        // handled by the broader path-safety pass — see ROADMAP); single-frame images are scrubbed.
-        guard CGImageSourceGetCount(source) == 1 else { return data }
+        let frameCount = CGImageSourceGetCount(source)
+        guard frameCount > 0 else { return data }
+
         let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, type, 1, nil) else {
+        guard let destination = CGImageDestinationCreateWithData(output, type, frameCount, nil) else {
             return data
         }
-        // No properties beyond compression quality → the encoder writes only the pixels, so every
-        // metadata dictionary is dropped.
-        let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.95]
-        CGImageDestinationAddImage(destination, image, options as CFDictionary)
+        // Container-level structural properties (e.g. a GIF's loop count) minus the metadata dicts.
+        if let container = CGImageSourceCopyProperties(source, nil) as? [CFString: Any] {
+            CGImageDestinationSetProperties(destination, withoutMetadata(container) as CFDictionary)
+        }
+        for index in 0..<frameCount {
+            guard let frame = CGImageSourceCreateImageAtIndex(source, index, nil) else { return data }
+            let frameProperties = (CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]) ?? [:]
+            CGImageDestinationAddImage(destination, frame, withoutMetadata(frameProperties) as CFDictionary)
+        }
         guard CGImageDestinationFinalize(destination), output.length > 0 else {
             return data
         }
         return output as Data
+    }
+
+    /// Sub-dictionaries that hold free-text / camera / location metadata — the passive injection
+    /// channels. Removed before re-encode; every other (structural) key is kept.
+    /// `nonisolated(unsafe)`: an immutable array of compile-time-constant ImageIO CFString globals.
+    private nonisolated(unsafe) static let metadataDictionaryKeys: [CFString] = [
+        kCGImagePropertyExifDictionary,
+        kCGImagePropertyExifAuxDictionary,
+        kCGImagePropertyGPSDictionary,
+        kCGImagePropertyIPTCDictionary,
+        kCGImagePropertyTIFFDictionary,
+        kCGImagePropertyMakerAppleDictionary,
+        kCGImagePropertyMakerCanonDictionary,
+        kCGImagePropertyMakerNikonDictionary,
+        kCGImagePropertyMakerMinoltaDictionary,
+        kCGImagePropertyMakerFujiDictionary,
+        kCGImagePropertyMakerOlympusDictionary,
+        kCGImagePropertyMakerPentaxDictionary,
+        kCGImageProperty8BIMDictionary,
+        kCGImagePropertyDNGDictionary,
+        kCGImagePropertyCIFFDictionary
+    ]
+
+    private static func withoutMetadata(_ properties: [CFString: Any]) -> [CFString: Any] {
+        var cleaned = properties
+        for key in metadataDictionaryKeys {
+            cleaned.removeValue(forKey: key)
+        }
+        return cleaned
     }
 
     /// Clears a PDF's document-info dictionary (Title / Author / Subject / Keywords / Creator /

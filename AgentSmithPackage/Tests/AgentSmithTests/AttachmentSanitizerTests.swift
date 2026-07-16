@@ -56,6 +56,35 @@ struct AttachmentSanitizerTests {
         #expect(CGImageSourceGetCount(src!) == 1)
     }
 
+    private func twoPageTIFFWithExif(_ comment: String) -> Data {
+        let image = makeCGImage()
+        let out = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(out, UTType.tiff.identifier as CFString, 2, nil)!
+        let props: [CFString: Any] = [
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: comment]
+        ]
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)  // page 0 carries EXIF
+        CGImageDestinationAddImage(dest, image, nil)                    // page 1
+        _ = CGImageDestinationFinalize(dest)
+        return out as Data
+    }
+
+    @Test("Strips metadata from a multi-frame image WITHOUT dropping frames")
+    func multiFrameKeepsAllFramesMinusMetadata() {
+        let payload = "INJECT via a multi-page TIFF"
+        let original = twoPageTIFFWithExif(payload)
+        // sanity: 2 pages, EXIF present on page 0
+        let srcBefore = CGImageSourceCreateWithData(original as CFData, nil)!
+        #expect(CGImageSourceGetCount(srcBefore) == 2)
+        #expect(exifUserComment(in: original) == payload)
+
+        let sanitized = AttachmentSanitizer.sanitize(original, mimeType: "image/tiff")
+
+        let srcAfter = try! #require(CGImageSourceCreateWithData(sanitized as CFData, nil))
+        #expect(CGImageSourceGetCount(srcAfter) == 2)   // both frames survived
+        #expect(exifUserComment(in: sanitized) == nil)  // metadata gone
+    }
+
     @Test("Invalid image bytes pass through unchanged (fail-safe)")
     func invalidImagePassesThrough() {
         let bytes = Data([0x89, 0x50, 0x4E, 0x47, 0x01, 0x02, 0x03])  // PNG magic, but truncated
