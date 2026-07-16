@@ -691,6 +691,15 @@ extension OrchestrationRuntime {
         if let evidenceDir = taskWorkspace(for: task.id).evidenceDirectory {
             fields["evidenceDirectory"] = evidenceDir.path
         }
+        // Structured deliverables (Phase B): the worker's tagged text/attachment items. Rendered
+        // with each item's routing tags and, for attachments, a file:// path the validator can
+        // pass to `attach_file` to actually SEE an image or read a file. Tags are hints — the
+        // validator still judges the whole result — but they say which items are for which
+        // requirement.
+        let deliverables = Self.renderDeliverables(task.resultItems, urlProvider: attachmentURLProviderClosure)
+        if !deliverables.isEmpty {
+            fields["structuredDeliverables"] = deliverables
+        }
         if let item = extraSlots["item"] {
             fields["itemToEvaluate"] = item
         }
@@ -833,6 +842,12 @@ extension OrchestrationRuntime {
             - `evidenceDirectory` — (when present) the folder the worker was told to place evidence \
             artifacts in. If a criterion names an evidence file, read it from here with `file_read`, or \
             list the folder with `directory_listing`.
+            - `structuredDeliverables` — (when present) the worker's tagged deliverables. Each line \
+            names the routing tags (which requirement the item is for) and, for files, a `file://` \
+            path. To actually SEE an image — e.g. to verify a screenshot really shows what's claimed \
+            — pass its path to `attach_file` and it arrives on your next turn; for text or other \
+            files, `file_read` the path. The tags are hints about which items are for which \
+            requirement, not a restriction on what you may look at.
             """
         if hasItem {
             prompt += "\n- `itemToEvaluate` — the specific item to judge for this criterion; when present, judge IT, using the other fields as context."
@@ -954,6 +969,34 @@ extension OrchestrationRuntime {
             "attach_file": AttachFileTool()
         ]
         return names.compactMap { catalog[$0] }
+    }
+
+    /// Renders a task's structured `resultItems` for the validator payload: one line per
+    /// deliverable with its routing tags, inline text, and — for attachments — a `file://` path
+    /// the validator can pass to `attach_file` to view an image or read a file.
+    static func renderDeliverables(_ items: [ResultItem], urlProvider: (@Sendable (UUID, String) -> URL?)?) -> String {
+        guard !items.isEmpty else { return "" }
+        func ref(_ attachment: Attachment) -> String {
+            let path = urlProvider?(attachment.id, attachment.filename).map { "file://" + $0.path(percentEncoded: false) } ?? "(no path)"
+            return "\(attachment.filename) (\(attachment.mimeType), \(path), id=\(attachment.id.uuidString))"
+        }
+        var lines: [String] = []
+        for (index, item) in items.enumerated() {
+            let tags = item.refs.isEmpty ? "" : " [for: \(item.refs.joined(separator: ", "))]"
+            switch item.content {
+            case .text(let text):
+                lines.append("- Deliverable \(index + 1)\(tags): \(text)")
+            case .attachment(let attachment):
+                lines.append("- Deliverable \(index + 1)\(tags): \(ref(attachment))")
+            case .attachmentGroup(let attachments, let description):
+                let header = description.map { " — \($0)" } ?? ""
+                lines.append("- Deliverable \(index + 1)\(tags): \(attachments.count) file(s)\(header):")
+                for attachment in attachments {
+                    lines.append("    • \(ref(attachment))")
+                }
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     static func renderSteps(_ steps: [TaskStep]) -> String {

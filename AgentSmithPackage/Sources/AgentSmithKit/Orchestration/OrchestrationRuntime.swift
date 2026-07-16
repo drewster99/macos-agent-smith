@@ -249,7 +249,7 @@ public actor OrchestrationRuntime {
     /// `makeToolContext` can pass a sync closure into `ToolContext.attachmentURLProvider`,
     /// which is consumed by `AgentActor.drainPendingMessages` (sync path) when building
     /// `file://` markdown links from incoming channel-message attachments.
-    private var attachmentURLProviderClosure: (@Sendable (UUID, String) -> URL?)?
+    var attachmentURLProviderClosure: (@Sendable (UUID, String) -> URL?)?
 
     /// FIFO queue used to serialize `restartForNewTask` requests. Without this,
     /// two near-concurrent restart calls would each fire their own
