@@ -387,19 +387,12 @@ Brown's seed briefing carries the image content — that's a real fixture invest
 worth doing once the attachment surface stabilizes.
 
 **Attachment lifetime — infinite, no garbage collection (decided 2026-07-15).**
-Attachments live forever. There is NO global attachment index/database and NO sidecar
-metadata file: the authoritative `Attachment` record (id / filename / mimeType /
-byteCount) exists ONLY embedded in the tasks and channel messages that reference it,
-while bytes sit in the global `attachments/<uuid>_<filename>` store with no reference
-counting. Consequences (all accepted for now): archiving or soft-deleting a task never
-purges its attachment files; hard-deleting the last referrer orphans the blob — the
-bytes leak on disk and the metadata record is lost (only `id` + `filename`, recoverable
-from the file name, survive). We deliberately LEAVE lifetime at infinity and do NOT
-implement GC at this point. If disk growth ever becomes a complaint: a manually-triggered
-mark-and-sweep (collect referenced ids across live + inactive tasks + retained channel
-logs, delete unreferenced files), with tiered policy (user-provided = never auto-purge;
-task evidence/result artifacts = eligible for purge on hard-delete). Keep it off hot
-paths per the manual-utility rule.
+Attachments live forever, by design. There is NO global attachment index/database and NO
+sidecar metadata file: the authoritative `Attachment` record (id / filename / mimeType /
+byteCount) exists ONLY embedded in the tasks and channel messages that reference it, while
+bytes sit in the global `attachments/<uuid>_<filename>` store with no reference counting.
+Consequence: hard-deleting the last referrer orphans the blob (bytes stay on disk; the metadata
+record is lost). This is accepted and settled — attachment garbage collection is **not** planned.
 
 **`attach_file` + vision for Brown/Security/validators, and a structured result model
 (design agreed 2026-07-15; implementing).** Two phases.
@@ -639,9 +632,10 @@ all session files left active-only, 6 attachment files pooled, app launches clea
 pass whose data-loss findings (corrupt-file overwrite on flush, session strip before a durable global
 save, `run_task`/PDF-export failing on auto-archived tasks) were fixed.
 
-**Deferred:** attachments now live in one flat global dir with no GC when a task is permanently
-deleted (orphaned files accumulate — harmless but unbounded). Add attachment GC if disk grows. The
-cross-window wake-routing note elsewhere in this file is unaffected.
+**Note:** attachments live in one flat global dir with no reference counting; hard-deleting a task
+orphans its attachment files (harmless, accumulates). This is settled — attachment GC is **not**
+planned (see "Attachment lifetime — infinite, no garbage collection"). The cross-window
+wake-routing note elsewhere in this file is unaffected.
 
 ### Instant Answer tool ✅
 `instant_answer` (`InstantAnswerTool`) — Brown tool wrapping DuckDuckGo's keyless Instant Answer JSON API (`api.duckduckgo.com`). Complements `web_search`: it returns a Wikipedia-style **entity** summary — abstract, infobox key facts, source URL, official site, related topics — for a recognized person/place/org/technology/concept, not a list of web pages.
