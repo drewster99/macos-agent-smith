@@ -377,16 +377,19 @@ credential-path list, so the Security verdict is the real gate today.
 tool (`file_read`, `file_edit`, `bash`, `attach_file`, `glob`, `grep`, `directory_listing`) to
 enforce sanctioned-directory scoping *consistently*, replacing the ad-hoc `checkPathRestriction`
 credential-path *denylist* with a real scope/allowlist model (per-role: e.g. validators confined
-to the task's evidence directory, agents to sanctioned dirs). This subsumes the two `attach_file`
-items above — (a) Security-side viewing and (b) validator path-scoping — plus:
-- **Scrub-on-ingest.** Strip image EXIF/metadata unconditionally and strip/flatten PDF metadata on
-  ingest, to kill the metadata injection channel. Today this is only PARTIAL: `ImageDownscaler`
-  re-encodes via `CGImageDestination` (which drops metadata) BUT small images below the reencode
-  threshold pass through untouched (metadata survives), and PDFs are never scrubbed (raw bytes
-  injected). Make the strip unconditional.
-- **Security-side content inspection.** Assemble the resolved attachment content into the Security
-  Agent's evaluation turn (vision when its model supports it; OCR + PDF-text-layer + metadata-string
-  extraction as a text fallback) so Security inspects the pixels/metadata, not just the path string.
+to the task's evidence directory, agents to sanctioned dirs). This is **layer 3** and remains the
+open work — it also covers `attach_file` validator path-scoping (item (b) above). Two earlier
+layers landed 2026-07-16:
+- ✅ **Scrub-on-ingest (layer 1, done 2026-07-16).** `AttachmentSanitizer` strips image metadata
+  (EXIF/GPS/IPTC/XMP/TIFF, via a full decode+re-encode — a lossless `CopyImageSource` only drops
+  the XMP container) and clears a PDF's document-info dict, applied unconditionally in
+  `AttachmentRegistry.ingestFile/ingestData`. Fail-safe (original bytes on any failure). Does NOT
+  yet flatten embedded PDF JavaScript/annotations — fold that into this pass.
+- ✅ **Security-side content inspection (layer 2, done 2026-07-16).** When the Security Agent
+  evaluates an `attach_file` call it is shown the actual image/PDF (gated on its own vision/document
+  capability, size-capped, sanitized) so it judges the content, not just the path; a non-vision
+  model falls back to a path-only prompt with a be-conservative note. Remaining: an OCR / PDF-text
+  fallback so a text-only Security model can still scan rendered/body text.
 Honest scope note: byte-level inspection is never perfect (steganography, adversarial images), so
 the durable controls are scope + provenance (only attach from trusted locations), with content
 inspection as a second layer — not the primary gate.
