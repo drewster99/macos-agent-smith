@@ -1801,7 +1801,7 @@ public actor OrchestrationRuntime {
                 messageDebounceInterval: agentTuning[.smith]?.messageDebounceInterval ?? 1,
                 messageAcceptFilter: smithMessageFilter,
                 maxToolCallsPerIteration: agentTuning[.smith]?.maxToolCalls ?? 100,
-                supportsVision: supportsVisionByRole[.smith] ?? false
+                supportsVision: supportsVisionByRole[.smith] ?? true
             ),
             provider: provider,
             tools: SmithBehavior.tools(validatorCatalogSummary: validatorCatalogSummary()),
@@ -3058,7 +3058,7 @@ public actor OrchestrationRuntime {
                 messageDebounceInterval: agentTuning[.brown]?.messageDebounceInterval ?? 1,
                 messageAcceptFilter: brownMessageFilter,
                 maxToolCallsPerIteration: agentTuning[.brown]?.maxToolCalls ?? 100,
-                supportsVision: supportsVisionByRole[.brown] ?? false
+                supportsVision: supportsVisionByRole[.brown] ?? true
             ),
             provider: brownProvider,
             tools: BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot),

@@ -31,7 +31,9 @@ struct AgentConfiguration: Sendable {
     /// Whether this agent's model can process images. When `false`, image attachments are NOT
     /// injected as content — they degrade to a `file://` reference line (a text-only model that
     /// receives image bytes may error or silently ignore them). Sourced from the model catalog's
-    /// `ModelCapabilities.vision` and threaded in at spawn.
+    /// `ModelCapabilities.vision` and threaded in at spawn. Defaults **true** (fail-open): only a
+    /// model the catalog EXPLICITLY marks non-vision should suppress images; an unknown/omitted
+    /// capability keeps the historical always-inject behavior.
     private(set) var supportsVision: Bool
 
     public init(
@@ -46,7 +48,7 @@ struct AgentConfiguration: Sendable {
         messageDebounceInterval: TimeInterval = 1,
         messageAcceptFilter: (@Sendable (ChannelMessage) -> Bool)? = nil,
         maxToolCallsPerIteration: Int = 100,
-        supportsVision: Bool = false
+        supportsVision: Bool = true
     ) {
         self.role = role
         self.llmConfig = llmConfig

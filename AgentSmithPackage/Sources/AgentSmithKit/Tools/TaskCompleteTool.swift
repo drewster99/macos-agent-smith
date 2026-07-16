@@ -107,6 +107,13 @@ public struct TaskCompleteTool: AgentTool {
         // per-entry attachment-resolution failure is skipped (best-effort) rather than blocking
         // the whole submission — the plain `result` + swept evidence still carry the work.
         let resultItems = await Self.buildDeliverables(arguments: arguments, context: context)
+        // Also merge any deliverable-only attachments into the canonical `resultAttachments` so
+        // they show in the UI and re-register on cold boot — `resultItems` adds STRUCTURE/tags, it
+        // is not a separate attachment store. Deduped by id against the already-collected set.
+        var seenAttachmentIDs = Set(attachments.map { $0.id })
+        for attachment in resultItems.flatMap({ $0.attachments }) where seenAttachmentIDs.insert(attachment.id).inserted {
+            attachments.append(attachment)
+        }
 
         // Store result on the task (survives restarts) and hand it to acceptance
         // validation — the evaluator system, not Smith, judges submissions now. The

@@ -360,13 +360,21 @@ The two paths are orthogonal — real support is additive, never a replacement f
 fallback). SwiftLLMKit blocker: `LLMMessage.Content.toolResult` is `content: String` today;
 images ride the separate `images:` field, consumed only on `.text`/user turns.
 
-**Security Agent evaluating `view_attachment` content.** `view_attachment` is currently
-gated by Brown's normal Security Agent approval, but Security Agent evaluates only the tool args
-(ids + detail), not the image bytes about to be loaded. A malicious image with
-prompt injection in the visual or metadata payload could still reach Brown's
-context. Security Agent doesn't have `view_attachment` in his tool list (text-only). Future
-work: a Security Agent-side "viewing" path so the security agent can see the same bytes
-before approving.
+**Harden `attach_file`'s auto-approved read surface (2026-07-16).** `attach_file` is
+auto-approved for Smith AND acceptance validators (it's in `readOnlyFilesystemEvidenceTools`),
+matching `file_read`. But it's a strictly larger surface than `file_read`: where `file_read`
+returns metadata-only for images/binaries, `attach_file` **ingests the bytes and sends supported
+images to the external model**, and it persists a copy into the attachment pool — so calling it
+"read-only / side-effect-free" is imprecise. A prompt-injected validator/Smith could therefore
+disclose any readable image (`checkPathRestriction` only blocks a short credential-path list) to
+the provider without a real Security evaluation. Accepted for now as a deliberate trade-off (the
+feature needs it, and `file_read` already auto-approves arbitrary *text* exfiltration), but the
+hardening is real future work: (a) a **Security-side viewing path** so the Security Agent can see
+the same bytes before approving (also covers the prompt-injection-in-image vector — Security
+currently evaluates only the path arg, not the pixels); and/or (b) **path-scope `attach_file` for
+validators to the task's evidence directory** (their only legitimate target), so it can't reach
+arbitrary images. Until then, `attach_file` should probably NOT be in the auto-approve set for a
+lower-trust caller than Smith/validator.
 
 **OpenAI Responses API support in SwiftLLMKit.** Big task; mentioned earlier in
 the attachment design discussion. Required before any OpenAI model can consume
