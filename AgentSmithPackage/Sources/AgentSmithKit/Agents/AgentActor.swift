@@ -547,15 +547,19 @@ public actor AgentActor {
 
     /// Whether this tool call must go through the Security Agent before it runs.
     /// Brown reviews every tool (`requiresToolApproval`). Smith routes its open-world tools
-    /// (really evaluated — the egress filter) AND its read-only filesystem evidence tools (which
-    /// the evaluator auto-approves without an LLM call, but which then appear in the transcript and
-    /// stay countable). Smith's messaging/task tools never touch the security path. It's a no-op
-    /// without a configured evaluator or when per-call review is switched off.
+    /// (really evaluated — the egress filter), its read-only filesystem evidence tools (which the
+    /// evaluator auto-approves without an LLM call, but which then appear in the transcript and
+    /// stay countable), AND `attach_file` (which is NOT auto-approved — it ingests bytes and sends
+    /// images to the provider, so it gets a real Security verdict like any evaluated tool). Smith's
+    /// messaging/task tools never touch the security path. It's a no-op without a configured
+    /// evaluator or when per-call review is switched off.
     private func mustEvaluate(_ tool: any AgentTool) -> Bool {
         guard perCallApprovalEnabled, securityEvaluator != nil else { return false }
         if configuration.requiresToolApproval { return true }
         guard evaluatesOpenWorldToolsOnly else { return false }
-        return tool.isOpenWorld || SecurityEvaluator.readOnlyFilesystemEvidenceTools.contains(tool.name)
+        return tool.isOpenWorld
+            || SecurityEvaluator.readOnlyFilesystemEvidenceTools.contains(tool.name)
+            || tool.name == "attach_file"
     }
 
     /// The last few user-role messages, concatenated, for the Security Agent's context when this

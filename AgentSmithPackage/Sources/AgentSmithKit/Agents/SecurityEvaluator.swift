@@ -153,7 +153,7 @@ actor SecurityEvaluator {
     /// added to Smith's set. Excludes web tools (open-world: always really evaluated) and non-fs
     /// reads like `search_memory`/`get_task_details` (not a filesystem-exfiltration surface).
     static let readOnlyFilesystemEvidenceTools: Set<String> = [
-        "file_read", "directory_listing", "directory_tree", "glob", "grep", "attach_file"
+        "file_read", "directory_listing", "directory_tree", "glob", "grep"
     ]
 
     /// When true, a read-only filesystem evidence call from an eligible caller (Smith / validator)
