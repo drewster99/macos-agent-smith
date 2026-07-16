@@ -432,10 +432,14 @@ old `result: String` → `[.text]`, old `resultAttachments` → untagged items. 
 undeclared evidence into an untagged group), `TaskValidationCoordinator` payload, the result UI
 renderer, `TaskSummarizer`. A dangling ref (matches no criterion) is a soft note, not an error.
 
-*Phase C — deferred, needs SwiftLLMKit.* Native document/file content blocks (`LLMMessage` +
-per-provider serialization: Anthropic `document`, Gemini `fileData`, OpenAI `file`) so PDFs and
-other types reach the model directly instead of as `file_read` text. Also obviates the
-"recurse into subdirectories" evidence-sweep item for declared `attachmentGroup` evidence.
+*Phase C — DONE (2026-07-16, SwiftLLMKit 0.0.45).* Native document content blocks:
+`LLMDocumentContent` + a runtime-only `LLMMessage.documents` field, serialized as Anthropic
+`document` base64 blocks, Gemini `inlineData`, and OpenAI `file` parts (Ollama has no document
+support). Agent-smith injects **PDFs** as documents when the assigned model reports `pdfInput`
+(threaded like the vision gate, fail-open); non-PDF / unsupported-model attachments still degrade
+to a `file://` reference line. So a PDF now reaches the model directly, not only as `file_read`
+text. Not yet wired: non-PDF document types (docx/etc.) — the plumbing is generic, but only
+`isPDF` attachments are injected today; add more mime types when a use case appears.
 
 ### Per-tool wall-clock timeouts ✅
 Tool calls used to run with no enforced wall-clock cap. A pathological invocation — e.g. a `run_applescript` that walks every Contacts entry and shells out per phone — could pin the agent for minutes; in a parallel batch the slowest leg blocked every other result from being delivered to the LLM. Originally identified 2026-04-29 from the "brown stopped" diagnostic where a Contacts AppleScript ran 2m21s before returning.
