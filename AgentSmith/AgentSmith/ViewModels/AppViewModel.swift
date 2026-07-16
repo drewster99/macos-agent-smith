@@ -581,6 +581,7 @@ final class AppViewModel {
         var providers: [AgentRole: any LLMProvider] = [:]
         var configurations: [AgentRole: ModelConfiguration] = [:]
         var apiTypes: [AgentRole: ProviderAPIType] = [:]
+        var visionByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
             guard let configID = agentAssignments[role] else { continue }
             do {
@@ -594,6 +595,7 @@ final class AppViewModel {
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }
+                visionByRole[role] = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities.vision ?? true
             }
         }
 
@@ -644,6 +646,7 @@ final class AppViewModel {
             providers: providers,
             configurations: configurations,
             providerAPITypes: apiTypes,
+            supportsVisionByRole: visionByRole,
             agentTuning: tuning,
             semanticSearchEngine: engine,
             usageStore: shared.usageStore,
@@ -1374,6 +1377,7 @@ final class AppViewModel {
         var providers: [AgentRole: any LLMProvider] = [:]
         var configurations: [AgentRole: ModelConfiguration] = [:]
         var apiTypes: [AgentRole: ProviderAPIType] = [:]
+        var visionByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
             guard let configID = agentAssignments[role] else { continue }
             do {
@@ -1387,11 +1391,12 @@ final class AppViewModel {
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }
+                visionByRole[role] = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities.vision ?? true
             }
         }
         await pushValidatorModel(to: runtime)
         guard !providers.isEmpty else { return }
-        await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes)
+        await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes, supportsVisionByRole: visionByRole)
         logger.info("Refreshed LLM providers for roles: \(providers.keys.map(\.displayName).sorted().joined(separator: ", "), privacy: .public)")
     }
 

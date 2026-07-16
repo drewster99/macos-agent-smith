@@ -28,6 +28,11 @@ struct AgentConfiguration: Sendable {
     /// Maximum number of tool calls executed per LLM response. Extra calls are dropped with a
     /// channel notice. Exists to prevent runaway tool loops.
     private(set) var maxToolCallsPerIteration: Int
+    /// Whether this agent's model can process images. When `false`, image attachments are NOT
+    /// injected as content — they degrade to a `file://` reference line (a text-only model that
+    /// receives image bytes may error or silently ignore them). Sourced from the model catalog's
+    /// `ModelCapabilities.vision` and threaded in at spawn.
+    private(set) var supportsVision: Bool
 
     public init(
         role: AgentRole,
@@ -40,7 +45,8 @@ struct AgentConfiguration: Sendable {
         pollInterval: TimeInterval = 5,
         messageDebounceInterval: TimeInterval = 1,
         messageAcceptFilter: (@Sendable (ChannelMessage) -> Bool)? = nil,
-        maxToolCallsPerIteration: Int = 100
+        maxToolCallsPerIteration: Int = 100,
+        supportsVision: Bool = false
     ) {
         self.role = role
         self.llmConfig = llmConfig
@@ -53,5 +59,6 @@ struct AgentConfiguration: Sendable {
         self.messageDebounceInterval = messageDebounceInterval
         self.messageAcceptFilter = messageAcceptFilter
         self.maxToolCallsPerIteration = maxToolCallsPerIteration
+        self.supportsVision = supportsVision
     }
 }

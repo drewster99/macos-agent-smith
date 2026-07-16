@@ -23,11 +23,15 @@ enum AttachmentInjection {
 
     /// Builds image blocks + reference lines for `attachments`.
     ///
+    /// EVERY attachment gets a `file://` reference line (the `id=` forwarding handle a model can
+    /// quote into `create_task`/`task_update`, plus a path it can pass to `file_read`). On top of
+    /// that, an injectable image on a vision-capable model also gets an image content block.
+    ///
     /// - Parameters:
     ///   - attachments: the attachments to inject.
-    ///   - modelSupportsVision: when false, image bytes are NOT injected — the image gets a
-    ///     reference line plus a note, so a non-vision model is never sent bytes it can't read
-    ///     (which some providers reject outright).
+    ///   - modelSupportsVision: when false, image bytes are NOT injected as blocks — the image
+    ///     still gets its reference line (with a note), so a non-vision model is never sent bytes
+    ///     it can't read (which some providers reject outright).
     ///   - maxLongEdge: downscale target for images (defaults to the standard 1024px tier;
     ///     nil skips resizing).
     ///   - urlProvider: resolves an attachment's stable `file://` URL for its reference line.
@@ -41,19 +45,24 @@ enum AttachmentInjection {
         var referenceLines: [String] = []
 
         for attachment in attachments {
+            var imageInjected = false
             if modelSupportsVision, attachment.isImage, let data = attachment.data {
                 let resized = ImageDownscaler.downscale(data, maxLongEdge: maxLongEdge, sourceMimeType: attachment.mimeType)
                 if ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) {
                     images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
-                    continue
+                    imageInjected = true
                 }
             }
 
+            // Reference line for EVERY attachment — the forwarding handle stays even when the
+            // image is also shown inline; it's how the model quotes an id or reads non-image bytes.
             let url = urlProvider(attachment.id, attachment.filename)
             let urlString = url.map { "file://" + $0.path(percentEncoded: false) } ?? "#"
             var line = "[\(attachment.filename)](\(urlString)) \(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)"
-            if attachment.isImage && !modelSupportsVision {
-                line += "  (image not shown — the assigned model is not vision-capable)"
+            if attachment.isImage && !imageInjected {
+                line += modelSupportsVision
+                    ? "  (image not shown — unsupported format; use file_read if it has text)"
+                    : "  (image not shown — the assigned model is not vision-capable)"
             }
             referenceLines.append(line)
         }

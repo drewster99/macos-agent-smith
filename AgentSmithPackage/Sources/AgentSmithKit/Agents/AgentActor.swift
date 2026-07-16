@@ -458,21 +458,24 @@ public actor AgentActor {
             appendUserMessage(text)
             return
         }
-        var images: [LLMImageContent] = []
-        for attachment in attachments where attachment.isImage {
-            guard let data = attachment.data else { continue }
-            // Same downscale as the channel-message path. Briefing-time injection is the
-            // most context-expensive moment in Brown's lifetime — every reset re-pays the
-            // image cost, so doing it at full resolution by default would compound badly
-            // across long-running tasks.
-            let resized = ImageDownscaler.downscale(data, sourceMimeType: attachment.mimeType)
-            guard ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) else { continue }
-            images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
+        // Briefing-time injection is the most context-expensive moment in Brown's lifetime —
+        // every reset re-pays the image cost — so the helper's standard downscale applies. It
+        // also emits a `file://` reference line per attachment (parity with the channel-drain
+        // path, which the old briefing code lacked — it silently dropped non-image attachments)
+        // and gates image bytes on the model's vision capability.
+        let assembled = AttachmentInjection.assemble(
+            attachments,
+            modelSupportsVision: configuration.supportsVision,
+            urlProvider: toolContext.attachmentURLProvider
+        )
+        var body = text
+        if !assembled.referenceLines.isEmpty {
+            body += "\n" + assembled.referenceLines.joined(separator: "\n")
         }
-        if images.isEmpty {
-            conversationHistory.append(.user(text))
+        if assembled.images.isEmpty {
+            conversationHistory.append(.user(body))
         } else {
-            conversationHistory.append(.user(text, images: images))
+            conversationHistory.append(.user(body, images: assembled.images))
         }
         hasUnprocessedInput = true
         pushLiveContext()
@@ -3119,39 +3122,16 @@ public actor AgentActor {
             }
             let formatted = "[\(senderLabel)]: \(message.content)"
 
-            let imageAttachments = message.attachments.filter(\.isImage)
-            for attachment in imageAttachments {
-                guard let data = attachment.data else { continue }
-                // Downscale to a 1024px long-edge JPEG/PNG before injection. Saves vision
-                // tokens significantly for phone screenshots / camera photos without losing
-                // enough detail to answer typical "what's in this image" questions. The
-                // downscaler returns the original bytes when the image is already smaller
-                // and in a provider-friendly format, so cheap inputs stay cheap.
-                let resized = ImageDownscaler.downscale(data, sourceMimeType: attachment.mimeType)
-                // Skip injection for formats no provider accepts (e.g. image/svg+xml,
-                // unrecognized formats where decode failed and the fallback returned
-                // source bytes). The agent still sees the file path and id via the
-                // markdown reference line below; for SVG specifically Brown can call
-                // file_read which returns the SVG XML content as text.
-                guard ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) else { continue }
-                allImages.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
-            }
-
-            var textParts = [formatted]
-            // Surface every attachment as a markdown reference so the agent can quote the
-            // `id=<UUID>` into a downstream tool call (`create_task`, `task_update`,
-            // `task_complete`, etc.). Image content is also injected as image blocks above
-            // — the markdown line is a forwarding handle and a `file://` link Brown can
-            // pass to `file_read` for non-image content. The URL provider is sync so this
-            // path stays sync; when no provider is wired (tests), the link is degraded to
-            // a `#` anchor and the agent still has the `id=` substring to forward.
-            for attachment in message.attachments {
-                let url = toolContext.attachmentURLProvider(attachment.id, attachment.filename)
-                let urlString = url.map { "file://" + $0.path(percentEncoded: false) } ?? "#"
-                textParts.append("[\(attachment.filename)](\(urlString)) \(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)")
-            }
-
-            allTextParts.append(textParts.joined(separator: "\n"))
+            // Downscale + inject images (gated on the model's vision capability) and surface
+            // EVERY attachment as a `file://` reference line the agent can quote (id=…) into a
+            // downstream tool call or pass to `file_read`. Single source of truth in the helper.
+            let assembled = AttachmentInjection.assemble(
+                message.attachments,
+                modelSupportsVision: configuration.supportsVision,
+                urlProvider: toolContext.attachmentURLProvider
+            )
+            allImages.append(contentsOf: assembled.images)
+            allTextParts.append(([formatted] + assembled.referenceLines).joined(separator: "\n"))
         }
         // Signal the runtime which user messages are being incorporated this turn, so their
         // durable buffer entries can be dropped now (and not before — see the callback doc).
@@ -3164,34 +3144,24 @@ public actor AgentActor {
             onInboundUserMessagesIncorporated?(incorporatedUserMessageIDs)
         }
 
-        // Drain any attachments staged via `attach_file`. Image attachments at the
-        // requested detail tier go in as image content blocks; non-image attachments
-        // become markdown reference lines. Dedupe by (id, detail) so a model that calls
-        // attach_file twice in a row doesn't double-inject. Stage list is cleared
+        // Drain any attachments staged via `attach_file`: images become content blocks (gated
+        // on the model's vision capability), every attachment gets a reference line. Dedupe by
+        // id so an attach_file called twice in a row doesn't double-inject. Stage list is cleared
         // unconditionally — leaving entries across drains creates leaks under retries.
         if !pendingStagedAttachments.isEmpty {
-            var seen: Set<String> = []
-            var stagedTextParts: [String] = ["[Staged for this turn via attach_file]"]
+            var seenIDs: Set<UUID> = []
+            var uniqueAttachments: [Attachment] = []
             for entry in pendingStagedAttachments {
-                let key = "\(entry.attachment.id.uuidString)|\(String(describing: entry.detail))"
-                guard !seen.contains(key) else { continue }
-                seen.insert(key)
-                let attachment = entry.attachment
-                if attachment.isImage, let data = attachment.data {
-                    let resized = ImageDownscaler.downscale(
-                        data,
-                        maxLongEdge: entry.detail.maxLongEdge,
-                        sourceMimeType: attachment.mimeType
-                    )
-                    if ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) {
-                        allImages.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
-                    }
-                }
-                let url = toolContext.attachmentURLProvider(attachment.id, attachment.filename)
-                let urlString = url.map { "file://" + $0.path(percentEncoded: false) } ?? "#"
-                stagedTextParts.append("[\(attachment.filename)](\(urlString)) \(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)")
+                guard seenIDs.insert(entry.attachment.id).inserted else { continue }
+                uniqueAttachments.append(entry.attachment)
             }
-            allTextParts.append(stagedTextParts.joined(separator: "\n"))
+            let assembled = AttachmentInjection.assemble(
+                uniqueAttachments,
+                modelSupportsVision: configuration.supportsVision,
+                urlProvider: toolContext.attachmentURLProvider
+            )
+            allImages.append(contentsOf: assembled.images)
+            allTextParts.append((["[Staged for this turn via attach_file]"] + assembled.referenceLines).joined(separator: "\n"))
             pendingStagedAttachments.removeAll()
         }
 

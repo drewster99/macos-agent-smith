@@ -88,6 +88,10 @@ public actor OrchestrationRuntime {
     var llmProviders: [AgentRole: any LLMProvider]
     var llmConfigs: [AgentRole: ModelConfiguration]
     var providerAPITypes: [AgentRole: ProviderAPIType]
+    /// Whether each role's assigned model can process images (from the model catalog's
+    /// `ModelCapabilities.vision`). Gates image injection so a non-vision model is never sent
+    /// image bytes. Threaded in from the app at start and on live model changes.
+    var supportsVisionByRole: [AgentRole: Bool]
     private var agentTuning: [AgentRole: AgentTuningConfig]
     /// Whether Smith should automatically run the next pending task after completing one.
     /// Mutable so the user can toggle it at runtime via `setAutoAdvance(_:)`.
@@ -1172,6 +1176,7 @@ public actor OrchestrationRuntime {
         providers: [AgentRole: any LLMProvider],
         configurations: [AgentRole: ModelConfiguration],
         providerAPITypes: [AgentRole: ProviderAPIType] = [:],
+        supportsVisionByRole: [AgentRole: Bool] = [:],
         agentTuning: [AgentRole: AgentTuningConfig] = [:],
         semanticSearchEngine: SemanticSearchEngine,
         usageStore: UsageStore,
@@ -1186,6 +1191,7 @@ public actor OrchestrationRuntime {
         self.llmProviders = providers
         self.llmConfigs = configurations
         self.providerAPITypes = providerAPITypes
+        self.supportsVisionByRole = supportsVisionByRole
         self.agentTuning = agentTuning
         self.autoAdvanceEnabled = autoAdvanceEnabled
         self.autoRunInterruptedTasks = autoRunInterruptedTasks
@@ -1280,11 +1286,13 @@ public actor OrchestrationRuntime {
     public func setProviders(
         providers: [AgentRole: any LLMProvider],
         configurations: [AgentRole: ModelConfiguration],
-        apiTypes: [AgentRole: ProviderAPIType]
+        apiTypes: [AgentRole: ProviderAPIType],
+        supportsVisionByRole: [AgentRole: Bool] = [:]
     ) {
         for (role, provider) in providers { llmProviders[role] = provider }
         for (role, config) in configurations { llmConfigs[role] = config }
         for (role, apiType) in apiTypes { providerAPITypes[role] = apiType }
+        for (role, vision) in supportsVisionByRole { self.supportsVisionByRole[role] = vision }
         // New configuration is grounds to retry: close a breaker opened by
         // missing-provider spawn failures (or by scoping failures against a backend the
         // user may just have fixed).
@@ -1789,7 +1797,8 @@ public actor OrchestrationRuntime {
                 pollInterval: agentTuning[.smith]?.pollInterval ?? 20,
                 messageDebounceInterval: agentTuning[.smith]?.messageDebounceInterval ?? 1,
                 messageAcceptFilter: smithMessageFilter,
-                maxToolCallsPerIteration: agentTuning[.smith]?.maxToolCalls ?? 100
+                maxToolCallsPerIteration: agentTuning[.smith]?.maxToolCalls ?? 100,
+                supportsVision: supportsVisionByRole[.smith] ?? false
             ),
             provider: provider,
             tools: SmithBehavior.tools(validatorCatalogSummary: validatorCatalogSummary()),
@@ -3034,7 +3043,8 @@ public actor OrchestrationRuntime {
                 pollInterval: agentTuning[.brown]?.pollInterval ?? 25,
                 messageDebounceInterval: agentTuning[.brown]?.messageDebounceInterval ?? 1,
                 messageAcceptFilter: brownMessageFilter,
-                maxToolCallsPerIteration: agentTuning[.brown]?.maxToolCalls ?? 100
+                maxToolCallsPerIteration: agentTuning[.brown]?.maxToolCalls ?? 100,
+                supportsVision: supportsVisionByRole[.brown] ?? false
             ),
             provider: brownProvider,
             tools: BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot),
