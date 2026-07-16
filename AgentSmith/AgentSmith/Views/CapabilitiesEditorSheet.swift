@@ -107,6 +107,10 @@ struct CapabilitiesEditorSheet: View {
     ]
 
     @State private var states: [String: FlagState] = [:]
+    /// The override selections as they stood when the sheet opened, so Done can tell whether
+    /// anything actually changed (and only then surface the restart notice).
+    @State private var initialStates: [String: FlagState] = [:]
+    @State private var showRestartNotice = false
 
     private var key: String { "\(providerID)/\(modelID)" }
 
@@ -132,7 +136,7 @@ struct CapabilitiesEditorSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("Done") { save(); dismiss() }
+                Button("Done") { commit() }
                     .keyboardShortcut(.defaultAction)
             }
 
@@ -154,7 +158,7 @@ struct CapabilitiesEditorSheet: View {
                 }
                 .disabled(!hasAnyOverride)
                 Spacer()
-                Text("Default = inherit LiteLLM/provider resolution. Force on/off writes a per-model override. Takes effect after a model-list refresh (or next launch).")
+                Text("Default = inherit LiteLLM/provider resolution. Force on/off writes a per-model override. Takes effect after you restart Agent Smith.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.trailing)
@@ -163,6 +167,11 @@ struct CapabilitiesEditorSheet: View {
         .padding(20)
         .frame(minWidth: 560, idealWidth: 640, minHeight: 460, idealHeight: 620)
         .onAppear { loadFromShared() }
+        .alert("Restart Required", isPresented: $showRestartNotice) {
+            Button("OK") { dismiss() }
+        } message: {
+            Text("Your capability changes were saved. They take effect the next time you restart Agent Smith.")
+        }
     }
 
     private func flagRow(_ descriptor: Descriptor) -> some View {
@@ -196,6 +205,19 @@ struct CapabilitiesEditorSheet: View {
         let existing = shared.userModelOverrides[key]?.capabilities
         for descriptor in Self.descriptors {
             states[descriptor.id] = FlagState(existing?[keyPath: descriptor.override] ?? nil)
+        }
+        initialStates = states
+    }
+
+    /// Persists the edits. If they changed anything, surfaces the restart notice (whose OK
+    /// dismisses); otherwise dismisses straight through so an unchanged visit doesn't nag.
+    private func commit() {
+        let changed = states != initialStates
+        save()
+        if changed {
+            showRestartNotice = true
+        } else {
+            dismiss()
         }
     }
 
