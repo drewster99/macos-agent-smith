@@ -31,6 +31,20 @@ public struct TaskCompleteTool: AgentTool {
                 "type": .string("array"),
                 "items": .dictionary(["type": .string("string")]),
                 "description": .string("Optional local file paths to read and attach to the result. Each is loaded, persisted to the per-session attachments directory, and surfaced to Smith with the awaitingReview banner.")
+            ]),
+            "deliverables": .dictionary([
+                "type": .string("array"),
+                "description": .string("Optional STRUCTURED deliverables — one entry per distinct piece of proof, so validators can find the evidence for each acceptance requirement. Each entry: `ref` (a short tag naming which requirement/deliverable it is), and any of `text` (an inline value/answer), `attachment_ids`, `attachment_paths` (files that ARE the evidence — e.g. per-locale screenshots), and `description` (for a group of files). Use this in ADDITION to `result` when the work has discrete, taggable evidence; omit it for a plain text result."),
+                "items": .dictionary([
+                    "type": .string("object"),
+                    "properties": .dictionary([
+                        "ref": .dictionary(["type": .string("string"), "description": .string("Short tag naming the requirement/deliverable this evidence is for.")]),
+                        "text": .dictionary(["type": .string("string"), "description": .string("An inline value or note for this deliverable (e.g. the answer).")]),
+                        "attachment_ids": .dictionary(["type": .string("array"), "items": .dictionary(["type": .string("string")]), "description": .string("Existing attachment UUIDs that are this deliverable's evidence.")]),
+                        "attachment_paths": .dictionary(["type": .string("array"), "items": .dictionary(["type": .string("string")]), "description": .string("Local file paths (ingested) that are this deliverable's evidence.")]),
+                        "description": .dictionary(["type": .string("string"), "description": .string("Description for a group of files under this deliverable.")])
+                    ])
+                ])
             ])
         ]),
         "required": .array([.string("result")])
@@ -88,11 +102,17 @@ public struct TaskCompleteTool: AgentTool {
         var attachments = resolution.attachments
         attachments += await Self.ingestEvidenceDirectory(context: context, existing: attachments)
 
+        // Optional structured deliverables → resultItems (additive; empty when omitted). Each
+        // entry becomes a text item and/or an attachment item/group, tagged with its `ref`. A
+        // per-entry attachment-resolution failure is skipped (best-effort) rather than blocking
+        // the whole submission — the plain `result` + swept evidence still carry the work.
+        let resultItems = await Self.buildDeliverables(arguments: arguments, context: context)
+
         // Store result on the task (survives restarts) and hand it to acceptance
         // validation — the evaluator system, not Smith, judges submissions now. The
         // "Ready for Review" banner is preserved for the UI via the same task_complete
         // message kind, posted publicly (Smith's filter drops it; the user sees it).
-        await context.taskStore.setResult(id: task.id, result: result, commentary: commentary, attachments: attachments)
+        await context.taskStore.setResult(id: task.id, result: result, commentary: commentary, attachments: attachments, resultItems: resultItems)
         await context.taskStore.updateStatus(id: task.id, status: .validating)
 
         var message = "Task '\(task.title)' submitted — acceptance validation is running."
@@ -116,6 +136,47 @@ public struct TaskCompleteTool: AgentTool {
         }
         let names = attachments.map { $0.filename }.joined(separator: ", ")
         return .success("Task submitted with \(attachments.count) attachment(s) (\(names)). Acceptance validation will judge it; you'll receive a punch list if changes are needed. Wait.")
+    }
+
+    /// Parses the optional `deliverables` argument into structured `ResultItem`s. Each entry
+    /// yields a `.text` item (when `text` is present) and/or an attachment item — `.attachment`
+    /// for a single file, `.attachmentGroup` for several or when a group `description` is given —
+    /// tagged with the entry's `ref`. Best-effort: an entry with no usable content is skipped, and
+    /// a per-entry attachment-resolution failure yields no attachments for that entry rather than
+    /// failing the whole submission. Returns `[]` when `deliverables` is absent.
+    static func buildDeliverables(arguments: [String: AnyCodable], context: ToolContext) async -> [ResultItem] {
+        guard case .array(let rawDeliverables) = arguments["deliverables"] else { return [] }
+        var items: [ResultItem] = []
+        for raw in rawDeliverables {
+            guard case .dictionary(let entry) = raw else { continue }
+
+            var refs: [String] = []
+            if case .string(let ref) = entry["ref"] {
+                let trimmed = ref.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { refs = [trimmed] }
+            }
+
+            var description: String?
+            if case .string(let d) = entry["description"] { description = d }
+
+            if case .string(let text) = entry["text"],
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                items.append(ResultItem(content: .text(text), refs: refs))
+            }
+
+            var entryArgs: [String: AnyCodable] = [:]
+            if let ids = entry["attachment_ids"] { entryArgs["attachment_ids"] = ids }
+            if let paths = entry["attachment_paths"] { entryArgs["attachment_paths"] = paths }
+            if !entryArgs.isEmpty {
+                let resolved = await TaskUpdateTool.resolveAttachments(arguments: entryArgs, context: context).attachments
+                if resolved.count == 1, description == nil {
+                    items.append(ResultItem(content: .attachment(resolved[0]), refs: refs))
+                } else if !resolved.isEmpty {
+                    items.append(ResultItem(content: .attachmentGroup(attachments: resolved, description: description), refs: refs))
+                }
+            }
+        }
+        return items
     }
 
     /// Ingests every regular file in the task's evidence directory as an attachment, skipping any

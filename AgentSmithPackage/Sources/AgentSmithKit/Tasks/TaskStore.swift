@@ -707,11 +707,12 @@ public actor TaskStore {
     }
 
     /// Stores a result (and optional commentary) on a task.
-    public func setResult(id: UUID, result: String, commentary: String?, attachments: [Attachment] = []) {
+    public func setResult(id: UUID, result: String, commentary: String?, attachments: [Attachment] = [], resultItems: [ResultItem] = []) {
         guard var task = tasks[id] else { return }
         task.result = result
         task.commentary = commentary
         task.resultAttachments = attachments
+        task.resultItems = resultItems
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
