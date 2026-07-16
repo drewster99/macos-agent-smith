@@ -381,6 +381,64 @@ attachment, watches Smith forward via `create_task(attachment_ids:)`, and verifi
 Brown's seed briefing carries the image content — that's a real fixture investment
 worth doing once the attachment surface stabilizes.
 
+**Attachment lifetime — infinite, no garbage collection (decided 2026-07-15).**
+Attachments live forever. There is NO global attachment index/database and NO sidecar
+metadata file: the authoritative `Attachment` record (id / filename / mimeType /
+byteCount) exists ONLY embedded in the tasks and channel messages that reference it,
+while bytes sit in the global `attachments/<uuid>_<filename>` store with no reference
+counting. Consequences (all accepted for now): archiving or soft-deleting a task never
+purges its attachment files; hard-deleting the last referrer orphans the blob — the
+bytes leak on disk and the metadata record is lost (only `id` + `filename`, recoverable
+from the file name, survive). We deliberately LEAVE lifetime at infinity and do NOT
+implement GC at this point. If disk growth ever becomes a complaint: a manually-triggered
+mark-and-sweep (collect referenced ids across live + inactive tasks + retained channel
+logs, delete unreferenced files), with tiered policy (user-provided = never auto-purge;
+task evidence/result artifacts = eligible for purge on hard-delete). Keep it off hot
+paths per the manual-utility rule.
+
+**`attach_file` + vision for Brown/Security/validators, and a structured result model
+(design agreed 2026-07-15; implementing).** Two phases.
+
+*Phase A — attachment vision (self-contained, no SwiftLLMKit release).* Replace
+`view_attachment` (id-only) with **`attach_file(path)`** — path-based, **durably ingests and
+dedupes by path** (reuse the existing attachment id so any id that surfaces in a verdict/result
+always resolves — no ephemeral/dangling ids), `detail` fixed at **auto** (not exposed). It
+accepts **any file**: images stage as a content block; non-images stage as a `file://`
+reference line (the agent then `file_read`s them; Phase C upgrades these to native document
+blocks). Bytes ride the caller's next USER turn (the only image position all four protocols
+support — tool-result images are Anthropic-only). Factor the downscale/format-gate/reference-line
+logic into ONE shared helper with a **vision gate** (`ModelInfo.capabilities.vision`, threaded
+app→runtime per role like `providerAPITypes`; skip + text-note when a model isn't vision-capable
+— also fixes Brown silently sending images to blind models). Wire the stage→drain into all three
+LLM loops: `AgentActor` (already drains — switch to helper), `SecurityEvaluator` (add tool; it
+already loops with `file_read`), and `EvaluationRunner` (add `attach_file` to
+`validatorEvidenceToolNames`); wire the no-op `stageAttachmentsForNextTurn` in `makeToolContext`.
+Fix `AgentActor.appendUserMessage(_:attachments:)` to emit non-image `file://` reference lines
+(briefing parity with the channel-drain path — it currently drops them). Fully REMOVE
+`view_attachment` (no alias) and sweep every mention. Closes the "Security Agent evaluating
+view_attachment content" gap above; lets validators inspect screenshots directly (e.g. verify
+pseudolocalization doubling). Images are **pulled** on demand, never force-fed.
+
+*Phase B — structured result model (depends on A).* `AgentTask.result` becomes an ordered
+`[ResultItem]` where `ResultItem = { content, refs: [String] }` and
+`content = .text | .attachment | .attachmentGroup([Attachment], description?)`. `refs` are
+**optional routing tags** (many-to-many, criterion-ID-valued) — **NOT a filter**: the validator
+always receives the whole structured result as text (item text inline; attachments as
+path/id + description + refs) and **pulls** the images it needs via `attach_file`; the pull
+model is exactly why no hard-filtering/token-blowup concern exists. A `prepare`/input-generator
+self-filters by ref for per-item fan-out. This subsumes `resultAttachments`, the evidence-index
+idea, and prose evidence pointers; inline evidence (answer-in-result) stays the free baseline
+(result + commentary + updates + steps + tool-activity log). Backward-compatible decode shim:
+old `result: String` → `[.text]`, old `resultAttachments` → untagged items. Touches: `AgentTask`
+(+ migration), `TaskStore.setResult`, `TaskCompleteTool` (structured items; still auto-sweeps
+undeclared evidence into an untagged group), `TaskValidationCoordinator` payload, the result UI
+renderer, `TaskSummarizer`. A dangling ref (matches no criterion) is a soft note, not an error.
+
+*Phase C — deferred, needs SwiftLLMKit.* Native document/file content blocks (`LLMMessage` +
+per-provider serialization: Anthropic `document`, Gemini `fileData`, OpenAI `file`) so PDFs and
+other types reach the model directly instead of as `file_read` text. Also obviates the
+"recurse into subdirectories" evidence-sweep item for declared `attachmentGroup` evidence.
+
 ### Per-tool wall-clock timeouts ✅
 Tool calls used to run with no enforced wall-clock cap. A pathological invocation — e.g. a `run_applescript` that walks every Contacts entry and shells out per phone — could pin the agent for minutes; in a parallel batch the slowest leg blocked every other result from being delivered to the LLM. Originally identified 2026-04-29 from the "brown stopped" diagnostic where a Contacts AppleScript ran 2m21s before returning.
 

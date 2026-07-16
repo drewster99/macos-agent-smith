@@ -71,7 +71,7 @@ struct MCPBridgedTool: AgentTool {
 
     /// Decodes returned image data, ingests it through the attachment pipeline, and
     /// stages it so the model sees it on the next turn — reusing Brown's
-    /// `view_attachment` machinery.
+    /// `attach_file` machinery.
     private func routeImages(_ images: [(data: Data, mimeType: String)], context: ToolContext) async {
         var staged: [Attachment] = []
         let tmpDir = FileManager.default.temporaryDirectory

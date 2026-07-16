@@ -30,7 +30,7 @@ enum SmithBehavior {
             SaveMemoryTool(),
             SearchMemoryTool(),
             FileReadTool(),
-            ViewAttachmentTool(),
+            AttachFileTool(),
             CurrentTimeTool(),
             DirectoryListingTool(),
             DirectoryTreeTool(),

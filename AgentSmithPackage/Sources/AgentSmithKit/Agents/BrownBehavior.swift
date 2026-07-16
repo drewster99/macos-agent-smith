@@ -34,7 +34,7 @@ public enum BrownBehavior {
             InstantAnswerTool(),
             WebFetchTool(),
             FileReadTool(),
-            ViewAttachmentTool(),
+            AttachFileTool(),
             FileWriteTool(),
             FileEditTool(),
             GlobTool(),

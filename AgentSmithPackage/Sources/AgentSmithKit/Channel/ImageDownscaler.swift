@@ -7,7 +7,7 @@ import os
 private let downscalerLogger = Logger(subsystem: "com.agentsmith", category: "ImageDownscaler")
 
 /// Downsamples image bytes to a maximum long-edge dimension before they go to an LLM.
-/// Used by the seed-Brown briefing path and `view_attachment` so that user-attached
+/// Used by the seed-Brown briefing path and `attach_file` so that user-attached
 /// photos don't burn 4K worth of vision tokens when the question is "what country is
 /// this flag." Output preserves the input MIME family (PNG → PNG, JPEG → JPEG) except
 /// HEIC/HEIF/TIFF/BMP, which are re-encoded to JPEG because not every provider accepts

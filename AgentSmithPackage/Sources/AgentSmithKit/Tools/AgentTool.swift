@@ -299,7 +299,7 @@ public struct ToolContext: Sendable {
     /// Stages attachments into the calling agent's next user turn. The runtime drains
     /// these into the assembled LLM message — image attachments become content blocks at
     /// the requested detail tier; non-image attachments become markdown reference lines.
-    /// Used by the `view_attachment` tool so an agent can pull a previously-known
+    /// Used by the `attach_file` tool so an agent can pull a previously-known
     /// attachment into its visual context on demand. The string parameter is the
     /// detail tier ("thumbnail" / "standard" / "full"); unknown values fall back to
     /// "standard".

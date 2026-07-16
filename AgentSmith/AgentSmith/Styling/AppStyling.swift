@@ -219,6 +219,8 @@ enum AppFonts {
     static let modelIDLabel = Font.system(size: 11, weight: .medium, design: .monospaced)
     /// 40pt — welcome screen wave icon.
     static let welcomeIcon = Font.system(size: 40)
+    /// 22pt — onboarding "what should I call you?" name field (large, friendly input).
+    static let onboardingNameField = Font.system(size: 22)
     /// 42pt rounded bold — spending dashboard headline cost number.
     static let dashboardHeadline = Font.system(size: 42, weight: .bold, design: .rounded)
     /// Title font for the AI Commentary inset (smaller than `sectionHeader`).

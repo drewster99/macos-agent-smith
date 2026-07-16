@@ -116,14 +116,14 @@ public actor AgentActor {
     /// Messages from the channel that arrived while waiting for the LLM.
     private var pendingChannelMessages: [ChannelMessage] = []
 
-    /// Attachments staged by `view_attachment` for injection into the next user turn.
+    /// Attachments staged by `attach_file` for injection into the next user turn.
     /// Drained by `drainPendingMessages` — image bytes (downscaled) become content blocks
     /// in the assembled LLM message; text/document refs are appended to the message body.
     /// Cleared after each drain so a stage that doesn't get a turn (rare) doesn't leak
     /// across runs.
     private var pendingStagedAttachments: [(attachment: Attachment, detail: AttachmentDetail)] = []
 
-    /// Detail tier requested by `view_attachment`. Controls which downscale variant gets
+    /// Detail tier requested by `attach_file`. Controls which downscale variant gets
     /// staged for injection. Mirrors the tool's `detail` parameter.
     enum AttachmentDetail: Sendable {
         case thumbnail  // 512px long edge
@@ -442,7 +442,7 @@ public actor AgentActor {
     /// can quote the id forward downstream. Used by the seed-Brown briefing path so a
     /// task created with attached files reaches Brown's first LLM turn with the bytes intact.
     /// Stages attachments for injection into the next user turn. Called by the
-    /// `view_attachment` tool so Brown can pull a previously-known attachment into his
+    /// `attach_file` tool so Brown can pull a previously-known attachment into his
     /// visual context on demand. Multiple calls before a single LLM turn accumulate;
     /// duplicates (same `id` and `detail`) are deduped on drain.
     ///
@@ -3046,7 +3046,7 @@ public actor AgentActor {
 
     private func drainPendingMessages() {
         // Drain when there's anything to drain — pending channel messages OR attachments
-        // staged via `view_attachment` (which arrive with no associated channel message
+        // staged via `attach_file` (which arrive with no associated channel message
         // but still need to land in the conversation history for the next LLM turn).
         guard !pendingChannelMessages.isEmpty || !pendingStagedAttachments.isEmpty else { return }
 
@@ -3164,14 +3164,14 @@ public actor AgentActor {
             onInboundUserMessagesIncorporated?(incorporatedUserMessageIDs)
         }
 
-        // Drain any attachments staged via `view_attachment`. Image attachments at the
+        // Drain any attachments staged via `attach_file`. Image attachments at the
         // requested detail tier go in as image content blocks; non-image attachments
         // become markdown reference lines. Dedupe by (id, detail) so a model that calls
-        // view_attachment twice in a row doesn't double-inject. Stage list is cleared
+        // attach_file twice in a row doesn't double-inject. Stage list is cleared
         // unconditionally — leaving entries across drains creates leaks under retries.
         if !pendingStagedAttachments.isEmpty {
             var seen: Set<String> = []
-            var stagedTextParts: [String] = ["[Staged for this turn via view_attachment]"]
+            var stagedTextParts: [String] = ["[Staged for this turn via attach_file]"]
             for entry in pendingStagedAttachments {
                 let key = "\(entry.attachment.id.uuidString)|\(String(describing: entry.detail))"
                 guard !seen.contains(key) else { continue }

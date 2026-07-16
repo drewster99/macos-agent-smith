@@ -964,7 +964,7 @@ public actor OrchestrationRuntime {
 
     /// Maximum number of MOST-RECENT updates whose attachments get rehydrated into Brown's
     /// briefing on a respawn. Older updates' attachment refs still appear in the markdown
-    /// briefing text (so Brown knows they existed and can `view_attachment` them by id),
+    /// briefing text (so Brown knows they existed and can `attach_file` them by path),
     /// but their image bytes are NOT eagerly re-injected into the conversation history.
     /// Without this cap, every Brown respawn re-pays the full image-cost of the entire
     /// task, compounding badly across long-running multi-update tasks.
@@ -976,11 +976,11 @@ public actor OrchestrationRuntime {
     ///   them*; Brown's first turn needs to see them.
     /// - **Update attachments**: only the most-recent `briefingUpdateAttachmentBudget`
     ///   updates' attachments are eagerly loaded. Older updates' refs appear as markdown
-    ///   links in the briefing text (Brown can call `view_attachment(ids:)` to load them).
+    ///   links in the briefing text (Brown can call `attach_file` to load them).
     /// - **Result attachments**: NEVER eagerly loaded on a respawn. The result is the
     ///   *output* of the task, not Brown's input — re-seating Brown to "redo" or "revise"
     ///   doesn't require him to look at his own previous output's attached files. If
-    ///   needed, Brown can `view_attachment` them.
+    ///   needed, Brown can `attach_file` them.
     ///
     /// Lazy-loads bytes via the registry where the in-memory record is metadata-only
     /// (e.g. a task restored from disk after restart).

@@ -95,7 +95,7 @@ enum TestToolContext {
         )
     }
 
-    /// Captures `view_attachment`'s staging requests so tests can assert on them.
+    /// Captures attach_file staging requests so tests can assert on them.
     final class StagedAttachmentRecorder: Sendable {
         private let lock = NSLock()
         nonisolated(unsafe) private var entries: [(attachments: [Attachment], detail: String)] = []

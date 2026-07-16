@@ -19,7 +19,7 @@ enum ToolSafetyClassification {
     /// fail-closed.
     static let knownBuiltInNames: Set<String> = [
         // Read-only
-        "file_read", "view_attachment", "glob", "directory_tree", "directory_listing",
+        "file_read", "attach_file", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
         "web_search", "instant_answer", "web_fetch",
@@ -50,7 +50,7 @@ enum ToolSafetyClassification {
     /// Built-in tools that are read-only — they inspect state but don't modify anything, so
     /// they have no side effects.
     private static let readOnlyNames: Set<String> = [
-        "file_read", "view_attachment", "glob", "directory_tree", "directory_listing",
+        "file_read", "attach_file", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
         "web_search", "instant_answer", "web_fetch"

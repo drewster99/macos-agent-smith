@@ -77,7 +77,7 @@ struct OnboardingView: View {
                 TextField("Your name or nickname", text: $nameInput)
                     .textFieldStyle(.roundedBorder)
                     .controlSize(.large)
-                    .font(.system(size: 22))
+                    .font(AppFonts.onboardingNameField)
                     .frame(maxWidth: 320)
                     .onSubmit { continueFromIntro() }
             }
