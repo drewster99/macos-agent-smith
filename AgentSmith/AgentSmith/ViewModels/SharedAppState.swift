@@ -14,7 +14,7 @@ import os
 /// instances receive `sharedMemoryStore` so each Smith reads and writes the same pool.
 /// Identifies a tab in the Settings window, for selection binding and deep-linking.
 enum SettingsTab: Hashable {
-    case general, providers, configurations, audio, mcp, tools
+    case general, providers, configurations, metadata, audio, mcp, tools
 }
 
 @Observable

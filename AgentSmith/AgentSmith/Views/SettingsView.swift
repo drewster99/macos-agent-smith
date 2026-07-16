@@ -36,6 +36,13 @@ struct SettingsView: View {
                 }
             }
 
+            Tab("Metadata", systemImage: "checklist", value: SettingsTab.metadata) {
+                ScrollView {
+                    MetadataCoverageView(shared: shared)
+                        .padding()
+                }
+            }
+
             Tab("Audio", systemImage: "speaker.wave.2", value: SettingsTab.audio) {
                 ScrollView {
                     audioSettingsSection()
