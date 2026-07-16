@@ -64,7 +64,7 @@ public enum EvaluatorDefaults {
 
     /// The read-only evidence quartet — the capability ceiling for inline/Smith-authored
     /// validators, and the default toolset for shipped ones.
-    public static let validatorEvidenceToolNames = ["file_read", "directory_listing", "grep", "glob"]
+    public static let validatorEvidenceToolNames = ["file_read", "directory_listing", "grep", "glob", "attach_file"]
 
     /// A human-readable authoring refusal, surfaced verbatim to the authoring tool.
     public struct AuthoringError: Error, Sendable {
@@ -663,7 +663,11 @@ extension OrchestrationRuntime {
         guard let resolved = providerForModelSlot(definition.modelSlot) else {
             return (.error("no model configured for slot '\(definition.modelSlot.rawValue)'"), EvaluationRunner.Transcript())
         }
-        let (provider, config, usageRole, providerTypeRawValue) = resolved
+        let provider = resolved.provider
+        let config = resolved.config
+        let usageRole = resolved.usageRole
+        let providerTypeRawValue = resolved.providerTypeRaw
+        let validatorSupportsVision = resolved.supportsVision
 
         // The evidence is delivered as a labeled JSON object and the criterion lives in the
         // system prompt. Keeping the two apart is deliberate: when both shared one undelimited
@@ -697,7 +701,14 @@ extension OrchestrationRuntime {
             hasItem: extraSlots["item"] != nil
         )
         let tools = Self.evidenceTools(named: definition.toolNames)
-        let evaluationContext = makeToolContext(agentID: UUID(), role: .securityAgent)
+        // Own the attach_file staging buffer so the validator can pull an evidence image into its
+        // own context; the runner drains it into a user turn after each tool round.
+        let stagingBuffer = StagedAttachmentBuffer()
+        let evaluationContext = makeToolContext(
+            agentID: UUID(),
+            role: .securityAgent,
+            attachmentStageOverride: { attachments, _ in await stagingBuffer.stage(attachments) }
+        )
         let sessionID = currentSessionID
         let usageStore = usageStore
         // Route each validator tool call through the shared Security Agent evaluator (auto-approved
@@ -759,6 +770,8 @@ extension OrchestrationRuntime {
             tools: tools,
             toolContext: evaluationContext,
             temperature: 0,
+            modelSupportsVision: validatorSupportsVision,
+            drainStagedAttachments: { await stagingBuffer.drain() },
             onResponse: { response, latencyMs in
                 await UsageRecorder.record(
                     response: response,
@@ -911,24 +924,24 @@ extension OrchestrationRuntime {
     /// once the app configures one, and otherwise falls back to the Summarizer's model (where
     /// acceptance validation has always run). `.smith`/`.summarizer` return nil only if that
     /// role itself was never configured.
-    private func providerForModelSlot(_ slot: EvaluatorDefinition.ModelSlot) -> (any LLMProvider, ModelConfiguration, AgentRole, String)? {
+    private func providerForModelSlot(_ slot: EvaluatorDefinition.ModelSlot) -> (provider: any LLMProvider, config: ModelConfiguration, usageRole: AgentRole, providerTypeRaw: String, supportsVision: Bool)? {
         switch slot {
         case .smith:
             guard let provider = llmProviders[.smith], let config = llmConfigs[.smith] else { return nil }
-            return (provider, config, .smith, providerAPITypes[.smith]?.rawValue ?? "")
+            return (provider, config, .smith, providerAPITypes[.smith]?.rawValue ?? "", supportsVisionByRole[.smith] ?? true)
         case .summarizer:
             guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "")
+            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true)
         case .validator:
             // Attributed to .summarizer for usage until AgentRole gains a validator case (the
             // decode shims are in; the dictionary-key migration is deliberately staged).
             if let provider = validatorProvider, let config = validatorConfiguration {
-                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "")
+                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "", validatorSupportsVision ?? (supportsVisionByRole[.summarizer] ?? true))
             }
             // No dedicated validator model configured: fall back to the Summarizer's model,
             // which is where acceptance validation has always run.
             guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "")
+            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true)
         }
     }
 
@@ -937,7 +950,8 @@ extension OrchestrationRuntime {
             "file_read": FileReadTool(),
             "directory_listing": DirectoryListingTool(),
             "grep": GrepTool(),
-            "glob": GlobTool()
+            "glob": GlobTool(),
+            "attach_file": AttachFileTool()
         ]
         return names.compactMap { catalog[$0] }
     }

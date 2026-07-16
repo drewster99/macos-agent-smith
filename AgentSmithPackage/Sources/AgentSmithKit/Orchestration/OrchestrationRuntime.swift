@@ -332,6 +332,9 @@ public actor OrchestrationRuntime {
     /// The API type of the dedicated validator provider, so `.validator` runs get the same
     /// provider-specific request handling the role dictionaries carry for other slots.
     var validatorProviderAPIType: ProviderAPIType?
+    /// Whether the dedicated validator model can process images. Nil when no dedicated validator
+    /// is configured (then `.validator` runs inherit the Summarizer's vision capability).
+    var validatorSupportsVision: Bool?
     /// Shared Security Agent evaluator for acceptance validators' read-only evidence calls. The
     /// evaluator auto-approves them (no LLM), so this is a central choke point we can tighten
     /// later — not a gate that blocks validation today. Created at `start()` when a Security Agent
@@ -3265,11 +3268,13 @@ public actor OrchestrationRuntime {
     public func setValidatorModel(
         provider: (any LLMProvider)?,
         configuration: ModelConfiguration?,
-        apiType: ProviderAPIType?
+        apiType: ProviderAPIType?,
+        supportsVision: Bool? = nil
     ) {
         validatorProvider = provider
         validatorConfiguration = configuration
         validatorProviderAPIType = apiType
+        validatorSupportsVision = supportsVision
     }
 
     /// The workspace (temp + evidence directories) for a task.
@@ -3338,7 +3343,12 @@ public actor OrchestrationRuntime {
         filesReadInSession: FileReadTracker? = nil,
         executionTracker: ToolExecutionTracker? = nil,
         taskEvidenceDirectory: URL? = nil,
-        taskTemporaryDirectory: URL? = nil
+        taskTemporaryDirectory: URL? = nil,
+        // When set, `attach_file`'s staging routes here instead of to a live AgentActor.
+        // Used by non-AgentActor loops (validators, Security) that own their own staging buffer
+        // and drain it themselves — the default agent-routing closure is a no-op for them
+        // (their `agentID` isn't a registered agent).
+        attachmentStageOverride: (@Sendable ([Attachment], String) async -> Void)? = nil
     ) -> ToolContext {
         // Strong-capture the tracker so it survives beyond this stack frame. Callers that
         // also need to read tool-execution outcomes (e.g. SecurityEvaluator) must pass the
@@ -3495,6 +3505,10 @@ public actor OrchestrationRuntime {
             },
             attachmentURLProvider: attachmentURLProviderClosure ?? { _, _ in nil },
             stageAttachmentsForNextTurn: { [weak self] attachments, detailString in
+                if let attachmentStageOverride {
+                    await attachmentStageOverride(attachments, detailString)
+                    return
+                }
                 guard let self else { return }
                 guard let agent = await self.supervisor.agent(id: agentID) else { return }
                 let detail: AgentActor.AttachmentDetail

@@ -1,5 +1,19 @@
 import Foundation
 
+/// A tiny actor-safe buffer for attachments staged during a bounded evaluation loop
+/// (acceptance validators, the Security Agent) that own their own stage→drain instead of
+/// routing to a live `AgentActor`. `attach_file`'s stage closure appends here; the loop drains
+/// it after each tool round and injects the bytes into the next user turn.
+actor StagedAttachmentBuffer {
+    private var pending: [Attachment] = []
+    func stage(_ attachments: [Attachment]) { pending.append(contentsOf: attachments) }
+    func drain() -> [Attachment] {
+        let out = pending
+        pending.removeAll()
+        return out
+    }
+}
+
 /// Shared assembly of attachment content for an LLM user turn.
 ///
 /// Image bytes — when the target model is vision-capable AND the format is provider-injectable —

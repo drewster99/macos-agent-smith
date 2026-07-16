@@ -70,6 +70,8 @@ public enum EvaluationRunner {
         tools: [any AgentTool],
         toolContext: ToolContext,
         temperature: Double? = nil,
+        modelSupportsVision: Bool = false,
+        drainStagedAttachments: (@Sendable () async -> [Attachment])? = nil,
         onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil,
         securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)? = nil
     ) async -> (outcome: Outcome, transcript: Transcript) {
@@ -140,6 +142,24 @@ public enum EvaluationRunner {
                     messages.append(.toolResult(Self.capToolResult(result), callID: call.id))
                 }
                 transcript.turnLog.append(toolLines.joined(separator: "\n"))
+                // Drain anything `attach_file` staged this round into a user turn so the model
+                // actually perceives it next iteration — images as content blocks (vision-gated),
+                // every attachment as a reference line. Mirrors AgentActor's stage→drain.
+                if let drainStagedAttachments {
+                    let staged = await drainStagedAttachments()
+                    if !staged.isEmpty {
+                        let assembled = AttachmentInjection.assemble(
+                            staged,
+                            modelSupportsVision: modelSupportsVision,
+                            urlProvider: toolContext.attachmentURLProvider
+                        )
+                        let header = "[Attached for review via attach_file]"
+                        let body = assembled.referenceLines.isEmpty
+                            ? header
+                            : ([header] + assembled.referenceLines).joined(separator: "\n")
+                        messages.append(assembled.images.isEmpty ? .user(body) : .user(body, images: assembled.images))
+                    }
+                }
                 continue
             }
 

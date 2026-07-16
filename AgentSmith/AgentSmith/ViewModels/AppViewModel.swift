@@ -1413,7 +1413,8 @@ final class AppViewModel {
         do {
             let provider = try shared.llmKit.makeProvider(for: validatorConfigID)
             let apiType = shared.llmKit.providers.first(where: { $0.id == validatorConfig.providerID })?.apiType
-            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType)
+            let vision = shared.llmKit.modelInfo(providerID: validatorConfig.providerID, modelID: validatorConfig.modelID)?.capabilities.vision ?? true
+            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: vision)
         } catch {
             logger.error("Failed to build validator provider (\(error.localizedDescription, privacy: .public)); validation falls back to the Summarizer model")
             await runtime.setValidatorModel(provider: nil, configuration: nil, apiType: nil)
