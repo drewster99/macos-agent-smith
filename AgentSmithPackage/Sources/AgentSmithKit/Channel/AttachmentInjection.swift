@@ -94,8 +94,10 @@ enum AttachmentInjection {
                         skipNote = "image not shown — unsupported format; use file_read if it has text"
                     }
                 }
-            } else if attachment.isPDF, modelSupportsDocuments {
-                if data == nil || hasEmptyBytes {
+            } else if attachment.isPDF {
+                if !modelSupportsDocuments {
+                    skipNote = "PDF not embedded — the assigned model has no native PDF support; use file_read for its text"
+                } else if data == nil || hasEmptyBytes {
                     if hasEmptyBytes {
                         Self.logger.warning("Attachment \(attachment.filename, privacy: .public) (id=\(attachment.id.uuidString, privacy: .public)) has 0 bytes — not injecting an empty document block.")
                     }

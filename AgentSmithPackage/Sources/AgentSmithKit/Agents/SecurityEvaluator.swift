@@ -456,10 +456,13 @@ actor SecurityEvaluator {
             }
 
             // LLM call succeeded. Execute any file_reads Security Agent requested, accumulating
-            // per-turn tool execution stats for the UsageRecord below.
+            // per-turn tool execution stats for the UsageRecord below. Only honor tool calls while
+            // tools are still on offer — once the evidence budget is spent we send `tools: []`, and
+            // a provider that returns tool calls anyway is ignored here so it falls through to the
+            // parse path, which DOES consume the retry budget (keeping the loop a hard bound).
             var turnToolExecutionMs = 0
             var turnToolResultChars = 0
-            if !response.toolCalls.isEmpty {
+            if offerTools, !response.toolCalls.isEmpty {
                 toolRounds += 1
                 // `.assistant(from:)` preserves reasoning + provider
                 // continuation (Anthropic thinking signatures / Gemini
@@ -533,7 +536,7 @@ actor SecurityEvaluator {
 
             emitTurnRecord(response: response, latencyMs: callLatencyMs, messageCount: conversationMessages.count)
 
-            if !response.toolCalls.isEmpty {
+            if offerTools, !response.toolCalls.isEmpty {
                 continue
             }
 
