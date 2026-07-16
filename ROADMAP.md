@@ -373,6 +373,24 @@ task's evidence directory** (their only legitimate target) so a prompt-injected 
 reach arbitrary images even with an approval. `checkPathRestriction` still only blocks a short
 credential-path list, so the Security verdict is the real gate today.
 
+**Full path-safety pass (planned 2026-07-16).** A dedicated sweep over EVERY filesystem-touching
+tool (`file_read`, `file_edit`, `bash`, `attach_file`, `glob`, `grep`, `directory_listing`) to
+enforce sanctioned-directory scoping *consistently*, replacing the ad-hoc `checkPathRestriction`
+credential-path *denylist* with a real scope/allowlist model (per-role: e.g. validators confined
+to the task's evidence directory, agents to sanctioned dirs). This subsumes the two `attach_file`
+items above — (a) Security-side viewing and (b) validator path-scoping — plus:
+- **Scrub-on-ingest.** Strip image EXIF/metadata unconditionally and strip/flatten PDF metadata on
+  ingest, to kill the metadata injection channel. Today this is only PARTIAL: `ImageDownscaler`
+  re-encodes via `CGImageDestination` (which drops metadata) BUT small images below the reencode
+  threshold pass through untouched (metadata survives), and PDFs are never scrubbed (raw bytes
+  injected). Make the strip unconditional.
+- **Security-side content inspection.** Assemble the resolved attachment content into the Security
+  Agent's evaluation turn (vision when its model supports it; OCR + PDF-text-layer + metadata-string
+  extraction as a text fallback) so Security inspects the pixels/metadata, not just the path string.
+Honest scope note: byte-level inspection is never perfect (steganography, adversarial images), so
+the durable controls are scope + provenance (only attach from trusted locations), with content
+inspection as a second layer — not the primary gate.
+
 **OpenAI Responses API support in SwiftLLMKit.** Big task; mentioned earlier in
 the attachment design discussion. Required before any OpenAI model can consume
 images returned from a tool's `tool_result` (Chat Completions can't carry image
