@@ -205,6 +205,9 @@ final class AppViewModel {
 
     private let logger = Logger(subsystem: "com.agentsmith", category: "AppViewModel")
     private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
+    /// Models already surfaced as absent from the capability catalog, so the one-time notice in
+    /// `resolveInjectionCapabilities` doesn't repeat on every provider refresh.
+    private var capabilityCatalogMissNoticeShown: Set<String> = []
     private var runtime: OrchestrationRuntime?
     /// Debounces provider rebuilds so a burst of Settings edits (every model field commits) results
     /// in a single `makeProvider`/keychain pass once editing settles, not one per keystroke.
@@ -596,9 +599,9 @@ final class AppViewModel {
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }
-                let capabilities = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities
-                visionByRole[role] = capabilities?.vision ?? true
-                documentsByRole[role] = capabilities?.pdfInput ?? false
+                let resolved = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
+                visionByRole[role] = resolved.vision
+                documentsByRole[role] = resolved.documents
             }
         }
 
@@ -1376,6 +1379,25 @@ final class AppViewModel {
     /// Security Agent re-read the providers at spawn; Smith/summarizer on the next runtime restart) without a
     /// session restart. A per-role build failure is logged and skipped — the runtime keeps that role's
     /// existing provider — so one misconfigured model can't break the others.
+    /// Resolves a model's image/document injection capability from the catalog. When the model is
+    /// ABSENT from the catalog we can't know: vision fails OPEN (images have no text fallback) and
+    /// documents fail CLOSED (a wrong PDF block is a hard API 400; the agent reads the extracted
+    /// text instead). That guess is never silent — the first time a given model is missing we log a
+    /// warning AND surface a system line in the transcript pointing at the Capabilities editor, so a
+    /// wrong assumption about our own data is visible rather than hidden.
+    private func resolveInjectionCapabilities(providerID: String, modelID: String, roleLabel: String) -> (vision: Bool, documents: Bool) {
+        let capabilities = shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)?.capabilities
+        if capabilities == nil {
+            let key = "\(providerID)/\(modelID)"
+            if capabilityCatalogMissNoticeShown.insert(key).inserted {
+                let notice = "Model “\(modelID)” (\(roleLabel)) isn’t in the capability catalog — assuming vision=on, PDF=off. If that’s wrong, set it explicitly in the Capabilities editor."
+                logger.warning("\(notice, privacy: .public)")
+                appendLocalSystemMessage(notice)
+            }
+        }
+        return (capabilities?.vision ?? true, capabilities?.pdfInput ?? false)
+    }
+
     private func pushUpdatedProviders() async {
         guard isRunning, let runtime else { return }
         var providers: [AgentRole: any LLMProvider] = [:]
@@ -1396,9 +1418,9 @@ final class AppViewModel {
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }
-                let capabilities = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities
-                visionByRole[role] = capabilities?.vision ?? true
-                documentsByRole[role] = capabilities?.pdfInput ?? false
+                let resolved = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
+                visionByRole[role] = resolved.vision
+                documentsByRole[role] = resolved.documents
             }
         }
         await pushValidatorModel(to: runtime)
@@ -1420,8 +1442,8 @@ final class AppViewModel {
         do {
             let provider = try shared.llmKit.makeProvider(for: validatorConfigID)
             let apiType = shared.llmKit.providers.first(where: { $0.id == validatorConfig.providerID })?.apiType
-            let capabilities = shared.llmKit.modelInfo(providerID: validatorConfig.providerID, modelID: validatorConfig.modelID)?.capabilities
-            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: capabilities?.vision ?? true, supportsDocuments: capabilities?.pdfInput ?? false)
+            let resolved = resolveInjectionCapabilities(providerID: validatorConfig.providerID, modelID: validatorConfig.modelID, roleLabel: "Validator")
+            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: resolved.vision, supportsDocuments: resolved.documents)
         } catch {
             logger.error("Failed to build validator provider (\(error.localizedDescription, privacy: .public)); validation falls back to the Summarizer model")
             await runtime.setValidatorModel(provider: nil, configuration: nil, apiType: nil)

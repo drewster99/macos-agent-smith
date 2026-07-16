@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// One element of a task's structured result.
 ///
@@ -60,6 +61,14 @@ extension ResultItem.Content: Codable {
                 description: try c.decodeIfPresent(String.self, forKey: .description)
             )
         case nil:
+            // An unrecognized kind can only come from a NEWER build (or a removed case) — never
+            // legitimate input. We must NOT throw (that would fail the whole task file and it'd be
+            // quarantined = data loss), so surface it loudly instead: an error-level log plus a
+            // visible placeholder that shows up verbatim in the UI. NOT an assertionFailure — this
+            // runs during boot-time task decode, where a trap would crash the app on launch for
+            // anyone whose on-disk data hit it.
+            Logger(subsystem: "AgentSmithKit", category: "ResultItem")
+                .error("Unknown ResultItem.Content kind '\(kindRaw, privacy: .public)' during decode — task data written by a newer build; degrading to a text placeholder.")
             self = .text("[unsupported result item: \(kindRaw)]")
         }
     }

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// A tiny actor-safe buffer for attachments staged during a bounded evaluation loop
 /// (acceptance validators, the Security Agent) that own their own stage→drain instead of
@@ -26,6 +27,8 @@ actor StagedAttachmentBuffer {
 /// vision-capability gate — live in exactly one place. Used by `AgentActor`, `SecurityEvaluator`,
 /// and `EvaluationRunner` so all three loops treat images identically.
 enum AttachmentInjection {
+    private static let logger = Logger(subsystem: "AgentSmithKit", category: "AttachmentInjection")
+
     /// Raw-byte ceiling for native document injection. A PDF larger than this is NOT sent as a
     /// document block (base64 expansion + provider size limits would risk a hard API 400 / token
     /// blowup) — it degrades to its reference line so the agent reads the extracted text via
@@ -69,19 +72,40 @@ enum AttachmentInjection {
         var referenceLines: [String] = []
 
         for attachment in attachments {
-            var mediaInjected = false
-            // `!data.isEmpty` guards against a 0-byte / unreadable attachment becoming an empty
-            // media block, which providers reject outright.
-            if modelSupportsVision, attachment.isImage, let data = attachment.data, !data.isEmpty {
-                let resized = ImageDownscaler.downscale(data, maxLongEdge: maxLongEdge, sourceMimeType: attachment.mimeType)
-                if ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) {
-                    images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
-                    mediaInjected = true
+            // When media the model COULD have shown isn't injected, `skipNote` carries the reason
+            // onto the reference line so the omission is visible to the agent, never silent.
+            var skipNote: String?
+            let data = attachment.data
+            let hasEmptyBytes = data?.isEmpty == true
+
+            if attachment.isImage {
+                if !modelSupportsVision {
+                    skipNote = "image not shown — the assigned model is not vision-capable"
+                } else if data == nil || hasEmptyBytes {
+                    if hasEmptyBytes {
+                        Self.logger.warning("Attachment \(attachment.filename, privacy: .public) (id=\(attachment.id.uuidString, privacy: .public)) has 0 bytes — not injecting an empty image block.")
+                    }
+                    skipNote = "image not shown — no readable bytes; use file_read if it has text"
+                } else if let data {
+                    let resized = ImageDownscaler.downscale(data, maxLongEdge: maxLongEdge, sourceMimeType: attachment.mimeType)
+                    if ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) {
+                        images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
+                    } else {
+                        skipNote = "image not shown — unsupported format; use file_read if it has text"
+                    }
                 }
-            } else if modelSupportsDocuments, attachment.isPDF, let data = attachment.data,
-                      !data.isEmpty, data.count <= maxDocumentBytes {
-                documents.append(LLMDocumentContent(data: data, mimeType: attachment.mimeType, filename: attachment.filename))
-                mediaInjected = true
+            } else if attachment.isPDF, modelSupportsDocuments {
+                if data == nil || hasEmptyBytes {
+                    if hasEmptyBytes {
+                        Self.logger.warning("Attachment \(attachment.filename, privacy: .public) (id=\(attachment.id.uuidString, privacy: .public)) has 0 bytes — not injecting an empty document block.")
+                    }
+                    skipNote = "PDF not embedded — no readable bytes; use file_read"
+                } else if let data, data.count > maxDocumentBytes {
+                    Self.logger.warning("PDF \(attachment.filename, privacy: .public) is \(attachment.formattedSize, privacy: .public), over the \(maxDocumentBytes) byte embed cap — sending a reference instead; the agent can file_read its text.")
+                    skipNote = "PDF not embedded — \(attachment.formattedSize) exceeds the embed limit; use file_read for its text"
+                } else if let data {
+                    documents.append(LLMDocumentContent(data: data, mimeType: attachment.mimeType, filename: attachment.filename))
+                }
             }
 
             // Reference line for EVERY attachment — the forwarding handle stays even when the media
@@ -89,10 +113,8 @@ enum AttachmentInjection {
             let url = urlProvider(attachment.id, attachment.filename)
             let urlString = url.map { "file://" + $0.path(percentEncoded: false) } ?? "#"
             var line = "[\(attachment.filename)](\(urlString)) \(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)"
-            if attachment.isImage && !mediaInjected {
-                line += modelSupportsVision
-                    ? "  (image not shown — unsupported format; use file_read if it has text)"
-                    : "  (image not shown — the assigned model is not vision-capable)"
+            if let skipNote {
+                line += "  (\(skipNote))"
             }
             referenceLines.append(line)
         }
