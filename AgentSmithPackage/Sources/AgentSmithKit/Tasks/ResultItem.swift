@@ -1,5 +1,6 @@
 import Foundation
 import os
+import SwiftLLMKit
 
 /// One element of a task's structured result.
 ///
@@ -21,6 +22,10 @@ public struct ResultItem: Codable, Sendable, Equatable {
         case attachment(Attachment)
         /// A named bundle of files (e.g. "the de/ screenshots"), with an optional description.
         case attachmentGroup(attachments: [Attachment], description: String?)
+        /// A kind this build doesn't recognize (written by a NEWER build). The original JSON node is
+        /// preserved verbatim in `raw` so a downgrade→resave round-trips it losslessly instead of
+        /// rewriting it as a lossy placeholder; the UI renders it as `[unsupported result item: …]`.
+        case unknown(kind: String, raw: AnyCodable)
     }
 
     public var content: Content
@@ -63,13 +68,13 @@ extension ResultItem.Content: Codable {
         case nil:
             // An unrecognized kind can only come from a NEWER build (or a removed case) — never
             // legitimate input. We must NOT throw (that would fail the whole task file and it'd be
-            // quarantined = data loss), so surface it loudly instead: an error-level log plus a
-            // visible placeholder that shows up verbatim in the UI. NOT an assertionFailure — this
-            // runs during boot-time task decode, where a trap would crash the app on launch for
-            // anyone whose on-disk data hit it.
+            // quarantined = data loss). Instead preserve the ORIGINAL JSON node verbatim so a
+            // downgrade→resave round-trips it losslessly; the UI renders a placeholder. NOT an
+            // assertionFailure — this runs during boot-time task decode, where a trap would crash
+            // the app on launch for anyone whose on-disk data hit it.
             Logger(subsystem: "AgentSmithKit", category: "ResultItem")
-                .error("Unknown ResultItem.Content kind '\(kindRaw, privacy: .public)' during decode — task data written by a newer build; degrading to a text placeholder.")
-            self = .text("[unsupported result item: \(kindRaw)]")
+                .error("Unknown ResultItem.Content kind '\(kindRaw, privacy: .public)' during decode — task data written by a newer build; preserving it verbatim behind a placeholder.")
+            self = .unknown(kind: kindRaw, raw: try AnyCodable(from: decoder))
         }
     }
 
@@ -86,6 +91,9 @@ extension ResultItem.Content: Codable {
             try c.encode(Kind.attachmentGroup, forKey: .kind)
             try c.encode(attachments, forKey: .attachments)
             try c.encodeIfPresent(description, forKey: .description)
+        case .unknown(_, let raw):
+            // Write the preserved node verbatim (it already carries its own `kind` + payload).
+            try raw.encode(to: encoder)
         }
     }
 }
@@ -98,6 +106,7 @@ public extension ResultItem {
         case .text: return []
         case .attachment(let attachment): return [attachment]
         case .attachmentGroup(let attachments, _): return attachments
+        case .unknown: return []
         }
     }
 }

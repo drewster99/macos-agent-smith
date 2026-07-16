@@ -996,6 +996,8 @@ extension OrchestrationRuntime {
                 for attachment in attachments {
                     lines.append("    • \(ref(attachment))")
                 }
+            case .unknown(let kind, _):
+                lines.append("- Deliverable \(index + 1)\(tags): [unsupported result item: \(kind)]")
             }
         }
         return lines.joined(separator: "\n")

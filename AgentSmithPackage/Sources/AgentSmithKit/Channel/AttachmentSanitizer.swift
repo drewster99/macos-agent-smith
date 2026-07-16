@@ -41,6 +41,10 @@ enum AttachmentSanitizer {
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             return data
         }
+        // Re-encoding only frame 0 would silently flatten an animated GIF / multi-page TIFF or HEIC.
+        // Rather than destroy frames, leave a multi-frame source untouched (its metadata channel is
+        // handled by the broader path-safety pass — see ROADMAP); single-frame images are scrubbed.
+        guard CGImageSourceGetCount(source) == 1 else { return data }
         let output = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(output, type, 1, nil) else {
             return data

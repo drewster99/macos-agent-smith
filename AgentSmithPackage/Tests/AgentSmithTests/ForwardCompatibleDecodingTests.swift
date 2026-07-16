@@ -54,18 +54,39 @@ struct ForwardCompatibleDecodingTests {
         #expect(decoded.title == "t")
     }
 
-    @Test("Unknown result-item kind decodes to a text placeholder, not a throw")
+    @Test("Unknown result-item kind decodes to a preserved .unknown, not a throw")
     func unknownResultItemKindFallsBack() throws {
         // A future build could add a Content kind (e.g. "chart"); an OLDER build reading it must
         // NOT throw, or the all-or-nothing array decode would take down the whole task file.
         let json = "{\"content\":{\"kind\":\"chart\",\"payload\":42},\"refs\":[\"c1\"]}"
         let decoded = try JSONDecoder().decode(ResultItem.self, from: Data(json.utf8))
-        guard case .text(let placeholder) = decoded.content else {
-            Issue.record("expected a text placeholder for an unknown kind")
+        guard case .unknown(let kind, _) = decoded.content else {
+            Issue.record("expected .unknown for an unrecognized kind")
             return
         }
-        #expect(placeholder.contains("chart"))
+        #expect(kind == "chart")
         #expect(decoded.refs == ["c1"])
+    }
+
+    @Test("An unknown result-item round-trips losslessly (downgrade→resave keeps the payload)")
+    func unknownResultItemRoundTrips() throws {
+        let json = "{\"content\":{\"kind\":\"chart\",\"payload\":42,\"title\":\"Q3\"},\"refs\":[\"c1\"]}"
+        let decoded = try JSONDecoder().decode(ResultItem.self, from: Data(json.utf8))
+        let reencoded = try JSONEncoder().encode(decoded)
+        // Re-decoding the re-encoded bytes still yields the same unknown kind with its payload,
+        // proving the older build didn't silently drop the newer content on save.
+        let roundTripped = try JSONDecoder().decode(ResultItem.self, from: reencoded)
+        guard case .unknown(let kind, let raw) = roundTripped.content else {
+            Issue.record("re-encoded unknown item should decode back to .unknown")
+            return
+        }
+        #expect(kind == "chart")
+        guard case .dictionary(let dict) = raw else {
+            Issue.record("preserved payload should be a JSON object")
+            return
+        }
+        #expect(dict["payload"] == .int(42))
+        #expect(dict["title"] == .string("Q3"))
     }
 
     @Test("A task carrying an unknown result-item kind decodes without failing the whole task")
@@ -78,8 +99,8 @@ struct ForwardCompatibleDecodingTests {
         let decoded = try JSONDecoder().decode(AgentTask.self, from: data)
         #expect(decoded.title == "t")
         #expect(decoded.resultItems.count == 1)
-        if case .text = decoded.resultItems[0].content {} else {
-            Issue.record("unknown result-item kind should degrade to text")
+        if case .unknown = decoded.resultItems[0].content {} else {
+            Issue.record("unknown result-item kind should decode to .unknown")
         }
     }
 

@@ -57,6 +57,11 @@ struct DeliverablesView: View {
                     attachmentLabel(attachment)
                 }
             }
+        case .unknown(let kind, _):
+            Text("[unsupported result item: \(kind)]")
+                .font(.callout)
+                .italic()
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -81,6 +86,8 @@ struct DeliverablesView: View {
             case .attachmentGroup(let attachments, let description):
                 let head = description.map { "\($0): " } ?? ""
                 return "\(tag)\(head)\(attachments.map(\.filename).joined(separator: ", "))"
+            case .unknown(let kind, _):
+                return "\(tag)[unsupported result item: \(kind)]"
             }
         }.joined(separator: "\n")
     }
