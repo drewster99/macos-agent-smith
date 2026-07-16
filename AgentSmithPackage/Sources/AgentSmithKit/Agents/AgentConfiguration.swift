@@ -35,6 +35,9 @@ struct AgentConfiguration: Sendable {
     /// model the catalog EXPLICITLY marks non-vision should suppress images; an unknown/omitted
     /// capability keeps the historical always-inject behavior.
     private(set) var supportsVision: Bool
+    /// Whether this agent's model can process documents (e.g. PDFs) natively. From the model
+    /// catalog's `ModelCapabilities.pdfInput`. Defaults true (fail-open), same as `supportsVision`.
+    private(set) var supportsDocuments: Bool
 
     public init(
         role: AgentRole,
@@ -48,7 +51,8 @@ struct AgentConfiguration: Sendable {
         messageDebounceInterval: TimeInterval = 1,
         messageAcceptFilter: (@Sendable (ChannelMessage) -> Bool)? = nil,
         maxToolCallsPerIteration: Int = 100,
-        supportsVision: Bool = true
+        supportsVision: Bool = true,
+        supportsDocuments: Bool = true
     ) {
         self.role = role
         self.llmConfig = llmConfig
@@ -62,5 +66,6 @@ struct AgentConfiguration: Sendable {
         self.messageAcceptFilter = messageAcceptFilter
         self.maxToolCallsPerIteration = maxToolCallsPerIteration
         self.supportsVision = supportsVision
+        self.supportsDocuments = supportsDocuments
     }
 }

@@ -466,16 +466,17 @@ public actor AgentActor {
         let assembled = AttachmentInjection.assemble(
             attachments,
             modelSupportsVision: configuration.supportsVision,
+            modelSupportsDocuments: configuration.supportsDocuments,
             urlProvider: toolContext.attachmentURLProvider
         )
         var body = text
         if !assembled.referenceLines.isEmpty {
             body += "\n" + assembled.referenceLines.joined(separator: "\n")
         }
-        if assembled.images.isEmpty {
+        if assembled.images.isEmpty && assembled.documents.isEmpty {
             conversationHistory.append(.user(body))
         } else {
-            conversationHistory.append(.user(body, images: assembled.images))
+            conversationHistory.append(.user(body, images: assembled.images, documents: assembled.documents))
         }
         hasUnprocessedInput = true
         pushLiveContext()
@@ -3108,8 +3109,9 @@ public actor AgentActor {
             }
         }
 
-        // Collect all images across pending messages
+        // Collect all images + documents across pending messages
         var allImages: [LLMImageContent] = []
+        var allDocuments: [LLMDocumentContent] = []
         var allTextParts: [String] = []
 
         for message in pendingChannelMessages {
@@ -3132,9 +3134,11 @@ public actor AgentActor {
             let assembled = AttachmentInjection.assemble(
                 message.attachments,
                 modelSupportsVision: configuration.supportsVision,
+                modelSupportsDocuments: configuration.supportsDocuments,
                 urlProvider: toolContext.attachmentURLProvider
             )
             allImages.append(contentsOf: assembled.images)
+            allDocuments.append(contentsOf: assembled.documents)
             allTextParts.append(([formatted] + assembled.referenceLines).joined(separator: "\n"))
         }
         // Signal the runtime which user messages are being incorporated this turn, so their
@@ -3162,15 +3166,16 @@ public actor AgentActor {
             let assembled = AttachmentInjection.assemble(
                 uniqueAttachments,
                 modelSupportsVision: configuration.supportsVision,
+                modelSupportsDocuments: configuration.supportsDocuments,
                 urlProvider: toolContext.attachmentURLProvider
             )
             allImages.append(contentsOf: assembled.images)
+            allDocuments.append(contentsOf: assembled.documents)
             allTextParts.append((["[Staged for this turn via attach_file]"] + assembled.referenceLines).joined(separator: "\n"))
             pendingStagedAttachments.removeAll()
         }
 
         let combinedText = allTextParts.joined(separator: "\n\n")
-        let images: [LLMImageContent]? = allImages.isEmpty ? nil : allImages
 
         // If the last history entry is already a user message (e.g. a prior LLM call failed
         // before producing an assistant response), merge into it to maintain the strict
@@ -3179,17 +3184,23 @@ public actor AgentActor {
            conversationHistory[lastIndex].role == .user,
            case .text(let existingText) = conversationHistory[lastIndex].content {
             let merged = existingText + "\n\n" + combinedText
-            // Combine images from both the existing message and new messages
-            let existingImages = conversationHistory[lastIndex].images
-            let mergedImages: [LLMImageContent]? = {
-                let combined = (existingImages ?? []) + (images ?? [])
-                return combined.isEmpty ? nil : combined
-            }()
-            conversationHistory[lastIndex] = mergedImages.map { .user(merged, images: $0) } ?? .user(merged)
+            // Combine images + documents from both the existing message and the new ones.
+            let mergedImages = (conversationHistory[lastIndex].images ?? []) + allImages
+            let mergedDocuments = (conversationHistory[lastIndex].documents ?? []) + allDocuments
+            conversationHistory[lastIndex] = Self.makeUserMessage(merged, images: mergedImages, documents: mergedDocuments)
         } else {
-            conversationHistory.append(images.map { .user(combinedText, images: $0) } ?? .user(combinedText))
+            conversationHistory.append(Self.makeUserMessage(combinedText, images: allImages, documents: allDocuments))
         }
         pushLiveContext()
+    }
+
+    /// Builds a user message, attaching image/document content only when present so a plain
+    /// message stays plain (some providers reject empty media arrays).
+    static func makeUserMessage(_ text: String, images: [LLMImageContent], documents: [LLMDocumentContent]) -> LLMMessage {
+        if images.isEmpty && documents.isEmpty {
+            return .user(text)
+        }
+        return .user(text, images: images, documents: documents)
     }
 
     /// Formats tool parameter definitions from a JSON Schema parameters dictionary into a human-readable string.

@@ -26,13 +26,14 @@ actor StagedAttachmentBuffer {
 /// vision-capability gate — live in exactly one place. Used by `AgentActor`, `SecurityEvaluator`,
 /// and `EvaluationRunner` so all three loops treat images identically.
 enum AttachmentInjection {
-    /// The result of assembling attachments: image content blocks to attach to a `.user` turn,
-    /// and reference lines to append to that turn's text.
+    /// The result of assembling attachments: image + document content blocks to attach to a
+    /// `.user` turn, and reference lines to append to that turn's text.
     struct Assembled {
         var images: [LLMImageContent]
+        var documents: [LLMDocumentContent]
         var referenceLines: [String]
 
-        var isEmpty: Bool { images.isEmpty && referenceLines.isEmpty }
+        var isEmpty: Bool { images.isEmpty && documents.isEmpty && referenceLines.isEmpty }
     }
 
     /// Builds image blocks + reference lines for `attachments`.
@@ -52,28 +53,33 @@ enum AttachmentInjection {
     static func assemble(
         _ attachments: [Attachment],
         modelSupportsVision: Bool,
+        modelSupportsDocuments: Bool = false,
         maxLongEdge: Int? = ImageDownscaler.defaultMaxLongEdge,
         urlProvider: (UUID, String) -> URL?
     ) -> Assembled {
         var images: [LLMImageContent] = []
+        var documents: [LLMDocumentContent] = []
         var referenceLines: [String] = []
 
         for attachment in attachments {
-            var imageInjected = false
+            var mediaInjected = false
             if modelSupportsVision, attachment.isImage, let data = attachment.data {
                 let resized = ImageDownscaler.downscale(data, maxLongEdge: maxLongEdge, sourceMimeType: attachment.mimeType)
                 if ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) {
                     images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
-                    imageInjected = true
+                    mediaInjected = true
                 }
+            } else if modelSupportsDocuments, attachment.isPDF, let data = attachment.data {
+                documents.append(LLMDocumentContent(data: data, mimeType: attachment.mimeType, filename: attachment.filename))
+                mediaInjected = true
             }
 
-            // Reference line for EVERY attachment — the forwarding handle stays even when the
-            // image is also shown inline; it's how the model quotes an id or reads non-image bytes.
+            // Reference line for EVERY attachment — the forwarding handle stays even when the media
+            // is also shown inline; it's how the model quotes an id or reads non-image bytes.
             let url = urlProvider(attachment.id, attachment.filename)
             let urlString = url.map { "file://" + $0.path(percentEncoded: false) } ?? "#"
             var line = "[\(attachment.filename)](\(urlString)) \(attachment.mimeType) · \(attachment.formattedSize) · id=\(attachment.id.uuidString)"
-            if attachment.isImage && !imageInjected {
+            if attachment.isImage && !mediaInjected {
                 line += modelSupportsVision
                     ? "  (image not shown — unsupported format; use file_read if it has text)"
                     : "  (image not shown — the assigned model is not vision-capable)"
@@ -81,6 +87,6 @@ enum AttachmentInjection {
             referenceLines.append(line)
         }
 
-        return Assembled(images: images, referenceLines: referenceLines)
+        return Assembled(images: images, documents: documents, referenceLines: referenceLines)
     }
 }

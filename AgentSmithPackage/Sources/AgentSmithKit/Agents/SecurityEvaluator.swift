@@ -235,6 +235,8 @@ actor SecurityEvaluator {
     /// Whether the Security Agent's own model can process images. Gates image injection when it
     /// pulls an attachment via `attach_file`.
     private let supportsVision: Bool
+    /// Whether the Security Agent's own model can process documents (PDFs). Gates document injection.
+    private let supportsDocuments: Bool
     /// Durably ingests a file path into the attachment store so the Security Agent can view it.
     /// Nil disables `attach_file` for the Security Agent (only `file_read` is offered).
     private let ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))?
@@ -251,6 +253,7 @@ actor SecurityEvaluator {
         providerType: String = "",
         sessionID: UUID? = nil,
         supportsVision: Bool = false,
+        supportsDocuments: Bool = false,
         ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))? = nil,
         attachmentURLProvider: (@Sendable (UUID, String) -> URL?)? = nil,
         // Forgetting to wire these causes Security Agent to misclassify failed-then-retried calls as
@@ -276,6 +279,7 @@ actor SecurityEvaluator {
         self.providerType = providerType
         self.sessionID = sessionID
         self.supportsVision = supportsVision
+        self.supportsDocuments = supportsDocuments
         self.ingestAttachmentFile = ingestAttachmentFile
         self.attachmentURLProvider = attachmentURLProvider
         self.hasToolSucceeded = hasToolSucceeded
@@ -477,13 +481,18 @@ actor SecurityEvaluator {
                     let assembled = AttachmentInjection.assemble(
                         staged,
                         modelSupportsVision: supportsVision,
+                        modelSupportsDocuments: supportsDocuments,
                         urlProvider: urlProvider
                     )
                     let header = "[Attached for review via attach_file]"
                     let body = assembled.referenceLines.isEmpty
                         ? header
                         : ([header] + assembled.referenceLines).joined(separator: "\n")
-                    conversationMessages.append(assembled.images.isEmpty ? .user(body) : .user(body, images: assembled.images))
+                    if assembled.images.isEmpty && assembled.documents.isEmpty {
+                        conversationMessages.append(.user(body))
+                    } else {
+                        conversationMessages.append(.user(body, images: assembled.images, documents: assembled.documents))
+                    }
                 }
             }
 

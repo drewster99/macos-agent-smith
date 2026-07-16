@@ -582,6 +582,7 @@ final class AppViewModel {
         var configurations: [AgentRole: ModelConfiguration] = [:]
         var apiTypes: [AgentRole: ProviderAPIType] = [:]
         var visionByRole: [AgentRole: Bool] = [:]
+        var documentsByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
             guard let configID = agentAssignments[role] else { continue }
             do {
@@ -595,7 +596,9 @@ final class AppViewModel {
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }
-                visionByRole[role] = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities.vision ?? true
+                let capabilities = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities
+                visionByRole[role] = capabilities?.vision ?? true
+                documentsByRole[role] = capabilities?.pdfInput ?? true
             }
         }
 
@@ -647,6 +650,7 @@ final class AppViewModel {
             configurations: configurations,
             providerAPITypes: apiTypes,
             supportsVisionByRole: visionByRole,
+            supportsDocumentsByRole: documentsByRole,
             agentTuning: tuning,
             semanticSearchEngine: engine,
             usageStore: shared.usageStore,
@@ -1378,6 +1382,7 @@ final class AppViewModel {
         var configurations: [AgentRole: ModelConfiguration] = [:]
         var apiTypes: [AgentRole: ProviderAPIType] = [:]
         var visionByRole: [AgentRole: Bool] = [:]
+        var documentsByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
             guard let configID = agentAssignments[role] else { continue }
             do {
@@ -1391,12 +1396,14 @@ final class AppViewModel {
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }
-                visionByRole[role] = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities.vision ?? true
+                let capabilities = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities
+                visionByRole[role] = capabilities?.vision ?? true
+                documentsByRole[role] = capabilities?.pdfInput ?? true
             }
         }
         await pushValidatorModel(to: runtime)
         guard !providers.isEmpty else { return }
-        await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes, supportsVisionByRole: visionByRole)
+        await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes, supportsVisionByRole: visionByRole, supportsDocumentsByRole: documentsByRole)
         logger.info("Refreshed LLM providers for roles: \(providers.keys.map(\.displayName).sorted().joined(separator: ", "), privacy: .public)")
     }
 
@@ -1413,8 +1420,8 @@ final class AppViewModel {
         do {
             let provider = try shared.llmKit.makeProvider(for: validatorConfigID)
             let apiType = shared.llmKit.providers.first(where: { $0.id == validatorConfig.providerID })?.apiType
-            let vision = shared.llmKit.modelInfo(providerID: validatorConfig.providerID, modelID: validatorConfig.modelID)?.capabilities.vision ?? true
-            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: vision)
+            let capabilities = shared.llmKit.modelInfo(providerID: validatorConfig.providerID, modelID: validatorConfig.modelID)?.capabilities
+            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: capabilities?.vision ?? true, supportsDocuments: capabilities?.pdfInput ?? true)
         } catch {
             logger.error("Failed to build validator provider (\(error.localizedDescription, privacy: .public)); validation falls back to the Summarizer model")
             await runtime.setValidatorModel(provider: nil, configuration: nil, apiType: nil)

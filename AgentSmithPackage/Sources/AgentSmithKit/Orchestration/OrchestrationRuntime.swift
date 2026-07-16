@@ -92,6 +92,8 @@ public actor OrchestrationRuntime {
     /// `ModelCapabilities.vision`). Gates image injection so a non-vision model is never sent
     /// image bytes. Threaded in from the app at start and on live model changes.
     var supportsVisionByRole: [AgentRole: Bool]
+    /// Whether each role's model can process documents (PDFs) natively (`ModelCapabilities.pdfInput`).
+    var supportsDocumentsByRole: [AgentRole: Bool]
     private var agentTuning: [AgentRole: AgentTuningConfig]
     /// Whether Smith should automatically run the next pending task after completing one.
     /// Mutable so the user can toggle it at runtime via `setAutoAdvance(_:)`.
@@ -335,6 +337,8 @@ public actor OrchestrationRuntime {
     /// Whether the dedicated validator model can process images. Nil when no dedicated validator
     /// is configured (then `.validator` runs inherit the Summarizer's vision capability).
     var validatorSupportsVision: Bool?
+    /// Whether the dedicated validator model can process documents. Nil → inherit the Summarizer's.
+    var validatorSupportsDocuments: Bool?
     /// Shared Security Agent evaluator for acceptance validators' read-only evidence calls. The
     /// evaluator auto-approves them (no LLM), so this is a central choke point we can tighten
     /// later — not a gate that blocks validation today. Created at `start()` when a Security Agent
@@ -1180,6 +1184,7 @@ public actor OrchestrationRuntime {
         configurations: [AgentRole: ModelConfiguration],
         providerAPITypes: [AgentRole: ProviderAPIType] = [:],
         supportsVisionByRole: [AgentRole: Bool] = [:],
+        supportsDocumentsByRole: [AgentRole: Bool] = [:],
         agentTuning: [AgentRole: AgentTuningConfig] = [:],
         semanticSearchEngine: SemanticSearchEngine,
         usageStore: UsageStore,
@@ -1195,6 +1200,7 @@ public actor OrchestrationRuntime {
         self.llmConfigs = configurations
         self.providerAPITypes = providerAPITypes
         self.supportsVisionByRole = supportsVisionByRole
+        self.supportsDocumentsByRole = supportsDocumentsByRole
         self.agentTuning = agentTuning
         self.autoAdvanceEnabled = autoAdvanceEnabled
         self.autoRunInterruptedTasks = autoRunInterruptedTasks
@@ -1290,12 +1296,14 @@ public actor OrchestrationRuntime {
         providers: [AgentRole: any LLMProvider],
         configurations: [AgentRole: ModelConfiguration],
         apiTypes: [AgentRole: ProviderAPIType],
-        supportsVisionByRole: [AgentRole: Bool] = [:]
+        supportsVisionByRole: [AgentRole: Bool] = [:],
+        supportsDocumentsByRole: [AgentRole: Bool] = [:]
     ) {
         for (role, provider) in providers { llmProviders[role] = provider }
         for (role, config) in configurations { llmConfigs[role] = config }
         for (role, apiType) in apiTypes { providerAPITypes[role] = apiType }
         for (role, vision) in supportsVisionByRole { self.supportsVisionByRole[role] = vision }
+        for (role, docs) in supportsDocumentsByRole { self.supportsDocumentsByRole[role] = docs }
         // New configuration is grounds to retry: close a breaker opened by
         // missing-provider spawn failures (or by scoping failures against a backend the
         // user may just have fixed).
@@ -1801,7 +1809,8 @@ public actor OrchestrationRuntime {
                 messageDebounceInterval: agentTuning[.smith]?.messageDebounceInterval ?? 1,
                 messageAcceptFilter: smithMessageFilter,
                 maxToolCallsPerIteration: agentTuning[.smith]?.maxToolCalls ?? 100,
-                supportsVision: supportsVisionByRole[.smith] ?? true
+                supportsVision: supportsVisionByRole[.smith] ?? true,
+                supportsDocuments: supportsDocumentsByRole[.smith] ?? true
             ),
             provider: provider,
             tools: SmithBehavior.tools(validatorCatalogSummary: validatorCatalogSummary()),
@@ -2812,6 +2821,7 @@ public actor OrchestrationRuntime {
             providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
             sessionID: currentSessionID,
             supportsVision: supportsVisionByRole[.securityAgent] ?? true,
+            supportsDocuments: supportsDocumentsByRole[.securityAgent] ?? true,
             ingestAttachmentFile: { [weak self] path in
                 guard let registry = await self?.attachmentRegistry else {
                     return (nil, "Attachment registry not configured for this runtime.")
@@ -3058,7 +3068,8 @@ public actor OrchestrationRuntime {
                 messageDebounceInterval: agentTuning[.brown]?.messageDebounceInterval ?? 1,
                 messageAcceptFilter: brownMessageFilter,
                 maxToolCallsPerIteration: agentTuning[.brown]?.maxToolCalls ?? 100,
-                supportsVision: supportsVisionByRole[.brown] ?? true
+                supportsVision: supportsVisionByRole[.brown] ?? true,
+                supportsDocuments: supportsDocumentsByRole[.brown] ?? true
             ),
             provider: brownProvider,
             tools: BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot),
@@ -3280,12 +3291,14 @@ public actor OrchestrationRuntime {
         provider: (any LLMProvider)?,
         configuration: ModelConfiguration?,
         apiType: ProviderAPIType?,
-        supportsVision: Bool? = nil
+        supportsVision: Bool? = nil,
+        supportsDocuments: Bool? = nil
     ) {
         validatorProvider = provider
         validatorConfiguration = configuration
         validatorProviderAPIType = apiType
         validatorSupportsVision = supportsVision
+        validatorSupportsDocuments = supportsDocuments
     }
 
     /// The workspace (temp + evidence directories) for a task.

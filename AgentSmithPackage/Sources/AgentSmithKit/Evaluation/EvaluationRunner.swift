@@ -71,6 +71,7 @@ public enum EvaluationRunner {
         toolContext: ToolContext,
         temperature: Double? = nil,
         modelSupportsVision: Bool = false,
+        modelSupportsDocuments: Bool = false,
         drainStagedAttachments: (@Sendable () async -> [Attachment])? = nil,
         onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil,
         securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)? = nil
@@ -151,13 +152,18 @@ public enum EvaluationRunner {
                         let assembled = AttachmentInjection.assemble(
                             staged,
                             modelSupportsVision: modelSupportsVision,
+                            modelSupportsDocuments: modelSupportsDocuments,
                             urlProvider: toolContext.attachmentURLProvider
                         )
                         let header = "[Attached for review via attach_file]"
                         let body = assembled.referenceLines.isEmpty
                             ? header
                             : ([header] + assembled.referenceLines).joined(separator: "\n")
-                        messages.append(assembled.images.isEmpty ? .user(body) : .user(body, images: assembled.images))
+                        if assembled.images.isEmpty && assembled.documents.isEmpty {
+                            messages.append(.user(body))
+                        } else {
+                            messages.append(.user(body, images: assembled.images, documents: assembled.documents))
+                        }
                     }
                 }
                 continue

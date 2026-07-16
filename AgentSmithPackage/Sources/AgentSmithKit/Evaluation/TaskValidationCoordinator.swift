@@ -668,6 +668,7 @@ extension OrchestrationRuntime {
         let usageRole = resolved.usageRole
         let providerTypeRawValue = resolved.providerTypeRaw
         let validatorSupportsVision = resolved.supportsVision
+        let validatorSupportsDocuments = resolved.supportsDocuments
 
         // The evidence is delivered as a labeled JSON object and the criterion lives in the
         // system prompt. Keeping the two apart is deliberate: when both shared one undelimited
@@ -780,6 +781,7 @@ extension OrchestrationRuntime {
             toolContext: evaluationContext,
             temperature: 0,
             modelSupportsVision: validatorSupportsVision,
+            modelSupportsDocuments: validatorSupportsDocuments,
             drainStagedAttachments: { await stagingBuffer.drain() },
             onResponse: { response, latencyMs in
                 await UsageRecorder.record(
@@ -939,24 +941,24 @@ extension OrchestrationRuntime {
     /// once the app configures one, and otherwise falls back to the Summarizer's model (where
     /// acceptance validation has always run). `.smith`/`.summarizer` return nil only if that
     /// role itself was never configured.
-    private func providerForModelSlot(_ slot: EvaluatorDefinition.ModelSlot) -> (provider: any LLMProvider, config: ModelConfiguration, usageRole: AgentRole, providerTypeRaw: String, supportsVision: Bool)? {
+    private func providerForModelSlot(_ slot: EvaluatorDefinition.ModelSlot) -> (provider: any LLMProvider, config: ModelConfiguration, usageRole: AgentRole, providerTypeRaw: String, supportsVision: Bool, supportsDocuments: Bool)? {
         switch slot {
         case .smith:
             guard let provider = llmProviders[.smith], let config = llmConfigs[.smith] else { return nil }
-            return (provider, config, .smith, providerAPITypes[.smith]?.rawValue ?? "", supportsVisionByRole[.smith] ?? true)
+            return (provider, config, .smith, providerAPITypes[.smith]?.rawValue ?? "", supportsVisionByRole[.smith] ?? true, supportsDocumentsByRole[.smith] ?? true)
         case .summarizer:
             guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true)
+            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? true)
         case .validator:
             // Attributed to .summarizer for usage until AgentRole gains a validator case (the
             // decode shims are in; the dictionary-key migration is deliberately staged).
             if let provider = validatorProvider, let config = validatorConfiguration {
-                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "", validatorSupportsVision ?? (supportsVisionByRole[.summarizer] ?? true))
+                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "", validatorSupportsVision ?? (supportsVisionByRole[.summarizer] ?? true), validatorSupportsDocuments ?? (supportsDocumentsByRole[.summarizer] ?? true))
             }
             // No dedicated validator model configured: fall back to the Summarizer's model,
             // which is where acceptance validation has always run.
             guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true)
+            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? true)
         }
     }
 
