@@ -457,7 +457,7 @@ actor SecurityEvaluator {
                 conversationMessages.append(.assistant(from: response))
                 // Execute each file_read / attach_file and append tool results, timing each one.
                 for call in response.toolCalls {
-                    await postSecurityAgentFileReadToChannel(call)
+                    await postSecurityAgentToolCallToChannel(call)
                     let execStart = Date()
                     let result: String
                     if call.name == "attach_file" {
@@ -1497,7 +1497,7 @@ actor SecurityEvaluator {
     }
 
     /// Posts a tool_request message to the channel so Security Agent's file reads appear in the transcript.
-    private func postSecurityAgentFileReadToChannel(_ call: LLMToolCall) async {
+    private func postSecurityAgentToolCallToChannel(_ call: LLMToolCall) async {
         let path: String = {
             guard let data = call.arguments.data(using: .utf8),
                   let dict = try? JSONDecoder().decode([String: AnyCodable].self, from: data),
@@ -1506,16 +1506,17 @@ actor SecurityEvaluator {
             }
             return p
         }()
+        let toolDescription = call.name == "attach_file" ? Self.attachFileToolDef.description : Self.fileReadToolDef.description
 
         await postToChannel(ChannelMessage(
             sender: .agent(.securityAgent),
-            content: "file_read: \(path)",
+            content: "\(call.name): \(path)",
             metadata: [
                 "messageKind": .string("tool_request"),
                 "requestID": .string(call.id),
-                "tool": .string("file_read"),
+                "tool": .string(call.name),
                 "params": .string(call.arguments),
-                "toolDescription": .string(Self.fileReadToolDef.description),
+                "toolDescription": .string(toolDescription),
                 "toolParameters": .string("")
             ]
         ))
