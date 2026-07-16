@@ -53,4 +53,46 @@ struct ForwardCompatibleDecodingTests {
         #expect(decoded.status == .interrupted)
         #expect(decoded.title == "t")
     }
+
+    @Test("Unknown result-item kind decodes to a text placeholder, not a throw")
+    func unknownResultItemKindFallsBack() throws {
+        // A future build could add a Content kind (e.g. "chart"); an OLDER build reading it must
+        // NOT throw, or the all-or-nothing array decode would take down the whole task file.
+        let json = "{\"content\":{\"kind\":\"chart\",\"payload\":42},\"refs\":[\"c1\"]}"
+        let decoded = try JSONDecoder().decode(ResultItem.self, from: Data(json.utf8))
+        guard case .text(let placeholder) = decoded.content else {
+            Issue.record("expected a text placeholder for an unknown kind")
+            return
+        }
+        #expect(placeholder.contains("chart"))
+        #expect(decoded.refs == ["c1"])
+    }
+
+    @Test("A task carrying an unknown result-item kind decodes without failing the whole task")
+    func taskWithUnknownResultItemKindDecodes() throws {
+        var task = AgentTask(title: "t", description: "d")
+        task.resultItems = [ResultItem(content: .text("keep me"), refs: [])]
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task)) as! [String: Any]
+        json["resultItems"] = [["content": ["kind": "someFutureKind", "extra": true], "refs": []]]
+        let data = try JSONSerialization.data(withJSONObject: json)
+        let decoded = try JSONDecoder().decode(AgentTask.self, from: data)
+        #expect(decoded.title == "t")
+        #expect(decoded.resultItems.count == 1)
+        if case .text = decoded.resultItems[0].content {} else {
+            Issue.record("unknown result-item kind should degrade to text")
+        }
+    }
+
+    @Test("Known result-item kinds still round-trip exactly")
+    func knownResultItemKindsRoundTrip() throws {
+        let attachment = Attachment(filename: "a.png", mimeType: "image/png", byteCount: 10)
+        let items: [ResultItem] = [
+            ResultItem(content: .text("hi"), refs: ["c1"]),
+            ResultItem(content: .attachment(attachment), refs: []),
+            ResultItem(content: .attachmentGroup(attachments: [attachment], description: "grp"), refs: ["c2", "c3"])
+        ]
+        let data = try JSONEncoder().encode(items)
+        let decoded = try JSONDecoder().decode([ResultItem].self, from: data)
+        #expect(decoded == items)
+    }
 }

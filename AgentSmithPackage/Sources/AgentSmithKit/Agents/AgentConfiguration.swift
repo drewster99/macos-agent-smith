@@ -36,7 +36,10 @@ struct AgentConfiguration: Sendable {
     /// capability keeps the historical always-inject behavior.
     private(set) var supportsVision: Bool
     /// Whether this agent's model can process documents (e.g. PDFs) natively. From the model
-    /// catalog's `ModelCapabilities.pdfInput`. Defaults true (fail-open), same as `supportsVision`.
+    /// catalog's `ModelCapabilities.pdfInput`. Defaults FALSE (fail-CLOSED) — unlike `supportsVision`.
+    /// Native PDF support is rare and a wrong document block is a hard API 400 that kills the turn,
+    /// whereas a NON-injected PDF degrades gracefully (the agent `file_read`s its extracted text).
+    /// So inject a PDF as a document block only when the model is KNOWN to support it.
     private(set) var supportsDocuments: Bool
 
     public init(
@@ -52,7 +55,7 @@ struct AgentConfiguration: Sendable {
         messageAcceptFilter: (@Sendable (ChannelMessage) -> Bool)? = nil,
         maxToolCallsPerIteration: Int = 100,
         supportsVision: Bool = true,
-        supportsDocuments: Bool = true
+        supportsDocuments: Bool = false
     ) {
         self.role = role
         self.llmConfig = llmConfig

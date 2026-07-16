@@ -1810,7 +1810,7 @@ public actor OrchestrationRuntime {
                 messageAcceptFilter: smithMessageFilter,
                 maxToolCallsPerIteration: agentTuning[.smith]?.maxToolCalls ?? 100,
                 supportsVision: supportsVisionByRole[.smith] ?? true,
-                supportsDocuments: supportsDocumentsByRole[.smith] ?? true
+                supportsDocuments: supportsDocumentsByRole[.smith] ?? false
             ),
             provider: provider,
             tools: SmithBehavior.tools(validatorCatalogSummary: validatorCatalogSummary()),
@@ -2821,7 +2821,7 @@ public actor OrchestrationRuntime {
             providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
             sessionID: currentSessionID,
             supportsVision: supportsVisionByRole[.securityAgent] ?? true,
-            supportsDocuments: supportsDocumentsByRole[.securityAgent] ?? true,
+            supportsDocuments: supportsDocumentsByRole[.securityAgent] ?? false,
             ingestAttachmentFile: { [weak self] path in
                 guard let registry = await self?.attachmentRegistry else {
                     return (nil, "Attachment registry not configured for this runtime.")
@@ -3069,7 +3069,7 @@ public actor OrchestrationRuntime {
                 messageAcceptFilter: brownMessageFilter,
                 maxToolCallsPerIteration: agentTuning[.brown]?.maxToolCalls ?? 100,
                 supportsVision: supportsVisionByRole[.brown] ?? true,
-                supportsDocuments: supportsDocumentsByRole[.brown] ?? true
+                supportsDocuments: supportsDocumentsByRole[.brown] ?? false
             ),
             provider: brownProvider,
             tools: BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot),

@@ -26,6 +26,12 @@ actor StagedAttachmentBuffer {
 /// vision-capability gate — live in exactly one place. Used by `AgentActor`, `SecurityEvaluator`,
 /// and `EvaluationRunner` so all three loops treat images identically.
 enum AttachmentInjection {
+    /// Raw-byte ceiling for native document injection. A PDF larger than this is NOT sent as a
+    /// document block (base64 expansion + provider size limits would risk a hard API 400 / token
+    /// blowup) — it degrades to its reference line so the agent reads the extracted text via
+    /// `file_read`. Conservative across providers (Anthropic caps PDFs at 32 MB).
+    static let defaultMaxDocumentBytes = 20 * 1024 * 1024
+
     /// The result of assembling attachments: image + document content blocks to attach to a
     /// `.user` turn, and reference lines to append to that turn's text.
     struct Assembled {
@@ -55,6 +61,7 @@ enum AttachmentInjection {
         modelSupportsVision: Bool,
         modelSupportsDocuments: Bool = false,
         maxLongEdge: Int? = ImageDownscaler.defaultMaxLongEdge,
+        maxDocumentBytes: Int = defaultMaxDocumentBytes,
         urlProvider: (UUID, String) -> URL?
     ) -> Assembled {
         var images: [LLMImageContent] = []
@@ -63,13 +70,16 @@ enum AttachmentInjection {
 
         for attachment in attachments {
             var mediaInjected = false
-            if modelSupportsVision, attachment.isImage, let data = attachment.data {
+            // `!data.isEmpty` guards against a 0-byte / unreadable attachment becoming an empty
+            // media block, which providers reject outright.
+            if modelSupportsVision, attachment.isImage, let data = attachment.data, !data.isEmpty {
                 let resized = ImageDownscaler.downscale(data, maxLongEdge: maxLongEdge, sourceMimeType: attachment.mimeType)
                 if ImageDownscaler.isProviderInjectable(mimeType: resized.mimeType) {
                     images.append(LLMImageContent(data: resized.data, mimeType: resized.mimeType))
                     mediaInjected = true
                 }
-            } else if modelSupportsDocuments, attachment.isPDF, let data = attachment.data {
+            } else if modelSupportsDocuments, attachment.isPDF, let data = attachment.data,
+                      !data.isEmpty, data.count <= maxDocumentBytes {
                 documents.append(LLMDocumentContent(data: data, mimeType: attachment.mimeType, filename: attachment.filename))
                 mediaInjected = true
             }

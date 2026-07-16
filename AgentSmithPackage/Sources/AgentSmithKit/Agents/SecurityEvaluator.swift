@@ -170,12 +170,16 @@ actor SecurityEvaluator {
     private var consecutiveEvaluationFailures = 0
     private static let maxConsecutiveFailures = 20
     /// Cap on parse-failure retries within a single evaluation. Each unparseable verdict
-    /// costs one retry; LLM call errors also cost one retry. File_read rounds are NOT
-    /// capped — Security Agent may read as many files as it needs before committing to a verdict;
-    /// the loop ends only on a parsed verdict, parse-retry exhaustion, or task
-    /// cancellation. (A pathological model that never stops reading is bounded only by
-    /// task cancellation — revisit if that ever shows up in practice.)
+    /// costs one retry; LLM call errors also cost one retry. The loop ends on a parsed verdict,
+    /// parse-retry exhaustion, tool-round exhaustion (see `maxToolRounds`), or task cancellation.
     private static let maxRetries = 5
+
+    /// Hard cap on evidence-gathering (file_read / attach_file) rounds within a single evaluation.
+    /// Once hit, subsequent LLM calls are made with NO tools so the model must commit to a verdict,
+    /// bounding a model that would otherwise loop forever — each round appends assistant + tool
+    /// results (and, for attach_file, downscaled image bytes), so an unbounded loop grows context
+    /// and token spend without end. `EvaluationRunner` bounds the identical pattern; match it here.
+    private static let maxToolRounds = 16
 
     /// Output-token floors (a minimum, not a cap — the configured Security Agent `max_tokens` still wins
     /// when larger). A per-call verdict is short; a per-task scoping pass emits an allow/block
@@ -418,13 +422,16 @@ actor SecurityEvaluator {
 
         let startTime = Date()
         var retryCount = 0
+        var toolRounds = 0
         var lastError: Error?
-        // Only parse-failure retries bound this loop. A file_read round (the model
-        // returned tool_calls) does NOT consume the retry budget and is not otherwise
-        // capped — Security Agent reads as many files as it needs, then commits to a verdict.
+        // Two independent bounds: parse-failure retries (`maxRetries`) and evidence-gathering
+        // rounds (`maxToolRounds`). Once tool rounds are exhausted the model is offered NO tools,
+        // forcing it to commit to a verdict, so a model that would loop on file_read/attach_file
+        // forever can't.
         while retryCount < Self.maxRetries {
             let response: LLMResponse
             let callLatencyMs: Int
+            let offerTools = toolRounds < Self.maxToolRounds
             do {
                 let callStart = Date()
                 // Floor the output budget so a small configured Security Agent max_tokens can't starve
@@ -433,7 +440,7 @@ actor SecurityEvaluator {
                 // cap — an earlier hard 200-token cap here collided with extended thinking.
                 response = try await provider.send(
                     messages: conversationMessages,
-                    tools: evalTools,
+                    tools: offerTools ? evalTools : [],
                     overrides: LLMCallOverrides(maxOutputTokens: max(configuration?.maxTokens ?? 0, Self.perCallEvalMaxTokensFloor))
                 )
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
@@ -453,6 +460,7 @@ actor SecurityEvaluator {
             var turnToolExecutionMs = 0
             var turnToolResultChars = 0
             if !response.toolCalls.isEmpty {
+                toolRounds += 1
                 // `.assistant(from:)` preserves reasoning + provider
                 // continuation (Anthropic thinking signatures / Gemini
                 // thoughtSignatures) so Security Agent's multi-turn file-read loop
@@ -493,6 +501,12 @@ actor SecurityEvaluator {
                     } else {
                         conversationMessages.append(.user(body, images: assembled.images, documents: assembled.documents))
                     }
+                }
+
+                // Evidence budget spent — the next call is made with no tools, so tell the model to
+                // stop gathering and commit to a verdict now.
+                if toolRounds >= Self.maxToolRounds {
+                    conversationMessages.append(.user("You have reached the evidence-gathering limit. Do not request more tools. Respond now with your final verdict (SAFE / WARN / UNSAFE / ABORT)."))
                 }
             }
 

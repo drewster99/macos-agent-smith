@@ -44,7 +44,12 @@ extension ResultItem.Content: Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(Kind.self, forKey: .kind) {
+        // Forward-compatible: a `kind` this build doesn't recognize (written by a NEWER build)
+        // must NOT throw — an array decode is all-or-nothing, so a single unknown item would take
+        // down the whole task list (and the app would quarantine the file). Degrade to a text
+        // placeholder instead, matching the codebase's `AgentRole` / `Status` decoding fallbacks.
+        let kindRaw = try c.decode(String.self, forKey: .kind)
+        switch Kind(rawValue: kindRaw) {
         case .text:
             self = .text(try c.decode(String.self, forKey: .text))
         case .attachment:
@@ -54,6 +59,8 @@ extension ResultItem.Content: Codable {
                 attachments: try c.decode([Attachment].self, forKey: .attachments),
                 description: try c.decodeIfPresent(String.self, forKey: .description)
             )
+        case nil:
+            self = .text("[unsupported result item: \(kindRaw)]")
         }
     }
 

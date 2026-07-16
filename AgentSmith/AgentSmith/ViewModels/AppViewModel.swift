@@ -598,7 +598,7 @@ final class AppViewModel {
                 }
                 let capabilities = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities
                 visionByRole[role] = capabilities?.vision ?? true
-                documentsByRole[role] = capabilities?.pdfInput ?? true
+                documentsByRole[role] = capabilities?.pdfInput ?? false
             }
         }
 
@@ -1398,7 +1398,7 @@ final class AppViewModel {
                 }
                 let capabilities = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)?.capabilities
                 visionByRole[role] = capabilities?.vision ?? true
-                documentsByRole[role] = capabilities?.pdfInput ?? true
+                documentsByRole[role] = capabilities?.pdfInput ?? false
             }
         }
         await pushValidatorModel(to: runtime)
@@ -1421,7 +1421,7 @@ final class AppViewModel {
             let provider = try shared.llmKit.makeProvider(for: validatorConfigID)
             let apiType = shared.llmKit.providers.first(where: { $0.id == validatorConfig.providerID })?.apiType
             let capabilities = shared.llmKit.modelInfo(providerID: validatorConfig.providerID, modelID: validatorConfig.modelID)?.capabilities
-            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: capabilities?.vision ?? true, supportsDocuments: capabilities?.pdfInput ?? true)
+            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: capabilities?.vision ?? true, supportsDocuments: capabilities?.pdfInput ?? false)
         } catch {
             logger.error("Failed to build validator provider (\(error.localizedDescription, privacy: .public)); validation falls back to the Summarizer model")
             await runtime.setValidatorModel(provider: nil, configuration: nil, apiType: nil)

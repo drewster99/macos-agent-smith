@@ -945,20 +945,20 @@ extension OrchestrationRuntime {
         switch slot {
         case .smith:
             guard let provider = llmProviders[.smith], let config = llmConfigs[.smith] else { return nil }
-            return (provider, config, .smith, providerAPITypes[.smith]?.rawValue ?? "", supportsVisionByRole[.smith] ?? true, supportsDocumentsByRole[.smith] ?? true)
+            return (provider, config, .smith, providerAPITypes[.smith]?.rawValue ?? "", supportsVisionByRole[.smith] ?? true, supportsDocumentsByRole[.smith] ?? false)
         case .summarizer:
             guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? true)
+            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? false)
         case .validator:
             // Attributed to .summarizer for usage until AgentRole gains a validator case (the
             // decode shims are in; the dictionary-key migration is deliberately staged).
             if let provider = validatorProvider, let config = validatorConfiguration {
-                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "", validatorSupportsVision ?? (supportsVisionByRole[.summarizer] ?? true), validatorSupportsDocuments ?? (supportsDocumentsByRole[.summarizer] ?? true))
+                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "", validatorSupportsVision ?? (supportsVisionByRole[.summarizer] ?? true), validatorSupportsDocuments ?? (supportsDocumentsByRole[.summarizer] ?? false))
             }
             // No dedicated validator model configured: fall back to the Summarizer's model,
             // which is where acceptance validation has always run.
             guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? true)
+            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? false)
         }
     }
 
