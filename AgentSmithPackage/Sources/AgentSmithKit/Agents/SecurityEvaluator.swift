@@ -199,6 +199,11 @@ actor SecurityEvaluator {
         return tool.definition(for: .securityAgent)
     }()
 
+    private static let attachFileToolDef: LLMToolDefinition = {
+        let tool = AttachFileTool()
+        return tool.definition(for: .securityAgent)
+    }()
+
     /// Evaluation history for inspector display.
     private var history: [EvaluationRecord] = []
     private static let maxHistory = 50
@@ -227,6 +232,15 @@ actor SecurityEvaluator {
     /// Function to check if a tool call has already failed after being approved.
     private let hasToolFailed: @Sendable (String) async -> Bool
 
+    /// Whether the Security Agent's own model can process images. Gates image injection when it
+    /// pulls an attachment via `attach_file`.
+    private let supportsVision: Bool
+    /// Durably ingests a file path into the attachment store so the Security Agent can view it.
+    /// Nil disables `attach_file` for the Security Agent (only `file_read` is offered).
+    private let ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))?
+    /// Resolves an attachment's stable `file://` URL for its reference line.
+    private let attachmentURLProvider: (@Sendable (UUID, String) -> URL?)?
+
     public init(
         provider: any LLMProvider,
         systemPrompt: String,
@@ -236,6 +250,9 @@ actor SecurityEvaluator {
         configuration: ModelConfiguration? = nil,
         providerType: String = "",
         sessionID: UUID? = nil,
+        supportsVision: Bool = false,
+        ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))? = nil,
+        attachmentURLProvider: (@Sendable (UUID, String) -> URL?)? = nil,
         // Forgetting to wire these causes Security Agent to misclassify failed-then-retried calls as
         // duplicates (the original 394bbbc bug). `assertionFailure` surfaces the wiring
         // mistake loudly in debug/tests; a release build degrades to `false` (the neutral
@@ -258,6 +275,9 @@ actor SecurityEvaluator {
         self.configuration = configuration
         self.providerType = providerType
         self.sessionID = sessionID
+        self.supportsVision = supportsVision
+        self.ingestAttachmentFile = ingestAttachmentFile
+        self.attachmentURLProvider = attachmentURLProvider
         self.hasToolSucceeded = hasToolSucceeded
         self.hasToolFailed = hasToolFailed
     }
@@ -385,6 +405,13 @@ actor SecurityEvaluator {
             .user(evalPrompt)
         ]
 
+        // attach_file is offered only when the runtime wired ingest + url resolution. The Security
+        // Agent stages an attachment here; the drain after each tool round injects it next turn so
+        // the agent can actually see an image before ruling on a tool call.
+        let canAttach = ingestAttachmentFile != nil && attachmentURLProvider != nil
+        let evalTools = canAttach ? [Self.fileReadToolDef, Self.attachFileToolDef] : [Self.fileReadToolDef]
+        let stagingBuffer = StagedAttachmentBuffer()
+
         let startTime = Date()
         var retryCount = 0
         var lastError: Error?
@@ -402,7 +429,7 @@ actor SecurityEvaluator {
                 // cap — an earlier hard 200-token cap here collided with extended thinking.
                 response = try await provider.send(
                     messages: conversationMessages,
-                    tools: [Self.fileReadToolDef],
+                    tools: evalTools,
                     overrides: LLMCallOverrides(maxOutputTokens: max(configuration?.maxTokens ?? 0, Self.perCallEvalMaxTokensFloor))
                 )
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
@@ -428,14 +455,35 @@ actor SecurityEvaluator {
                 // keeps thinking continuity. Manual construction silently
                 // broke thinkingBudget > 0 runs and Gemini 2.5.
                 conversationMessages.append(.assistant(from: response))
-                // Execute each file_read and append tool results, timing each one.
+                // Execute each file_read / attach_file and append tool results, timing each one.
                 for call in response.toolCalls {
                     await postSecurityAgentFileReadToChannel(call)
                     let execStart = Date()
-                    let result = executeSecurityAgentFileRead(call)
+                    let result: String
+                    if call.name == "attach_file" {
+                        result = await executeSecurityAgentAttachFile(call, buffer: stagingBuffer)
+                    } else {
+                        result = executeSecurityAgentFileRead(call)
+                    }
                     turnToolExecutionMs += Int(Date().timeIntervalSince(execStart) * 1000)
                     turnToolResultChars += result.count
                     conversationMessages.append(.toolResult(result, callID: call.id))
+                }
+                // Drain anything attach_file staged this round into a user turn so the Security
+                // Agent perceives it next iteration — images as blocks (vision-gated), every
+                // attachment as a reference line.
+                let staged = await stagingBuffer.drain()
+                if !staged.isEmpty, let urlProvider = attachmentURLProvider {
+                    let assembled = AttachmentInjection.assemble(
+                        staged,
+                        modelSupportsVision: supportsVision,
+                        urlProvider: urlProvider
+                    )
+                    let header = "[Attached for review via attach_file]"
+                    let body = assembled.referenceLines.isEmpty
+                        ? header
+                        : ([header] + assembled.referenceLines).joined(separator: "\n")
+                    conversationMessages.append(assembled.images.isEmpty ? .user(body) : .user(body, images: assembled.images))
                 }
             }
 
@@ -1494,6 +1542,38 @@ actor SecurityEvaluator {
 
         // Use the shared read logic (path restriction, content type detection, line-numbered output).
         return FileReadTool.readFileContent(at: path)
+    }
+
+    /// Ingests and stages a file for the Security Agent's next turn (image → inline content,
+    /// otherwise a `file://` reference). Mirrors `AttachFileTool` but runs in the Security Agent's
+    /// custom loop, which has no generic `ToolContext`.
+    private func executeSecurityAgentAttachFile(_ call: LLMToolCall, buffer: StagedAttachmentBuffer) async -> String {
+        guard let ingest = ingestAttachmentFile else {
+            return "Error: attach_file is not available in this evaluation."
+        }
+        let args: [String: AnyCodable]
+        do {
+            args = try call.parsedArguments()
+        } catch {
+            return "Error: Invalid arguments — \(error.localizedDescription)"
+        }
+        guard case .string(let rawPath) = args["path"] else {
+            return "Error: Missing required argument 'path'"
+        }
+        let path = PathNormalization.normalize(rawPath)
+        guard path.hasPrefix("/") else {
+            return "attach_file: path must be absolute (start with /). Got: \(path)"
+        }
+        if let rejection = FileReadTool.checkPathRestriction(path) {
+            return rejection
+        }
+        let (attachment, error) = await ingest(path)
+        guard let attachment else {
+            return "attach_file: couldn't attach \(path): \(error ?? "unknown error")."
+        }
+        await buffer.stage([attachment])
+        let kind = attachment.isImage ? "image (shown inline)" : "file (as a file:// reference)"
+        return "Attached \(attachment.filename) as \(kind) for your next turn."
     }
 
     private static func parseToolParams(_ json: String) -> [String: AnyCodable]? {

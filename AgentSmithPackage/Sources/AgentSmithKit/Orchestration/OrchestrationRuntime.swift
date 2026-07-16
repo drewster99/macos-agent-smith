@@ -2811,6 +2811,17 @@ public actor OrchestrationRuntime {
             configuration: llmConfigs[.securityAgent],
             providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
             sessionID: currentSessionID,
+            supportsVision: supportsVisionByRole[.securityAgent] ?? true,
+            ingestAttachmentFile: { [weak self] path in
+                guard let registry = await self?.attachmentRegistry else {
+                    return (nil, "Attachment registry not configured for this runtime.")
+                }
+                switch await registry.ingestFile(path: path) {
+                case .success(let attachment): return (attachment, nil)
+                case .failure(let err): return (nil, err.description)
+                }
+            },
+            attachmentURLProvider: attachmentURLProviderClosure,
             hasToolSucceeded: { [executionTracker] toolCallID in
                 await executionTracker.hasSucceeded(toolCallID: toolCallID)
             },
