@@ -146,11 +146,17 @@ actor AttachmentRegistry {
         }
 
         let mimeType = Self.mimeType(forPathExtension: url.pathExtension)
+        // Strip passive injection channels (image EXIF/GPS, PDF info dict) before the bytes are
+        // persisted and later sent to a model. Fail-safe: returns the original bytes on any failure.
+        let sanitized = AttachmentSanitizer.sanitize(data, mimeType: mimeType)
+        if sanitized.count != data.count {
+            attachmentRegistryLogger.info("Sanitized \(url.lastPathComponent, privacy: .public): \(data.count) → \(sanitized.count) bytes (stripped metadata).")
+        }
         let attachment = Attachment(
             filename: url.lastPathComponent,
             mimeType: mimeType,
-            byteCount: data.count,
-            data: data
+            byteCount: sanitized.count,
+            data: sanitized
         )
 
         do {
@@ -179,11 +185,15 @@ actor AttachmentRegistry {
             return .failure(.tooLarge(path: filename, size: data.count, max: maxIngestBytes))
         }
 
+        let sanitized = AttachmentSanitizer.sanitize(data, mimeType: mimeType)
+        if sanitized.count != data.count {
+            attachmentRegistryLogger.info("Sanitized \(filename, privacy: .public): \(data.count) → \(sanitized.count) bytes (stripped metadata).")
+        }
         let attachment = Attachment(
             filename: filename,
             mimeType: mimeType,
-            byteCount: data.count,
-            data: data
+            byteCount: sanitized.count,
+            data: sanitized
         )
 
         do {
