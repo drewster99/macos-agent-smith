@@ -50,6 +50,11 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// Attachments produced or referenced as part of the final task result. Set by
     /// `task_complete`. Surfaced to Smith with the awaitingReview banner.
     public var resultAttachments: [Attachment]
+    /// Optional STRUCTURED result: an ordered list of tagged text/attachment/group items
+    /// (`ResultItem`). Additive alongside `result`/`resultAttachments`, which stay canonical —
+    /// empty for tasks that never produced structured items. Lets a validator route evidence by
+    /// criterion (the item `refs`) and pull attachment items into its context.
+    public var resultItems: [ResultItem]
 
     /// The acceptance contract: criteria judged by evaluators when the task enters
     /// `.validating`. Requester-owned (user/Smith/system); the worker never edits these.
@@ -259,6 +264,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         lastEditedAt: Date? = nil,
         descriptionAttachments: [Attachment] = [],
         resultAttachments: [Attachment] = [],
+        resultItems: [ResultItem] = [],
         approvedTools: [String]? = nil,
         userToolOverrides: [String: Bool]? = nil,
         helpRequest: String? = nil,
@@ -290,6 +296,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.lastEditedAt = lastEditedAt
         self.descriptionAttachments = descriptionAttachments
         self.resultAttachments = resultAttachments
+        self.resultItems = resultItems
         self.approvedTools = approvedTools
         self.userToolOverrides = userToolOverrides
         self.helpRequest = helpRequest
@@ -303,7 +310,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID
     }
 
     public init(from decoder: Decoder) throws {
@@ -330,6 +337,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         lastEditedAt = try c.decodeIfPresent(Date.self, forKey: .lastEditedAt)
         descriptionAttachments = try c.decodeIfPresent([Attachment].self, forKey: .descriptionAttachments) ?? []
         resultAttachments = try c.decodeIfPresent([Attachment].self, forKey: .resultAttachments) ?? []
+        resultItems = try c.decodeIfPresent([ResultItem].self, forKey: .resultItems) ?? []
         approvedTools = try c.decodeIfPresent([String].self, forKey: .approvedTools)
         userToolOverrides = try c.decodeIfPresent([String: Bool].self, forKey: .userToolOverrides)
         helpRequest = try c.decodeIfPresent(String.self, forKey: .helpRequest)
@@ -371,6 +379,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         }
         if !resultAttachments.isEmpty {
             try c.encode(resultAttachments, forKey: .resultAttachments)
+        }
+        if !resultItems.isEmpty {
+            try c.encode(resultItems, forKey: .resultItems)
         }
         try c.encodeIfPresent(approvedTools, forKey: .approvedTools)
         try c.encodeIfPresent(userToolOverrides, forKey: .userToolOverrides)
