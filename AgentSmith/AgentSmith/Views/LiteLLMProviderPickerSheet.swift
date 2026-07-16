@@ -73,17 +73,10 @@ struct LiteLLMProviderPickerSheet: View {
             TextField("Filter\u{2026}", text: $searchText)
                 .textFieldStyle(.roundedBorder)
 
+            // Only real litellm_provider values are selectable. "Unmapped" is a state a provider
+            // can arrive in (LiteLLM has no data for it), never one to be chosen — so nil keeps a
+            // single meaning here and seeding stays free to fill it from the preset.
             List(selection: $selection) {
-                // "Not mapped" is offered only where it can actually stick. A built-in whose
-                // preset carries a mapping stores nil as "field absent", which seeding then
-                // refills from the preset — so offering it here would silently revert on the
-                // next launch. Representing "explicitly unmapped" separately from "never set"
-                // needs the mapping to become an enum; until then, don't offer the dead state.
-                if canUnmap {
-                    Text("(not mapped \u{2014} no LiteLLM data)")
-                        .foregroundStyle(.secondary)
-                        .tag(String?.none)
-                }
                 ForEach(filteredNames, id: \.name) { entry in
                     HStack {
                         Text(entry.name).font(.body.monospaced())
@@ -126,14 +119,6 @@ struct LiteLLMProviderPickerSheet: View {
             // ones. Restart is the only action that applies a remapping consistently.
             Text("The mapping was saved. The check marks below update right away, but limits, pricing, and capability flags are rebuilt at launch — restart Agent Smith to apply them.")
         }
-    }
-
-    /// Whether "not mapped" is a state this provider can actually hold. A built-in whose preset
-    /// declares a mapping cannot: seeding treats a stored nil as "field absent" and refills it
-    /// from the preset on the next launch.
-    private var canUnmap: Bool {
-        guard let preset = BuiltInProviders.preset(id: target.provider.id) else { return true }
-        return preset.liteLLMProviderName == nil
     }
 
     private var filteredNames: [(name: String, modelCount: Int)] {
