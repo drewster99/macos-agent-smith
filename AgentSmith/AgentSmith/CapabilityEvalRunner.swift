@@ -12,7 +12,12 @@ import SwiftLLMKit
 /// for contrast — where the probe disagrees, the probe is the evidence and the claim is the claim.
 ///
 /// Usage:
-///   AgentSmith --eval-capabilities [--targets <providerID/modelID,...>] [--effort] [--verbose]
+///   AgentSmith --eval-capabilities [flags]
+///     --list-models                 print every providerID/modelID that --targets accepts, then exit
+///     --targets <provID/model,...>  probe these instead of the default diverse set
+///     --effort                      with --targets, probe every known effort level per model
+///     --no-seed                     probe everything even if the payload already answered it
+///     --verbose                     extra request logging
 ///
 /// With no `--targets`, probes a hand-picked diverse set (see `defaultTargets`): the real
 /// workhorses plus deliberate false-positive cases.
@@ -91,6 +96,10 @@ enum CapabilityEvalRunner {
             }
         }
         print()
+
+        if CommandLine.arguments.contains("--list-models") {
+            listModelsAndExit(kit: kit)
+        }
 
         var profiles: [ModelProfile] = []
         for (index, target) in targets.enumerated() {
@@ -210,8 +219,9 @@ enum CapabilityEvalRunner {
     }
 
     private static func printSummary(_ profiles: [ModelProfile]) {
-        print("\n" + String(repeating: "═", count: 72))
-        print("SUMMARY")
+        print("\n" + String(repeating: "═", count: 100))
+        print("SUMMARY   (yes / no = established · ? = inconclusive · - = not attempted)")
+        print("")
         func cell(_ f: ProbeFinding<Bool>) -> String {
             switch f.status {
             case .established:  return f.value == true ? "yes" : "no"
@@ -219,20 +229,56 @@ enum CapabilityEvalRunner {
             case .notAttempted: return "-"
             }
         }
-        print("  \("model".padding(toLength: 34, withPad: " ", startingAt: 0)) chat tool rtrip vis pdf temp   maxOut")
+        // Full-length column titles, each wide enough for its header and its cells.
+        let columns: [(title: String, cell: (ModelProfile) -> String)] = [
+            ("chat",           { cell($0.chat) }),
+            ("tool-call",      { cell($0.toolCalling) }),
+            ("tool-result",    { cell($0.toolResultRoundTrip) }),
+            ("vision",         { cell($0.vision) }),
+            ("pdf-input",      { cell($0.pdfInput) }),
+            ("temperature",    { cell($0.acceptsTemperature) }),
+            ("max-output",     {
+                $0.maxOutputTokens.value.map(String.init)
+                    ?? ($0.maxOutputTokens.status == .inconclusive ? "?" : "-")
+            })
+        ]
+        let modelWidth = max(40, (profiles.map { $0.modelID.count }.max() ?? 0) + 2)
+
+        func row(_ model: String, _ cells: [String]) -> String {
+            var line = "  " + model.padding(toLength: modelWidth, withPad: " ", startingAt: 0)
+            for (col, value) in zip(columns, cells) {
+                let width = max(col.title.count, 11)
+                line += value.padding(toLength: width, withPad: " ", startingAt: 0) + "  "
+            }
+            return line
+        }
+
+        print(row("model", columns.map(\.title)))
         for p in profiles {
-            let maxOut = p.maxOutputTokens.value.map(String.init) ?? (p.maxOutputTokens.status == .inconclusive ? "?" : "-")
-            print("  \(p.modelID.padding(toLength: 34, withPad: " ", startingAt: 0)) "
-                  + "\(cell(p.chat).padding(toLength: 4, withPad: " ", startingAt: 0)) "
-                  + "\(cell(p.toolCalling).padding(toLength: 4, withPad: " ", startingAt: 0)) "
-                  + "\(cell(p.toolResultRoundTrip).padding(toLength: 5, withPad: " ", startingAt: 0)) "
-                  + "\(cell(p.vision).padding(toLength: 3, withPad: " ", startingAt: 0)) "
-                  + "\(cell(p.pdfInput).padding(toLength: 3, withPad: " ", startingAt: 0)) "
-                  + "\(cell(p.acceptsTemperature).padding(toLength: 6, withPad: " ", startingAt: 0)) "
-                  + maxOut)
+            print(row(p.modelID, columns.map { $0.cell(p) }))
         }
         let calls = profiles.reduce(0) { $0 + $1.callCount }
         print("\n  \(profiles.count) models, \(calls) total API calls")
+    }
+
+    /// Prints every `providerID/modelID` that `--targets` will accept — the exact strings, one
+    /// per line, grouped by provider — then exits. Providers without a key are noted (their models
+    /// can't be probed), and providers that failed to refresh show nothing.
+    private static func listModelsAndExit(kit: LLMKitManager) -> Never {
+        print(String(repeating: "═", count: 72))
+        print("AVAILABLE MODELS  (copy a providerID/modelID into --targets)")
+        for provider in kit.providers.sorted(by: { $0.id < $1.id }) {
+            let models = kit.models(for: provider.id)
+            let hasKey = (kit.apiKey(for: provider.id)?.isEmpty == false)
+            guard !models.isEmpty else { continue }
+            print("\n\(provider.id)   (\(provider.name)\(hasKey ? "" : " — NO API KEY, can't probe"))  \(models.count) models")
+            for model in models.sorted(by: { $0.modelID < $1.modelID }) {
+                print("  \(provider.id)/\(model.modelID)")
+            }
+        }
+        print("\nExample:")
+        print("  --targets builtin.anthropic/claude-sonnet-5,builtin.openai/gpt-5-mini")
+        exit(0)
     }
 
     private static func writeProfiles(_ profiles: [ModelProfile]) {
