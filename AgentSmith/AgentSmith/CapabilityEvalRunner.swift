@@ -18,6 +18,9 @@ import SwiftLLMKit
 ///     --effort                      with --targets, probe every known effort level per model
 ///     --no-seed                     probe everything even if the payload already answered it
 ///     --verbose                     extra request logging
+///   Fetch control (compose with any launch, including a normal GUI launch):
+///     --force-fetch-models          re-fetch every provider now, ignoring the daily gate
+///     --no-fetch-models             never fetch; use the cached catalog
 ///
 /// With no `--targets`, probes a hand-picked diverse set (see `defaultTargets`): the real
 /// workhorses plus deliberate false-positive cases.
@@ -92,28 +95,22 @@ enum CapabilityEvalRunner {
         kit.verboseLogging = true
         kit.load()
 
-        // --list-models just needs the names, so it reads the CACHED catalog that `load()` already
-        // brought in — no forced refresh. A forced refresh here would re-fetch all ~14 providers,
-        // waiting on the slow/unreachable ones (a self-hosted box on a 15s timeout, local servers
-        // that aren't running). It refreshes only if the cache is empty (fresh install).
-        if CommandLine.arguments.contains("--list-models") {
-            if kit.models(for: "builtin.anthropic").isEmpty && kit.models(for: "builtin.openai").isEmpty {
-                print("--- no cached models; refreshing once ---")
-                await kit.refreshAllModels()
-            }
-            listModelsAndExit(kit: kit)
-        }
-
-        print("--- refreshing metadata + all provider models (ungated) ---")
-        await kit.refreshAllModels()
-        if kit.refreshErrors.isEmpty {
-            print("  no refresh errors")
-        } else {
+        // Model-list refresh follows the same policy as a normal launch: gated (once/day) by
+        // default, overridable with --force-fetch-models / --no-fetch-models. This is what stops
+        // every eval run from re-fetching all ~14 providers (and waiting on the unreachable ones).
+        let fetchPolicy = LaunchFetchPolicy.fromArguments
+        print("--- model fetch policy: \(fetchPolicy) ---")
+        await fetchPolicy.apply(to: kit)
+        if !kit.refreshErrors.isEmpty {
             for (name, error) in kit.refreshErrors.sorted(by: { $0.key < $1.key }) {
                 print("  refresh error  \(name): \(error)")
             }
         }
         print()
+
+        if CommandLine.arguments.contains("--list-models") {
+            listModelsAndExit(kit: kit)
+        }
 
         var profiles: [ModelProfile] = []
         for (index, target) in targets.enumerated() {
@@ -140,9 +137,10 @@ enum CapabilityEvalRunner {
 
             // Seed from the PURE vendor payload — fetched directly, not from kit.models, whose
             // entries have LiteLLM's claims enriched in and would let third-party data wear a
-            // `decoded` badge. --no-seed skips this to re-validate probe-vs-payload agreement.
+            // `decoded` badge. --no-seed skips it to re-validate probe-vs-payload agreement;
+            // --no-fetch-models skips it too (a bare seed means "probe everything").
             var seed = ModelProfile(providerID: target.providerID, modelID: target.modelID)
-            if !noSeed {
+            if !noSeed && fetchPolicy != .none {
                 do {
                     let decodedModels = try await ModelFetchService().fetchModels(from: provider, apiKey: key)
                     if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {

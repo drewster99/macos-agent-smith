@@ -589,8 +589,9 @@ final class SharedAppState {
         // Diagnostic: warn if a cache-supporting provider has 0% hit rate.
         await runUsageHealthCheck()
 
-        // Refresh model catalog (YYYYMMDD-gated).
-        await llmKit.refreshIfNeeded()
+        // Refresh model catalog. Gated (once/day) by default; --force-fetch-models /
+        // --no-fetch-models override, so those flags work on a normal GUI launch too.
+        await LaunchFetchPolicy.fromArguments.apply(to: llmKit)
         llmKit.validateConfigurations()
 
         // Build the LiteLLM pricing snapshot once the catalog is current. Keyed by
