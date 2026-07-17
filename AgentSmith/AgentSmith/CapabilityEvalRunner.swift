@@ -17,6 +17,8 @@ import SwiftLLMKit
 ///     --targets <provID/model,...>  probe these instead of the default diverse set
 ///     --effort                      with --targets, probe every known effort level per model
 ///     --no-seed                     probe everything even if the payload already answered it
+///     --discard-non-chat            drop models the probe establishes can't chat (post-probe)
+///     --discard-deprecated          skip models the provider marked deprecated (before probing)
 ///     --verbose                     extra request logging
 ///   Fetch control (compose with any launch, including a normal GUI launch):
 ///     --force-fetch-models          re-fetch every provider now, ignoring the daily gate
@@ -80,14 +82,15 @@ enum CapabilityEvalRunner {
     static func runAndExit() async -> Never {
         let verbose = CommandLine.arguments.contains("--verbose")
         let noSeed = CommandLine.arguments.contains("--no-seed")
-        let targets = parseTargets() ?? defaultTargets
+        let discardNonChat = CommandLine.arguments.contains("--discard-non-chat")
+        let discardDeprecated = CommandLine.arguments.contains("--discard-deprecated")
 
         LLMRequestLogger.logDirectoryName = "AgentSmith-CapabilityEval"
         ModelFetchService.verboseLogging = true
         ModelMetadataService.verboseLogging = true
 
         print("=== Capability evaluation ===")
-        print("targets: \(targets.count)   verbose: \(verbose)")
+        print("verbose: \(verbose)  discard-non-chat: \(discardNonChat)  discard-deprecated: \(discardDeprecated)")
         print("logs: \(NSTemporaryDirectory())AgentSmith-CapabilityEval/\n")
 
         let kit = LLMKitManager(appIdentifier: "com.nuclearcyborg.AgentSmith",
@@ -111,6 +114,11 @@ enum CapabilityEvalRunner {
         if CommandLine.arguments.contains("--list-models") {
             listModelsAndExit(kit: kit)
         }
+
+        // Computed after the fetch so a bare-provider `--targets builtin.alibabacloud` can expand
+        // against a populated catalog.
+        let targets = parseTargets(kit: kit) ?? defaultTargets
+        print("targets: \(targets.count)\n")
 
         var profiles: [ModelProfile] = []
         for (index, target) in targets.enumerated() {
@@ -155,6 +163,12 @@ enum CapabilityEvalRunner {
                 }
             }
 
+            // Deprecated models are skipped BEFORE probing so no calls are spent on a model the
+            // provider is retiring. The seed carries the vendor's own deprecation date.
+            if discardDeprecated, let deprecatedOn = seed.deprecatedOn {
+                print("  SKIP: deprecated \(Self.dateOnly.string(from: deprecatedOn))\n"); continue
+            }
+
             var profile = await ModelProber.probe(
                 llm: llm, seed: seed,
                 effortLevelsToProbe: provider.apiType == .anthropic ? target.effortLevels : []
@@ -181,6 +195,12 @@ enum CapabilityEvalRunner {
                     )
                     profile.callCount += 1
                 }
+            }
+
+            // Non-chat models are dropped AFTER probing (chat is a probed result, not known up
+            // front). We'll likely discard these downstream anyway; the flag makes that explicit.
+            if discardNonChat, profile.chat.value == false {
+                print("  DISCARD: not a chat model\n"); continue
             }
 
             profiles.append(profile)
@@ -219,19 +239,58 @@ enum CapabilityEvalRunner {
             let ev = f.evidence.map { "  (\($0.prefix(80)))" } ?? ""
             print("    \(label.padding(toLength: 18, withPad: " ", startingAt: 0)) \(v)\(ev)")
         }
+        func plain(_ label: String, _ value: String) {
+            print("    \(label.padding(toLength: 18, withPad: " ", startingAt: 0)) \(value)")
+        }
+        line("isAvailable", p.isAvailable)
+        line("isAccessDenied", p.isAccessDenied)
         line("chat", p.chat)
         line("acceptsTemp", p.acceptsTemperature)
         line("toolCalling", p.toolCalling)
         line("toolRoundTrip", p.toolResultRoundTrip)
         line("vision", p.vision)
         line("pdfInput", p.pdfInput)
+        line("maxContextTokens", p.maxContextTokens)
         line("maxOutputTokens", p.maxOutputTokens)
+        if let maxTemperature = p.maxTemperature {
+            plain("maxTemperature", "\(maxTemperature)")
+        }
+        if let pricing = p.pricing, pricing.base.hasAnyRate {
+            plain("pricing", "\(formatPrice(pricing)) (USD per 1M tokens, in/out)")
+        }
+        if let deprecatedOn = p.deprecatedOn {
+            plain("deprecated", Self.dateOnly.string(from: deprecatedOn))
+        }
         if !p.effortLevels.isEmpty {
             let accepted = p.establishedEffortLevels
             let rejected = p.effortLevels.filter { $0.value.value == false }.keys.sorted()
             print("    effort             accepted=[\(accepted.joined(separator: ","))] rejected=[\(rejected.joined(separator: ","))]")
         }
         print("    — \(p.callCount) calls, \(String(format: "%.1fs", p.duration))")
+    }
+
+    /// yyyy-MM-dd, for deprecation dates — the time-of-day is noise in a capability table.
+    private static let dateOnly: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    /// Compact token counts: 131072 → "131k", 1048576 → "1.0M". Precision isn't the point in a
+    /// scan-at-a-glance table; magnitude is.
+    private static func formatTokens(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000 { return "\(n / 1_000)k" }
+        return "\(n)"
+    }
+
+    /// Base-tier input/output as USD per 1M tokens, e.g. "$1.40/$4.40". Pricing is stored per single
+    /// token, so ×1e6. Output falls back to "?" when only input is known.
+    private static func formatPrice(_ pricing: ModelPricing) -> String {
+        let inStr = pricing.base.input.map { String(format: "$%.2f", $0 * 1_000_000) } ?? "?"
+        let outStr = pricing.base.output.map { String(format: "$%.2f", $0 * 1_000_000) } ?? "?"
+        return "\(inStr)/\(outStr)"
     }
 
     private static func printSummary(_ profiles: [ModelProfile]) {
@@ -245,18 +304,26 @@ enum CapabilityEvalRunner {
             case .notAttempted: return "-"
             }
         }
+        func intCell(_ f: ProbeFinding<Int>) -> String {
+            f.value.map(formatTokens) ?? (f.status == .inconclusive ? "?" : "-")
+        }
         // Full-length column titles, each wide enough for its header and its cells.
         let columns: [(title: String, cell: (ModelProfile) -> String)] = [
+            ("available",      { cell($0.isAvailable) }),
+            ("access-denied",  { cell($0.isAccessDenied) }),
             ("chat",           { cell($0.chat) }),
             ("tool-call",      { cell($0.toolCalling) }),
             ("tool-result",    { cell($0.toolResultRoundTrip) }),
             ("vision",         { cell($0.vision) }),
             ("pdf-input",      { cell($0.pdfInput) }),
             ("temperature",    { cell($0.acceptsTemperature) }),
-            ("max-output",     {
-                $0.maxOutputTokens.value.map(String.init)
-                    ?? ($0.maxOutputTokens.status == .inconclusive ? "?" : "-")
-            })
+            ("max-context",    { intCell($0.maxContextTokens) }),
+            ("max-output",     { intCell($0.maxOutputTokens) }),
+            ("price-in/out",   { profile in
+                guard let pricing = profile.pricing, pricing.base.hasAnyRate else { return "-" }
+                return formatPrice(pricing)
+            }),
+            ("deprecated",     { $0.deprecatedOn.map { Self.dateOnly.string(from: $0) } ?? "-" })
         ]
         let modelWidth = max(40, (profiles.map { $0.modelID.count }.max() ?? 0) + 2)
 
@@ -332,15 +399,31 @@ enum CapabilityEvalRunner {
 
     // MARK: - Args
 
-    private static func parseTargets() -> [Target]? {
+    /// Parses `--targets`. Each comma-separated spec is either `providerID/modelID` (one model) or a
+    /// bare `providerID` (every model that provider currently lists in the catalog) — the latter so
+    /// you can sweep, say, all of Alibaba Cloud without hand-listing model IDs. Returns nil when
+    /// `--targets` is absent, so the caller falls back to the diverse default set.
+    private static func parseTargets(kit: LLMKitManager) -> [Target]? {
         guard let index = CommandLine.arguments.firstIndex(of: "--targets"),
               index + 1 < CommandLine.arguments.count else { return nil }
         let effort = CommandLine.arguments.contains("--effort")
-        return CommandLine.arguments[index + 1].split(separator: ",").compactMap { spec in
+        let levels = effort ? EffortRank.allKnown : []
+        return CommandLine.arguments[index + 1].split(separator: ",").flatMap { spec -> [Target] in
             let parts = spec.split(separator: "/", maxSplits: 1)
-            guard parts.count == 2 else { return nil }
-            return Target(providerID: String(parts[0]), modelID: String(parts[1]),
-                          effortLevels: effort ? EffortRank.allKnown : [], note: "cli target")
+            if parts.count == 2 {
+                return [Target(providerID: String(parts[0]), modelID: String(parts[1]),
+                               effortLevels: levels, note: "cli target")]
+            }
+            // Bare provider ID: expand to every model the catalog lists for it.
+            let providerID = String(parts[0])
+            let models = kit.models(for: providerID).sorted { $0.modelID < $1.modelID }
+            if models.isEmpty {
+                print("  (no catalogued models for \(providerID) — nothing to expand)")
+            }
+            return models.map {
+                Target(providerID: providerID, modelID: $0.modelID,
+                       effortLevels: levels, note: "cli target (provider sweep)")
+            }
         }
     }
 }

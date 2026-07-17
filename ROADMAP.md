@@ -442,6 +442,17 @@ images returned from a tool's `tool_result` (Chat Completions can't carry image
 content in the `role: "tool"` message). Provides reasoning persistence for o-series
 and GPT-5 as a side benefit.
 
+Additional driver: some OpenAI models are served **only** via `v1/responses`, never
+`v1/chat/completions` — the deep-research models (`o4-mini-deep-research`,
+`o3-deep-research`) 404 on chat-completions with "only supported in v1/responses".
+The capability probe speaks chat-completions, so it currently records these as
+`chat=false`, which is accurate for "usable via chat-completions" but misleading —
+the model works, just on a different endpoint. Once Responses support lands, the
+probe should try Responses for such models (or read the `/models`
+`supported_endpoints` and route accordingly) so they're profiled instead of written
+off. Until then, a chat-completions 404 naming `v1/responses` should ideally be
+surfaced as "wrong endpoint," not a flat capability `false`.
+
 **End-to-end attachment forwarding tests.** v1 ships unit tests for
 `ImageDownscaler`, `AttachmentRegistry`, and `ViewAttachmentTool` in isolation. A
 test that spins up `OrchestrationRuntime`, sends a user message with an image
