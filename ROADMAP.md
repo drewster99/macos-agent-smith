@@ -2,6 +2,34 @@
 
 ## Planned
 
+### Agents are pruning at ~13% of their model's real context window (2026-07-17)
+
+`ModelConfiguration.maxContextTokens` defaults to `128_000` and **nothing ever wires it from the model's actual limit**. Anthropic's `/v1/models` reports `max_input_tokens: 1,000,000` for Sonnet 5 / Opus 4.8 / Fable 5; we decode that into `ModelInfo.maxInputTokens` and then never connect the two. It isn't cosmetic — `contextWindowSize` drives conversation pruning (`AgentActor.pruneThresholdTokens`) and the summarizer's budget (`TaskSummarizer`, 80% of the window):
+
+```
+Smith     — claude-opus-4-8   prunes at  95,846  ->  793,446   (8.3x)
+Brown     — claude-sonnet-5   prunes at  95,846  ->  793,446   (8.3x)
+Validator — claude-sonnet-5   prunes at  99,123  ->  796,723   (8.0x)
+```
+
+**This produces no error, ever** — which is why it hid. The context limit is never sent over the wire for hosted APIs (there is no such parameter; Ollama's `num_ctx` is the one exception), so an under-set value simply prunes early and silently wastes context we're paying for. And unlike output caps, there's no learning path: `learnModelOutputLimit` records a model's true output ceiling from a 400, but nothing equivalent exists for context because we prune long before the API would object.
+
+The arithmetic needs no change — `inputBudget = contextWindowSize - outputReservation` is the correct reading for Claude, where output is drawn from the window. Only the wiring is missing. Note some configs are *already* right (`Jones — gemma3:27b` carries a hand-set 1,000,000), which shows this is drift rather than a missing concept: whoever set that one knew, and the default silently won everywhere else.
+
+Fix requires the SwiftLLMKit data-shape work (see its roadmap): `ModelInfo.maxContextTokens` authoritative, `ModelConfiguration.maxContextTokens: Int?` with `nil` = "use the model's". **The migration is the hard part** — every stored config has an explicit `"maxContextTokens": 128000` on disk, which under `Int?` decodes as `.some(128000)` = a deliberate choice, so the fix reaches nobody. It's user data and can't be discarded like the model catalog. Raising only values that are still the untouched default is the obvious move but can't distinguish "never touched" from "deliberately 128,000".
+
+**Related, same investigation:** Smith runs `claude-opus-4-8`, which per Anthropic's docs *"runs without thinking"* unless `thinking: {type: "adaptive"}` is sent explicitly — and every Anthropic config has `thinkingBudget: nil`, so we never send it. Smith is orchestrating with thinking off. Whether that's intended is a product decision, but it probably isn't what "use Opus for the orchestrator" was meant to mean.
+
+### Capability probe: establish tool calling by asking, not by believing (2026-07-17)
+
+`--eval-capabilities` (see `CapabilityEvalRunner`) exists because every capability we hold is a **claim**: LiteLLM says `gemini-2.5-flash-image` supports function calling; it says nothing at all about ~63% of the catalog; and a claim is indistinguishable from evidence once it's in a struct. The probe hands a model one tool, forces `tool_choice: required`, and checks it fetches and returns a random 9-char identifier — proving the whole loop, not just that a call was emitted.
+
+It lives in the app rather than a CLI target because the API keys sit in a Keychain access group tied to the app's bundle ID; a separately-signed binary would have nothing to call with. It cannot consult the catalog **by construction**: it takes an `any LLMProvider`, which carries no capability data, so there is nothing to read even by mistake.
+
+Why `toolUse` can't simply be enforced from the catalog today: `ModelCapabilities` fields are non-optional `Bool`, so `false` means both "cannot" and "we have no idea". A hard tool-calling requirement would reject **537 of 770** offered models — including `glm-5.2`, `kimi-k2.5` and `qwen3-coder:480b`, which are what actually runs here. The `Bool?` work is upstream of any enforcement.
+
+Established so far (Anthropic, first 2 models, live): both complete the full round trip. Next: extend beyond Anthropic, decide how verdicts merge back (locally via `model_overrides.json`; the bundled JSON is ship-time and read-only, so a user probing a new model can't write there), and scope a full run — 853 models × 2 serial calls is ~1–2 hours and real money, so `--provider` / `--only-unknown` / `--limit` / `--dry-run` / resume matter before it's pointed at everything.
+
 ### Tool-execution timeout is cooperative, not a hard wall-clock cap (2026-07-15)
 
 `AgentActor.runToolWithTimeout` races the tool against a sleep in a `withThrowingTaskGroup`,
