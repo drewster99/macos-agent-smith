@@ -311,27 +311,28 @@ public actor PersistenceManager {
     /// Loads the most-recent `limit` messages plus the total on-disk count. Reads the file once
     /// but only decodes the tail — decoding tens of thousands of objects is the expensive part,
     /// and the UI only needs the tail on launch.
-    /// Synchronous — NOT offloaded to `FileIO`. `appendChannelMessages` writes this same `.jsonl`
-    /// on the actor's executor; if this read suspended (async), an append could run concurrently and
-    /// `Data(contentsOf:)`'s mmap-backed read could SIGBUS on the growing file. Keeping it sync makes
-    /// it mutually exclusive with append via actor isolation. (Only the append-free snapshot files —
-    /// inactive_tasks / tasks — are safely offloaded.)
-    public func loadChannelLogTail(limit: Int) throws -> (messages: [ChannelMessage], totalCount: Int) {
+    /// Offloaded read (reads the whole `.jsonl` to count lines, decodes only the tail). Runs at
+    /// launch, before the session appends anything, so there is no concurrent writer here. Even the
+    /// general case is safe: `appendChannelMessages` only GROWS the file (never truncates), so a
+    /// concurrent read can't lose page backing (no SIGBUS), and the worst it sees is a half-written
+    /// trailing line — which `decodeJSONL` skips by design (same as a partial record from `kill -9`).
+    public func loadChannelLogTail(limit: Int) async throws -> (messages: [ChannelMessage], totalCount: Int) {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return ([], 0) }
-        let data = try Data(contentsOf: channelLogJSONLURL)
+        let data = try await FileIO.read(channelLogJSONLURL)
         return decodeJSONL(data, limit: limit)
     }
 
     /// Loads the entire channel log. Used only by the user-initiated "Restore full history"
     /// path — the common launch/append paths never materialize the whole transcript.
-    /// Synchronous — NOT offloaded, for the same reason as `loadChannelLogTail`: it reads the same
-    /// `.jsonl` that `appendChannelMessages` writes on the actor, so it must stay mutually exclusive
-    /// with append.
-    public func loadFullChannelLog() throws -> [ChannelMessage] {
+    /// Offloaded read. Unlike the launch-time tail read this CAN race a live `appendChannelMessages`
+    /// (it's the user-initiated "restore full history"), but that's safe for the same reasons:
+    /// append only grows the file (no truncation → no mmap SIGBUS), and a torn trailing line is
+    /// skipped by `decodeJSONL`. The missed in-flight message is on disk and appears on the next load.
+    public func loadFullChannelLog() async throws -> [ChannelMessage] {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return [] }
-        let data = try Data(contentsOf: channelLogJSONLURL)
+        let data = try await FileIO.read(channelLogJSONLURL)
         return decodeJSONL(data).messages
     }
 
