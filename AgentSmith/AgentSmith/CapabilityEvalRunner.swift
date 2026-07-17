@@ -53,12 +53,19 @@ enum CapabilityEvalRunner {
         .init(providerID: "builtin.ollama-cloud", modelID: "qwen3.5:397b",
               effortLevels: [], note: "workhorse; LiteLLM has no data"),
         .init(providerID: "builtin.xai", modelID: "grok-4.5",
-              effortLevels: [], note: "real usage; xAI path")
+              effortLevels: [], note: "real usage; xAI path"),
+        .init(providerID: "builtin.openai", modelID: "gpt-5-mini",
+              effortLevels: ["none", "minimal", "low", "medium", "high"],
+              note: "OpenAI reasoning model — effort levels PROVEN via forced reasoning_effort"),
+        .init(providerID: "builtin.openai", modelID: "gpt-4o-mini",
+              effortLevels: ["low"],
+              note: "OpenAI NON-reasoning model — expect reasoning_effort rejected")
     ]
 
     /// Runs the evaluation and terminates the process. Never returns.
     static func runAndExit() async -> Never {
         let verbose = CommandLine.arguments.contains("--verbose")
+        let noSeed = CommandLine.arguments.contains("--no-seed")
         let targets = parseTargets() ?? defaultTargets
 
         LLMRequestLogger.logDirectoryName = "AgentSmith-CapabilityEval"
@@ -108,11 +115,49 @@ enum CapabilityEvalRunner {
             )
             let llm = kit.makeProvider(configuration: config, provider: provider)
 
-            let profile = await ModelProber.probe(
-                llm: llm, providerID: target.providerID, modelID: target.modelID,
-                skip: [],   // the eval probes everything, to validate the probe against the catalog
-                effortLevelsToProbe: target.effortLevels
+            // Seed from the PURE vendor payload — fetched directly, not from kit.models, whose
+            // entries have LiteLLM's claims enriched in and would let third-party data wear a
+            // `decoded` badge. --no-seed skips this to re-validate probe-vs-payload agreement.
+            var seed = ModelProfile(providerID: target.providerID, modelID: target.modelID)
+            if !noSeed {
+                do {
+                    let decodedModels = try await ModelFetchService().fetchModels(from: provider, apiKey: key)
+                    if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {
+                        seed = ModelProber.seedProfile(fromDecoded: decoded, apiType: provider.apiType)
+                    }
+                } catch {
+                    print("  seed fetch failed (probing everything): \(error.localizedDescription)")
+                }
+            }
+
+            var profile = await ModelProber.probe(
+                llm: llm, seed: seed,
+                effortLevelsToProbe: provider.apiType == .anthropic ? target.effortLevels : []
             )
+
+            // Effort on OpenAI-compatible endpoints can't go through LLMCallOverrides — the
+            // provider only emits reasoning_effort when the supportsReasoningEffort flag is set,
+            // so an unflagged model silently drops it and a "no error" proves nothing. Forcing
+            // the field via extraJSONOverrides bypasses the gate, making effort PROVABLE instead
+            // of hand-authored: one provider per level, graded on the endpoint's own answer.
+            if provider.apiType != .anthropic, !target.effortLevels.isEmpty {
+                for level in target.effortLevels where profile.effortLevels[level] == nil {
+                    let forcedConfig = ModelConfiguration(
+                        name: "probe:\(target.modelID):effort", providerID: target.providerID,
+                        modelID: target.modelID, temperature: nil, maxOutputTokens: 512,
+                        streaming: false,
+                        extraJSONOverrides: ["reasoning_effort": .string(level)]
+                    )
+                    let forcedLLM = kit.makeProvider(configuration: forcedConfig, provider: provider)
+                    profile.effortLevels[level] = await ModelProber.probeParameterAcceptance(
+                        llm: forcedLLM,
+                        parameterDescription: "reasoning_effort=\(level)",
+                        rejectionKeywords: ["reasoning_effort", "reasoning", "effort"]
+                    )
+                    profile.callCount += 1
+                }
+            }
+
             profiles.append(profile)
             report(profile)
         }
