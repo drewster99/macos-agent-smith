@@ -13,6 +13,18 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     /// Set once by `AgentSmithApp.init`. Runs the cross-session persistence drain on quit.
     @MainActor static var flushHandler: (@MainActor () async -> Void)?
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // A capability-eval launch takes over the process: it runs headless and exits without
+        // ever handing control back. Started here rather than from App.init because the probe is
+        // async and init is not — blocking the main actor there to await MainActor-isolated work
+        // would deadlock. Auto-start is separately suppressed in MainView so no real agent runs
+        // alongside the probe.
+        guard CapabilityEvalRunner.isRequested else { return }
+        Task { @MainActor in
+            await CapabilityEvalRunner.runAndExit()
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let handler = AppLifecycleDelegate.flushHandler else { return .terminateNow }
         // Defer the actual quit until the async flush finishes, then signal AppKit to proceed.

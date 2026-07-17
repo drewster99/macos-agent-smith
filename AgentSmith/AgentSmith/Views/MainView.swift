@@ -170,7 +170,11 @@ struct MainView: View {
             DispatchQueue.main.async { showWelcomeSheet = true }
         } else if !viewModel.allAgentConfigsValid {
             DispatchQueue.main.async { showValidationSheet = true }
-        } else if shared.autoStartEnabled && !viewModel.isRunning {
+        } else if shared.autoStartEnabled && !viewModel.isRunning && !CapabilityEvalRunner.isRequested {
+            // A capability-eval launch must not also spin up real agents: they'd make their own
+            // LLM calls, spending money and interleaving with the probe's logs. Gated here rather
+            // than by flipping `autoStartEnabled`, whose didSet would persist the change and
+            // leave auto-start switched off for good.
             Task { await viewModel.start() }
         }
     }
