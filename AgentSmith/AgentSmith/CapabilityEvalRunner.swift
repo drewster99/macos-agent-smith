@@ -119,6 +119,14 @@ enum CapabilityEvalRunner {
         // against a populated catalog.
         let targets = parseTargets(kit: kit) ?? defaultTargets
         print("targets: \(targets.count)\n")
+        if targets.isEmpty {
+            print("No targets to probe (an explicit --targets matched no catalogued models). Nothing to do.")
+            exit(0)
+        }
+
+        // Cache the freshly-decoded vendor payload per provider: a provider sweep probes many models
+        // from one provider, and each seed only needs that provider's model list fetched once.
+        var decodedByProvider: [String: [ModelInfo]] = [:]
 
         var profiles: [ModelProfile] = []
         for (index, target) in targets.enumerated() {
@@ -154,7 +162,13 @@ enum CapabilityEvalRunner {
             var seed = ModelProfile(providerID: target.providerID, modelID: target.modelID)
             if !noSeed && fetchPolicy != .none {
                 do {
-                    let decodedModels = try await ModelFetchService().fetchModels(from: provider, apiKey: key.isEmpty ? nil : key)
+                    let decodedModels: [ModelInfo]
+                    if let cached = decodedByProvider[target.providerID] {
+                        decodedModels = cached
+                    } else {
+                        decodedModels = try await ModelFetchService().fetchModels(from: provider, apiKey: key.isEmpty ? nil : key)
+                        decodedByProvider[target.providerID] = decodedModels
+                    }
                     if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {
                         seed = ModelProber.seedProfile(fromDecoded: decoded, apiType: provider.apiType)
                     }
@@ -255,8 +269,33 @@ enum CapabilityEvalRunner {
         if let maxTemperature = p.maxTemperature {
             plain("maxTemperature", "\(maxTemperature)")
         }
+        if let defaults = p.samplingDefaults, !defaults.isEmpty {
+            var parts: [String] = []
+            if let t = defaults.temperature { parts.append("temp \(t)") }
+            if let tp = defaults.topP { parts.append("topP \(tp)") }
+            if let tk = defaults.topK { parts.append("topK \(tk)") }
+            if let fp = defaults.frequencyPenalty { parts.append("freqPen \(fp)") }
+            if let pp = defaults.presencePenalty { parts.append("presPen \(pp)") }
+            if let rp = defaults.repetitionPenalty { parts.append("repPen \(rp)") }
+            plain("samplingDefaults", parts.joined(separator: ", "))
+        }
+        if let isFree = p.isFree {
+            plain("isFree", "\(isFree)")
+        }
         if let pricing = p.pricing, pricing.base.hasAnyRate {
             plain("pricing", "\(formatPrice(pricing)) (USD per 1M tokens, in/out)")
+        }
+        if let benchmarks = p.benchmarks, !benchmarks.isEmpty {
+            var parts: [String] = []
+            if let aa = benchmarks.artificialAnalysis {
+                if let i = aa.intelligenceIndex { parts.append("intelligence \(i)") }
+                if let c = aa.codingIndex { parts.append("coding \(c)") }
+                if let a = aa.agenticIndex { parts.append("agentic \(a)") }
+            }
+            if let top = benchmarks.designArena?.first, let elo = top.elo {
+                parts.append("elo \(Int(elo)) (\(top.arena ?? "?"))")
+            }
+            if !parts.isEmpty { plain("benchmarks", parts.joined(separator: ", ")) }
         }
         if let deprecatedOn = p.deprecatedOn {
             plain("deprecated", Self.dateOnly.string(from: deprecatedOn))
@@ -327,10 +366,17 @@ enum CapabilityEvalRunner {
         ]
         let modelWidth = max(40, (profiles.map { $0.modelID.count }.max() ?? 0) + 2)
 
+        // Each column is as wide as its header OR its widest cell — never narrower, because
+        // padding(toLength:) TRUNCATES an over-long string (e.g. "$15.00/$75.00" is 13 chars but a
+        // fixed width-12 price column would silently drop the last digit).
+        let columnWidths: [Int] = columns.map { col in
+            let widestCell = profiles.map { col.cell($0).count }.max() ?? 0
+            return max(col.title.count, widestCell)
+        }
+
         func row(_ model: String, _ cells: [String]) -> String {
             var line = "  " + model.padding(toLength: modelWidth, withPad: " ", startingAt: 0)
-            for (col, value) in zip(columns, cells) {
-                let width = max(col.title.count, 11)
+            for (width, value) in zip(columnWidths, cells) {
                 line += value.padding(toLength: width, withPad: " ", startingAt: 0) + "  "
             }
             return line
