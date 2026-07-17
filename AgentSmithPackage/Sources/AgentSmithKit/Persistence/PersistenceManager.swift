@@ -128,21 +128,19 @@ public actor PersistenceManager {
     /// Loads the global archived + recently-deleted task list. Returns nil when the file is
     /// absent — the caller uses that to detect "the one-time per-session → global migration
     /// hasn't run yet" (distinct from an empty-but-migrated `[]`).
-    public func loadInactiveTasks() throws -> [AgentTask]? {
+    public func loadInactiveTasks() async throws -> [AgentTask]? {
         let url = baseDirectory.appendingPathComponent("inactive_tasks.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode([AgentTask].self, from: data)
+        return try await FileIO.readJSON([AgentTask].self, from: url)
     }
 
     /// Saves the global archived + recently-deleted task list. Writing this file is what marks
     /// the one-time migration as complete, so callers must persist it before stripping inactive
     /// tasks from the per-session files.
-    public func saveInactiveTasks(_ tasks: [AgentTask]) throws {
+    public func saveInactiveTasks(_ tasks: [AgentTask]) async throws {
         try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-        let data = try JSONEncoder().encode(tasks)
         let url = baseDirectory.appendingPathComponent("inactive_tasks.json")
-        try data.write(to: url, options: .atomic)
+        try await FileIO.writeJSON(tasks, to: url)
     }
 
     /// Moves an unreadable `inactive_tasks.json` aside to a timestamped `.corrupt-…` name so a fresh
@@ -190,18 +188,16 @@ public actor PersistenceManager {
 
     // MARK: - Channel Log (per-session)
 
-    public func saveChannelLog(_ messages: [ChannelMessage]) throws {
+    public func saveChannelLog(_ messages: [ChannelMessage]) async throws {
         try ensureDirectories()
-        let data = try JSONEncoder().encode(messages)
         let url = sessionDirectory.appendingPathComponent("channel_log.json")
-        try data.write(to: url, options: .atomic)
+        try await FileIO.writeJSON(messages, to: url)
     }
 
-    public func loadChannelLog() throws -> [ChannelMessage] {
+    public func loadChannelLog() async throws -> [ChannelMessage] {
         let url = sessionDirectory.appendingPathComponent("channel_log.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode([ChannelMessage].self, from: data)
+        return try await FileIO.readJSON([ChannelMessage].self, from: url)
     }
 
     // MARK: - Channel Log — append-only JSONL (per-session)
@@ -315,36 +311,34 @@ public actor PersistenceManager {
     /// Loads the most-recent `limit` messages plus the total on-disk count. Reads the file once
     /// but only decodes the tail — decoding tens of thousands of objects is the expensive part,
     /// and the UI only needs the tail on launch.
-    public func loadChannelLogTail(limit: Int) throws -> (messages: [ChannelMessage], totalCount: Int) {
+    public func loadChannelLogTail(limit: Int) async throws -> (messages: [ChannelMessage], totalCount: Int) {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return ([], 0) }
-        let data = try Data(contentsOf: channelLogJSONLURL)
+        let data = try await FileIO.read(channelLogJSONLURL)
         return decodeJSONL(data, limit: limit)
     }
 
     /// Loads the entire channel log. Used only by the user-initiated "Restore full history"
     /// path — the common launch/append paths never materialize the whole transcript.
-    public func loadFullChannelLog() throws -> [ChannelMessage] {
+    public func loadFullChannelLog() async throws -> [ChannelMessage] {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return [] }
-        let data = try Data(contentsOf: channelLogJSONLURL)
+        let data = try await FileIO.read(channelLogJSONLURL)
         return decodeJSONL(data).messages
     }
 
     // MARK: - Tasks (per-session)
 
-    public func saveTasks(_ tasks: [AgentTask]) throws {
+    public func saveTasks(_ tasks: [AgentTask]) async throws {
         try ensureDirectories()
-        let data = try JSONEncoder().encode(tasks)
         let url = sessionDirectory.appendingPathComponent("tasks.json")
-        try data.write(to: url, options: .atomic)
+        try await FileIO.writeJSON(tasks, to: url)
     }
 
-    public func loadTasks() throws -> [AgentTask] {
+    public func loadTasks() async throws -> [AgentTask] {
         let url = sessionDirectory.appendingPathComponent("tasks.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode([AgentTask].self, from: data)
+        return try await FileIO.readJSON([AgentTask].self, from: url)
     }
 
     /// Moves an unreadable `tasks.json` aside to a timestamped `.corrupt-…` name so a fresh one can
