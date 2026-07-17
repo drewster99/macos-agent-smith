@@ -11,9 +11,9 @@ import SwiftLLMKit
 /// capability data. LiteLLM's and the provider's claims are printed alongside each result purely
 /// for contrast — where the probe disagrees, the probe is the evidence and the claim is the claim.
 ///
-/// Usage:
+/// Usage — either `--eval-capabilities` or `--list-models` puts the app in headless mode:
+///   AgentSmith --list-models                       print every providerID/modelID, then exit
 ///   AgentSmith --eval-capabilities [flags]
-///     --list-models                 print every providerID/modelID that --targets accepts, then exit
 ///     --targets <provID/model,...>  probe these instead of the default diverse set
 ///     --effort                      with --targets, probe every known effort level per model
 ///     --no-seed                     probe everything even if the payload already answered it
@@ -25,7 +25,13 @@ import SwiftLLMKit
 enum CapabilityEvalRunner {
 
     static let flag = "--eval-capabilities"
-    static var isRequested: Bool { CommandLine.arguments.contains(flag) }
+
+    /// Any eval flag puts the app in headless mode — you shouldn't have to pair `--list-models`
+    /// with `--eval-capabilities`. Either alone is enough.
+    static var isRequested: Bool {
+        let args = CommandLine.arguments
+        return args.contains(flag) || args.contains("--list-models")
+    }
 
     /// A model to probe, and which effort levels (if any) to attempt for it. Effort is only worth
     /// probing where the provider emits the field unconditionally (Anthropic); elsewhere the field
