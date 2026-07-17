@@ -311,19 +311,27 @@ public actor PersistenceManager {
     /// Loads the most-recent `limit` messages plus the total on-disk count. Reads the file once
     /// but only decodes the tail — decoding tens of thousands of objects is the expensive part,
     /// and the UI only needs the tail on launch.
-    public func loadChannelLogTail(limit: Int) async throws -> (messages: [ChannelMessage], totalCount: Int) {
+    /// Synchronous — NOT offloaded to `FileIO`. `appendChannelMessages` writes this same `.jsonl`
+    /// on the actor's executor; if this read suspended (async), an append could run concurrently and
+    /// `Data(contentsOf:)`'s mmap-backed read could SIGBUS on the growing file. Keeping it sync makes
+    /// it mutually exclusive with append via actor isolation. (Only the append-free snapshot files —
+    /// inactive_tasks / tasks — are safely offloaded.)
+    public func loadChannelLogTail(limit: Int) throws -> (messages: [ChannelMessage], totalCount: Int) {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return ([], 0) }
-        let data = try await FileIO.read(channelLogJSONLURL)
+        let data = try Data(contentsOf: channelLogJSONLURL)
         return decodeJSONL(data, limit: limit)
     }
 
     /// Loads the entire channel log. Used only by the user-initiated "Restore full history"
     /// path — the common launch/append paths never materialize the whole transcript.
-    public func loadFullChannelLog() async throws -> [ChannelMessage] {
+    /// Synchronous — NOT offloaded, for the same reason as `loadChannelLogTail`: it reads the same
+    /// `.jsonl` that `appendChannelMessages` writes on the actor, so it must stay mutually exclusive
+    /// with append.
+    public func loadFullChannelLog() throws -> [ChannelMessage] {
         try migrateLegacyChannelLogIfNeeded()
         guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return [] }
-        let data = try await FileIO.read(channelLogJSONLURL)
+        let data = try Data(contentsOf: channelLogJSONLURL)
         return decodeJSONL(data).messages
     }
 

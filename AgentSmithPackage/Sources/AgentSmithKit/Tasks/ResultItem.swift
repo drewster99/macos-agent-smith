@@ -22,9 +22,10 @@ public struct ResultItem: Codable, Sendable, Equatable {
         case attachment(Attachment)
         /// A named bundle of files (e.g. "the de/ screenshots"), with an optional description.
         case attachmentGroup(attachments: [Attachment], description: String?)
-        /// A kind this build doesn't recognize (written by a NEWER build). The original JSON node is
-        /// preserved verbatim in `raw` so a downgrade→resave round-trips it losslessly instead of
-        /// rewriting it as a lossy placeholder; the UI renders it as `[unsupported result item: …]`.
+        /// A kind this build doesn't recognize (written by a NEWER build). The original JSON node's
+        /// VALUE is preserved in `raw` (semantically, not byte-for-byte — key order/whitespace are
+        /// re-normalized by the encoder) so a downgrade→resave keeps the payload instead of
+        /// discarding it; the UI renders it as `[unsupported result item: …]`.
         case unknown(kind: String, raw: AnyCodable)
     }
 
@@ -49,36 +50,62 @@ extension ResultItem.Content: Codable {
     }
 
     public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        // Forward-compatible: a `kind` this build doesn't recognize (written by a NEWER build)
-        // must NOT throw — an array decode is all-or-nothing, so a single unknown item would take
-        // down the whole task list (and the app would quarantine the file). Degrade to a text
-        // placeholder instead, matching the codebase's `AgentRole` / `Status` decoding fallbacks.
-        let kindRaw = try c.decode(String.self, forKey: .kind)
+        // Decode the whole node ONCE as a generic JSON value, then branch on `kind`. This avoids
+        // requesting two different containers from the same decoder (a Codable-contract violation
+        // that only happens to work with JSONDecoder), and it lets an unrecognized future `kind` be
+        // preserved verbatim. Forward-compatible: an unknown kind must NEVER throw — an array decode
+        // is all-or-nothing, so one bad item would take down (and quarantine) the whole task file.
+        let raw = try AnyCodable(from: decoder)
+        guard case .dictionary(let object) = raw, case .string(let kindRaw)? = object["kind"] else {
+            // Not the expected object-with-string-kind shape — preserve it rather than throw.
+            Self.logger.error("ResultItem.Content decode: unexpected shape; preserving verbatim.")
+            self = .unknown(kind: "", raw: raw)
+            return
+        }
         switch Kind(rawValue: kindRaw) {
         case .text:
-            self = .text(try c.decode(String.self, forKey: .text))
+            guard case .string(let text)? = object["text"] else {
+                self = .unknown(kind: kindRaw, raw: raw)
+                return
+            }
+            self = .text(text)
         case .attachment:
-            self = .attachment(try c.decode(Attachment.self, forKey: .attachment))
+            self = .attachment(try Self.bridgeDecode(Attachment.self, from: object["attachment"]))
         case .attachmentGroup:
+            var description: String?
+            if case .string(let value)? = object["description"] { description = value }
             self = .attachmentGroup(
-                attachments: try c.decode([Attachment].self, forKey: .attachments),
-                description: try c.decodeIfPresent(String.self, forKey: .description)
+                attachments: try Self.bridgeDecode([Attachment].self, from: object["attachments"]),
+                description: description
             )
         case nil:
-            // An unrecognized kind can only come from a NEWER build (or a removed case) — never
-            // legitimate input. We must NOT throw (that would fail the whole task file and it'd be
-            // quarantined = data loss). Instead preserve the ORIGINAL JSON node verbatim so a
-            // downgrade→resave round-trips it losslessly; the UI renders a placeholder. NOT an
-            // assertionFailure — this runs during boot-time task decode, where a trap would crash
-            // the app on launch for anyone whose on-disk data hit it.
-            Logger(subsystem: "AgentSmithKit", category: "ResultItem")
-                .error("Unknown ResultItem.Content kind '\(kindRaw, privacy: .public)' during decode — task data written by a newer build; preserving it verbatim behind a placeholder.")
-            self = .unknown(kind: kindRaw, raw: try AnyCodable(from: decoder))
+            // An unrecognized kind can only come from a NEWER build (or a removed case). Preserve the
+            // ORIGINAL node so a downgrade→resave round-trips it losslessly; the UI shows a
+            // placeholder. NOT an assertionFailure — this runs during boot-time task decode, where a
+            // trap would crash the app on launch for anyone whose on-disk data hit it.
+            Self.logger.error("Unknown ResultItem.Content kind '\(kindRaw, privacy: .public)' during decode — written by a newer build; preserving it behind a placeholder.")
+            self = .unknown(kind: kindRaw, raw: raw)
         }
     }
 
+    /// Decodes a typed payload out of an already-parsed `AnyCodable` sub-value by round-tripping it
+    /// through JSON. Keeps `init(from:)` to a single container while still decoding `Attachment`
+    /// et al. with their own `Codable`. Cost is negligible — result items are few and small.
+    private static func bridgeDecode<T: Decodable>(_ type: T.Type, from value: AnyCodable?) throws -> T {
+        guard let value else {
+            throw DecodingError.valueNotFound(T.self, .init(codingPath: [], debugDescription: "missing payload for result item"))
+        }
+        return try JSONDecoder().decode(T.self, from: JSONEncoder().encode(value))
+    }
+
     public func encode(to encoder: Encoder) throws {
+        // Branch `.unknown` BEFORE creating any container: it writes the preserved node directly
+        // (a single container on this encoder). Creating a keyed container here and then also calling
+        // `raw.encode(to:)` would request two containers on one encoder — a contract violation.
+        if case .unknown(_, let raw) = self {
+            try raw.encode(to: encoder)
+            return
+        }
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .text(let text):
@@ -91,11 +118,12 @@ extension ResultItem.Content: Codable {
             try c.encode(Kind.attachmentGroup, forKey: .kind)
             try c.encode(attachments, forKey: .attachments)
             try c.encodeIfPresent(description, forKey: .description)
-        case .unknown(_, let raw):
-            // Write the preserved node verbatim (it already carries its own `kind` + payload).
-            try raw.encode(to: encoder)
+        case .unknown:
+            break  // handled above
         }
     }
+
+    private static let logger = Logger(subsystem: "AgentSmithKit", category: "ResultItem")
 }
 
 public extension ResultItem {

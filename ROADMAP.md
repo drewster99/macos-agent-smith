@@ -381,10 +381,14 @@ to the task's evidence directory, agents to sanctioned dirs). This is **layer 3*
 open work — it also covers `attach_file` validator path-scoping (item (b) above). Two earlier
 layers landed 2026-07-16:
 - ✅ **Scrub-on-ingest (layer 1, done 2026-07-16).** `AttachmentSanitizer` strips image metadata
-  (EXIF/GPS/IPTC/XMP/TIFF, via a full decode+re-encode — a lossless `CopyImageSource` only drops
-  the XMP container) and clears a PDF's document-info dict, applied unconditionally in
-  `AttachmentRegistry.ingestFile/ingestData`. Fail-safe (original bytes on any failure). Does NOT
-  yet flatten embedded PDF JavaScript/annotations — fold that into this pass.
+  (EXIF/GPS/IPTC/TIFF-text/maker notes + PNG tEXt/iTXt text keys + implicit XMP drop, via a
+  frame-preserving decode+re-encode) and clears a PDF's document-info dict, applied unconditionally
+  in `AttachmentRegistry.ingestFile/ingestData`. Fail-safe (original bytes on any failure).
+  **Residuals to close in this pass:** (a) PDF sanitize is PARTIAL — PDFKit's `documentAttributes`
+  doesn't touch the XMP `/Metadata` stream or arbitrary custom `/Info` keys, and doesn't flatten
+  embedded JavaScript/annotations; a CGPDF-level catalog rewrite is needed. (b) Image sanitize drops
+  HEIF auxiliary images (depth/gain maps, thumbnails) — accepted for model-input use, revisit if
+  those ever matter.
 - ✅ **Security-side content inspection (layer 2, done 2026-07-16).** When the Security Agent
   evaluates an `attach_file` call it is shown the actual image/PDF (gated on its own vision/document
   capability, size-capped, sanitized) so it judges the content, not just the path; a non-vision

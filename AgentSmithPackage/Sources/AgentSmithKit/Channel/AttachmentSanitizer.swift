@@ -36,6 +36,10 @@ enum AttachmentSanitizer {
     /// dictionaries — are carried forward, so a multi-frame image (animated GIF / APNG / HEICS /
     /// multi-page TIFF) keeps every frame and its timing rather than being flattened. Returns the
     /// original bytes if the data isn't a decodable image or the format can't be re-encoded.
+    ///
+    /// Residual (accepted for the model-input use case, tracked in the ROADMAP path-safety pass):
+    /// non-raster auxiliary images — HEIF depth/disparity maps, gain maps, embedded thumbnails — are
+    /// NOT carried forward; only the displayable raster frames survive.
     static func stripImageMetadata(_ data: Data) -> Data {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let type = CGImageSourceGetType(source) else {
@@ -84,18 +88,43 @@ enum AttachmentSanitizer {
         kCGImagePropertyCIFFDictionary
     ]
 
+    /// PNG stores free text (tEXt / zTXt / iTXt chunks) INSIDE its property dictionary, alongside
+    /// structural keys (gamma, chromaticity, APNG timing). We keep the PNG dict for APNG timing, so
+    /// its text fields must be stripped individually — dropping the whole dict would break animation.
+    private nonisolated(unsafe) static let pngTextKeys: [CFString] = [
+        kCGImagePropertyPNGTitle,
+        kCGImagePropertyPNGAuthor,
+        kCGImagePropertyPNGDescription,
+        kCGImagePropertyPNGCopyright,
+        kCGImagePropertyPNGComment,
+        kCGImagePropertyPNGDisclaimer,
+        kCGImagePropertyPNGSoftware,
+        kCGImagePropertyPNGSource,
+        kCGImagePropertyPNGWarning
+    ]
+
     private static func withoutMetadata(_ properties: [CFString: Any]) -> [CFString: Any] {
         var cleaned = properties
         for key in metadataDictionaryKeys {
             cleaned.removeValue(forKey: key)
+        }
+        if var png = cleaned[kCGImagePropertyPNGDictionary] as? [CFString: Any] {
+            for key in pngTextKeys { png.removeValue(forKey: key) }
+            cleaned[kCGImagePropertyPNGDictionary] = png
         }
         return cleaned
     }
 
     /// Clears a PDF's document-info dictionary (Title / Author / Subject / Keywords / Creator /
     /// Producer), where free-text metadata could carry an injection payload. Returns the original
-    /// bytes if the data isn't a valid PDF. Does NOT yet flatten embedded JavaScript / annotations —
-    /// that deeper sanitization is part of the planned full path-safety pass (see ROADMAP).
+    /// bytes if the data isn't a valid PDF.
+    ///
+    /// PARTIAL by design (deeper PDF scrubbing is tracked in the ROADMAP path-safety pass): PDFKit's
+    /// `documentAttributes` only covers the standard `/Info` keys — it does NOT touch the XMP
+    /// `/Metadata` stream in the catalog or arbitrary custom `/Info` keys, and it does not flatten
+    /// embedded JavaScript / annotations. A determined payload in those survives. The Security-side
+    /// content inspection (which shows the Security Agent the actual PDF) is the compensating control
+    /// until a CGPDF-level catalog rewrite lands.
     static func stripPDFMetadata(_ data: Data) -> Data {
         guard let document = PDFDocument(data: data) else { return data }
         document.documentAttributes = [:]

@@ -85,6 +85,39 @@ struct AttachmentSanitizerTests {
         #expect(exifUserComment(in: sanitized) == nil)  // metadata gone
     }
 
+    private func pngWithTextDescription(_ text: String) -> Data {
+        let image = makeCGImage()
+        let out = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil)!
+        let props: [CFString: Any] = [
+            kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGDescription: text]
+        ]
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        _ = CGImageDestinationFinalize(dest)
+        return out as Data
+    }
+
+    private func pngDescription(in data: Data) -> String? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let png = props[kCGImagePropertyPNGDictionary] as? [CFString: Any] else {
+            return nil
+        }
+        return png[kCGImagePropertyPNGDescription] as? String
+    }
+
+    @Test("Strips PNG text chunks (tEXt/iTXt) while keeping the image decodable")
+    func stripsPNGText() {
+        let payload = "INJECT via a PNG text chunk"
+        let original = pngWithTextDescription(payload)
+        #expect(pngDescription(in: original) == payload)  // sanity: present
+
+        let sanitized = AttachmentSanitizer.sanitize(original, mimeType: "image/png")
+
+        #expect(pngDescription(in: sanitized) == nil)  // text chunk gone
+        #expect(CGImageSourceCreateWithData(sanitized as CFData, nil) != nil)
+    }
+
     @Test("Invalid image bytes pass through unchanged (fail-safe)")
     func invalidImagePassesThrough() {
         let bytes = Data([0x89, 0x50, 0x4E, 0x47, 0x01, 0x02, 0x03])  // PNG magic, but truncated

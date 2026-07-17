@@ -1081,22 +1081,29 @@ actor SecurityEvaluator {
 
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
-        guard size > 0, size <= Self.maxInspectionBytes else { return nil }
-        // Read off the actor's executor — up to maxInspectionBytes of disk I/O shouldn't block a
-        // cooperative thread.
-        guard let raw = try? await Task.detached(priority: .utility, operation: { try Data(contentsOf: url) }).value,
-              !raw.isEmpty else { return nil }
 
-        let sanitized = AttachmentSanitizer.sanitize(raw, mimeType: mimeType)
-        let attachment = Attachment(filename: url.lastPathComponent, mimeType: mimeType, byteCount: sanitized.count, data: sanitized)
-        let assembled = AttachmentInjection.assemble(
-            [attachment],
-            modelSupportsVision: supportsVision,
-            modelSupportsDocuments: supportsDocuments,
-            urlProvider: { _, _ in url }
-        )
+        // Do ALL the heavy work off the actor: a BOUNDED read (not stat-then-read, which a 32-bit
+        // NSNumber size truncation or a TOCTOU swap could bypass into a multi-GB read), then the
+        // metadata strip, image re-encode / PDF reserialize, and block assembly — all CPU-heavy for
+        // a large input and none of it needing actor state beyond the two capability flags.
+        let vision = supportsVision
+        let documents = supportsDocuments
+        let cap = Self.maxInspectionBytes
+        let assembled: AttachmentInjection.Assembled? = await Task.detached(priority: .utility) {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? handle.close() }
+            // read(upToCount: cap + 1): anything over the cap comes back as cap+1 bytes and is rejected.
+            guard let raw = try? handle.read(upToCount: cap + 1), !raw.isEmpty, raw.count <= cap else { return nil }
+            let sanitized = AttachmentSanitizer.sanitize(raw, mimeType: mimeType)
+            let attachment = Attachment(filename: url.lastPathComponent, mimeType: mimeType, byteCount: sanitized.count, data: sanitized)
+            return AttachmentInjection.assemble(
+                [attachment],
+                modelSupportsVision: vision,
+                modelSupportsDocuments: documents,
+                urlProvider: { _, _ in url }
+            )
+        }.value
+        guard let assembled else { return nil }
         return (assembled, isImage)
     }
 
