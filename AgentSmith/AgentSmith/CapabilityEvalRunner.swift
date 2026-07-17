@@ -121,7 +121,11 @@ enum CapabilityEvalRunner {
             guard let provider = kit.providers.first(where: { $0.id == target.providerID }) else {
                 print("  SKIP: provider not configured\n"); continue
             }
-            guard let key = kit.apiKey(for: target.providerID), !key.isEmpty else {
+            let key = kit.apiKey(for: target.providerID) ?? ""
+            // A missing key only blocks a provider that needs one. Local servers (mlx, LM Studio,
+            // Ollama on localhost) are keyless — probe them anyway; if the server isn't running the
+            // probe reports a connection failure, which is the honest answer rather than a guess.
+            if providerNeedsKey(provider) && key.isEmpty {
                 print("  SKIP: no API key for \(provider.name)\n"); continue
             }
             reportCatalogClaims(kit: kit, target: target)
@@ -142,7 +146,7 @@ enum CapabilityEvalRunner {
             var seed = ModelProfile(providerID: target.providerID, modelID: target.modelID)
             if !noSeed && fetchPolicy != .none {
                 do {
-                    let decodedModels = try await ModelFetchService().fetchModels(from: provider, apiKey: key)
+                    let decodedModels = try await ModelFetchService().fetchModels(from: provider, apiKey: key.isEmpty ? nil : key)
                     if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {
                         seed = ModelProber.seedProfile(fromDecoded: decoded, apiType: provider.apiType)
                     }
@@ -273,17 +277,36 @@ enum CapabilityEvalRunner {
         print("\n  \(profiles.count) models, \(calls) total API calls")
     }
 
+    /// Whether a provider needs an API key to probe. The signal is the ENDPOINT HOST, not the
+    /// apiType: a local server (mlx, LM Studio, Ollama on localhost) is keyless, but Ollama Cloud
+    /// is the SAME `.ollama` apiType pointed at ollama.com and very much needs a key. So exempting
+    /// by apiType would wrongly wave through the cloud one — check the host.
+    static func providerNeedsKey(_ provider: ModelProvider) -> Bool {
+        let host = provider.endpoint.host?.lowercased() ?? ""
+        let localHosts: Set<String> = ["localhost", "127.0.0.1", "0.0.0.0", "::1"]
+        return !(localHosts.contains(host) || host.hasSuffix(".local"))
+    }
+
     /// Prints every `providerID/modelID` that `--targets` will accept — the exact strings, one
-    /// per line, grouped by provider — then exits. Providers without a key are noted (their models
-    /// can't be probed), and providers that failed to refresh show nothing.
+    /// per line, grouped by provider — then exits. A cloud provider without a key is flagged (its
+    /// models can't be probed); a keyless LOCAL provider is not — it just needs to be running.
     private static func listModelsAndExit(kit: LLMKitManager) -> Never {
         print(String(repeating: "═", count: 72))
         print("AVAILABLE MODELS  (copy a providerID/modelID into --targets)")
         for provider in kit.providers.sorted(by: { $0.id < $1.id }) {
             let models = kit.models(for: provider.id)
-            let hasKey = (kit.apiKey(for: provider.id)?.isEmpty == false)
             guard !models.isEmpty else { continue }
-            print("\n\(provider.id)   (\(provider.name)\(hasKey ? "" : " — NO API KEY, can't probe"))  \(models.count) models")
+            let needsKey = providerNeedsKey(provider)
+            let hasKey = (kit.apiKey(for: provider.id)?.isEmpty == false)
+            let note: String
+            if needsKey && !hasKey {
+                note = " — NO API KEY, can't probe"
+            } else if !needsKey {
+                note = " — local, no key needed (must be running)"
+            } else {
+                note = ""
+            }
+            print("\n\(provider.id)   (\(provider.name)\(note))  \(models.count) models")
             for model in models.sorted(by: { $0.modelID < $1.modelID }) {
                 print("  \(provider.id)/\(model.modelID)")
             }
