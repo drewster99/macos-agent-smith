@@ -13,6 +13,15 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     /// Set once by `AgentSmithApp.init`. Runs the cross-session persistence drain on quit.
     @MainActor static var flushHandler: (@MainActor () async -> Void)?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // A capability-eval launch is headless: keep it out of the Dock and off screen. This hook
+        // fires BEFORE the SwiftUI WindowGroup creates its window, so `.prohibited` stops the
+        // window from ever appearing — setting it later (in didFinishLaunching, where the probe
+        // starts) is too late, which is why the GUI was flashing up.
+        guard CapabilityEvalRunner.isRequested else { return }
+        NSApp.setActivationPolicy(.prohibited)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // A capability-eval launch takes over the process: it runs headless and exits without
         // ever handing control back. Started here rather than from App.init because the probe is
@@ -20,6 +29,9 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         // would deadlock. Auto-start is separately suppressed in MainView so no real agent runs
         // alongside the probe.
         guard CapabilityEvalRunner.isRequested else { return }
+        // Belt-and-suspenders: close any window SwiftUI may have instantiated before the policy
+        // took effect, so nothing lingers on screen while the probe runs its network calls.
+        for window in NSApp.windows { window.close() }
         Task { @MainActor in
             await CapabilityEvalRunner.runAndExit()
         }
@@ -65,6 +77,10 @@ struct AgentSmithApp: App {
                 .frame(minWidth: 900, minHeight: 600)
                 .migrationOverlay(shared)
         }
+        // A capability-eval launch is headless. `.prohibited` alone doesn't stop it — SwiftUI's
+        // WindowGroup opens its window at launch regardless — so suppress the launch window here,
+        // which is the actual lever (macOS 15+). `.automatic` is the normal behavior.
+        .defaultLaunchBehavior(CapabilityEvalRunner.isRequested ? .suppressed : .automatic)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Session") {

@@ -86,6 +86,18 @@ enum CapabilityEvalRunner {
         kit.verboseLogging = true
         kit.load()
 
+        // --list-models just needs the names, so it reads the CACHED catalog that `load()` already
+        // brought in — no forced refresh. A forced refresh here would re-fetch all ~14 providers,
+        // waiting on the slow/unreachable ones (a self-hosted box on a 15s timeout, local servers
+        // that aren't running). It refreshes only if the cache is empty (fresh install).
+        if CommandLine.arguments.contains("--list-models") {
+            if kit.models(for: "builtin.anthropic").isEmpty && kit.models(for: "builtin.openai").isEmpty {
+                print("--- no cached models; refreshing once ---")
+                await kit.refreshAllModels()
+            }
+            listModelsAndExit(kit: kit)
+        }
+
         print("--- refreshing metadata + all provider models (ungated) ---")
         await kit.refreshAllModels()
         if kit.refreshErrors.isEmpty {
@@ -96,10 +108,6 @@ enum CapabilityEvalRunner {
             }
         }
         print()
-
-        if CommandLine.arguments.contains("--list-models") {
-            listModelsAndExit(kit: kit)
-        }
 
         var profiles: [ModelProfile] = []
         for (index, target) in targets.enumerated() {

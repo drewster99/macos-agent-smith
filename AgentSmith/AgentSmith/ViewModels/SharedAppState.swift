@@ -481,6 +481,15 @@ final class SharedAppState {
     }
 
     private func performLoadPersistedState() async {
+        // A capability-eval launch runs headless against its OWN LLMKitManager and never touches
+        // this shared state — so don't boot it. Chiefly this skips preparing the semantic-search
+        // embedding engine (a multi-second model load, and a first-run model download), which the
+        // probe has no use for and which was needlessly delaying `--list-models`.
+        if CapabilityEvalRunner.isRequested {
+            hasLoadedPersistedState = true
+            return
+        }
+
         // Load nickname early so display names and prompts pick it up.
         nickname = UserDefaults.standard.string(forKey: "userNickname") ?? ""
         AgentRole.userNickname = nickname
