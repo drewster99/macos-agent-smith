@@ -28,7 +28,15 @@ It lives in the app rather than a CLI target because the API keys sit in a Keych
 
 Why `toolUse` can't simply be enforced from the catalog today: `ModelCapabilities` fields are non-optional `Bool`, so `false` means both "cannot" and "we have no idea". A hard tool-calling requirement would reject **537 of 770** offered models — including `glm-5.2`, `kimi-k2.5` and `qwen3-coder:480b`, which are what actually runs here. The `Bool?` work is upstream of any enforcement.
 
-Established so far (Anthropic, first 2 models, live): both complete the full round trip. Next: extend beyond Anthropic, decide how verdicts merge back (locally via `model_overrides.json`; the bundled JSON is ship-time and read-only, so a user probing a new model can't write there), and scope a full run — 853 models × 2 serial calls is ~1–2 hours and real money, so `--provider` / `--only-unknown` / `--limit` / `--dry-run` / resume matter before it's pointed at everything.
+**Now a full battery** (SwiftLLMKit `ModelProber`, released through 0.0.59): chat, temperature tolerance, tool calling + result round-trip, vision, PDF input, max-output (read from the endpoint's own 400), and named effort levels. Each defends against the false positive a plain "can you?" invites — vision sends a coloured shape and demands both facts (~1-in-18 to guess), PDF demands a transcribed code, tool use demands the fetched identifier. Findings are tri-state so "couldn't find out" is never a measured false. Fixtures (PNG/PDF) are built byte-by-byte and validated against the real `CGImageSource`/`CGPDFDocument` decoders.
+
+**First diverse live sweep (8 models, 57 calls) validated the whole approach and found real bugs:**
+- **`gemini-2.5-flash-image`**: catalog (LiteLLM) says `toolUse=true`; probe establishes **`toolCalling=false`** ("Function calling is not supported"). The exact false positive the whole investigation predicted, caught with evidence.
+- **`glm-5.2` / `qwen3.5:397b`** (LiteLLM has no data, catalog all-false): probe establishes chat + tool + round-trip — the only source of truth, working. `glm-5.2` differs by host: Ollama-Cloud reports `vision=false` + a real 131072 max-output; z.ai errors differently.
+- **`claude-sonnet-5` rejects temperature** — a live 400 for Brown and the Validator. Fixed (see SwiftLLMKit roadmap bug #2).
+- Effort probing matched the payload exactly (haiku rejects all levels; sonnet-5 accepts the full ladder), and the max-output parser was fixed to read Anthropic's "N, which is the maximum" phrasing.
+
+Next: decide how verdicts merge back (locally via `model_overrides.json`; the bundled JSON is ship-time and read-only, so a user probing a new model can't write there), and scope a full run — hundreds of models × several serial calls is real money, so `--targets` exists now and `--only-unknown` / `--dry-run` / resume matter before it's pointed at everything. Some findings are decodable rather than probeable (Gemini's `outputTokenLimit`, Anthropic's effort block) — the decode-side work will let the sweep `skip` them.
 
 ### Tool-execution timeout is cooperative, not a hard wall-clock cap (2026-07-15)
 
