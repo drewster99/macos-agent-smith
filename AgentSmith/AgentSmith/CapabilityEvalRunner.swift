@@ -133,6 +133,9 @@ enum CapabilityEvalRunner {
         let c = info.capabilities
         print("  catalog: toolUse=\(c.toolUse) vision=\(c.vision) pdfInput=\(c.pdfInput) reasoning=\(c.reasoning) "
               + "maxOut=\(info.maxOutputTokens.map(String.init) ?? "?") mode=\(info.mode ?? "?")")
+        if !info.validEffortLevels.isEmpty || !info.behaviorFlags.isAllDefault {
+            print("  catalog: effortLevels=\(info.validEffortLevels) flags=[\(info.behaviorFlags.displayLabels.joined(separator: ","))]")
+        }
     }
 
     private static func report(_ p: ModelProfile) {
