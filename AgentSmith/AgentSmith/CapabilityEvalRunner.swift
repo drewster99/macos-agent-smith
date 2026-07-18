@@ -19,6 +19,9 @@ import SwiftLLMKit
 ///     --no-seed                     probe everything even if the payload already answered it
 ///     --discard-non-chat            drop models the probe establishes can't chat (post-probe)
 ///     --discard-deprecated          skip models the provider marked deprecated (before probing)
+///     --reuse-store                 seed established probed findings from the local record;
+///                                   only gaps / new / version-invalidated findings re-probe
+///     --reuse-max-age-days <N>      with --reuse-store, records older than N days re-probe fully (default 30)
 ///     --verbose                     extra request logging
 ///   Fetch control (compose with any launch, including a normal GUI launch):
 ///     --force-fetch-models          re-fetch every provider now, ignoring the daily gate
@@ -84,6 +87,12 @@ enum CapabilityEvalRunner {
         let noSeed = CommandLine.arguments.contains("--no-seed")
         let discardNonChat = CommandLine.arguments.contains("--discard-non-chat")
         let discardDeprecated = CommandLine.arguments.contains("--discard-deprecated")
+        // Store-seeded re-sweep: reuse established, probed findings from the local record so only
+        // gaps (inconclusive last time), new models, or prober-version-invalidated findings cost
+        // calls. Off by default — a bare sweep is a full, honest re-measurement.
+        let reuseStore = CommandLine.arguments.contains("--reuse-store")
+        let reuseMaxAgeDays = argumentValue("--reuse-max-age-days").flatMap(Double.init) ?? 30
+        let reuseMaxAge = reuseMaxAgeDays * 86_400
 
         LLMRequestLogger.logDirectoryName = "AgentSmith-CapabilityEval"
         ModelFetchService.verboseLogging = true
@@ -183,6 +192,29 @@ enum CapabilityEvalRunner {
                 }
             }
 
+            // Store-seeded re-sweep: overlay prior probed findings onto the decoded seed, gated
+            // on the SAME prober version (a bump invalidates the whole record) and a max age
+            // (served models drift under fixed IDs). Carried findings keep their own evidence and
+            // timestamps; only gaps re-probe.
+            var reusedFindingSummary = ""
+            if reuseStore {
+                let (localRecord, _) = kit.probeRecords(provider: provider, modelID: target.modelID)
+                if let record = localRecord {
+                    let age = Date().timeIntervalSince(record.recordedAt)
+                    if record.proberVersion != ModelProber.proberVersion {
+                        reusedFindingSummary = "  reuse: SKIP — record is prober v\(record.proberVersion), current is v\(ModelProber.proberVersion); full re-probe"
+                    } else if age > reuseMaxAge {
+                        reusedFindingSummary = "  reuse: SKIP — record is \(Int(age / 86_400))d old (> \(Int(reuseMaxAgeDays))d); full re-probe"
+                    } else {
+                        seed.seedProbedFindings(from: record.profile)
+                        reusedFindingSummary = "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
+                    }
+                } else {
+                    reusedFindingSummary = "  reuse: no prior record — full probe"
+                }
+                print(reusedFindingSummary)
+            }
+
             // Deprecated models are skipped BEFORE probing so no calls are spent on a model the
             // provider is retiring. The seed carries the vendor's own deprecation date.
             if discardDeprecated, let deprecatedOn = seed.deprecatedOn {
@@ -226,11 +258,17 @@ enum CapabilityEvalRunner {
             // Persist through the SAME per-record store the GUI reads — never a private file.
             // The store rejects runs with no established probed findings (an aborted run must
             // not clobber a real record), so "skipped" here is a verdict, not an error.
-            do {
-                let stored = try kit.storeProbeResult(profile: profile, provider: provider, modelID: target.modelID)
-                print(stored ? "  probe record stored" : "  probe record skipped (no established probed findings)")
-            } catch {
-                print("  probe record store FAILED: \(error.localizedDescription)")
+            if reuseStore && profile.callCount == 0 {
+                // Every finding came from the store; nothing was measured this run. Re-storing
+                // would refresh recordedAt on data we didn't re-verify, so leave the record as is.
+                print("  probe record unchanged (fully reused; no new measurements)")
+            } else {
+                do {
+                    let stored = try kit.storeProbeResult(profile: profile, provider: provider, modelID: target.modelID)
+                    print(stored ? "  probe record stored" : "  probe record skipped (no established probed findings)")
+                } catch {
+                    print("  probe record store FAILED: \(error.localizedDescription)")
+                }
             }
 
             profiles.append(profile)
@@ -491,6 +529,13 @@ enum CapabilityEvalRunner {
     /// bare `providerID` (every model that provider currently lists in the catalog) — the latter so
     /// you can sweep, say, all of Alibaba Cloud without hand-listing model IDs. Returns nil when
     /// `--targets` is absent, so the caller falls back to the diverse default set.
+    /// The value following a `--flag value` argument, or nil if the flag is absent or last.
+    private static func argumentValue(_ flag: String) -> String? {
+        guard let index = CommandLine.arguments.firstIndex(of: flag),
+              index + 1 < CommandLine.arguments.count else { return nil }
+        return CommandLine.arguments[index + 1]
+    }
+
     private static func parseTargets(kit: LLMKitManager) -> [Target]? {
         guard let index = CommandLine.arguments.firstIndex(of: "--targets"),
               index + 1 < CommandLine.arguments.count else { return nil }
