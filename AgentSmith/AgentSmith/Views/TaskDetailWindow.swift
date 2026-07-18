@@ -836,15 +836,22 @@ struct TaskDetailWindow: View {
         let latest = task.validation?.latestVerdict(for: criterion.id)
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: Self.verdictSymbol(latest?.verdict))
-                    .foregroundStyle(Self.verdictColor(latest?.verdict))
-                    .font(.callout)
                 // Stable criterion number — matches the number in Brown's briefing, in
                 // get_task_details, and in the validator's rejection punch list ("Criterion 5").
                 Text("\(number).")
                     .font(.body.monospacedDigit())
                     .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
+                    // Verdict as a LABELED chip on its own line above the body — icon + the
+                    // verdict WORD, always shown (an accepted criterion previously showed only a
+                    // bare icon). Separating it from the body means the criterion's own in-text
+                    // "…this criterion FAILS" can never be read as the verdict.
+                    Label(latest?.verdict.displayLabel ?? "Pending", systemImage: Self.verdictSymbol(latest?.verdict))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Self.verdictColor(latest?.verdict))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Self.verdictColor(latest?.verdict).opacity(0.15)))
                     Text(criterion.text)
                         .font(.body)
                         .fixedSize(horizontal: false, vertical: true)
@@ -856,7 +863,7 @@ struct TaskDetailWindow: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let latest, let detail = latest.verdict.detailText {
-                        Text("\(latest.verdict.displayLabel): \(detail)")
+                        Text(detail)
                             .font(.callout)
                             .foregroundStyle(Self.verdictColor(latest.verdict))
                             .lineLimit(expanded ? nil : 2)

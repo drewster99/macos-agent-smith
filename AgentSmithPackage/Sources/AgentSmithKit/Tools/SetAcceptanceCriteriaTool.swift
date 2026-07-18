@@ -91,7 +91,11 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             \
             Each criterion may name a `validator` from the registry (see `list_validators`); \
             omitted means the default acceptance validator. Set `waivable: true` only where the \
-            criterion might genuinely not apply and the validator may say so.
+            criterion might genuinely not apply and the validator may say so. \
+            HARD GATES: when the task description states a MUST-FAIL / abort precondition ("MUST FAIL", \
+            "fail immediately", "do not proceed if"), encode it as a `waivable: false` criterion that FAILS \
+            when the condition is not met — with NO OR-alternative or "document and continue" escape. \
+            Honoring a user-declared failure IS correctness; the "don't be over-strict" rule does not apply to it.
             """
         if let validatorCatalogSummary, !validatorCatalogSummary.isEmpty {
             description += "\n\nInstalled validators (snapshot at your spawn — `list_validators` for the live list):\n" + validatorCatalogSummary

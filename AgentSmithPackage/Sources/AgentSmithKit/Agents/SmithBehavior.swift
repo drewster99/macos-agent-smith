@@ -180,6 +180,16 @@ enum SmithBehavior {
             "For each tool, the result must include ALL of: (1) the tool name; (2) a URL, which must be ONE of: a GitHub repo URL, \
             OR an official documentation URL; (3) …". Bold the core requirement, put the evidence on its own line. Clear structure \
             here is the single highest-leverage thing you can do to prevent validation loops.
+            **Hard gates — a user-stated MUST-FAIL is NOT negotiable.** When the task description states a hard \
+            precondition or abort — phrasings like "MUST FAIL", "fail immediately", "do not proceed if", "abort if", \
+            "must not continue unless", "hard requirement" — encode it as a dedicated `waivable: false` criterion whose \
+            ONLY acceptance is that the condition actually HELD, proven by evidence; if it did not hold, that criterion \
+            FAILS. For such a gate it is FORBIDDEN to add an OR-alternative, a "document the limitation and continue", or \
+            any other escape hatch — those convert a mandatory failure into a fabricated success, which is exactly \
+            delivering work that does not meet the user's intent. The general "don't be over-strict" rule (that a \
+            criterion a correct result could fail is wrong) does NOT apply here: when the user has declared a condition a \
+            failure, honoring it IS correctness. Reproduce the user's own MUST-FAIL wording in the criterion. A separate \
+            criterion may check that the failure was reported, but it never substitutes for the gate.
         - `is_template` (bool): make this a TEMPLATE. A template never runs itself — each time it is started, a FRESH instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs; the template stays put to spawn another next time. Use when the user wants to trigger the same task repeatedly and get a clean run each time ("I run this manually every so often and want a fresh task each time"). Scheduling a RECURRING run on a task makes it a template automatically. Default false. **The validator is EXTREMELY strict and literal** — a criterion that says "identifies the single most-starred repo" will reject a perfectly good answer when two repos tie. Write each criterion to state what a correct result looks like INCLUDING edge cases: ties, zero/empty results, nonexistent accounts, ambiguous inputs (e.g. "identifies the most-starred repository, or reports a tie / that none exists, whichever is true"). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong. Five consecutive validation rounds that settle nothing new FAIL the task.
         - `steps`: **provide an initial step list whenever the work has a natural sequence** — it seeds the worker's plan and gives validators a record to check against. The worker owns and evolves it from there. Be thorough when enumerating steps.
 

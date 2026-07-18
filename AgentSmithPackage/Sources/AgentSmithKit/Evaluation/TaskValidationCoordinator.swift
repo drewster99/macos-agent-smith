@@ -1026,9 +1026,29 @@ extension OrchestrationRuntime {
     private func postRoundSummary(taskID: UUID, records: [CriterionVerdictRecord]) async {
         guard let task = await taskStore.task(id: taskID) else { return }
         let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let numberByID = Dictionary(uniqueKeysWithValues: task.acceptanceCriteria.enumerated().map { ($0.element.id, $0.offset + 1) })
+        // Verdict FIRST (bolded), then the criterion by number + its first line only. A
+        // criterion's body can be multi-paragraph and may itself contain the word "FAILS" (as
+        // part of its own conditional logic) — appending the verdict at the very end buried it
+        // and made that in-text "FAILS" read like a result. Each line stays a markdown bullet
+        // (the feed renders markdown) so verdicts don't collapse into one paragraph.
         let lines = records.map { record -> String in
-            let text = criteriaByID[record.criterionID]?.text ?? record.criterionID.uuidString
-            return "- \(text): \(Self.describeVerdict(record))"
+            let full = criteriaByID[record.criterionID]?.text ?? record.criterionID.uuidString
+            let firstLine = full.split(whereSeparator: \.isNewline).first.map(String.init) ?? full
+            let trimmed = firstLine.count > 100 ? String(firstLine.prefix(100)) + "…" : firstLine
+            let numberPrefix = numberByID[record.criterionID].map { "\($0). " } ?? ""
+
+            let token: String
+            let reason: String?
+            switch record.verdict {
+            case .accepted: token = "ACCEPT"; reason = nil
+            case .rejected(let r): token = "REJECT"; reason = r
+            case .waived(let r): token = "WAIVE"; reason = r
+            case .error(let m): token = "ERROR"; reason = m
+            }
+            var line = "- **\(token)** — \(numberPrefix)\(trimmed)"
+            if let reason { line += " (\(reason))" }
+            return line
         }
         let summary = "Validation results for \"\(task.title)\":\n" + lines.joined(separator: "\n")
         await taskStore.addUpdate(id: taskID, message: summary)
