@@ -70,7 +70,9 @@ final class ModelProbeRunner {
             // makeProbeProvider strips the restriction flags the probe measures (see the kit's
             // factory doc) while keeping request-forming necessity flags.
             let llm = kit.makeProbeProvider(configuration: throwawayConfig, provider: target.provider)
-            let profile = await ModelProber.probe(llm: llm, seed: seed)
+            let preferLowImageDetail = target.provider.endpoint.host?.contains("api.openai.com") == true
+            let profile = await ModelProber.probe(llm: llm, seed: seed,
+                                                  preferLowImageDetail: preferLowImageDetail)
 
             do {
                 let stored = try kit.storeProbeResult(profile: profile, provider: target.provider, modelID: target.modelID)

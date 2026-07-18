@@ -221,9 +221,14 @@ enum CapabilityEvalRunner {
                 print("  SKIP: deprecated \(Self.dateOnly.string(from: deprecatedOn))\n"); continue
             }
 
+            // detail:'low' bills OpenAI image input at a flat ~85 tokens instead of tile math —
+            // scoped to api.openai.com, the one host documented to accept the field (the vision
+            // probe still retries hint-free before grading any failure, so it can't misfire).
+            let preferLowImageDetail = provider.endpoint.host?.contains("api.openai.com") == true
             var profile = await ModelProber.probe(
                 llm: llm, seed: seed,
-                effortLevelsToProbe: provider.apiType == .anthropic ? target.effortLevels : []
+                effortLevelsToProbe: provider.apiType == .anthropic ? target.effortLevels : [],
+                preferLowImageDetail: preferLowImageDetail
             )
 
             // Effort on OpenAI-compatible endpoints can't go through LLMCallOverrides — the
