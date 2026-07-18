@@ -59,6 +59,17 @@ enum AppColors {
     static let verdictError = Color.red
     static let verdictPending = Color.secondary
 
+    // MARK: - Task success measure (graded outcome)
+
+    /// All criteria accepted — an unqualified win.
+    static let outcomeSuccess = Color.green
+    /// Completed, but with waivers — met, with carve-outs. Amber-gold reads as "good, noted."
+    static let outcomePass = Color(red: 0.82, green: 0.66, blue: 0.20)
+    /// Failed / stalled — matches the rejected-verdict red.
+    static let outcomeIncomplete = Color(red: 0.90, green: 0.35, blue: 0.35)
+    /// Escalated — the machine couldn't judge; needs the user.
+    static let outcomeReview = Color.orange
+
     // MARK: - Worker step statuses
 
     static let stepCompleted = Color.green
@@ -308,6 +319,28 @@ enum TaskStatusBadge {
         case .interrupted: return "exclamationmark.circle.fill"
         case .scheduled: return "clock.badge"
         case .validating: return "checklist"
+        }
+    }
+}
+
+/// Color + SF Symbol for a task's graded success measure (`TaskOutcome`). Parallels
+/// `TaskStatusBadge` but keyed on the derived outcome rather than the lifecycle status.
+enum TaskOutcomeBadge {
+    static func color(for outcome: TaskOutcome) -> Color {
+        switch outcome {
+        case .success: return AppColors.outcomeSuccess
+        case .pass: return AppColors.outcomePass
+        case .incomplete: return AppColors.outcomeIncomplete
+        case .needsReview: return AppColors.outcomeReview
+        }
+    }
+
+    static func icon(for outcome: TaskOutcome) -> String {
+        switch outcome {
+        case .success: return "checkmark.seal.fill"
+        case .pass: return "checkmark.circle.fill"
+        case .incomplete: return "xmark.circle.fill"
+        case .needsReview: return "exclamationmark.triangle.fill"
         }
     }
 }

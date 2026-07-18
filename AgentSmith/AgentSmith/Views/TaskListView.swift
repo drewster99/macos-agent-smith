@@ -524,6 +524,7 @@ private struct TaskRow: View {
     private func metadataLine() -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             costChip()
+            elapsedChip()
 
             Spacer(minLength: 0)
 
@@ -531,7 +532,7 @@ private struct TaskRow: View {
             case .active:
                 if task.status != .running {
                     HStack(spacing: 4) {
-                        statusCapsule()
+                        outcomeOrStatusChip()
                         ScheduledRunsIndicator(task: task, viewModel: viewModel)
                     }
                 }
@@ -558,6 +559,32 @@ private struct TaskRow: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.orange)
                 .fixedSize()
+        }
+    }
+
+    /// Final elapsed runtime, shown just right of cost. Tertiary so cost (orange) stays the
+    /// primary left-edge signal while elapsed rides along as glanceable context. Only for
+    /// FINISHED tasks (`completedAt` set) — a still-running task's elapsed would be frozen at
+    /// last redraw rather than ticking, so we don't pretend the row is a live stopwatch.
+    @ViewBuilder
+    private func elapsedChip() -> some View {
+        if task.completedAt != nil, let elapsed = task.elapsedDisplayString {
+            Text(elapsed)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .fixedSize()
+        }
+    }
+
+    /// The graded success measure ("Incomplete 2/8") once a task is terminal, else the
+    /// generic lifecycle status ("Pending"). Folding both into one chip keeps the row
+    /// glanceable AND stops "Completed" from masking a task that actually went poorly.
+    @ViewBuilder
+    private func outcomeOrStatusChip() -> some View {
+        if let outcome = task.outcome {
+            TaskOutcomeChip(outcome: outcome)
+        } else {
+            statusCapsule()
         }
     }
 

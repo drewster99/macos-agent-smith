@@ -617,7 +617,7 @@ struct TaskDetailWindow: View {
         if !task.resultItems.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 sectionHeader("Deliverables", copyText: DeliverablesView.plainText(task.resultItems))
-                DeliverablesView(items: task.resultItems)
+                DeliverablesView(items: task.resultItems, urlResolver: attachmentURLResolver)
             }
             Divider()
         }
@@ -1452,6 +1452,17 @@ struct TaskDetailWindow: View {
                     .fontWeight(.medium)
             }
 
+            if let outcome = task.outcome {
+                GridRow(alignment: .firstTextBaseline) {
+                    metadataLabel("Result")
+                    HStack(spacing: 8) {
+                        TaskOutcomeChip(outcome: outcome)
+                        Text(outcome.detailText)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             GridRow {
                 metadataLabel("Created")
                 Text(task.createdAt.formatted(date: .abbreviated, time: .standard))
@@ -1496,9 +1507,17 @@ struct TaskDetailWindow: View {
             if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
                 GridRow {
                     metadataLabel("Cost")
-                    Text(String(format: "$%.2f", cost))
-                        .monospacedDigit()
-                        .foregroundStyle(.orange)
+                    HStack(spacing: 6) {
+                        Text(String(format: "$%.2f", cost))
+                            .monospacedDigit()
+                            .foregroundStyle(.orange)
+                        if let ratePerHour = task.costPerHourString(cost: cost) {
+                            Text("(\(ratePerHour))")
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
 

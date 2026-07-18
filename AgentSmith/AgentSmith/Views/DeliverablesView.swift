@@ -1,12 +1,16 @@
 import SwiftUI
+import AppKit
 import AgentSmithKit
 
 /// Renders a task's structured result deliverables (`ResultItem`s) as a stack of cards: each with
-/// its routing tags, inline text (markdown), and attachment references by name. The clickable
-/// attachment cards live in the separate "Result Attachments" section — here files are shown by
-/// name so the value is the tagged structure and inline answers, without duplicating the cards.
+/// its routing tags, inline text (markdown), and attachment references. Each attachment whose file
+/// is reachable on disk is a clickable link that opens it in its default app; unreachable ones fall
+/// back to a plain secondary label.
 struct DeliverablesView: View {
     let items: [ResultItem]
+    /// Resolves an attachment to its on-disk URL so a reachable file can be opened. Defaults to
+    /// unresolved (every row renders as a plain label) for previews and callers without a session.
+    var urlResolver: (Attachment) -> URL? = { _ in nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -65,12 +69,26 @@ struct DeliverablesView: View {
         }
     }
 
-    /// A single attachment reference line — icon reflects the file kind.
+    /// A single attachment reference line — icon reflects the file kind. When the file is
+    /// reachable on disk the row becomes a link that opens it in its default app; otherwise it
+    /// degrades to a plain secondary label (no dead click target).
+    @ViewBuilder
     private func attachmentLabel(_ attachment: Attachment) -> some View {
         let icon = attachment.isImage ? "photo" : (attachment.isPDF ? "doc.richtext" : "paperclip")
-        return Label(attachment.filename, systemImage: icon)
-            .font(.callout)
-            .foregroundStyle(.secondary)
+        if let url = urlResolver(attachment), FileManager.default.fileExists(atPath: url.path) {
+            Button(action: { NSWorkspace.shared.open(url) }, label: {
+                Label(attachment.filename, systemImage: icon)
+                    .font(.callout)
+            })
+            .buttonStyle(.plain)
+            .foregroundStyle(AppColors.disclosureToggle)
+            .help("Open \(attachment.filename)")
+            .pointerStyle(.link)
+        } else {
+            Label(attachment.filename, systemImage: icon)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
     }
 
     /// Plain-text rendering for a section copy button — the single source of truth for how a
