@@ -218,6 +218,18 @@ struct SettingsView: View {
 
     @State private var editingConfig: ModelConfiguration?
     @State private var isCreatingConfig = false
+    @State private var configFilterText = ""
+    @State private var configSortOrder: ConfigSortOrder = .created
+
+    /// Display order for the configurations list. `.created` is the stored order (new
+    /// configurations append at the bottom, where the New button just put them).
+    private enum ConfigSortOrder: String, CaseIterable, Identifiable {
+        case created = "Created"
+        case name = "Name"
+        case provider = "Provider"
+        case model = "Model"
+        var id: String { rawValue }
+    }
     /// (providerID, modelID) of the model whose behavior flags are being edited.
     /// Drives the `BehaviorFlagsEditorSheet` presentation.
     @State private var editingFlagsFor: FlagsEditTarget?
@@ -249,8 +261,26 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
             } else {
-                ForEach(shared.llmKit.configurations) { config in
-                    configRow(config)
+                HStack(spacing: 8) {
+                    TextField("Filter by name, provider, or model", text: $configFilterText)
+                        .textFieldStyle(.roundedBorder)
+                    Picker("Sort", selection: $configSortOrder) {
+                        ForEach(ConfigSortOrder.allCases) { order in
+                            Text(order.rawValue).tag(order)
+                        }
+                    }
+                    .fixedSize()
+                }
+                let displayed = displayedConfigurations()
+                if displayed.isEmpty {
+                    Text("No configurations match \u{201C}\(configFilterText)\u{201D}.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 20)
+                } else {
+                    ForEach(displayed) { config in
+                        configRow(config)
+                    }
                 }
             }
 
@@ -330,6 +360,39 @@ struct SettingsView: View {
         }, message: {
             Text(exportError ?? "")
         })
+    }
+
+    /// The configurations list as filtered and ordered by the tab's controls. Filtering
+    /// matches the configuration name, the provider's display name, and the model ID,
+    /// case-insensitively.
+    private func displayedConfigurations() -> [ModelConfiguration] {
+        var configs = shared.llmKit.configurations
+        let query = configFilterText.trimmingCharacters(in: .whitespaces)
+        if !query.isEmpty {
+            configs = configs.filter { config in
+                let providerName = shared.llmKit.providers.first { $0.id == config.providerID }?.name ?? ""
+                return config.name.localizedCaseInsensitiveContains(query)
+                    || providerName.localizedCaseInsensitiveContains(query)
+                    || config.modelID.localizedCaseInsensitiveContains(query)
+            }
+        }
+        switch configSortOrder {
+        case .created:
+            return configs
+        case .name:
+            return configs.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .provider:
+            return configs.sorted { lhs, rhs in
+                let lhsProvider = shared.llmKit.providers.first { $0.id == lhs.providerID }?.name ?? lhs.providerID
+                let rhsProvider = shared.llmKit.providers.first { $0.id == rhs.providerID }?.name ?? rhs.providerID
+                if lhsProvider.localizedCaseInsensitiveCompare(rhsProvider) != .orderedSame {
+                    return lhsProvider.localizedCaseInsensitiveCompare(rhsProvider) == .orderedAscending
+                }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        case .model:
+            return configs.sorted { $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending }
+        }
     }
 
     private func configRow(_ config: ModelConfiguration) -> some View {

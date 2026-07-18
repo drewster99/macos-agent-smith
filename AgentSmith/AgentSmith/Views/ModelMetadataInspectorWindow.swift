@@ -418,8 +418,6 @@ struct ModelCompositionDetailView: View {
             return parts.isEmpty ? nil : parts.joined(separator: ", ")
         case "createdAt", "deprecatedOn":
             // Dates: the generic description is a raw interval; format them.
-            guard let value = field.describe(facts) else { return nil }
-            _ = value
             let date = field.name == "createdAt" ? facts.createdAt : facts.deprecatedOn
             return date?.formatted(date: .abbreviated, time: .omitted)
         default:

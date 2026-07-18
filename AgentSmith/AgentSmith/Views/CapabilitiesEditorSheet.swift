@@ -1,8 +1,10 @@
 import SwiftUI
 import SwiftLLMKit
 
-/// Per-(provider, model) capability-flag override editor — the twin of
-/// `BehaviorFlagsEditorSheet`, but for `ModelCapabilities` (vision, tool use, …).
+/// Per-(provider, model) capability-flag and status override editor — the twin of
+/// `BehaviorFlagsEditorSheet`, but for `ModelCapabilities` (vision, tool use, …) plus the
+/// top-level status fields (`hidden`, `isAvailable`, `isAccessDenied`,
+/// `supportsChatCompletions`) and the display-name override.
 ///
 /// The catalog's capability flags come from LiteLLM + provider-reported abilities, which are
 /// frequently WRONG for self-hosted / cloud models (e.g. ollama-cloud reports `toolUse: false`
@@ -109,27 +111,66 @@ struct CapabilitiesEditorSheet: View {
                    resolved: \.toolChoice, override: \.toolChoice)
     ]
 
+    /// One editable model-status field. These live at the top level of `ModelMetadataOverride`
+    /// (not inside the capabilities container) and their resolved values are tri-state on
+    /// `ModelInfo` — nil means "no source has said", which the row surfaces as "unknown".
+    private struct StatusDescriptor: Identifiable {
+        let id: String
+        let title: String
+        let description: String
+        let resolved: (ModelInfo?) -> Bool?
+        let override: WritableKeyPath<ModelMetadataOverride, Bool?>
+    }
+
+    private static let statusDescriptors: [StatusDescriptor] = [
+        StatusDescriptor(id: "hidden", title: "Hidden",
+                         description: "Hide this model from configuration pickers. Presentation only — nothing is deleted, and un-hiding is just clearing this.",
+                         resolved: { $0?.hidden }, override: \.hidden),
+        StatusDescriptor(id: "isAvailable", title: "Available",
+                         description: "Whether the model actually answers. Probes set this empirically; force it to correct a stale verdict (e.g. a model that came back to life).",
+                         resolved: { $0?.isAvailable }, override: \.isAvailable),
+        StatusDescriptor(id: "isAccessDenied", title: "Access denied",
+                         description: "Whether YOUR account/key is denied for this model. Account-scoped — force off after a plan change un-denies you.",
+                         resolved: { $0?.isAccessDenied }, override: \.isAccessDenied),
+        StatusDescriptor(id: "supportsChatCompletions", title: "Chat completions",
+                         description: "Model serves the chat-completions surface Agent Smith talks to. Off means it's responses-/embeddings-only.",
+                         resolved: { $0?.supportsChatCompletions }, override: \.supportsChatCompletions)
+    ]
+
     @State private var states: [String: FlagState] = [:]
     /// The override selections as they stood when the sheet opened, so Done can tell whether
     /// anything actually changed (and only then surface the restart notice).
     @State private var initialStates: [String: FlagState] = [:]
+    /// Display-name override as typed; empty = no override.
+    @State private var displayNameOverride: String = ""
+    @State private var initialDisplayNameOverride: String = ""
     @State private var showRestartNotice = false
 
     private var key: String { "\(providerID)/\(modelID)" }
 
+    private var resolvedModelInfo: ModelInfo? {
+        shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)
+    }
+
     private var resolvedCapabilities: ModelCapabilities {
-        shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)?.capabilities ?? ModelCapabilities()
+        resolvedModelInfo?.capabilities ?? ModelCapabilities()
     }
 
     private var hasAnyOverride: Bool {
-        states.values.contains { $0 != .default }
+        states.values.contains { $0 != .default } || !displayNameOverride.isEmpty
+    }
+
+    /// The typed display-name override, normalized: whitespace-trimmed, empty → nil.
+    private var trimmedDisplayNameOverride: String? {
+        let trimmed = displayNameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Model Capabilities")
+                    Text("Model Capabilities & Status")
                         .font(.title3.bold())
                     Text("\(providerID) — \(modelID)")
                         .font(.caption)
@@ -147,8 +188,17 @@ struct CapabilitiesEditorSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    sectionHeader("Capabilities")
                     ForEach(Self.descriptors) { descriptor in
                         flagRow(descriptor)
+                    }
+
+                    Divider().padding(.vertical, 4)
+
+                    sectionHeader("Status & Identity")
+                    displayNameRow
+                    ForEach(Self.statusDescriptors) { descriptor in
+                        statusRow(descriptor)
                     }
                 }
             }
@@ -158,6 +208,8 @@ struct CapabilitiesEditorSheet: View {
             HStack {
                 Button("Reset to defaults") {
                     for descriptor in Self.descriptors { states[descriptor.id] = .default }
+                    for descriptor in Self.statusDescriptors { states[descriptor.id] = .default }
+                    displayNameOverride = ""
                 }
                 .disabled(!hasAnyOverride)
                 Spacer()
@@ -174,6 +226,70 @@ struct CapabilitiesEditorSheet: View {
             Button("OK") { dismiss() }
         } message: {
             Text("Your capability changes were saved. They take effect the next time you restart Agent Smith.")
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline.bold())
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var displayNameRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Display name").font(.headline)
+                Spacer()
+                Text("Resolved: \(resolvedModelInfo?.displayName ?? modelID)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Text("Override how this model is named in pickers and lists. Empty = keep the catalog's name.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("e.g. GLM 5.2 (Ollama Cloud)", text: $displayNameOverride)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private func statusRow(_ descriptor: StatusDescriptor) -> some View {
+        let resolved = descriptor.resolved(resolvedModelInfo)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(descriptor.title).font(.headline)
+                Spacer()
+                switch resolved {
+                case true?:
+                    Text("Resolved: ON")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.green)
+                case false?:
+                    Text("Resolved: off")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                case nil:
+                    Text("Resolved: unknown")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            Text(descriptor.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Picker(selection: Binding(
+                get: { states[descriptor.id] ?? .default },
+                set: { states[descriptor.id] = $0 }
+            ), label: EmptyView()) {
+                ForEach(FlagState.allCases) { value in
+                    Text(value.label).tag(value)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
         }
     }
 
@@ -205,17 +321,22 @@ struct CapabilitiesEditorSheet: View {
     }
 
     private func loadFromShared() {
-        let existing = shared.userModelOverrides[key]?.capabilities
+        let existing = shared.userModelOverrides[key]
         for descriptor in Self.descriptors {
+            states[descriptor.id] = FlagState(existing?.capabilities?[keyPath: descriptor.override] ?? nil)
+        }
+        for descriptor in Self.statusDescriptors {
             states[descriptor.id] = FlagState(existing?[keyPath: descriptor.override] ?? nil)
         }
+        displayNameOverride = existing?.displayName ?? ""
         initialStates = states
+        initialDisplayNameOverride = displayNameOverride
     }
 
     /// Persists the edits. If they changed anything, surfaces the restart notice (whose OK
     /// dismisses); otherwise dismisses straight through so an unchanged visit doesn't nag.
     private func commit() {
-        let changed = states != initialStates
+        let changed = states != initialStates || displayNameOverride != initialDisplayNameOverride
         save()
         if changed {
             showRestartNotice = true
@@ -232,21 +353,20 @@ struct CapabilitiesEditorSheet: View {
             patch[keyPath: descriptor.override] = value
             if value != nil { anyForced = true }
         }
-        // Preserve every non-capability field on the existing override; edit only `capabilities`.
+        // This sheet now owns capabilities, status flags, and display name; only the fields it
+        // does NOT edit (limits, pricing, behavior flags) are carried from the existing override.
         let existing = shared.userModelOverrides[key]
-        let merged = ModelMetadataOverride(
-            displayName: existing?.displayName,
+        var merged = ModelMetadataOverride(
+            displayName: trimmedDisplayNameOverride,
             maxInputTokens: existing?.maxInputTokens,
             maxOutputTokens: existing?.maxOutputTokens,
             capabilities: anyForced ? patch : nil,
             pricing: existing?.pricing,
-            supportsChatCompletions: existing?.supportsChatCompletions,
-            behaviorFlags: existing?.behaviorFlags,
-            // Every newer override field must ride along or a save here silently drops it.
-            hidden: existing?.hidden,
-            isAvailable: existing?.isAvailable,
-            isAccessDenied: existing?.isAccessDenied
+            behaviorFlags: existing?.behaviorFlags
         )
+        for descriptor in Self.statusDescriptors {
+            merged[keyPath: descriptor.override] = (states[descriptor.id] ?? .default).asOptional
+        }
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }
 }
