@@ -2,6 +2,42 @@
 
 ## Planned
 
+### Layered model-metadata composition — the authoritative design (decided 2026-07-17)
+
+Replaces the flattened `fetchAndEnrich` pipeline with per-source records + a deterministic merge, so every value's provenance is inspectable and "we couldn't tell" can never be read as "no". Reviewed by a three-lens adversarial panel plus codex/agy externally; all amendments below are decided, not open.
+
+**The five layers, and the merge (per model key, then per field):**
+
+```
+merged = authoritative                      (fresh /models decode; per-provider last-known-good
+                                             snapshots w/ fetchedAt; keep-on-failure; tombstones)
+nil fields   <- empirical                   (downloaded probe store + local probe store, combined
+                                             per-field: established-only, newer RECORD's field wins)
+non-nil downloaded-override fields FORCE    (the fix power: repairs wrong /models AND wrong probe
+                                             data; forced fields are then non-nil, so LiteLLM
+                                             can't touch them; every entry carries _evidence)
+nil fields   <- LiteLLM                     (gap-fill only, "possibly correct")
+non-nil user-override fields FORCE          (user always wins)
+```
+
+**Load-bearing rules (each one exists because a concrete failure was found):**
+
+1. **Tri-state per-source records.** Source records are all-optional (`Bool?` per capability) — NOT `ModelInfo`, whose non-optional `false` means "vendor didn't say" for most decoders. Decoders emit only what the vendor *stated*, per a per-provider bidirectional/positive-only table (Anthropic's capabilities block has **no tool key** — a mechanical port would make every Claude model "authoritatively" tool-incapable; Mistral's `?? false` leaves must die; HF's *stated* `supports_tools:false` must stop being discarded; OpenRouter empty arrays = nil). `BehaviorFlags` gets per-flag optionals in source records.
+2. **Probe runs: complete-only, replace-wholesale.** Only complete runs persist ("complete" includes policy halts — the tool-calling=false early-stop is a complete run; an aborted/rate-gutted run is discarded). A complete run **replaces** the stored local record; no cross-run stitching, one honest timestamp + `proberVersion` per record. No per-finding timestamps needed: records are single runs, so record timestamps give per-field freshness across the two stores for free.
+3. **Only `source == .probed` findings enter the empirical layer.** Decoded seed-echoes are regenerated fresh every run — they'd always win "newest" and launder catalog claims into empirical authority (worst when a model is delisted and its stale echoes become the top source).
+4. **Empirical-owned fields.** `isAvailable`, `isAccessDenied`, `toolResultRoundTrip`, `acceptsTemperature` (and probed max-output when the vendor is silent) are never supplied by the authoritative layer — otherwise Gemini's daily re-listing of retired `gemini-2.0-flash-lite` resurrects the dead model every 24h. Genuine conflicts elsewhere: authoritative wins the merged value, but the merge emits a **disagreements list** for the inspector.
+5. **Atomic vs per-field.** `pricing`, `samplingDefaults`, `benchmarks` merge whole-value-or-nothing (no Frankenstein tier structures); capabilities merge per-flag.
+6. **Scope split + identity.** Model-scoped findings (toolCalling, roundTrip, vision, pdf, maxOutput, acceptsTemperature) are shareable, keyed `(apiType, normalized endpoint host, modelID)` — survives provider delete/recreate, addressable by shipped data. Account-scoped findings (`isAccessDenied`, tier-gated effort, likely `isFree`) are keyed by providerID and **never exported** — a dev-key `isAccessDenied=false` must not overwrite a user's true `established(true)`. Ephemeral hosts (vast.ai) may get a user-stable alias.
+7. **Model existence = union of layers.** An override-only record materializes a model (badge: "not vendor-listed") — real need: Anthropic delists old dated snapshots that remain callable; Gemini previews; gateways with /models disabled; HF entries we skip. **Removal is never deletion**: `hidden` is an ordinary mergeable override field; pickers filter, data survives. Delisted models are tombstoned (probe records kept), not erased.
+8. **One field-descriptor table** (name, keypath, precedence class, scope, atomic-vs-per-field) drives merge + provenance + Codable + export-strip, with a Mirror-reflection test so an unregistered field is a red test, not a silent wrong-merge. (Drift is already real: the 8 fields added 2026-07-16/17 are absent from `ModelMetadataOverride.apply`.)
+9. **Reactivity.** Layer records are value types; ONE `@Observable` composer (evolving `LLMKitManager`) is the single mutation point — every layer write recomputes and republishes the merged view, so probe results / downloads / overrides take effect immediately. No per-model reference objects (would scatter mutation and fight `Sendable` at the runtime actor boundary).
+10. **Probing is manual-only for now.** CLI bulk probe updates its JSON *per-record* (re-probing a target overwrites just that record) — this file IS the shipped-artifact source, with account-scoped fields stripped at export. In-app: a model-info screen with per-layer values, disagreements highlighted, "missing information — Probe now" for unprobed models, and multiselect probe. No auto-probe-on-discovery, no budget machinery until the data shape has settled (numbers that ruled it out: one OpenRouter key-paste = ~343 discovered models ≈ 2,100–3,100 paid calls, serial, sharing rate limits with live agent traffic).
+11. **Staleness: no TTL.** Event-driven invalidation from production traffic (a live 400 naming temperature, a `reportedMaxOutputTokenLimit` mismatch, a 404 on an `isAvailable=true` model) marks the specific finding stale + surfaces re-probe; `proberVersion`-behind findings lose ties (real precedent: pre-0.0.45 PDF probes measured our own broken encoder).
+
+**Rollout (each tagged release safe on its own):**
+① per-source records + merge inside `fetchAndEnrich`, probe layers empty, golden-parity tests (new merge byte-identical to old pipeline across per-apiType fixtures) → ② seen-models ledger seeded from the existing catalog (empty ledger = "seed silently", never "everything is new") → ③ local probe store (App Support, one file per record, read-merge-write + atomic replace; CLI writes through it) wired read-only into the merge, golden tests for glm-5.2 (probe-only truth) and gemini-2.0-flash-lite (dead-but-listed) → ④ provenance/inspector UI + multiselect probe → ⑤ downloaded slots (probe data + overrides), export format already defined by ③.
+**Migration: nothing migrates into per-source stores** — the old merged catalog can't be decomposed (a `maxInputTokens` in it might be LiteLLM's); it remains a read-only per-provider fallback until that provider's first fresh decode lands.
+
 ### Agents are pruning at ~13% of their model's real context window (2026-07-17)
 
 `ModelConfiguration.maxContextTokens` defaults to `128_000` and **nothing ever wires it from the model's actual limit**. Anthropic's `/v1/models` reports `max_input_tokens: 1,000,000` for Sonnet 5 / Opus 4.8 / Fable 5; we decode that into `ModelInfo.maxInputTokens` and then never connect the two. It isn't cosmetic — `contextWindowSize` drives conversation pruning (`AgentActor.pruneThresholdTokens`) and the summarizer's budget (`TaskSummarizer`, 80% of the window):
