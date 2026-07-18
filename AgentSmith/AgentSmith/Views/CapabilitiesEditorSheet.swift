@@ -144,6 +144,11 @@ struct CapabilitiesEditorSheet: View {
     /// Display-name override as typed; empty = no override.
     @State private var displayNameOverride: String = ""
     @State private var initialDisplayNameOverride: String = ""
+    /// Token-limit overrides as typed; nil/empty = no override (inherit the catalog value).
+    @State private var maxContextOverride: Int?
+    @State private var maxOutputOverride: Int?
+    @State private var initialMaxContextOverride: Int?
+    @State private var initialMaxOutputOverride: Int?
     @State private var showRestartNotice = false
 
     private var key: String { "\(providerID)/\(modelID)" }
@@ -158,6 +163,7 @@ struct CapabilitiesEditorSheet: View {
 
     private var hasAnyOverride: Bool {
         states.values.contains { $0 != .default } || !displayNameOverride.isEmpty
+            || maxContextOverride != nil || maxOutputOverride != nil
     }
 
     /// The typed display-name override, normalized: whitespace-trimmed, empty → nil.
@@ -200,6 +206,18 @@ struct CapabilitiesEditorSheet: View {
                     ForEach(Self.statusDescriptors) { descriptor in
                         statusRow(descriptor)
                     }
+
+                    Divider().padding(.vertical, 4)
+
+                    sectionHeader("Limits")
+                    limitRow(title: "Max context (input) tokens",
+                             help: "The model's real context window. Overrides the catalog value everywhere — the config editor's limits, validation, and context pruning read it. Set this for models whose provider doesn't report a context window (e.g. Ollama Cloud).",
+                             resolved: resolvedModelInfo?.maxInputTokens,
+                             value: $maxContextOverride)
+                    limitRow(title: "Max output tokens",
+                             help: "The model's real output-token ceiling. Overrides the catalog value; the config editor and validation read it.",
+                             resolved: resolvedModelInfo?.maxOutputTokens,
+                             value: $maxOutputOverride)
                 }
             }
 
@@ -210,6 +228,8 @@ struct CapabilitiesEditorSheet: View {
                     for descriptor in Self.descriptors { states[descriptor.id] = .default }
                     for descriptor in Self.statusDescriptors { states[descriptor.id] = .default }
                     displayNameOverride = ""
+                    maxContextOverride = nil
+                    maxOutputOverride = nil
                 }
                 .disabled(!hasAnyOverride)
                 Spacer()
@@ -234,6 +254,35 @@ struct CapabilitiesEditorSheet: View {
             .font(.subheadline.bold())
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func limitRow(title: String, help: String, resolved: Int?, value: Binding<Int?>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.headline)
+                Spacer()
+                Text("Resolved: \(resolved.map { "\($0.formatted())" } ?? "unknown")")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(resolved == nil ? .tertiary : .secondary)
+            }
+            Text(help)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                TextField("catalog value", value: value, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 140)
+                if let resolved, value.wrappedValue != resolved {
+                    Button("Use resolved (\(resolved.formatted()))") { value.wrappedValue = resolved }
+                        .controlSize(.small)
+                }
+                if value.wrappedValue != nil {
+                    Button("Clear") { value.wrappedValue = nil }
+                        .controlSize(.small)
+                }
+            }
+        }
     }
 
     private var displayNameRow: some View {
@@ -329,14 +378,20 @@ struct CapabilitiesEditorSheet: View {
             states[descriptor.id] = FlagState(existing?[keyPath: descriptor.override] ?? nil)
         }
         displayNameOverride = existing?.displayName ?? ""
+        maxContextOverride = existing?.maxInputTokens
+        maxOutputOverride = existing?.maxOutputTokens
         initialStates = states
         initialDisplayNameOverride = displayNameOverride
+        initialMaxContextOverride = maxContextOverride
+        initialMaxOutputOverride = maxOutputOverride
     }
 
     /// Persists the edits. If they changed anything, surfaces the restart notice (whose OK
     /// dismisses); otherwise dismisses straight through so an unchanged visit doesn't nag.
     private func commit() {
         let changed = states != initialStates || displayNameOverride != initialDisplayNameOverride
+            || maxContextOverride != initialMaxContextOverride
+            || maxOutputOverride != initialMaxOutputOverride
         save()
         if changed {
             showRestartNotice = true
@@ -353,13 +408,13 @@ struct CapabilitiesEditorSheet: View {
             patch[keyPath: descriptor.override] = value
             if value != nil { anyForced = true }
         }
-        // This sheet now owns capabilities, status flags, and display name; only the fields it
-        // does NOT edit (limits, pricing, behavior flags) are carried from the existing override.
+        // This sheet now owns capabilities, status flags, display name, AND token limits; only the
+        // fields it does NOT edit (pricing, behavior flags) are carried from the existing override.
         let existing = shared.userModelOverrides[key]
         var merged = ModelMetadataOverride(
             displayName: trimmedDisplayNameOverride,
-            maxInputTokens: existing?.maxInputTokens,
-            maxOutputTokens: existing?.maxOutputTokens,
+            maxInputTokens: maxContextOverride,
+            maxOutputTokens: maxOutputOverride,
             capabilities: anyForced ? patch : nil,
             pricing: existing?.pricing,
             behaviorFlags: existing?.behaviorFlags
