@@ -346,7 +346,7 @@ struct ModelCompositionDetailView: View {
                 let orderedLayers: [MetadataLayer] = [.authoritative, .empirical, .downloadedOverrides, .enrichment, .userOverrides]
                 ForEach(ModelFactsFieldTable.fields, id: \.name) { field in
                     if let winner = composition.provenance[field.name],
-                       let value = field.describe(composition.merged) {
+                       let value = Self.displayValue(field: field, in: composition.merged) {
                         let hasDisagreement = composition.disagreements.contains { $0.field == field.name }
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Text(field.name)
@@ -367,7 +367,7 @@ struct ModelCompositionDetailView: View {
                             ForEach(orderedLayers.filter { $0 != winner }, id: \.self) { layer in
                                 if let layerFacts = composition.layers[layer],
                                    field.isSet(layerFacts),
-                                   let layerValue = field.describe(layerFacts) {
+                                   let layerValue = Self.displayValue(field: field, in: layerFacts) {
                                     Text("\(layer.shortName): \(layerValue)")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
@@ -379,6 +379,51 @@ struct ModelCompositionDetailView: View {
                 }
             }
             .padding(4)
+        }
+    }
+
+    /// Human-readable field values for the composition table. Composites get compact formatting
+    /// (a raw struct dump like "ModelPricing(base: PricingTier(input: Optional(2e-06)…" is
+    /// unreadable and, for pricing, actively misleading in per-token units); everything else
+    /// falls back to the descriptor's generic description.
+    static func displayValue(field: ModelFactsField, in facts: ModelFacts) -> String? {
+        switch field.name {
+        case "pricing":
+            guard let pricing = facts.pricing else { return nil }
+            func perM(_ v: Double?) -> String { v.map { String(format: "$%.2f", $0 * 1_000_000) } ?? "—" }
+            var text = "in \(perM(pricing.base.input)) / out \(perM(pricing.base.output)) per 1M"
+            if !pricing.tokenThresholdTiers.isEmpty { text += " (+\(pricing.tokenThresholdTiers.count) tier)" }
+            return text
+        case "samplingDefaults":
+            guard let defaults = facts.samplingDefaults else { return nil }
+            var parts: [String] = []
+            if let t = defaults.temperature { parts.append("temp \(t)") }
+            if let p = defaults.topP { parts.append("topP \(p)") }
+            if let k = defaults.topK { parts.append("topK \(k)") }
+            if let f = defaults.frequencyPenalty { parts.append("freqPen \(f)") }
+            if let pr = defaults.presencePenalty { parts.append("presPen \(pr)") }
+            if let r = defaults.repetitionPenalty { parts.append("repPen \(r)") }
+            return parts.isEmpty ? nil : parts.joined(separator: ", ")
+        case "benchmarks":
+            guard let benchmarks = facts.benchmarks else { return nil }
+            var parts: [String] = []
+            if let aa = benchmarks.artificialAnalysis {
+                if let i = aa.intelligenceIndex { parts.append("intel \(i)") }
+                if let c = aa.codingIndex { parts.append("coding \(c)") }
+                if let a = aa.agenticIndex { parts.append("agentic \(a)") }
+            }
+            if let top = benchmarks.designArena?.first, let elo = top.elo {
+                parts.append("elo \(Int(elo))")
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: ", ")
+        case "createdAt", "deprecatedOn":
+            // Dates: the generic description is a raw interval; format them.
+            guard let value = field.describe(facts) else { return nil }
+            _ = value
+            let date = field.name == "createdAt" ? facts.createdAt : facts.deprecatedOn
+            return date?.formatted(date: .abbreviated, time: .omitted)
+        default:
+            return field.describe(facts)
         }
     }
 

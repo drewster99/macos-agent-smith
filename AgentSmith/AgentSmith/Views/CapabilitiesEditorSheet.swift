@@ -101,6 +101,9 @@ struct CapabilitiesEditorSheet: View {
         Descriptor(id: "assistantPrefill", title: "Assistant prefill",
                    description: "Model supports prefilling the start of the assistant's reply.",
                    resolved: \.assistantPrefill, override: \.assistantPrefill),
+        Descriptor(id: "toolResultRoundTrip", title: "Tool result round-trip",
+                   description: "Model consumes tool RESULTS, not just emits calls — the half an agent depends on. Probe-established; force only to correct a stale verdict.",
+                   resolved: \.toolResultRoundTrip, override: \.toolResultRoundTrip),
         Descriptor(id: "toolChoice", title: "Tool choice",
                    description: "Model honors an explicit `tool_choice` selection.",
                    resolved: \.toolChoice, override: \.toolChoice)
@@ -238,7 +241,11 @@ struct CapabilitiesEditorSheet: View {
             capabilities: anyForced ? patch : nil,
             pricing: existing?.pricing,
             supportsChatCompletions: existing?.supportsChatCompletions,
-            behaviorFlags: existing?.behaviorFlags
+            behaviorFlags: existing?.behaviorFlags,
+            // Every newer override field must ride along or a save here silently drops it.
+            hidden: existing?.hidden,
+            isAvailable: existing?.isAvailable,
+            isAccessDenied: existing?.isAccessDenied
         )
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }

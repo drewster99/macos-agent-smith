@@ -222,6 +222,7 @@ struct SettingsView: View {
     /// Drives the `BehaviorFlagsEditorSheet` presentation.
     @State private var editingFlagsFor: FlagsEditTarget?
     @State private var editingCapabilitiesFor: FlagsEditTarget?
+    @State private var editingPricingFor: FlagsEditTarget?
 
     private struct FlagsEditTarget: Identifiable {
         let providerID: String
@@ -314,6 +315,13 @@ struct SettingsView: View {
                 modelID: target.modelID
             )
         }
+        .sheet(item: $editingPricingFor) { target in
+            PricingEditorSheet(
+                shared: shared,
+                providerID: target.providerID,
+                modelID: target.modelID
+            )
+        }
         .alert("Export Error", isPresented: Binding(
             get: { exportError != nil },
             set: { if !$0 { exportError = nil } }
@@ -392,6 +400,14 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Override per-model capability flags (vision, tool use, …) when the catalog is wrong")
+                Button("Pricing") {
+                    editingPricingFor = FlagsEditTarget(
+                        providerID: config.providerID,
+                        modelID: config.modelID
+                    )
+                }
+                .buttonStyle(.borderless)
+                .help("View resolved pricing and override input/output rates (USD per 1M tokens)")
                 Button("Edit") {
                     editingConfig = config
                 }

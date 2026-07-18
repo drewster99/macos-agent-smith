@@ -203,7 +203,11 @@ struct BehaviorFlagsEditorSheet: View {
             capabilities: existing?.capabilities,
             pricing: existing?.pricing,
             supportsChatCompletions: existing?.supportsChatCompletions,
-            behaviorFlags: flagsPatch.isEmpty ? nil : flagsPatch
+            behaviorFlags: flagsPatch.isEmpty ? nil : flagsPatch,
+            // Every newer override field must ride along or a save here silently drops it.
+            hidden: existing?.hidden,
+            isAvailable: existing?.isAvailable,
+            isAccessDenied: existing?.isAccessDenied
         )
         shared.setUserModelOverride(
             providerID: providerID,
