@@ -126,7 +126,9 @@ enum CapabilityEvalRunner {
 
         // Cache the freshly-decoded vendor payload per provider: a provider sweep probes many models
         // from one provider, and each seed only needs that provider's model list fetched once.
-        var decodedByProvider: [String: [ModelInfo]] = [:]
+        // Tri-state facts, NOT materialized ModelInfo — materialization flattens nil to false,
+        // and seeding from it fabricates decoded(false) for fields the vendor never stated.
+        var decodedByProvider: [String: [DecodedModelFacts]] = [:]
 
         var profiles: [ModelProfile] = []
         for (index, target) in targets.enumerated() {
@@ -162,15 +164,15 @@ enum CapabilityEvalRunner {
             var seed = ModelProfile(providerID: target.providerID, modelID: target.modelID)
             if !noSeed && fetchPolicy != .none {
                 do {
-                    let decodedModels: [ModelInfo]
+                    let decodedModels: [DecodedModelFacts]
                     if let cached = decodedByProvider[target.providerID] {
                         decodedModels = cached
                     } else {
-                        decodedModels = try await ModelFetchService().fetchModels(from: provider, apiKey: key.isEmpty ? nil : key)
+                        decodedModels = try await ModelFetchService().fetchModelFacts(from: provider, apiKey: key.isEmpty ? nil : key)
                         decodedByProvider[target.providerID] = decodedModels
                     }
                     if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {
-                        seed = ModelProber.seedProfile(fromDecoded: decoded, apiType: provider.apiType)
+                        seed = ModelProber.seedProfile(fromDecodedFacts: decoded, providerID: target.providerID)
                     }
                 } catch {
                     print("  seed fetch failed (probing everything): \(error.localizedDescription)")
@@ -244,10 +246,14 @@ enum CapabilityEvalRunner {
     private static func exportProbeRecords(kit: LLMKitManager) {
         let records = kit.exportableProbeRecords()
         guard !records.isEmpty else { return }
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("AgentSmith-CapabilityEval")
-            .appendingPathComponent("probe_records_export.json")
+        let url = directory.appendingPathComponent("probe_records_export.json")
         do {
+            // The request logger usually creates this directory as a side effect of the first
+            // logged call — but a quiet run (e.g. --no-fetch-models with an early failure) may
+            // never log, so ensure it exists rather than depend on the coincidence.
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(records).write(to: url, options: .atomic)
@@ -461,10 +467,11 @@ enum CapabilityEvalRunner {
     }
 
     private static func writeProfiles(_ profiles: [ModelProfile]) {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("AgentSmith-CapabilityEval")
-            .appendingPathComponent("profiles.json")
+        let url = directory.appendingPathComponent("profiles.json")
         do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(profiles).write(to: url)

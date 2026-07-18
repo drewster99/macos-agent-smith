@@ -2,7 +2,18 @@
 
 ## Planned
 
-### Layered model-metadata composition — the authoritative design (decided 2026-07-17)
+### Layered model-metadata composition — the authoritative design (decided 2026-07-17) ✅ IMPLEMENTED
+
+**Status: all five rollout steps shipped 2026-07-17** (SwiftLLMKit 0.0.77–0.0.82; app follows).
+①`ModelFacts` + field table + five-layer merge + stated-facts decoder audit; ②seen-models
+ledger with PER-PROVIDER silent seeding; ③local probe store + empirical layer + CLI
+write-through/export; ④Model Metadata inspector window (⌘5) + manual multiselect probing;
+⑤`downloaded_overrides.json` slot + `hidden` + union-of-layers existence. Deliberate scope
+holdovers: probe-only fields (`isAvailable`/`isAccessDenied`/`toolResultRoundTrip`/effort
+levels) are record-only (shown in the inspector, not merged — promotion is a future explicit
+decision); `seedProfile` still consumes materialized `ModelInfo` rather than facts (pre-existing,
+carries the old `?? false` subtlety for payloads missing a capabilities block); event-driven
+staleness invalidation and any automatic probing remain future work per the design.
 
 Replaces the flattened `fetchAndEnrich` pipeline with per-source records + a deterministic merge, so every value's provenance is inspectable and "we couldn't tell" can never be read as "no". Reviewed by a three-lens adversarial panel plus codex/agy externally; all amendments below are decided, not open.
 

@@ -34,8 +34,9 @@ final class ModelProbeRunner {
         states = Dictionary(uniqueKeysWithValues: targets.map { ("\($0.provider.id)/\($0.modelID)", .pending) })
 
         // Pure vendor payloads, fetched once per provider — the seed source that keeps LiteLLM's
-        // claims from wearing a `decoded` badge.
-        var vendorModelsByProvider: [String: [ModelInfo]] = [:]
+        // claims from wearing a `decoded` badge. Tri-state facts, not materialized ModelInfo,
+        // so unstated fields stay probe-able instead of seeding a fabricated decoded(false).
+        var vendorModelsByProvider: [String: [DecodedModelFacts]] = [:]
         let fetchService = ModelFetchService()
 
         for target in targets {
@@ -44,19 +45,19 @@ final class ModelProbeRunner {
 
             var seed = ModelProfile(providerID: target.provider.id, modelID: target.modelID)
             do {
-                let vendorModels: [ModelInfo]
+                let vendorModels: [DecodedModelFacts]
                 if let cached = vendorModelsByProvider[target.provider.id] {
                     vendorModels = cached
                 } else {
                     let apiKey = kit.apiKey(for: target.provider.id)
-                    vendorModels = try await fetchService.fetchModels(
+                    vendorModels = try await fetchService.fetchModelFacts(
                         from: target.provider,
                         apiKey: (apiKey?.isEmpty == false) ? apiKey : nil
                     )
                     vendorModelsByProvider[target.provider.id] = vendorModels
                 }
                 if let decoded = vendorModels.first(where: { $0.modelID == target.modelID }) {
-                    seed = ModelProber.seedProfile(fromDecoded: decoded, apiType: target.provider.apiType)
+                    seed = ModelProber.seedProfile(fromDecodedFacts: decoded, providerID: target.provider.id)
                 }
             } catch {
                 // A failed seed fetch means probing everything — same policy as the CLI runner.
