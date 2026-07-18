@@ -83,6 +83,9 @@ struct AgentCardModelInfoLine: View {
                 Button("Resolve\u{2026}") {
                     showingMetadataWarning = false
                     shared?.settingsSelectedTab = .metadata
+                    // Deep-link: land ON the entry, not just the tab.
+                    shared?.metadataFocusProviderID = modelConfig.providerID
+                    shared?.metadataFocusModelID = modelConfig.modelID
                     openSettings()
                 }
             }

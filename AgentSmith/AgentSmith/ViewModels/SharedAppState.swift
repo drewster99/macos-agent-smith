@@ -387,6 +387,12 @@ final class SharedAppState {
     /// programmatically to deep-link (e.g. an MCP failure banner opens the MCP tab).
     var settingsSelectedTab: SettingsTab = .general
 
+    /// One-shot deep-link into the Metadata tab: the provider (and optionally model) the coverage
+    /// view should expand, scroll to, and highlight on next appearance. Set by "Resolve…" in the
+    /// inspector's missing-metadata popover; cleared by the coverage view after honoring it.
+    var metadataFocusProviderID: String?
+    var metadataFocusModelID: String?
+
     /// Live MCP client hosts (one per active session), weakly held so closing a tab
     /// lets its host deallocate. Used to push config changes to running sessions.
     private var mcpHostBoxes: [WeakMCPHostBox] = []

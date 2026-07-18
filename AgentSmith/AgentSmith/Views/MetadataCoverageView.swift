@@ -15,6 +15,9 @@ import SwiftLLMKit
 /// from "upstream simply doesn't have it".
 struct MetadataCoverageView: View {
     @Bindable var shared: SharedAppState
+    /// Supplied by the Settings tab so the deep-link (inspector "Resolve…") can scroll to the
+    /// focused provider's section.
+    var scrollProxy: ScrollViewProxy?
 
     /// providerID → (modelID → resolution). Recomputed on appear and after any mapping edit.
     @State private var resolutions: [String: [String: ModelMetadataService.Resolution]] = [:]
@@ -23,6 +26,8 @@ struct MetadataCoverageView: View {
     @State private var expandedProviderIDs: Set<String> = []
     @State private var editingMappingFor: MappingEditTarget?
     @State private var isLoading = true
+    /// "providerID/modelID" briefly highlighted after a deep-link, so the eye lands on the row.
+    @State private var highlightedModelKey: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -37,6 +42,10 @@ struct MetadataCoverageView: View {
             }
         }
         .task { await reload() }
+        .onChange(of: shared.metadataFocusProviderID) {
+            // Re-fired if the user hits Resolve again while Settings is already open.
+            DispatchQueue.main.async { honorFocusTarget() }
+        }
         .sheet(item: $editingMappingFor) { target in
             LiteLLMProviderPickerSheet(
                 shared: shared,
@@ -107,6 +116,7 @@ struct MetadataCoverageView: View {
             }
         }
         .padding(.vertical, 4)
+        .id(provider.id)
     }
 
     @ViewBuilder
@@ -129,6 +139,11 @@ struct MetadataCoverageView: View {
                 .font(.caption2)
             }
         }
+        .padding(.horizontal, 4)
+        .background(
+            highlightedModelKey == "\(provider.id)/\(modelID)" ? Color.yellow.opacity(0.18) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 4)
+        )
     }
 
     @ViewBuilder
@@ -188,6 +203,32 @@ struct MetadataCoverageView: View {
         }
         resolutions = next
         isLoading = false
+        honorFocusTarget()
+    }
+
+    /// Consumes the one-shot deep-link from the inspector's Resolve button: expand the target
+    /// provider, scroll its section into view, and briefly highlight the model row so "Resolve"
+    /// lands ON the entry instead of merely on the tab.
+    private func honorFocusTarget() {
+        guard let providerID = shared.metadataFocusProviderID else { return }
+        let modelID = shared.metadataFocusModelID
+        shared.metadataFocusProviderID = nil
+        shared.metadataFocusModelID = nil
+
+        expandedProviderIDs.insert(providerID)
+        if let modelID {
+            highlightedModelKey = "\(providerID)/\(modelID)"
+        }
+        // Let the expansion lay out before scrolling to the section anchor.
+        DispatchQueue.main.async {
+            withAnimation {
+                scrollProxy?.scrollTo(providerID, anchor: .top)
+            }
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            highlightedModelKey = nil
+        }
     }
 }
 

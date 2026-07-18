@@ -37,9 +37,11 @@ struct SettingsView: View {
             }
 
             Tab("Metadata", systemImage: "checklist", value: SettingsTab.metadata) {
-                ScrollView {
-                    MetadataCoverageView(shared: shared)
-                        .padding()
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        MetadataCoverageView(shared: shared, scrollProxy: proxy)
+                            .padding()
+                    }
                 }
             }
 
