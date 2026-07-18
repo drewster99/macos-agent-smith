@@ -278,8 +278,7 @@ struct ModelCompositionDetailView: View {
                     Text("Output bounded by context").font(.caption)
                     Text("\(context) tokens").font(.caption.bold()).foregroundStyle(.orange)
                     if let evidence = bound.evidence {
-                        Image(systemName: "info.circle").font(.caption2)
-                            .foregroundStyle(.secondary).help(evidence)
+                        EvidenceInfoButton(evidence: evidence)
                     }
                     Spacer()
                 }
@@ -310,10 +309,7 @@ struct ModelCompositionDetailView: View {
                     Text("(decoded)").font(.caption2).foregroundStyle(.secondary)
                 }
                 if let evidence = finding.evidence {
-                    Image(systemName: "info.circle")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .help(evidence)
+                    EvidenceInfoButton(evidence: evidence)
                 }
                 Spacer()
             }
@@ -504,6 +500,38 @@ extension MetadataLayer {
         case .downloadedOverrides: return .purple
         case .enrichment: return .gray
         case .userOverrides: return .orange
+        }
+    }
+}
+
+
+/// The clickable "i" beside a probe finding: hover shows a quick tooltip, click opens a popover
+/// with the full, selectable evidence text (an HTTP body or reason is usually multi-line and gets
+/// clipped in a one-line tooltip). An info-circle reads as clickable, so it now behaves that way.
+private struct EvidenceInfoButton: View {
+    let evidence: String
+    @State private var isShowing = false
+
+    var body: some View {
+        Button {
+            isShowing.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help(evidence)
+        .popover(isPresented: $isShowing, arrowEdge: .bottom) {
+            ScrollView {
+                Text(evidence)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .frame(width: 420)
+            .frame(maxHeight: 300)
         }
     }
 }
