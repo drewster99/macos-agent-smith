@@ -75,10 +75,12 @@ final class ModelProbeRunner {
                                                   preferLowImageDetail: preferLowImageDetail)
 
             do {
-                let stored = try kit.storeProbeResult(profile: profile, provider: target.provider, modelID: target.modelID)
-                states[stateKey] = stored
-                    ? .stored(callCount: profile.callCount)
-                    : .skipped(reason: "no established probed findings")
+                let outcome = try kit.storeProbeResult(profile: profile, provider: target.provider, modelID: target.modelID)
+                switch outcome {
+                case .stored:  states[stateKey] = .stored(callCount: profile.callCount)
+                case .pruned:  states[stateKey] = .skipped(reason: "not a chat model — stale record pruned")
+                case .skipped: states[stateKey] = .skipped(reason: "no established probed findings")
+                }
             } catch {
                 states[stateKey] = .failed(error.localizedDescription)
             }

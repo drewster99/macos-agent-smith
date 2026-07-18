@@ -269,8 +269,12 @@ enum CapabilityEvalRunner {
                 print("  probe record unchanged (fully reused; no new measurements)")
             } else {
                 do {
-                    let stored = try kit.storeProbeResult(profile: profile, provider: provider, modelID: target.modelID)
-                    print(stored ? "  probe record stored" : "  probe record skipped (no established probed findings)")
+                    let outcome = try kit.storeProbeResult(profile: profile, provider: provider, modelID: target.modelID)
+                    switch outcome {
+                    case .stored:  print("  probe record stored")
+                    case .pruned:  print("  stale probe record PRUNED (payload says non-chat; no capability measurement held)")
+                    case .skipped: print("  probe record skipped (no established probed findings)")
+                    }
                 } catch {
                     print("  probe record store FAILED: \(error.localizedDescription)")
                 }
