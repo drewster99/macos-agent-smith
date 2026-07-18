@@ -1037,27 +1037,17 @@ final class SharedAppState {
         setUserModelOverride(providerID: providerID, modelID: modelID, override: override)
     }
 
-    /// Returns true when every field on the override is at its no-op value. Used by
-    /// `setUserModelOverride` to remove rather than persist an empty patch — keeps the
-    /// on-disk JSON tidy and means "revert to bundled" is a single-call operation.
+    /// True when the override carries no information, meaning the entry should be removed
+    /// rather than stored — keeps the on-disk JSON tidy and means "revert to bundled" is a
+    /// single-call operation. Compares against blank values instead of enumerating fields:
+    /// per-field enumeration silently judged overrides "empty" whenever a newer field
+    /// (hidden, isAvailable, isAccessDenied, capabilities.toolResultRoundTrip) was the only
+    /// one set, discarding the user's edit on save.
     private func overrideIsEmpty(_ override: ModelMetadataOverride) -> Bool {
-        if override.displayName != nil { return false }
-        if override.maxInputTokens != nil { return false }
-        if override.maxOutputTokens != nil { return false }
-        if override.pricing != nil { return false }
-        if override.supportsChatCompletions != nil { return false }
-        if let cap = override.capabilities, capabilitiesOverrideHasContent(cap) { return false }
-        if let flags = override.behaviorFlags, !flags.isEmpty { return false }
-        return true
-    }
-
-    private func capabilitiesOverrideHasContent(_ cap: ModelCapabilitiesOverride) -> Bool {
-        cap.toolUse != nil || cap.vision != nil || cap.reasoning != nil
-            || cap.codeExecution != nil || cap.promptCaching != nil || cap.computerUse != nil
-            || cap.audioInput != nil || cap.audioOutput != nil || cap.videoInput != nil
-            || cap.responseSchema != nil || cap.parallelToolCalls != nil || cap.pdfInput != nil
-            || cap.webSearch != nil || cap.systemMessages != nil || cap.assistantPrefill != nil
-            || cap.toolChoice != nil
+        var normalized = override
+        if normalized.capabilities == ModelCapabilitiesOverride() { normalized.capabilities = nil }
+        if let flags = normalized.behaviorFlags, flags.isEmpty { normalized.behaviorFlags = nil }
+        return normalized == ModelMetadataOverride()
     }
 
     // MARK: - Memory
