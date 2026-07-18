@@ -23,9 +23,13 @@ struct ModelMetadataInspectorWindow: View {
         HSplitView {
             modelListColumn
                 .frame(minWidth: 300, idealWidth: 340)
+                .frame(maxHeight: .infinity)
             detailColumn
-                .frame(minWidth: 420)
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
         }
+        // Without greedy frames the HSplitView collapses to its children's intrinsic height and
+        // the whole UI floats vertically centered in the window with the list squashed.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             if selectedProviderID.isEmpty {
                 selectedProviderID = kit.providers.first?.id ?? ""
@@ -187,11 +191,17 @@ struct ModelCompositionDetailView: View {
                     disagreementsSection(composition)
                     fieldsSection(composition)
                 } else {
-                    ContentUnavailableView(
-                        "Composition Not Computed",
-                        systemImage: "arrow.triangle.2.circlepath",
-                        description: Text("Refresh this provider's models to compute the layered merge for this model.")
-                    )
+                    ContentUnavailableView {
+                        Label("Composition Not Computed", systemImage: "arrow.triangle.2.circlepath")
+                    } description: {
+                        Text("Refresh this provider's models to compute the layered merge for this model.")
+                    } actions: {
+                        Button("Refresh Provider Models") {
+                            guard let provider = kit.providers.first(where: { $0.id == providerID }) else { return }
+                            Task { await kit.refreshModels(provider: provider) }
+                        }
+                        .disabled(kit.isRefreshing)
+                    }
                 }
             }
             .padding(14)
@@ -341,10 +351,11 @@ struct ModelCompositionDetailView: View {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Text(field.name)
                                 .font(.caption)
-                                .frame(width: 230, alignment: .leading)
+                                .frame(width: 220, alignment: .leading)
                             Text(value)
                                 .font(.caption.bold())
                                 .lineLimit(1)
+                                .frame(minWidth: 60, alignment: .leading)
                                 .help(value)
                             layerBadge(winner)
                             if hasDisagreement {
@@ -374,6 +385,7 @@ struct ModelCompositionDetailView: View {
     private func layerBadge(_ layer: MetadataLayer) -> some View {
         Text(layer.displayName)
             .font(.caption2.bold())
+            .fixedSize()   // never wrap a badge ("Provi/der") — it claims its full width
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(layer.badgeColor.opacity(0.18), in: Capsule())
