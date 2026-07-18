@@ -272,6 +272,18 @@ struct ModelCompositionDetailView: View {
             probeFindingLine("Vision", record.profile.vision)
             probeFindingLine("PDF input", record.profile.pdfInput)
             probeFindingLine("Accepts temperature", record.profile.acceptsTemperature)
+            if let bound = record.profile.maxOutputBoundedByContext, bound.status == .established,
+               let context = bound.value {
+                HStack(spacing: 6) {
+                    Text("Output bounded by context").font(.caption)
+                    Text("\(context) tokens").font(.caption.bold()).foregroundStyle(.orange)
+                    if let evidence = bound.evidence {
+                        Image(systemName: "info.circle").font(.caption2)
+                            .foregroundStyle(.secondary).help(evidence)
+                    }
+                    Spacer()
+                }
+            }
             if record.profile.callCount > 0 {
                 Text("\(record.profile.callCount) calls, \(String(format: "%.1fs", record.profile.duration))")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -349,9 +361,10 @@ struct ModelCompositionDetailView: View {
                        let value = Self.displayValue(field: field, in: composition.merged) {
                         let hasDisagreement = composition.disagreements.contains { $0.field == field.name }
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(field.name)
+                            Text(Self.friendlyFieldName(field.name))
                                 .font(.caption)
                                 .frame(width: 220, alignment: .leading)
+                                .help(field.name)
                             Text(value)
                                 .font(.caption.bold())
                                 .lineLimit(1)
@@ -386,6 +399,32 @@ struct ModelCompositionDetailView: View {
     /// (a raw struct dump like "ModelPricing(base: PricingTier(input: Optional(2e-06)…" is
     /// unreadable and, for pricing, actively misleading in per-token units); everything else
     /// falls back to the descriptor's generic description.
+    /// A readable label for a merge field. camelCase names are split on word boundaries and
+    /// title-cased; a small map covers the ones that would split badly (acronyms, "PDF"). The raw
+    /// name stays available as a tooltip so the field is still identifiable in code terms.
+    static func friendlyFieldName(_ name: String) -> String {
+        let overrides: [String: String] = [
+            "huggingFaceID": "Hugging Face ID",
+            "maxInputTokens": "Max input tokens",
+            "maxOutputTokens": "Max output tokens",
+            "maxTemperature": "Max temperature",
+            "outputBoundedByContext": "Output bounded by context",
+            "isFree": "Free",
+            "isAvailable": "Available",
+            "isAccessDenied": "Access denied",
+            "supportsChatCompletions": "Chat completions",
+            "pdfInput": "PDF input",
+            "modelDescription": "Description"
+        ]
+        if let mapped = overrides[name] { return mapped }
+        var out = ""
+        for (index, character) in name.enumerated() {
+            if index > 0, character.isUppercase { out.append(" ") }
+            out.append(character)
+        }
+        return out.prefix(1).uppercased() + out.dropFirst()
+    }
+
     static func displayValue(field: ModelFactsField, in facts: ModelFacts) -> String? {
         switch field.name {
         case "pricing":
