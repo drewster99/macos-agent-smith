@@ -217,13 +217,44 @@ enum CapabilityEvalRunner {
                 print("  DISCARD: not a chat model\n"); continue
             }
 
+            // Persist through the SAME per-record store the GUI reads — never a private file.
+            // The store rejects runs with no established probed findings (an aborted run must
+            // not clobber a real record), so "skipped" here is a verdict, not an error.
+            do {
+                let stored = try kit.storeProbeResult(profile: profile, provider: provider, modelID: target.modelID)
+                print(stored ? "  probe record stored" : "  probe record skipped (no established probed findings)")
+            } catch {
+                print("  probe record store FAILED: \(error.localizedDescription)")
+            }
+
             profiles.append(profile)
             report(profile)
         }
 
         writeProfiles(profiles)
+        exportProbeRecords(kit: kit)
         printSummary(profiles)
         exit(profiles.contains { $0.chat.status == .inconclusive } ? 2 : 0)
+    }
+
+    /// Writes the accumulated local probe store — every run ever, not just this one — in the
+    /// EXACT shape the downloaded-probe slot consumes (account-scoped findings stripped). This
+    /// file is the shipped-data artifact: re-probing a model updates its record in the store,
+    /// and the next export reflects the full corrected set.
+    private static func exportProbeRecords(kit: LLMKitManager) {
+        let records = kit.exportableProbeRecords()
+        guard !records.isEmpty else { return }
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("AgentSmith-CapabilityEval")
+            .appendingPathComponent("probe_records_export.json")
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(records).write(to: url, options: .atomic)
+            print("  \(records.count) probe records exported (shipped format) to \(url.path)")
+        } catch {
+            print("  failed to export probe records: \(error)")
+        }
     }
 
     // MARK: - Reporting
