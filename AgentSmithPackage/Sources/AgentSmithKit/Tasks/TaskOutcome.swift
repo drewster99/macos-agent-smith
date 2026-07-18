@@ -68,11 +68,13 @@ public extension AgentTask {
 
         var accepted = 0
         var waived = 0
+        var judged = 0
         for criterion in acceptanceCriteria {
             switch validation.latestVerdict(for: criterion.id)?.verdict {
-            case .accepted: accepted += 1
-            case .waived: waived += 1
-            case .rejected, .error, .none: break
+            case .accepted: accepted += 1; judged += 1
+            case .waived: waived += 1; judged += 1
+            case .rejected, .error: judged += 1
+            case .none: break
             }
         }
         let total = acceptanceCriteria.count
@@ -91,6 +93,12 @@ public extension AgentTask {
             }
             return nil
         case .failed:
+            // A task that reached `.failed` before any criterion was judged didn't stall on
+            // its criteria — there's nothing to grade. Fall back to the "Failed" status chip
+            // rather than a misleading "Incomplete 0/N — progress stalled".
+            if judged == 0 {
+                return nil
+            }
             return .incomplete(accepted: accepted, total: total)
         case .awaitingReview:
             return .needsReview(accepted: accepted, total: total)

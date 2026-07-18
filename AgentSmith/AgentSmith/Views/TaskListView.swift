@@ -572,7 +572,8 @@ private struct TaskRow: View {
             Text(elapsed)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
-                .fixedSize()
+                .lineLimit(1)
+                .layoutPriority(-1)
         }
     }
 
