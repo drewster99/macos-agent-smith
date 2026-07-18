@@ -91,6 +91,11 @@ struct ModelMetadataInspectorWindow: View {
                     .foregroundStyle(.orange)
                     .help("Provider marked this model deprecated")
             }
+            if model.hidden == true {
+                Image(systemName: "eye.slash")
+                    .foregroundStyle(.secondary)
+                    .help("Hidden from pickers (an override sets hidden) — data intact")
+            }
             if let state = probeRunner.states["\(selectedProviderID)/\(model.modelID)"] {
                 probeStateBadge(state)
             }

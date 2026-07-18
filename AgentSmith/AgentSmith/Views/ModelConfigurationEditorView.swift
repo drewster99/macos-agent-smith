@@ -271,7 +271,12 @@ struct ModelConfigurationEditorView: View {
     // MARK: - Model Picker
 
     private var providerModels: [ModelInfo] {
+        // Hidden is presentation, not deletion: filtered here, fully visible in the
+        // Model Metadata inspector. The CURRENTLY SELECTED model is always kept even when
+        // hidden — filtering it out would leave the picker unable to render its own
+        // selection (a blank control), breaking existing configs visually.
         llmKit.models(for: selectedProviderID)
+            .filter { $0.hidden != true || $0.modelID == selectedModelID }
     }
 
     private var selectedModelInfo: ModelInfo? {

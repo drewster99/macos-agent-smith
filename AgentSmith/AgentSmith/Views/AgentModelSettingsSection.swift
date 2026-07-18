@@ -207,6 +207,10 @@ struct AgentModelSettingsSection: View {
     @ViewBuilder
     private func providerSubmenu(for provider: ModelProvider) -> some View {
         let providerModels = llmKit.models(for: provider.id)
+            // Hidden is presentation, not deletion — see the Model Metadata inspector. The
+            // config's current model stays listed even when hidden so the selection stays
+            // renderable and re-selectable.
+            .filter { $0.hidden != true || $0.modelID == modelID }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         let refreshError = llmKit.refreshErrors[provider.name]
         let isEmpty = providerModels.isEmpty
