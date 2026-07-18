@@ -155,7 +155,11 @@ enum CapabilityEvalRunner {
                 name: "probe:\(target.modelID)", providerID: target.providerID, modelID: target.modelID,
                 temperature: nil, maxOutputTokens: 512, streaming: false
             )
-            let llm = kit.makeProvider(configuration: config, provider: provider)
+            // makeProbeProvider, not makeProvider: necessity flags stay (a malformed request
+            // must not fabricate a capability negative) but the no-temperature restriction is
+            // stripped so the temperature probe measures the raw endpoint instead of trivially
+            // passing under the very flag it exists to derive.
+            let llm = kit.makeProbeProvider(configuration: config, provider: provider)
 
             // Seed from the PURE vendor payload — fetched directly, not from kit.models, whose
             // entries have LiteLLM's claims enriched in and would let third-party data wear a

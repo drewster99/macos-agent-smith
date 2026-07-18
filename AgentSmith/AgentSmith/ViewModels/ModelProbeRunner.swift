@@ -67,7 +67,9 @@ final class ModelProbeRunner {
                 name: "probe:\(target.modelID)", providerID: target.provider.id,
                 modelID: target.modelID, temperature: nil, maxOutputTokens: 512, streaming: false
             )
-            let llm = kit.makeProvider(configuration: throwawayConfig, provider: target.provider)
+            // makeProbeProvider strips the restriction flags the probe measures (see the kit's
+            // factory doc) while keeping request-forming necessity flags.
+            let llm = kit.makeProbeProvider(configuration: throwawayConfig, provider: target.provider)
             let profile = await ModelProber.probe(llm: llm, seed: seed)
 
             do {

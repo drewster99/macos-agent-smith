@@ -159,26 +159,46 @@ struct ModelConfigurationEditorView: View {
                 .disabled(isThinkingActive)
 
             LabeledContent("Max Output Tokens") {
-                TextField("4096", value: $maxOutputTokens, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .onChange(of: maxOutputTokens) { _, newValue in
-                        // Project rule: clamp on next runloop tick.
-                        if newValue < 1 {
-                            DispatchQueue.main.async { self.maxOutputTokens = 1 }
+                HStack(spacing: 6) {
+                    TextField("4096", value: $maxOutputTokens, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                        .onChange(of: maxOutputTokens) { _, newValue in
+                            // Project rule: clamp on next runloop tick.
+                            if newValue < 1 {
+                                DispatchQueue.main.async { self.maxOutputTokens = 1 }
+                            }
                         }
+                    if let knownMax = selectedModelInfo?.maxOutputTokens {
+                        Button("Use max (\(knownMax.formatted()))") {
+                            maxOutputTokens = knownMax
+                        }
+                        .controlSize(.small)
+                        .disabled(maxOutputTokens == knownMax)
+                        .help("Set to the model's known output limit")
                     }
+                }
             }
 
             LabeledContent("Max Context Tokens") {
-                TextField("128000", value: $maxContextTokens, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .onChange(of: maxContextTokens) { _, newValue in
-                        if newValue < 1 {
-                            DispatchQueue.main.async { self.maxContextTokens = 1 }
+                HStack(spacing: 6) {
+                    TextField("128000", value: $maxContextTokens, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                        .onChange(of: maxContextTokens) { _, newValue in
+                            if newValue < 1 {
+                                DispatchQueue.main.async { self.maxContextTokens = 1 }
+                            }
                         }
+                    if let knownMax = selectedModelInfo?.maxInputTokens {
+                        Button("Use max (\(knownMax.formatted()))") {
+                            maxContextTokens = knownMax
+                        }
+                        .controlSize(.small)
+                        .disabled(maxContextTokens == knownMax)
+                        .help("Set to the model's known context window")
                     }
+                }
             }
         }
     }
@@ -356,11 +376,13 @@ struct ModelConfigurationEditorView: View {
         HStack(spacing: 8) {
             if let maxOut = info.maxOutputTokens {
                 let exceeds = maxOutputTokens > maxOut
-                Text("Max output: \(formatTokenCount(maxOut))")
+                // Exact, not rounded: "131.1K" once led someone to type 131100 against a real
+                // limit of 131072. The precise figure is the only safe thing to display here.
+                Text("Max output: \(maxOut.formatted())")
                     .foregroundStyle(exceeds ? .red : .secondary)
             }
             if let maxIn = info.maxInputTokens {
-                Text("Context: \(formatTokenCount(maxIn))")
+                Text("Context: \(maxIn.formatted())")
                     .foregroundStyle(.secondary)
             }
             ForEach(info.capabilities.enabledLabels, id: \.self) { label in

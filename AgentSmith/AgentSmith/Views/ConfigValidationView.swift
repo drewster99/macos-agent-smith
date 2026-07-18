@@ -43,7 +43,10 @@ struct ConfigValidationView: View {
             .padding(.top, 8)
         }
         .padding(24)
-        .frame(minWidth: 400)
+        // Sized ~40% wider and ~50% taller than the old content-hugging sheet (was ~480×490):
+        // multi-line validation errors ("Max output tokens (500000) exceeds model limit…") need
+        // the room, and the old minWidth-only frame clipped them.
+        .frame(minWidth: 670, minHeight: 730)
     }
 
     private func agentRow(role: AgentRole, label: String, color: Color) -> some View {
