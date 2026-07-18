@@ -147,6 +147,11 @@ struct AgentSmithApp: App {
                 }
                 .keyboardShortcut("4", modifiers: .command)
 
+                Button("Model Metadata") {
+                    openWindow(id: "model-metadata")
+                }
+                .keyboardShortcut("5", modifiers: .command)
+
                 Button("Timers") {
                     if let id = shared.focusedSessionID {
                         openWindow(id: "timers", value: id)
@@ -215,6 +220,11 @@ struct AgentSmithApp: App {
             SpendingDashboardView(shared: shared)
         }
         .defaultSize(width: 900, height: 800)
+
+        Window("Model Metadata", id: "model-metadata") {
+            ModelMetadataInspectorWindow(shared: shared)
+        }
+        .defaultSize(width: 1000, height: 700)
 
         WindowGroup("Timers", id: "timers", for: UUID.self) { $sessionID in
             if let id = sessionID, let vm = sessionManager.viewModel(for: id) {
