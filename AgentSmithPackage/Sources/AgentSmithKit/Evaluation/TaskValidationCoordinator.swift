@@ -677,13 +677,22 @@ extension OrchestrationRuntime {
         // ACCEPT/REJECT/WAIVE" (the validator's OWN output rule bleeding onto the worker).
         // No prior verdict is included on purpose: showing the validator its last answer
         // anchors it to that answer instead of re-judging the (changed) evidence fresh.
+        // The worker's SCOPED set (task.approvedTools) is the durable single source of truth for
+        // what it could actually call. Never substitute the static declared roster: a validator
+        // told the worker had `bash`/`run_applescript` when it didn't rejects feasible work and
+        // orders impossible fixes. A missing scope is an invariant violation, not a fallback case —
+        // error out so it escalates for manual review rather than fabricating a toolset.
+        guard let workerToolNames = task.approvedTools, !workerToolNames.isEmpty else {
+            return (.error("worker tool scope (task.approvedTools) is unavailable — cannot judge feasibility; escalating for manual review"), EvaluationRunner.Transcript())
+        }
+
         var fields: [String: String] = [
             "resultsToEvaluate": task.result ?? "(none submitted)",
             "taskTitle": task.title,
             "taskDescription": task.description,
             "taskUpdateHistory": task.updates.suffix(10).map { "- \($0.message)" }.joined(separator: "\n"),
             "commentary": task.commentary ?? "(none)",
-            "workerTools": workerToolsDescription(for: task),
+            "workerTools": workerToolNames.sorted().joined(separator: ", "),
             "workerActivity": await workerActivityDigest(for: task),
             "workerSteps": Self.renderSteps(task.steps)
         ]
@@ -889,18 +898,6 @@ extension OrchestrationRuntime {
                 """
         }
         return prompt
-    }
-
-    /// The worker's tool names for the validator's context — the LIVE worker's actual
-    /// (scoped) set when one exists, else the standard worker toolset. Validators never
-    /// share the worker's tools; without this list they misjudge feasibility by their
-    /// own read-only kit ("the gh CLI is not available in this environment").
-    private func workerToolsDescription(for task: AgentTask) -> String {
-        if let liveWorker = liveWorkerHandle(for: task) {
-            return liveWorker.agent.toolNames.joined(separator: ", ")
-        }
-        return BrownBehavior.toolNames.joined(separator: ", ")
-            + " (standard worker toolset; the worker may also have had MCP-provided tools)"
     }
 
     /// A bounded, SYSTEM-OBSERVED digest of the worker's tool calls and results, from

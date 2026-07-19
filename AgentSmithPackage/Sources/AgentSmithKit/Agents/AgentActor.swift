@@ -16,6 +16,11 @@ public actor AgentActor {
     /// Refreshed each turn by `refreshActiveTools()` and used for both tool-definition
     /// assembly and tool-call dispatch.
     private var activeTools: [any AgentTool]
+    /// True once `refreshActiveTools()` has run at least once, i.e. `activeTools` reflects the
+    /// registry's scoped verdict rather than the unscoped construction-time placeholder. Used by
+    /// `toolNames` so a scoped worker never reports the unscoped roster in the pre-first-refresh
+    /// window (which for Brown would include `bash`).
+    private var hasRefreshedActiveTools = false
     /// Per-agent tool registry + availability gate. Rebuilt each turn from the candidate
     /// set (built-ins + dynamic MCP tools); `activeTools` is its `availableTools()`.
     private var toolRegistry = ToolRegistry()
@@ -1045,9 +1050,19 @@ public actor AgentActor {
         isRunning
     }
 
-    /// The names of tools available to this agent. Nonisolated because `configuration` is a let.
-    public nonisolated var toolNames: [String] {
-        configuration.toolNames
+    /// The agent's LIVE tool names — the registry's currently-available set (security-scoped,
+    /// forced-lifecycle, plus present MCP tools), NOT the static configured roster. A scoped
+    /// worker's usable set changes at runtime, so the frozen `configuration.toolNames` would
+    /// misreport it (e.g. showing `bash` to a worker that was never granted it).
+    ///
+    /// Before the first refresh, `activeTools` is still the unscoped construction placeholder, so
+    /// reporting it would leak the ungranted roster; in that window a scoped agent reports its
+    /// approved scoped names and an unscoped agent (Smith) its configured roster. Never empty.
+    public var toolNames: [String] {
+        if hasRefreshedActiveTools {
+            return activeTools.map(\.name)
+        }
+        return toolScopingEnabled ? approvedToolNames.sorted() : configuration.toolNames
     }
 
     // MARK: - Private
@@ -1065,6 +1080,7 @@ public actor AgentActor {
             // candidates, identical to the pre-registry behavior.
             toolRegistry.rebuild(candidates: candidates, defaultApproved: true)
             activeTools = toolRegistry.availableTools()
+            hasRefreshedActiveTools = true
             publishActiveToolNamesIfChanged()
             return
         }
@@ -1093,6 +1109,7 @@ public actor AgentActor {
         toolRegistry.applyApproval(approvedNames: resolved)
         applyForcedLifecycleFlags()
         activeTools = toolRegistry.availableTools()
+        hasRefreshedActiveTools = true
         publishActiveToolNamesIfChanged()
     }
 

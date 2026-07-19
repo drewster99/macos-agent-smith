@@ -57,6 +57,9 @@ struct TaskValidationCoordinatorTests {
             await store.setAcceptanceCriteria(id: task.id, criteria: criteria)
         }
         await store.setResult(id: task.id, result: "The thing was done.", commentary: nil, attachments: [])
+        // A real task reaches `.validating` only after pre-flight scoping, so its scoped set
+        // (approvedTools) is always populated — the validator reads it as the worker's toolset.
+        await store.setApprovedTools(id: task.id, approvedTools: ["bash", "file_read", "file_write", "grep", "glob", "manage_steps", "task_complete"])
         await store.updateStatus(id: task.id, status: .validating)
         return await store.task(id: task.id) ?? task
     }
@@ -321,7 +324,29 @@ struct TaskValidationCoordinatorTests {
 
         let record = await runtime.taskStore.task(id: task.id)?.validation?.verdictRecords.first
         #expect(record?.renderedInput?.contains("workerTools") == true, "the JSON payload carries the worker-tools field")
-        #expect(record?.renderedInput?.contains("bash") == true, "the worker toolset (incl. bash) is in the validator's input")
+        #expect(record?.renderedInput?.contains("bash") == true, "the worker's scoped toolset (incl. bash) is in the validator's input")
+    }
+
+    @Test("A missing worker scope errors and escalates — never a fabricated toolset")
+    func validatorErrorsWhenWorkerScopeMissing() async {
+        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
+        await runtime.setEvaluatorConfiguration(directory: directory)
+        let task = await makeSubmittedTask(on: runtime)
+        // Simulate the should-never-happen invariant violation: a task reaching validation with no
+        // scoped set. The validator must NOT invent one (which historically injected `bash` and
+        // ordered impossible fixes); it must error so the task escalates for manual review.
+        await runtime.taskStore.setApprovedTools(id: task.id, approvedTools: [])
+
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .awaitingReview, "a missing scope is machine-can't-judge → escalates, not accepts")
+
+        let record = await runtime.taskStore.task(id: task.id)?.validation?.verdictRecords.first
+        if case .error(let message) = record?.verdict {
+            #expect(message.contains("approvedTools"), "the error names the missing scoped set")
+        } else {
+            Issue.record("expected an .error verdict, got \(String(describing: record?.verdict))")
+        }
     }
 
     @Test("Validator input keeps rubric and result apart: criterion in the system prompt, result in a JSON field, with the verdict-format firewall")

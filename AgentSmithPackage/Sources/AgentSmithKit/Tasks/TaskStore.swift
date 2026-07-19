@@ -723,6 +723,10 @@ public actor TaskStore {
     /// changes from a previously-recorded one, a labeled update is appended for history.
     public func setApprovedTools(id: UUID, approvedTools: [String]) {
         guard var task = tasks[id] else { return }
+        // Persist in a stable, sorted order (callers pass `Array(Set)`, whose order is
+        // nondeterministic). The change check below is set-based, so ordering never fabricates a
+        // diff; sorting just keeps the on-disk list stable across writes.
+        let approvedTools = approvedTools.sorted()
         let previous = task.approvedTools
         task.approvedTools = approvedTools
         if let previous, Set(previous) != Set(approvedTools) {

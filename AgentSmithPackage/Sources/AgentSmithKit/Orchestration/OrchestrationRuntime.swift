@@ -2344,7 +2344,7 @@ public actor OrchestrationRuntime {
         // unsubscribes and drops it (stop() on a never-started agent is a no-op).
         guard !aborted, !stopRequested else { return }
         await smithAgent.start(initialInstruction: initialInstruction)
-        onAgentStarted?(.smith, smithAgent.toolNames)
+        onAgentStarted?(.smith, await smithAgent.toolNames)
 
         await channel.post(ChannelMessage(
             sender: .system,
@@ -3134,8 +3134,11 @@ public actor OrchestrationRuntime {
 
         onAgentStarted?(.securityAgent, SecurityAgentBehavior.toolNames)
 
+        // Seed the inspector BEFORE the run loop starts, so Brown's first refreshActiveTools —
+        // which publishes the authoritative available set via onActiveToolNamesChanged — overwrites
+        // the seed instead of racing it. Pre-start, toolNames reports the scoped approved names.
+        onAgentStarted?(.brown, await brownAgent.toolNames)
         await brownAgent.start()
-        onAgentStarted?(.brown, brownAgent.toolNames)
 
         return brownID
     }
