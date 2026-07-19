@@ -1166,7 +1166,7 @@ final class SharedAppState {
         let cacheCapableProviders: Set<String> = [
             "anthropic", "gemini",
             "openAICompatible", "lmStudio", "mistral", "huggingFace",
-            "xAI", "zAI", "metaLlama", "alibabaCloud", "openRouter"
+            "xAI", "zAI", "metaModel", "alibabaCloud", "openRouter"
         ]
 
         var byProvider: [String: (calls: Int, totalInput: Int, totalCacheRead: Int, withRawUsage: Int)] = [:]

@@ -5,9 +5,8 @@ import SwiftLLMKit
 ///
 /// The choices come from LiteLLM's data itself rather than free text, because a value that isn't
 /// present upstream can only ever resolve to nothing — and because the correct value is rarely
-/// guessable (Alibaba Cloud is `dashscope`, Meta Llama is `meta_llama` with an underscore, and
-/// Anthropic's models are catalogued bare under `anthropic` while every `anthropic.`-prefixed key
-/// actually belongs to Bedrock).
+/// guessable (Alibaba Cloud is `dashscope`, and Anthropic's models are catalogued bare under
+/// `anthropic` while every `anthropic.`-prefixed key actually belongs to Bedrock).
 ///
 /// When opened from a failing model row, the sheet leads with the providers that genuinely
 /// catalogue that model — which is usually the answer.
