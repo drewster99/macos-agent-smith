@@ -161,6 +161,34 @@ struct CapabilitiesEditorSheet: View {
         resolvedModelInfo?.capabilities ?? ModelCapabilities()
     }
 
+    /// The model's own reported limit, independent of THIS user override — so it stays visible as
+    /// a reference even after you cap the used value below it. Prefers the probe record's
+    /// established value (a real measurement); falls back to the resolved catalog value.
+    private var localProbeRecord: ProbeRecord? {
+        guard let provider = shared.llmKit.providers.first(where: { $0.id == providerID }) else { return nil }
+        return shared.llmKit.probeRecords(provider: provider, modelID: modelID).local
+    }
+    /// The model's reported ceiling for a limit, resolved to be INDEPENDENT of this user override
+    /// so it stays visible even after the used value is capped below it. In priority:
+    /// 1. a real probed measurement; 2. the composition's non-user layers (catalog/empirical),
+    /// pre-override, when computed; 3. the resolved catalog value, but ONLY when the user hasn't
+    /// overridden this field (otherwise that value is the override itself and would mislead).
+    private func reportedLimit(probed: KeyPath<ModelProfile, ProbeFinding<Int>>,
+                               facts: KeyPath<ModelFacts, Int?>,
+                               catalog: Int?, userOverride: Int?) -> Int? {
+        if let finding = localProbeRecord?.profile[keyPath: probed], finding.status == .established {
+            return finding.value
+        }
+        if let composition = shared.llmKit.metadataCompositions[key] {
+            for layer in [MetadataLayer.authoritative, .empirical, .downloadedOverrides, .enrichment] {
+                if let layerFacts = composition.layers[layer], let value = layerFacts[keyPath: facts] {
+                    return value
+                }
+            }
+        }
+        return userOverride == nil ? catalog : nil
+    }
+
     private var hasAnyOverride: Bool {
         states.values.contains { $0 != .default } || !displayNameOverride.isEmpty
             || maxContextOverride != nil || maxOutputOverride != nil
@@ -211,12 +239,14 @@ struct CapabilitiesEditorSheet: View {
 
                     sectionHeader("Limits")
                     limitRow(title: "Max context (input) tokens",
-                             help: "The model's real context window. Overrides the catalog value everywhere — the config editor's limits, validation, and context pruning read it. Set this for models whose provider doesn't report a context window (e.g. Ollama Cloud).",
-                             resolved: resolvedModelInfo?.maxInputTokens,
+                             help: "Correct the model's context window when the catalog is wrong or missing (e.g. Ollama Cloud reports no context window). Becomes the value the app uses everywhere. Empty = use the reported value.",
+                             reported: reportedLimit(probed: \.maxContextTokens, facts: \.maxInputTokens,
+                                                     catalog: resolvedModelInfo?.maxInputTokens, userOverride: maxContextOverride),
                              value: $maxContextOverride)
                     limitRow(title: "Max output tokens",
-                             help: "The model's real output-token ceiling. Overrides the catalog value; the config editor and validation read it.",
-                             resolved: resolvedModelInfo?.maxOutputTokens,
+                             help: "Correct the model's output-token ceiling when the catalog is wrong or missing. Becomes the value the app uses. Empty = use the reported value.",
+                             reported: reportedLimit(probed: \.maxOutputTokens, facts: \.maxOutputTokens,
+                                                     catalog: resolvedModelInfo?.maxOutputTokens, userOverride: maxOutputOverride),
                              value: $maxOutputOverride)
                 }
             }
@@ -256,30 +286,37 @@ struct CapabilitiesEditorSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func limitRow(title: String, help: String, resolved: Int?, value: Binding<Int?>) -> some View {
+    /// `reported` is the model's own ceiling (probe/catalog), shown as a persistent reference.
+    /// `value` is a CORRECTION of the believed limit — set it when the catalog is wrong or missing
+    /// (e.g. Ollama Cloud reports no context window). It is NOT a cost-cap preference; per-run caps
+    /// belong on the configuration, not on the model's metadata.
+    private func limitRow(title: String, help: String, reported: Int?, value: Binding<Int?>) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.headline)
                 Spacer()
-                Text("Resolved: \(resolved.map { "\($0.formatted())" } ?? "unknown")")
+                Text("Model reports: \(reported.map { "\($0.formatted())" } ?? "unknown")")
                     .font(.caption.monospaced())
-                    .foregroundStyle(resolved == nil ? .tertiary : .secondary)
+                    .foregroundStyle(reported == nil ? .tertiary : .secondary)
             }
             Text(help)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
-                TextField("catalog value", value: value, format: .number)
+                TextField(reported.map { "\($0)" } ?? "model's limit", value: value, format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 140)
-                if let resolved, value.wrappedValue != resolved {
-                    Button("Use resolved (\(resolved.formatted()))") { value.wrappedValue = resolved }
+                // Warn when the used value EXCEEDS what the model reports — that 400s in production.
+                if let reported, value.wrappedValue != reported {
+                    Button("Prefill (\(reported.formatted()))") { value.wrappedValue = reported }
                         .controlSize(.small)
+                        .help("Fill the field with the model's reported value, then edit it down.")
                 }
                 if value.wrappedValue != nil {
-                    Button("Clear") { value.wrappedValue = nil }
+                    Button("Inherit catalog") { value.wrappedValue = nil }
                         .controlSize(.small)
+                        .help("Remove the override and use the model's own reported limit.")
                 }
             }
         }
