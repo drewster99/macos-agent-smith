@@ -541,8 +541,10 @@ enum CapabilityEvalRunner {
     /// bare `providerID` (every model that provider currently lists in the catalog) — the latter so
     /// you can sweep, say, all of Alibaba Cloud without hand-listing model IDs. Returns nil when
     /// `--targets` is absent, so the caller falls back to the diverse default set.
-    /// The downloaded-overrides file shape (a subset of BundledModelMetadataRegistry's file), so
-    /// this tool can read/merge/write it without depending on the registry's private codec.
+    /// The downloaded-overrides file shape. MUST mirror BundledModelMetadataRegistry's file format
+    /// — this tool round-trips the file, so any top-level key not represented here is dropped on
+    /// write. Keep in sync if the registry format gains a field (currently: version, description,
+    /// entries, providerEntries, providerDefaults).
     private struct OverridesFile: Codable {
         var version: Int = 2
         var description: String?
@@ -597,9 +599,30 @@ enum CapabilityEvalRunner {
         let baseDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("SwiftLLMKit/com.nuclearcyborg.AgentSmith", isDirectory: true)
         let url = baseDir.appendingPathComponent("downloaded_overrides.json")
-        var file = (try? JSONDecoder().decode(OverridesFile.self, from: Data(contentsOf: url))) ?? OverridesFile()
+        var file: OverridesFile
+        if let data = try? Data(contentsOf: url) {
+            // The file EXISTS. A decode failure here means it's corrupt or hand-edited-broken —
+            // silently falling back to a blank file would wipe every other provider's overrides
+            // on write. Refuse instead.
+            do {
+                file = try JSONDecoder().decode(OverridesFile.self, from: data)
+            } catch {
+                print("\nExisting \(url.lastPathComponent) is present but unreadable: \(error.localizedDescription)")
+                print("Refusing to overwrite it — fix or remove the file and re-run.")
+                exit(1)
+            }
+        } else {
+            file = OverridesFile()   // absent → start fresh
+        }
         var providerEntries = file.providerEntries ?? [:]
-        for (modelKey, override) in newEntries { providerEntries[modelKey] = override }
+        for (modelKey, scraped) in newEntries {
+            // Update ONLY the two scraped fields, preserving any hand-added pricing/flags/etc. on
+            // an existing entry for this model.
+            var entry = providerEntries[modelKey] ?? ModelMetadataOverride()
+            entry.maxInputTokens = scraped.maxInputTokens
+            entry.sizeLabel = scraped.sizeLabel
+            providerEntries[modelKey] = entry
+        }
         file.providerEntries = providerEntries
         file.description = file.description ?? "Downloaded/curated model-metadata overrides (App Support overlay)."
 
