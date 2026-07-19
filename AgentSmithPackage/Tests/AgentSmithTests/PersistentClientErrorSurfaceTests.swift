@@ -252,4 +252,48 @@ struct PersistentClientErrorSurfaceTests {
         // +26h always crosses a calendar-day boundary in any timezone: date appended.
         #expect(AgentActor.formatRetryClock(now.addingTimeInterval(26 * 3600), now: now).contains(" on "))
     }
+
+    /// A 402 is out of credits, not a transient fault. The surfaced line must read as a plain
+    /// billing problem — naming the cause and the remedy — rather than the generic
+    /// "error (1/50): HTTP 402: {raw json}" frame. Retry behavior is intentionally unchanged.
+    @Test("HTTP 402 surfaces as a clear out-of-credits message, not a raw error dump")
+    func http402SurfacesAsOutOfCredits() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let provider = SingleShot400Provider(
+            statusCode: 402,
+            body: #"{"error":{"type":"insufficient_quota","message":"You have insufficient credits."}}"#
+        )
+        let agent = Self.makeBrown(provider: provider, channel: channel, taskStore: taskStore)
+
+        await agent.start(initialInstruction: "do something")
+        await Self.waitUntil(deadline: 1.0) {
+            let msgs = await channel.allMessages()
+            return msgs.contains { $0.content.contains("out of credits") }
+        }
+        await agent.stop()
+
+        let banner = await channel.allMessages().first { $0.content.contains("out of credits") }
+        #expect(banner != nil, "a 402 should surface a clear out-of-credits message on the first failure")
+        if let banner {
+            #expect(banner.content.contains("HTTP 402 (Payment Required)"))
+            #expect(banner.content.contains("Add funds"))
+            // The clear message replaces the generic error frame and never dumps the raw JSON body…
+            #expect(!banner.content.contains("error (1/"))
+            #expect(!banner.content.contains("insufficient_quota"))
+            // …but the behavior is unchanged — it still backs off and retries.
+            #expect(banner.content.contains("retrying in"))
+        }
+    }
+
+    @Test("outOfCreditsMessage names the role and model, no terminal punctuation")
+    func outOfCreditsMessageShape() {
+        let msg = AgentActor.outOfCreditsMessage(role: .brown, model: "magistral-medium-2509")
+        #expect(msg.contains("Brown"))
+        #expect(msg.contains("magistral-medium-2509"))
+        #expect(msg.contains("402"))
+        #expect(msg.contains("Add funds"))
+        // The caller appends "— retrying in …", so the base line must not end with a period.
+        #expect(!msg.hasSuffix("."))
+    }
 }

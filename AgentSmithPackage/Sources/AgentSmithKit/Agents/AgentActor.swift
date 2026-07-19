@@ -1520,7 +1520,13 @@ public actor AgentActor {
                     || (serverRetryAfter != nil && consecutiveErrors == 1)
 
                 if shouldSurfaceNow {
-                    var content = "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)"
+                    // A 402 is out of credits / a billing block, not a transient fault. The generic
+                    // "error (n/50): HTTP 402: {raw json}" frame buries the one thing the user needs
+                    // to know, so say it plainly. (Behavior is unchanged — it still backs off and
+                    // retries; only the wording is clarified.)
+                    var content = httpStatus == 402
+                        ? Self.outOfCreditsMessage(role: configuration.role, model: configuration.llmConfig.model)
+                        : "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)"
                     // Only claim a retry when one is actually coming (the stop below fires at the
                     // cap). State the wait both relatively and as a wall-clock time so a long wait
                     // reads clearly, and flag a suspiciously long server-directed delay.
@@ -3822,6 +3828,13 @@ public actor AgentActor {
     /// detect patterns that may need specific handling in the future.
     private static let agentLogger = Logger(subsystem: "com.agentsmith", category: "AgentActor")
     private static let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
+
+    /// A clear, actionable transcript line for an HTTP 402 (out of credits / payment required),
+    /// so the cause reads plainly instead of a raw JSON error body under a generic "error (n/50):"
+    /// frame. Ends without terminal punctuation so the caller's "— retrying in …" suffix flows.
+    static func outOfCreditsMessage(role: AgentRole, model: String) -> String {
+        "Agent \(role.displayName): out of credits — the provider for model '\(model)' returned HTTP 402 (Payment Required). Add funds to your account to continue"
+    }
 
     private static func logUnhandled400(_ error: Error) {
         guard let providerError = error as? LLMProviderError,
