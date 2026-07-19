@@ -690,8 +690,6 @@ extension OrchestrationRuntime {
             "resultsToEvaluate": task.result ?? "(none submitted)",
             "taskTitle": task.title,
             "taskDescription": task.description,
-            "taskUpdateHistory": task.updates.suffix(10).map { "- \($0.message)" }.joined(separator: "\n"),
-            "commentary": task.commentary ?? "(none)",
             "workerTools": workerToolNames.sorted().joined(separator: ", "),
             "workerActivity": await workerActivityDigest(for: task),
             "workerSteps": Self.renderSteps(task.steps)
@@ -845,10 +843,8 @@ extension OrchestrationRuntime {
             The user message is a single JSON object whose values are all strings:
             - `resultsToEvaluate` — the worker's submitted result. THIS is the primary thing you evaluate.
             - `taskTitle`, `taskDescription` — what the task asked for (context).
-            - `taskUpdateHistory` — the worker's own progress notes (context).
-            - `commentary` — the worker's closing notes on the result (context).
             - `workerTools` — the worker's capabilities, which differ from yours (context).
-            - `workerActivity` — the SYSTEM-OBSERVED tool-call log; trust it over narrative claims.
+            - `workerActivity` — the SYSTEM-OBSERVED tool-call log (calls + results); trust it over narrative claims. Each call/result is length-capped (an ellipsis marks a cut), and if whole entries were dropped to fit the budget, a leading `[⚠️ Activity log truncated …]` line says how many EARLIEST entries are missing — so the ABSENCE of an entry here is NOT proof the worker didn't do it.
             - `workerSteps` — the worker's plan with statuses and tombstones.
             - `evidenceDirectory` — (when present) the folder the worker was told to place evidence \
             artifacts in. If a criterion names an evidence file, read it from here with `file_read`, or \
@@ -900,6 +896,14 @@ extension OrchestrationRuntime {
         return prompt
     }
 
+    /// Caps for the validator's system-observed activity log. Each tool call (name+args) and each
+    /// result is capped at `maxActivityItemChars`; the assembled digest at `maxActivityDigestChars`.
+    /// Both truncations are SIGNALED — a per-item cut gets an ellipsis, and dropped whole entries
+    /// get a leading warning naming how many EARLIEST entries were omitted — so a validator never
+    /// reads a truncated log as proof the worker didn't do something.
+    static let maxActivityItemChars = 200
+    static let maxActivityDigestChars = 20_000
+
     /// A bounded, SYSTEM-OBSERVED digest of the worker's tool calls and results, from
     /// the live worker's LLM turn records. This is the validator's ground truth for
     /// "did the worker actually run what it claims" — without it, validators reject
@@ -909,6 +913,11 @@ extension OrchestrationRuntime {
         guard let worker = liveWorkerHandle(for: task) else {
             return "(worker no longer running — tool activity log unavailable)"
         }
+        func cap(_ text: String) -> String {
+            text.count > Self.maxActivityItemChars
+                ? String(text.prefix(Self.maxActivityItemChars)) + "…"
+                : text
+        }
         let turns = await worker.agent.turnsSnapshot()
         var lines: [String] = []
         for turn in turns {
@@ -916,22 +925,29 @@ extension OrchestrationRuntime {
             // in turn order keeps call → result adjacency close enough for judging.
             for message in turn.inputDelta {
                 if case .toolResult(_, let content) = message.content {
-                    lines.append("   ↳ \(content.prefix(220))")
+                    lines.append("   ↳ \(cap(String(content)))")
                 }
             }
             for call in turn.response.toolCalls {
-                lines.append("→ \(call.name)(\(call.arguments.prefix(220)))")
+                lines.append("→ \(cap(call.name + "(" + call.arguments + ")"))")
             }
         }
         guard !lines.isEmpty else { return "(no tool calls recorded this session)" }
-        // Keep the most recent activity when capped.
+        // Keep the most recent activity when the whole digest exceeds the budget; the OLDEST
+        // (earliest) lines are dropped first.
+        var included = 0
         var digest = ""
         for line in lines.reversed() {
-            let candidate = line + "\n" + digest
-            if candidate.count > 8_000 { break }
+            let candidate = digest.isEmpty ? line : line + "\n" + digest
+            if candidate.count > Self.maxActivityDigestChars { break }
             digest = candidate
+            included += 1
         }
-        return digest.trimmingCharacters(in: .whitespacesAndNewlines)
+        digest = digest.trimmingCharacters(in: .whitespacesAndNewlines)
+        let omitted = lines.count - included
+        guard omitted > 0 else { return digest }
+        let warning = "[⚠️ Activity log truncated to fit \(Self.maxActivityDigestChars) chars: the \(omitted) EARLIEST of \(lines.count) activity line(s) are omitted; the most recent \(included) are shown below. Absence of an entry here does NOT mean the worker never did it — it may predate this window.]"
+        return warning + "\n" + digest
     }
 
     /// V1 model references are role slots only. `.validator` resolves to a dedicated provider

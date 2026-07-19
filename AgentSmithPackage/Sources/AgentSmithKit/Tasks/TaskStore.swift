@@ -271,12 +271,9 @@ public actor TaskStore {
         return true
     }
 
-    /// Appends an update to a task copy, trimming to the max-updates cap. Caller writes back.
+    /// Appends an update to a task copy. Caller writes back. Update history is unbounded.
     private func appendUpdate(to task: inout AgentTask, _ message: String) {
         task.updates.append(AgentTask.TaskUpdate(message: message))
-        if task.updates.count > AgentTask.maxUpdates {
-            task.updates.removeFirst(task.updates.count - AgentTask.maxUpdates)
-        }
     }
 
     /// Preserves a task's current result (and commentary) into its update history before that
@@ -421,13 +418,10 @@ public actor TaskStore {
             .first
     }
 
-    /// Appends a progress update to a task, enforcing the per-task cap.
+    /// Appends a progress update to a task. Update history is unbounded.
     public func addUpdate(id: UUID, message: String, attachments: [Attachment] = []) {
         guard var task = tasks[id] else { return }
         task.updates.append(AgentTask.TaskUpdate(message: message, attachments: attachments))
-        if task.updates.count > AgentTask.maxUpdates {
-            task.updates.removeFirst(task.updates.count - AgentTask.maxUpdates)
-        }
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
@@ -739,9 +733,6 @@ public actor TaskStore {
             if !removed.isEmpty { changes.append("-\(removed.joined(separator: ", -"))") }
             let line = "Approved tool list updated (\(changes.joined(separator: ", ")))."
             task.updates.append(AgentTask.TaskUpdate(message: line))
-            if task.updates.count > AgentTask.maxUpdates {
-                task.updates.removeFirst(task.updates.count - AgentTask.maxUpdates)
-            }
         }
         task.updatedAt = Date()
         tasks[id] = task

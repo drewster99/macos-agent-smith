@@ -134,9 +134,6 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         }
     }
 
-    /// Maximum number of updates retained per task.
-    public static let maxUpdates = 20
-
     public enum Status: String, Codable, Sendable, CaseIterable {
         case pending
         /// Transient: a start has been claimed for this task and its worker (Brown) is being
