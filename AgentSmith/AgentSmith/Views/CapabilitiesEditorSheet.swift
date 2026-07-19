@@ -452,6 +452,7 @@ struct CapabilitiesEditorSheet: View {
             displayName: trimmedDisplayNameOverride,
             maxInputTokens: maxContextOverride,
             maxOutputTokens: maxOutputOverride,
+            sizeLabel: existing?.sizeLabel,
             capabilities: anyForced ? patch : nil,
             pricing: existing?.pricing,
             behaviorFlags: existing?.behaviorFlags

@@ -200,6 +200,7 @@ struct BehaviorFlagsEditorSheet: View {
             displayName: existing?.displayName,
             maxInputTokens: existing?.maxInputTokens,
             maxOutputTokens: existing?.maxOutputTokens,
+            sizeLabel: existing?.sizeLabel,
             capabilities: existing?.capabilities,
             pricing: existing?.pricing,
             supportsChatCompletions: existing?.supportsChatCompletions,

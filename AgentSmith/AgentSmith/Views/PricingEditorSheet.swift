@@ -117,6 +117,7 @@ struct PricingEditorSheet: View {
             displayName: existing?.displayName,
             maxInputTokens: existing?.maxInputTokens,
             maxOutputTokens: existing?.maxOutputTokens,
+            sizeLabel: existing?.sizeLabel,
             capabilities: existing?.capabilities,
             pricing: pricingOverride,
             supportsChatCompletions: existing?.supportsChatCompletions,

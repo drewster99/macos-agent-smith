@@ -38,7 +38,7 @@ enum CapabilityEvalRunner {
     /// with `--eval-capabilities`. Either alone is enough.
     static var isRequested: Bool {
         let args = CommandLine.arguments
-        return args.contains(flag) || args.contains("--list-models")
+        return args.contains(flag) || args.contains("--list-models") || args.contains("--fetch-ollama-library")
     }
 
     /// A model to probe, and which effort levels (if any) to attempt for it. Effort is only worth
@@ -83,6 +83,9 @@ enum CapabilityEvalRunner {
 
     /// Runs the evaluation and terminates the process. Never returns.
     static func runAndExit() async -> Never {
+        if CommandLine.arguments.contains("--fetch-ollama-library") {
+            await fetchOllamaLibraryAndExit()
+        }
         let verbose = CommandLine.arguments.contains("--verbose")
         let noSeed = CommandLine.arguments.contains("--no-seed")
         let discardNonChat = CommandLine.arguments.contains("--discard-non-chat")
@@ -538,6 +541,81 @@ enum CapabilityEvalRunner {
     /// bare `providerID` (every model that provider currently lists in the catalog) — the latter so
     /// you can sweep, say, all of Alibaba Cloud without hand-listing model IDs. Returns nil when
     /// `--targets` is absent, so the caller falls back to the diverse default set.
+    /// The downloaded-overrides file shape (a subset of BundledModelMetadataRegistry's file), so
+    /// this tool can read/merge/write it without depending on the registry's private codec.
+    private struct OverridesFile: Codable {
+        var version: Int = 2
+        var description: String?
+        var entries: [String: ModelMetadataOverride]?
+        var providerEntries: [String: ModelMetadataOverride]?
+        var providerDefaults: [String: ModelMetadataOverride]?
+    }
+
+    /// `--fetch-ollama-library`: scrapes each Ollama Cloud model's ollama.com/library page for the
+    /// context window + parameter size that `/api/tags` omits, and MERGES them into
+    /// `downloaded_overrides.json` as provider-scoped overrides. This is deliberately a one-shot
+    /// curation tool — the app never scrapes on a normal fetch/probe; it reads these persisted,
+    /// force-applied overrides. Re-run when Ollama changes a model's window (rare).
+    static func fetchOllamaLibraryAndExit() async -> Never {
+        LLMRequestLogger.logDirectoryName = "AgentSmith-CapabilityEval"
+        let kit = LLMKitManager(appIdentifier: "com.nuclearcyborg.AgentSmith",
+                                keychainServicePrefix: "com.agentsmith.SwiftLLMKit")
+        kit.load()
+        let providerID = "builtin.ollama-cloud"
+        guard let provider = kit.providers.first(where: { $0.id == providerID }) else {
+            print("Ollama Cloud provider (\(providerID)) not configured."); exit(1)
+        }
+        let key = kit.apiKey(for: providerID) ?? ""
+
+        print("=== Ollama Cloud library scrape ===")
+        print("Fetching cloud model list from \(provider.endpoint.absoluteString)…")
+        let models: [DecodedModelFacts]
+        do {
+            models = try await ModelFetchService().fetchModelFacts(from: provider, apiKey: key.isEmpty ? nil : key)
+        } catch {
+            print("Model list fetch FAILED: \(error.localizedDescription)"); exit(1)
+        }
+        print("Scraping \(models.count) library pages (fail-soft per model)…\n")
+
+        var newEntries: [String: ModelMetadataOverride] = [:]
+        for model in models.sorted(by: { $0.modelID < $1.modelID }) {
+            let facts = await OllamaLibraryScraper.scrape(modelID: model.modelID)
+            let label = model.modelID.padding(toLength: 26, withPad: " ", startingAt: 0)
+            guard !facts.isEmpty else {
+                print("  \(label)  (no library data)")
+                continue
+            }
+            var override = ModelMetadataOverride()
+            override.maxInputTokens = facts.contextTokens
+            override.sizeLabel = facts.sizeLabel
+            newEntries["\(providerID)/\(model.modelID)"] = override
+            let ctx = facts.contextTokens.map { "\($0)" } ?? "?"
+            print("  \(label)  ctx=\(ctx)  size=\(facts.sizeLabel ?? "?")")
+        }
+
+        // Merge into downloaded_overrides.json: overwrite THIS provider's entries, preserve the rest.
+        let baseDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SwiftLLMKit/com.nuclearcyborg.AgentSmith", isDirectory: true)
+        let url = baseDir.appendingPathComponent("downloaded_overrides.json")
+        var file = (try? JSONDecoder().decode(OverridesFile.self, from: Data(contentsOf: url))) ?? OverridesFile()
+        var providerEntries = file.providerEntries ?? [:]
+        for (modelKey, override) in newEntries { providerEntries[modelKey] = override }
+        file.providerEntries = providerEntries
+        file.description = file.description ?? "Downloaded/curated model-metadata overrides (App Support overlay)."
+
+        do {
+            try FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(file).write(to: url, options: .atomic)
+            print("\nWrote \(newEntries.count) Ollama Cloud overrides to \(url.path)")
+            print("Restart the app (or refresh models) to pick them up in the downloaded-overrides layer.")
+        } catch {
+            print("\nWrite FAILED: \(error.localizedDescription)"); exit(1)
+        }
+        exit(0)
+    }
+
     /// The value following a `--flag value` argument, or nil if the flag is absent or last.
     private static func argumentValue(_ flag: String) -> String? {
         guard let index = CommandLine.arguments.firstIndex(of: flag),
