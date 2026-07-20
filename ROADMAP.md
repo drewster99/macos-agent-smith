@@ -1322,6 +1322,19 @@ The `swiftlint` skill is configured for this project. Pair with the `CodeStyleGu
 
 **Direction (not yet decided).** Options to weigh: (a) measure real token budget from the target model's context window (not a fixed char count) and only reduce when genuinely over; (b) when reduction IS needed, prefer summarize/chunk/map-reduce over hard truncation, and always SIGNAL what was elided; (c) a shared `ContextBudget` helper so callers stop hand-rolling thresholds; (d) surface an explicit "input too large for model X" outcome (ties into the precondition/`.blocked` work above) rather than silently degrading. Cross-cutting; touches TaskSummarizer, the validator digest, Smith compaction, and the provider layer.
 
+### Centralize limit constants and make the useful ones configurable (design pending)
+
+Across the 2026-07-19 limits pass we hand-bumped a lot of hardcoded magic numbers in place. They should be pulled into named, documented constants (many already are) and the operationally-useful ones exposed as configuration — Settings for global knobs, per-tool params for tool-local ones. `grep`'s trio (`max_file_count` / `max_line_count` / `max_file_size_mb`, defaults interpolated into the tool/param help) is the model to follow: named constant → optional param → default shown in the schema.
+
+Candidates flagged so far (value = current default):
+- **Tool timeouts.** `bash`/`gh` subprocess `timeout` (300 s default, caller-raisable) with the `executionTimeout` **3700 s** (~1 h) backstop; `web_fetch` 12 s (HTML→md) / 30 s (fetch) / 180 s (whole call); AppleScript 30 s; `directory_tree` 10 s; `glob` 30 s default / 120 s max. The 3700 s backstop in particular should be a named/tunable constant, not a literal.
+- **Smith `/compact`.** recent-turns-kept **6**, transcript char cap **120 000**, summary output **5000** tokens, summary word budget **600**.
+- **Concurrency / retries.** `validationParallelism` **8**, `maxConcurrentEvaluations` **8**, `SecurityEvaluator.maxRetries` **8**, `EvaluationRunner.maxParseRetries` **8** (note: keep it below a definition's `maxTurns` or turn-exhaustion wins first), worker pool `maxSimultaneousTasks` **4** (already a Setting).
+- **Tool-result caps.** `ToolResultCap` **50 000** overflow threshold / **2000** preview (shared by agents + validator); the validator/prepare output cap **10 000** tokens; `file_read` 2500 lines / 1 000 000 chars; `directory_listing` 50 000 entries.
+- **Inspector ring buffers.** `AgentActor.maxTurnRecords` **100**, `SecurityEvaluator.maxHistory` **100**.
+
+Overlaps with the holistic-oversized-input item above (the char/token caps) — do them together. No behavior change intended; this is "stop hardcoding, expose the knobs."
+
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved
