@@ -3315,10 +3315,6 @@ public actor AgentActor {
         return "\(name)|\(arguments.hashValue)"
     }
 
-    /// Maximum characters for a tool result stored in conversation history.
-    /// Prevents massive outputs (e.g., binary blobs, multi-MB command output) from blowing up LLM context.
-    private static let maxToolResultCharacters = 50_000
-
     /// Maximum characters per argument value in security denial task updates.
     private static let maxArgCharsForUpdate = 50
 
@@ -3362,11 +3358,9 @@ public actor AgentActor {
             """
     }
 
-    /// Caps a tool result string for conversation history, preserving the head and noting truncation.
+    /// Caps a tool result for conversation history (shared overflow handling — see `ToolResultCap`).
     static func capToolResult(_ result: String) -> String {
-        guard result.count > maxToolResultCharacters else { return result }
-        let remaining = result.count - maxToolResultCharacters
-        return String(result.prefix(maxToolResultCharacters)) + "\n\n[Output truncated — \(remaining) more characters omitted]"
+        ToolResultCap.cap(result)
     }
 
     /// Truncates multi-line output to a limited number of lines, appending an ellipsis indicator if truncated.

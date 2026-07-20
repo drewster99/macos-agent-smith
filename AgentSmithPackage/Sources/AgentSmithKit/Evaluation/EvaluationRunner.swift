@@ -284,10 +284,9 @@ public enum EvaluationRunner {
         }
     }
 
-    /// Evaluations read evidence, not novels — cap what a tool round can inject.
+    /// Evidence-tool results are capped exactly like agent tool results (shared overflow handling —
+    /// see `ToolResultCap`): oversized output spills to a file the validator reads back in slices.
     static func capToolResult(_ result: String) -> String {
-        let cap = 30_000
-        guard result.count > cap else { return result }
-        return String(result.prefix(cap)) + "\n[…truncated at \(cap) characters…]"
+        ToolResultCap.cap(result)
     }
 }
