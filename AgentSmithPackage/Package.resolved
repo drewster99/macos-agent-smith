@@ -1,5 +1,5 @@
 {
-  "originHash" : "154e4305c82efb4215b6cfe75bc7ec3eaf0dad97622ae26060c432d836bc532c",
+  "originHash" : "6ec07fc702a42464b022412bbde2ebb9b9bd6fcd693e06ec06f39f945baeb24d",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -13,19 +13,19 @@
     {
       "identity" : "mlx-swift",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/ml-explore/mlx-swift",
+      "location" : "https://github.com/drewster99/mlx-swift",
       "state" : {
-        "revision" : "0bb916c67f4b9e5c682cbe02a42c701c93ab5021",
-        "version" : "0.31.6"
+        "revision" : "12e329a6dcb281010d800535d7a42fd67c8602cf",
+        "version" : "0.31.7"
       }
     },
     {
       "identity" : "mlx-swift-lm",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/ml-explore/mlx-swift-lm",
+      "location" : "https://github.com/drewster99/mlx-swift-lm",
       "state" : {
-        "revision" : "25b00d4e22e61ec9c41efda47990cd2084ec87ff",
-        "version" : "2.31.3"
+        "revision" : "d409ef205d2204f8028d21b371306245dcd74111",
+        "version" : "2.31.4"
       }
     },
     {
@@ -141,8 +141,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/drewster99/swift-semantic-search.git",
       "state" : {
-        "revision" : "603f58592312e319564b3b7d261b2517bddb6a0a",
-        "version" : "0.0.5"
+        "revision" : "cc26eee17aeaba9efa8d6d6f2fce5f792e6048d4",
+        "version" : "0.0.6"
       }
     },
     {

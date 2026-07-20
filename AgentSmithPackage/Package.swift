@@ -16,10 +16,10 @@ let package = Package(
         // keeps an out-of-date checkout from satisfying the build. Package.resolved locks the
         // exact commit for reproducible clones.
         .package(url: "https://github.com/drewster99/swift-llm-kit.git", from: "0.0.110"),
-        // On-device semantic memory (MLX embeddings). 0.0.5 keeps Agent Smith on the
-        // MLX Swift LM 2.x-compatible line while picking up the 2.31.3 runtime fix.
+        // On-device semantic memory (MLX embeddings). 0.0.6 keeps Agent Smith on the
+        // MLX Swift LM 2.x-compatible line while picking up the patched MLX Metal fix.
         // See the package CHANGELOG and ROADMAP. Package.resolved locks the commit.
-        .package(url: "https://github.com/drewster99/swift-semantic-search.git", from: "0.0.5"),
+        .package(url: "https://github.com/drewster99/swift-semantic-search.git", from: "0.0.6"),
         // Official Model Context Protocol Swift SDK. Provides the MCP client used to
         // talk to user-configured stdio MCP servers.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk", .upToNextMinor(from: "0.12.1"))
