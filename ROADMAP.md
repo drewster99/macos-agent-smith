@@ -1312,6 +1312,16 @@ The `swiftlint` skill is configured for this project. Pair with the `CodeStyleGu
 
 **Open questions.** (1) `supportsVision` defaults **fail-open** (unknown → true); a hard gate should treat unknown as **not satisfied** (fail-closed), coupling to the SwiftLLMKit `Bool?` capability work. (2) User override / force-run past a failed precondition must be **user-only, never Smith** (a per-task `overridePreconditions: Set<UUID>` set only from the UI) — otherwise it's the same "Smith loosens the contract after failure" hazard. (3) Declare at `create_task`, evaluate at start (capability may not be resolvable at create time). (4) The `.blocked` Smith-notification copy should say "reassign a capable model or drop the requirement," not "retry unchanged."
 
+### Holistic oversized-input / context-overflow handling (design pending)
+
+**Problem.** Many components independently clip their inputs with an ad-hoc per-site cap to avoid blowing an LLM context window. Each cap is a silent (or semi-silent) truncation that can drop exactly the detail that mattered, and the thresholds are scattered magic numbers. We are deliberately **removing the per-site caps** where truncation corrupts the decision, and deferring to ONE holistic mechanism instead of N local guesses.
+
+**Already uncapped (let them produce whatever they need):** `TaskSummarizer.reconcileMemoryTexts` (memory merge/keep-separate decision now sees the FULL text of both memories — a clipped tail could flip SAME/DIFFERENT) and `TaskSummarizer.extractWebContent` (web_fetch extraction now sees the FULL page — an answer near the end must stay reachable). The 20-update `task.updates` cap was also removed (history unbounded).
+
+**Still capped, candidates to fold into the holistic solution:** `TaskSummarizer.buildUserPrompt` (`task.result` truncated to `resultCharBudget` before summarization); the validator activity digest (per-item 200 + 20 000 total, now *signaled* — `TaskValidationCoordinator.workerActivityDigest`); Smith `/compact` transcript (per-tool-result 300 chars + 120 K total — `OrchestrationRuntime.renderTranscriptForCompaction`); the model's per-turn tool-result ceiling (50 000 chars — `AgentActor.maxToolResultCharacters`); the in-memory channel history window (10 000 msgs — `MessageChannel`). See the limits audit (2026-07-19) for the full inventory.
+
+**Direction (not yet decided).** Options to weigh: (a) measure real token budget from the target model's context window (not a fixed char count) and only reduce when genuinely over; (b) when reduction IS needed, prefer summarize/chunk/map-reduce over hard truncation, and always SIGNAL what was elided; (c) a shared `ContextBudget` helper so callers stop hand-rolling thresholds; (d) surface an explicit "input too large for model X" outcome (ties into the precondition/`.blocked` work above) rather than silently degrading. Cross-cutting; touches TaskSummarizer, the validator digest, Smith compaction, and the provider layer.
+
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved

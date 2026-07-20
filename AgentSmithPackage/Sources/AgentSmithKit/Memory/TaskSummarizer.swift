@@ -169,30 +169,11 @@ actor TaskSummarizer {
             (it supersedes the old). No headings, bullets, or commentary.
             """
 
-        // Cap combined memory texts to 80% of the context window (same logic as
-        // resultCharBudget) so oversized inputs don't exceed the model's limit.
-        let budget = resultCharBudget
-        let cappedExisting: String
-        let cappedNew: String
-        if existing.count + new.count > budget {
-            // Give each half the budget, but let the shorter one use less.
-            let halfBudget = budget / 2
-            if existing.count <= halfBudget {
-                cappedExisting = existing
-                cappedNew = String(new.prefix(budget - existing.count))
-            } else if new.count <= halfBudget {
-                cappedNew = new
-                cappedExisting = String(existing.prefix(budget - new.count))
-            } else {
-                cappedExisting = String(existing.prefix(halfBudget))
-                cappedNew = String(new.prefix(halfBudget))
-            }
-        } else {
-            cappedExisting = existing
-            cappedNew = new
-        }
-
-        let userPrompt = "Existing memory:\n\(cappedExisting)\n\nNew memory:\n\(cappedNew)"
+        // No length cap: the merge decision must see the FULL text of both memories — a
+        // distinguishing detail past a cut could flip the verdict, and on SAME the reconciled
+        // text would be rebuilt from clipped inputs. Oversized-context handling is deferred to a
+        // holistic solution (see ROADMAP).
+        let userPrompt = "Existing memory:\n\(existing)\n\nNew memory:\n\(new)"
 
         let messages: [LLMMessage] = [
             .system(systemPrompt),
@@ -269,8 +250,9 @@ actor TaskSummarizer {
     /// Runs `prompt` against fetched web-page `content` and returns the extracted answer, or
     /// `nil` if the model returns nothing or the call fails. Backs the `web_fetch` tool's hybrid
     /// extraction mode (reuses the summarizer's provider so no separate LLM agent is needed).
-    /// `content` is capped to `resultCharBudget` so an oversized page can't exceed the model's
-    /// context window.
+    /// No length cap: the extractor sees the FULL page — an answer near the end of a long page
+    /// must stay reachable. Oversized-context handling is deferred to a holistic solution
+    /// (see ROADMAP).
     public func extractWebContent(content: String, prompt: String) async -> String? {
         let systemPrompt = """
             You extract information from web page content. Given a page's text and a user's \
@@ -279,8 +261,7 @@ actor TaskSummarizer {
             content does not contain what was asked, say so plainly. Output ONLY the answer — no \
             preamble or commentary.
             """
-        let capped = content.count > resultCharBudget ? String(content.prefix(resultCharBudget)) : content
-        let userPrompt = "Request:\n\(prompt)\n\nWeb page content:\n\(capped)"
+        let userPrompt = "Request:\n\(prompt)\n\nWeb page content:\n\(content)"
         let messages: [LLMMessage] = [
             .system(systemPrompt),
             .user(userPrompt)
