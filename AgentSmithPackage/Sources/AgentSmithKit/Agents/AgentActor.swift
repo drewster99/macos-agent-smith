@@ -1842,7 +1842,7 @@ public actor AgentActor {
 
         var executedCallIDs = Set<String>()
 
-        for segment in segments {
+        toolSegments: for segment in segments {
             guard isRunning else { break }
 
             if segment.isLifecycle {
@@ -1850,21 +1850,27 @@ public actor AgentActor {
                 for call in segment.calls {
                     guard isRunning else { break }
                     let result: String
+                    let succeeded: Bool
                     if let tool = activeTools.first(where: { $0.name == call.name }) {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
+                            succeeded = false
                         } else {
-                            result = await directExecute(call, tool: tool)
+                            let outcome = await directExecute(call, tool: tool)
+                            result = outcome.result
+                            succeeded = outcome.succeeded
                         }
                     } else {
                         result = "Unknown tool: \(call.name)"
+                        succeeded = false
                         await toolContext.setToolExecutionStatus(call.id, false)
                         recordToolOutcome(name: call.name, succeeded: false)
                     }
                     executedCallIDs.insert(call.id)
-                    updatePostCallFlags(call: call, result: result, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
+                    updatePostCallFlags(call: call, result: result, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
+                    if calledTaskComplete { break toolSegments }
                 }
             } else if segment.calls.count > 1 && configuration.requiresToolApproval && perCallApprovalEnabled,
                       let evaluator = securityEvaluator {
@@ -2089,7 +2095,7 @@ public actor AgentActor {
                                 : []
                             result = await executeWithApproval(call, tool: tool, parallelIndex: batchIndex, parallelCount: segment.calls.count, siblingCallSummaries: siblings)
                         } else {
-                            result = await directExecute(call, tool: tool)
+                            result = await directExecute(call, tool: tool).result
                         }
                     } else {
                         result = "Unknown tool: \(call.name)"
@@ -2097,7 +2103,7 @@ public actor AgentActor {
                         recordToolOutcome(name: call.name, succeeded: false)
                     }
                     executedCallIDs.insert(call.id)
-                    updatePostCallFlags(call: call, result: result, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
+                    updatePostCallFlags(call: call, result: result, succeeded: false, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                 }
@@ -2108,7 +2114,10 @@ public actor AgentActor {
         // results for remaining tool_calls to maintain the API invariant.
         var appendedPlaceholders = false
         for call in callsToExecute where !executedCallIDs.contains(call.id) {
-            conversationHistory.append(.toolResult("Tool execution cancelled (agent stopped)", callID: call.id))
+            let cancellationReason = calledTaskComplete
+                ? "Tool not executed because the preceding lifecycle handoff parked the agent."
+                : "Tool execution cancelled (agent stopped)"
+            conversationHistory.append(.toolResult(cancellationReason, callID: call.id))
             await toolContext.setToolExecutionStatus(call.id, false)
             appendedPlaceholders = true
         }
@@ -2302,7 +2311,7 @@ public actor AgentActor {
         )
 
         if disposition.approved {
-            let result = await directExecute(call, tool: tool)
+            let result = await directExecute(call, tool: tool).result
             await Self.postToolOutputToChannel(
                 result: result, call: call, role: configuration.role, context: toolContext, taskTitle: channelTaskTitle
             )
@@ -2349,7 +2358,7 @@ public actor AgentActor {
         ))
     }
 
-    private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> String {
+    private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> (result: String, succeeded: Bool) {
         let agentIDPrefix = String(id.uuidString.prefix(8))
         let outcome = await Self.runToolWithTimeout(call, tool: tool, context: toolContext) { name, seconds in
             Self.stopLogger.warning("Tool '\(name, privacy: .public)' execution exceeded \(seconds, privacy: .public)s — cancelled (agent=\(agentIDPrefix, privacy: .public))")
@@ -2358,7 +2367,7 @@ public actor AgentActor {
         turnToolResultChars += outcome.result.count
         await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
         recordToolOutcome(name: call.name, succeeded: outcome.succeeded)
-        return outcome.result
+        return (outcome.result, outcome.succeeded)
     }
 
     /// Tools whose "failure" is the CALLEE's exit status, not a tool malfunction — bash
@@ -2659,16 +2668,19 @@ public actor AgentActor {
         ))
     }
 
-    /// Tool result strings used for post-call control flow. Keep in sync with tool return values.
-    private func updatePostCallFlags(call: LLMToolCall, result: String, sentMessage: inout Bool, calledTaskComplete: inout Bool, calledCreateTask: inout Bool) {
+    /// Whether a successful lifecycle tool transfers control away from the current agent turn.
+    static func shouldParkAfterLifecycleTool(named toolName: String, succeeded: Bool) -> Bool {
+        succeeded && (toolName == "task_complete" || toolName == "request_help")
+    }
+
+    private func updatePostCallFlags(call: LLMToolCall, result: String, succeeded: Bool, sentMessage: inout Bool, calledTaskComplete: inout Bool, calledCreateTask: inout Bool) {
         if call.name == "message_user" && result == "Message sent to user." { sentMessage = true }
         if call.name == "review_work" && (result.contains("accepted and marked COMPLETE") || result.hasPrefix("Changes requested")) { sentMessage = true }
         if call.name == "message_brown" && result == "Message sent to Brown." { sentMessage = true }
         if call.name == "reply_to_user" && result == "Reply sent to user." { sentMessage = true }
-        if call.name == "task_complete" && result.hasPrefix("Task submitted for review:") { calledTaskComplete = true }
-        // request_help parks Brown identically to task_complete — it hands off to Smith and must
-        // wait. Reuses the same control flag so the run loop sets `awaitingTaskReview` and idles.
-        if call.name == "request_help" && result.hasPrefix("Help requested for task:") { calledTaskComplete = true }
+        // A successful task_complete or request_help hands control to another actor. Use the
+        // tool's domain outcome rather than parsing its human-facing response text.
+        if Self.shouldParkAfterLifecycleTool(named: call.name, succeeded: succeeded) { calledTaskComplete = true }
         if call.name == "run_task" && result.contains("System is restarting") { calledCreateTask = true }
         if call.name == "create_task" && result.contains("System is restarting") { calledCreateTask = true }
 
@@ -2678,7 +2690,7 @@ public actor AgentActor {
             case "task_update":
                 isSuccessfulTaskCommunication = result == "Update sent to Agent Smith."
             case "task_complete":
-                isSuccessfulTaskCommunication = result.hasPrefix("Task submitted for review:")
+                isSuccessfulTaskCommunication = succeeded
             default:
                 isSuccessfulTaskCommunication = false
             }
