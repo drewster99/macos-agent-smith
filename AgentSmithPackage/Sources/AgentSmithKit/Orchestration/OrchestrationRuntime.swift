@@ -549,7 +549,7 @@ public actor OrchestrationRuntime {
                 (5) a brief recap of the most recent messages exchanged among you (Smith), the \
                 user, the system, and the worker Brown, so the immediate conversational state is \
                 clear. Omit tool-call mechanics and routine acknowledgments — but a worker's \
-                blocker or request for help is never routine; preserve it verbatim. Under 400 words.
+                blocker or request for help is never routine; preserve it verbatim. Under 600 words.
                 """),
             .user(transcript)
         ]
