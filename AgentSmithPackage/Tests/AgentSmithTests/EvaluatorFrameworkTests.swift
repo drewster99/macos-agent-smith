@@ -260,18 +260,68 @@ struct EvaluationRunnerLoopTests {
         #expect(refusalDelivered)
     }
 
-    @Test("Persistent grammar violations end in ERROR, never a fake verdict")
+    @Test("A non-empty malformed verdict gets one same-context repair")
+    func malformedVerdictGetsOneRepair() async {
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(text: "The work looks complete."),
+            LLMResponse(text: "ACCEPT")
+        ])
+        let outcome = await runOutcome(makeDefinition(maxTurns: 5), provider: provider)
+        #expect(outcome == .verdict(token: "ACCEPT", reason: nil))
+        #expect(provider.callCount == 2)
+        let sawFormatNudge = provider.receivedMessages.last?.contains {
+            $0.content.textValue?.contains("Your response did not match the required format") == true
+        } ?? false
+        #expect(sawFormatNudge)
+    }
+
+    @Test("A second malformed verdict errors so the coordinator can retry fresh")
     func persistentParseFailureErrors() async {
-        let provider = MockLLMProvider(responses: [LLMResponse(text: "I feel good about this one!")])
-        // maxTurns must exceed maxParseRetries (8) so persistent grammar violations hit the
-        // parse-retry cap (the path this test exercises) rather than turn exhaustion, which the
-        // sibling `turnExhaustionErrors` test covers.
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(text: "I feel good about this one!"),
+            LLMResponse(text: "Still not in the requested format.")
+        ])
         let outcome = await runOutcome(makeDefinition(maxTurns: 20), provider: provider)
         guard case .error(let why) = outcome else {
             Issue.record("expected error, got \(outcome)")
             return
         }
         #expect(why.contains("unparseable"))
+        #expect(provider.callCount == 2)
+    }
+
+    @Test("An empty verdict response aborts the attempt without a repair nudge")
+    func emptyVerdictResponseErrorsImmediately() async {
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(text: ""),
+            LLMResponse(text: "ACCEPT")
+        ])
+        let outcome = await runOutcome(makeDefinition(maxTurns: 5), provider: provider)
+        guard case .error(let why) = outcome else {
+            Issue.record("expected error, got \(outcome)")
+            return
+        }
+        #expect(why.contains("empty response"))
+        #expect(provider.callCount == 1)
+    }
+
+    @Test("A rejection cannot claim file_read errored after a successful read")
+    func contradictedFileReadRejectionErrors() async throws {
+        let tempDir = TempDir()
+        defer { tempDir.cleanup() }
+        let evidencePath = try tempDir.write("confirmed file contents", to: "evidence.txt")
+
+        let readCall = LLMToolCall(id: "call-1", name: "file_read", arguments: "{\"path\": \"\(evidencePath)\"}")
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(toolCalls: [readCall]),
+            LLMResponse(text: "REJECT: The file \(evidencePath) does not exist. The file_read tool call returned an error.")
+        ])
+        let outcome = await runOutcome(makeDefinition(tools: ["file_read"], maxTurns: 5), provider: provider, tools: [FileReadTool()])
+        guard case .error(let why) = outcome else {
+            Issue.record("expected error, got \(outcome)")
+            return
+        }
+        #expect(why.contains("contradicted successful file_read"))
     }
 
     @Test("Turn exhaustion ends in ERROR")

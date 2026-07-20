@@ -28,7 +28,10 @@ public enum EvaluationRunner {
     }
 
     /// How many grammar-violating responses are re-prompted before giving up.
-    static let maxParseRetries = 8
+    /// Verdict validators get one same-context repair; an empty response aborts the
+    /// attempt so the coordinator retries with a fresh validator conversation.
+    static let maxVerdictParseRetries = 1
+    static let maxJSONParseRetries = 8
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "EvaluationRunner")
 
@@ -89,6 +92,7 @@ public enum EvaluationRunner {
         let deadline = Date().addingTimeInterval(definition.timeoutSeconds)
         var parseRetries = 0
         var turns = 0
+        var toolObservations: [ToolObservation] = []
 
         while turns < definition.maxTurns {
             if Date() > deadline {
@@ -121,6 +125,7 @@ public enum EvaluationRunner {
                 messages.append(.assistant(from: response))
                 var toolLines: [String] = []
                 for call in response.toolCalls {
+                    var parsedArguments: [String: AnyCodable]?
                     let result: String
                     if let tool = tools.first(where: { $0.name == call.name }) {
                         // When a security gate is provided (validators), every tool call is routed
@@ -129,18 +134,24 @@ public enum EvaluationRunner {
                         // a behavior change. A denial short-circuits execution.
                         if let securityGate, await securityGate(call, tool) == false {
                             result = "Tool execution denied by security."
+                            parsedArguments = try? call.parsedArguments()
                         } else {
                             do {
-                                let outcome = try await tool.execute(arguments: try call.parsedArguments(), context: toolContext)
+                                let arguments = try call.parsedArguments()
+                                parsedArguments = arguments
+                                let outcome = try await tool.execute(arguments: arguments, context: toolContext)
                                 result = outcome.output
                             } catch {
+                                parsedArguments = try? call.parsedArguments()
                                 result = "Tool error: \(error.localizedDescription)"
                             }
                         }
                     } else {
+                        parsedArguments = try? call.parsedArguments()
                         result = "Tool '\(call.name)' is not permitted for this evaluation."
                     }
                     await onToolResult?(call, result)
+                    toolObservations.append(ToolObservation(call: call, parsedArguments: parsedArguments, result: result))
                     toolLines.append("→ \(call.name)(\(call.arguments.prefix(200))) → \(result.prefix(300))")
                     messages.append(.toolResult(Self.capToolResult(result), callID: call.id))
                 }
@@ -176,10 +187,17 @@ public enum EvaluationRunner {
             transcript.turnLog.append(text)
             switch parse(text, grammar: definition.outputGrammar) {
             case .success(let outcome):
+                if let contradiction = contradictedToolClaim(in: outcome, observations: toolObservations) {
+                    transcript.turnLog.append("[validator runtime guard] \(contradiction)")
+                    return (.error(contradiction), transcript)
+                }
                 return (outcome, transcript)
             case .failure(let why):
+                if isEmptyParseFailure(why) && isVerdictGrammar(definition.outputGrammar) {
+                    return (.error("empty response from validator; retrying requires a fresh validator conversation"), transcript)
+                }
                 parseRetries += 1
-                guard parseRetries <= Self.maxParseRetries else {
+                guard parseRetries <= maxParseRetries(for: definition.outputGrammar) else {
                     return (.error("unparseable after \(parseRetries) attempts: \(why)"), transcript)
                 }
                 messages.append(.assistant(from: response))
@@ -187,6 +205,70 @@ public enum EvaluationRunner {
             }
         }
         return (.error("exhausted \(definition.maxTurns) turns without a conforming result"), transcript)
+    }
+
+    private struct ToolObservation {
+        var call: LLMToolCall
+        var parsedArguments: [String: AnyCodable]?
+        var result: String
+
+        var pathArgument: String? {
+            guard case .string(let path)? = parsedArguments?["path"] else { return nil }
+            return path
+        }
+
+        var succeeded: Bool {
+            let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !trimmed.hasPrefix("error:")
+                && !trimmed.hasPrefix("tool error:")
+                && !trimmed.hasPrefix("tool execution denied")
+                && !trimmed.contains("no such file")
+        }
+    }
+
+    private static func maxParseRetries(for grammar: EvaluatorDefinition.OutputGrammar) -> Int {
+        switch grammar {
+        case .verdictLine:
+            return maxVerdictParseRetries
+        case .jsonArray:
+            return maxJSONParseRetries
+        }
+    }
+
+    private static func isVerdictGrammar(_ grammar: EvaluatorDefinition.OutputGrammar) -> Bool {
+        if case .verdictLine = grammar { return true }
+        return false
+    }
+
+    private static func isEmptyParseFailure(_ problem: String) -> Bool {
+        problem.localizedCaseInsensitiveContains("empty response")
+    }
+
+    private static func contradictedToolClaim(in outcome: Outcome, observations: [ToolObservation]) -> String? {
+        guard case .verdict("REJECT", let reason?) = outcome else { return nil }
+        let lowerReason = reason.lowercased()
+        guard lowerReason.contains("file_read") || lowerReason.contains("file read") else { return nil }
+        guard lowerReason.contains("returned an error")
+            || lowerReason.contains("return an error")
+            || lowerReason.contains("tool error")
+            || lowerReason.contains("does not exist")
+            || lowerReason.contains("did not exist")
+            || lowerReason.contains("not exist")
+            || lowerReason.contains("not found")
+            || lowerReason.contains("not readable")
+        else { return nil }
+
+        let fileReads = observations.filter { $0.call.name == "file_read" && $0.pathArgument != nil }
+        let successfulReads = fileReads.filter(\.succeeded)
+        let contradicted = successfulReads.first(where: { observation in
+            guard let path = observation.pathArgument else { return false }
+            return reason.contains(path)
+        })
+        guard let contradicted else {
+            return nil
+        }
+        let path = contradicted.pathArgument ?? "(unknown path)"
+        return "validator rejection contradicted successful file_read for \(path); discarding this validator attempt"
     }
 
     // MARK: - Parsing
