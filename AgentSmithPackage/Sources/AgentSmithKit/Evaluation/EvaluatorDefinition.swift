@@ -88,7 +88,7 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         toolNames: [String] = [],
         maxTurns: Int = 8,
         timeoutSeconds: TimeInterval = 300,
-        maxOutputTokens: Int = 2000
+        maxOutputTokens: Int = 10_000
     ) {
         self.name = name
         self.description = description
@@ -169,7 +169,7 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         toolNames = try c.decodeIfPresent([String].self, forKey: .toolNames) ?? []
         maxTurns = try c.decodeIfPresent(Int.self, forKey: .maxTurns) ?? 8
         timeoutSeconds = try c.decodeIfPresent(TimeInterval.self, forKey: .timeoutSeconds) ?? 300
-        maxOutputTokens = try c.decodeIfPresent(Int.self, forKey: .maxOutputTokens) ?? 2000
+        maxOutputTokens = try c.decodeIfPresent(Int.self, forKey: .maxOutputTokens) ?? 10_000
 
         let g = try c.nestedContainer(keyedBy: GrammarCodingKeys.self, forKey: .outputGrammar)
         let type = try g.decode(String.self, forKey: .type)

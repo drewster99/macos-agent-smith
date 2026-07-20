@@ -210,7 +210,7 @@ actor SecurityEvaluator {
 
     /// Evaluation history for inspector display.
     private var history: [EvaluationRecord] = []
-    private static let maxHistory = 50
+    private static let maxHistory = 100
 
     /// Fires after each evaluation is recorded, pushing the record to the UI layer.
     private var onEvaluationRecorded: (@Sendable (EvaluationRecord) -> Void)?

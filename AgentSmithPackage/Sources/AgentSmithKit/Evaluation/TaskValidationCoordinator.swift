@@ -59,7 +59,7 @@ public enum EvaluatorDefaults {
         toolNames: EvaluatorDefaults.validatorEvidenceToolNames,
         maxTurns: 10,
         timeoutSeconds: 300,
-        maxOutputTokens: 2000
+        maxOutputTokens: 10_000
     )
 
     /// The read-only evidence quartet — the capability ceiling for inline/Smith-authored
@@ -114,7 +114,7 @@ public enum EvaluatorDefaults {
             toolNames: validatorEvidenceToolNames,
             maxTurns: 10,
             timeoutSeconds: 300,
-            maxOutputTokens: 2000
+            maxOutputTokens: 10_000
         ))
     }
 
