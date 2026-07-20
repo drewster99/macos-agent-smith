@@ -2606,6 +2606,23 @@ public actor AgentActor {
     /// The channel message stores only the display-truncated version of the output to avoid
     /// bloating the SwiftUI view layer with megabytes of data (e.g., binary blobs from osascript).
     static func postToolOutputToChannel(result: String, call: LLMToolCall, role: AgentRole, context: ToolContext, taskTitle: String? = nil) async {
+        await postToolOutputToChannel(
+            result: result,
+            call: call,
+            sender: .agent(role),
+            post: { await context.post($0) },
+            taskTitle: taskTitle
+        )
+    }
+
+    static func postToolOutputToChannel(
+        result: String,
+        call: LLMToolCall,
+        sender: ChannelMessage.Sender,
+        post: @Sendable (ChannelMessage) async -> Void,
+        taskTitle: String? = nil,
+        taskID: UUID? = nil
+    ) async {
         let trimmedResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedResult.isEmpty else { return }
         let truncated = AgentActor.truncateOutput(trimmedResult, maxLines: 4)
@@ -2617,6 +2634,9 @@ public actor AgentActor {
         ]
         if let taskTitle {
             outputMetadata["senderTaskTitle"] = .string(taskTitle)
+        }
+        if let taskID {
+            outputMetadata["taskID"] = .string(taskID.uuidString)
         }
         if isTruncated {
             outputMetadata["truncatedContent"] = .string(truncated)
@@ -2631,10 +2651,11 @@ public actor AgentActor {
                 outputMetadata["expandedContent"] = .string(trimmedResult)
             }
         }
-        await context.post(ChannelMessage(
-            sender: .agent(role),
+        await post(ChannelMessage(
+            sender: sender,
             content: isTruncated ? truncated : trimmedResult,
-            metadata: outputMetadata
+            metadata: outputMetadata,
+            taskID: taskID
         ))
     }
 

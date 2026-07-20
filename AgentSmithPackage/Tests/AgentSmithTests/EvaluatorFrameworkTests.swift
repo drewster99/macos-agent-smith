@@ -27,6 +27,14 @@ private func makeDefinition(
     )
 }
 
+private actor ToolResultRecorder {
+    private(set) var records: [(callID: String, result: String)] = []
+
+    func record(callID: String, result: String) {
+        records.append((callID, result))
+    }
+}
+
 // MARK: - Definition
 
 @Suite("EvaluatorDefinition")
@@ -202,6 +210,37 @@ struct EvaluationRunnerLoopTests {
             return false
         }
         #expect(evidenceDelivered)
+    }
+
+    @Test("Tool result observer receives evaluator evidence output")
+    func toolResultObserverReceivesEvidenceOutput() async throws {
+        let tempDir = TempDir()
+        defer { tempDir.cleanup() }
+        let evidencePath = try tempDir.write("validator-visible content", to: "evidence.txt")
+
+        let readCall = LLMToolCall(id: "call-1", name: "file_read", arguments: "{\"path\": \"\(evidencePath)\"}")
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(toolCalls: [readCall]),
+            LLMResponse(text: "ACCEPT")
+        ])
+        let recorder = ToolResultRecorder()
+        let outcome = await EvaluationRunner.runMessages(
+            definition: makeDefinition(tools: ["file_read"]),
+            systemPrompt: "You judge things.",
+            userMessage: "Task: t\nCriterion: c",
+            provider: provider,
+            tools: [FileReadTool()],
+            toolContext: TestToolContext.make(),
+            onToolResult: { call, result in
+                await recorder.record(callID: call.id, result: result)
+            }
+        ).outcome
+
+        #expect(outcome == .verdict(token: "ACCEPT", reason: nil))
+        let records = await recorder.records
+        #expect(records.count == 1)
+        #expect(records.first?.callID == "call-1")
+        #expect(records.first?.result.contains("validator-visible content") == true)
     }
 
     @Test("A non-allowlisted tool call is refused but the loop continues")

@@ -47,6 +47,12 @@ public enum EvaluatorDefaults {
             step list, progress updates, and the specificity of the result — not on whether \
             you could perform them.
 
+            If the criterion names a local file path and asks whether that file exists or contains \
+            specific content, call `file_read` on that exact path before rejecting for nonexistence \
+            or missing file contents, unless the current workerActivity already contains a successful \
+            `file_read` result for that exact path. If `file_read` returns content for the path, do \
+            not reject by saying the file does not exist.
+
             Be strict about completeness, but judge what the criterion asks — not what you would \
             have asked.
             """,
@@ -728,6 +734,9 @@ extension OrchestrationRuntime {
         )
         let sessionID = currentSessionID
         let usageStore = usageStore
+        let validationChannel = channel
+        let taskID = task.id
+        let taskTitle = task.title
         // Route each validator tool call through the shared Security Agent evaluator (auto-approved
         // for read-only evidence tools — no LLM). A central choke point, tightenable later, so these
         // reads are never off the security path. Nil when no Security Agent provider is configured;
@@ -747,9 +756,13 @@ extension OrchestrationRuntime {
                     metadata: [
                         "messageKind": .string("tool_request"),
                         "requestID": .string(call.id),
+                        "taskID": .string(gateTaskID),
+                        "taskTitle": .string(gateTaskTitle),
                         "tool": .string(call.name),
-                        "params": .string(call.arguments)
-                    ]
+                        "params": .string(call.arguments),
+                        "senderTaskTitle": .string(gateTaskTitle)
+                    ],
+                    taskID: task.id
                 ))
                 let disposition = await evaluator.evaluate(
                     toolName: call.name,
@@ -804,6 +817,16 @@ extension OrchestrationRuntime {
                     ),
                     latencyMs: latencyMs,
                     to: usageStore
+                )
+            },
+            onToolResult: { call, result in
+                await AgentActor.postToolOutputToChannel(
+                    result: result,
+                    call: call,
+                    sender: .validator,
+                    post: { await validationChannel.post($0) },
+                    taskTitle: taskTitle,
+                    taskID: taskID
                 )
             },
             securityGate: securityGate
