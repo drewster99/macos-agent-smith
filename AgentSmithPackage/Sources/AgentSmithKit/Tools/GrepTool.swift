@@ -6,7 +6,7 @@ import Foundation
 /// matching file paths only, or matching lines with file:line_number:content format.
 struct GrepTool: AgentTool {
     let name = "grep"
-    let toolDescription = "Search file contents for lines matching a regex `pattern`. `path` may be a directory (searched recursively) OR a single file. Returns matching file paths by default, or matching lines in file:line:content format. Supports glob-based file filtering when searching a directory. Use instead of grep or rg bash commands for content search."
+    let toolDescription = "Search file contents for lines matching a regex `pattern`. `path` may be a directory (searched recursively) OR a single file. Returns matching file paths by default, or matching lines in file:line:content format. Supports glob-based file filtering when searching a directory. Use instead of grep or rg bash commands for content search. Result limits are caller-configurable: `max_file_count` (default \(GrepTool.defaultMaxFileMatches)), `max_line_count` (default \(GrepTool.defaultMaxContentLines)), `max_file_size_mb` (default \(GrepTool.defaultMaxFileSizeMB)); files over the size limit are skipped and their count is reported so matches are never silently missed."
 
     public func description(for role: AgentRole) -> String {
         switch role {
@@ -37,17 +37,39 @@ struct GrepTool: AgentTool {
                 "type": .string("string"),
                 "description": .string("Output format: \"files_with_matches\" (default) returns only file paths containing matches. \"content\" returns matching lines as file:line_number:content."),
                 "enum": .array([.string("files_with_matches"), .string("content")])
+            ]),
+            "max_file_count": .dictionary([
+                "type": .string("integer"),
+                "description": .string("Max number of matching files to return (default \(GrepTool.defaultMaxFileMatches)).")
+            ]),
+            "max_line_count": .dictionary([
+                "type": .string("integer"),
+                "description": .string("Max number of matching content lines to return in \"content\" mode (default \(GrepTool.defaultMaxContentLines)).")
+            ]),
+            "max_file_size_mb": .dictionary([
+                "type": .string("integer"),
+                "description": .string("Skip files larger than this many megabytes (default \(GrepTool.defaultMaxFileSizeMB)). Any skipped files are reported in the result, so matches are never silently missed — raise this to search larger files.")
             ])
         ]),
         "required": .array([.string("pattern"), .string("path")])
     ]
 
-    /// Maximum number of matching files to return.
-    private static let maxFileMatches = 500
-    /// Maximum number of content lines to return in content mode.
-    private static let maxContentLines = 1000
-    /// Skip files larger than this (likely binary or generated).
-    private static let maxFileSize: UInt64 = 1_000_000
+    /// Default cap on matching files returned; caller override: `max_file_count`.
+    private static let defaultMaxFileMatches = 2500
+    /// Default cap on matching content lines returned; caller override: `max_line_count`.
+    private static let defaultMaxContentLines = 10_000
+    /// Default per-file size ceiling in megabytes; caller override: `max_file_size_mb`. Files
+    /// larger than this are skipped, and the skip COUNT is reported — never a silent miss.
+    private static let defaultMaxFileSizeMB = 16
+
+    /// Parses an optional positive-integer argument, flooring at 1, falling back when absent/invalid.
+    private static func positiveInt(_ raw: AnyCodable?, or fallback: Int) -> Int {
+        switch raw {
+        case .int(let v): return max(1, v)
+        case .double(let v): return max(1, Int(v))
+        default: return fallback
+        }
+    }
 
     public init() {}
 
@@ -82,6 +104,12 @@ struct GrepTool: AgentTool {
         } else {
             contentMode = false
         }
+
+        // Caller-configurable limits (all optional; defaults are generous).
+        let maxFileMatches = Self.positiveInt(arguments["max_file_count"], or: Self.defaultMaxFileMatches)
+        let maxContentLines = Self.positiveInt(arguments["max_line_count"], or: Self.defaultMaxContentLines)
+        let maxFileSizeMB = Self.positiveInt(arguments["max_file_size_mb"], or: Self.defaultMaxFileSizeMB)
+        let maxFileSizeBytes = UInt64(maxFileSizeMB) * 1024 * 1024
 
         // Compile glob filter if provided.
         let globRegex: NSRegularExpression?
@@ -139,14 +167,15 @@ struct GrepTool: AgentTool {
         var matchingFiles: [String] = []
         var contentLines: [String] = []
         var truncated = false
+        var oversizedSkipped = 0
 
         for fileURL in allURLs {
             // Stop if we've hit the file limit.
-            if matchingFiles.count >= Self.maxFileMatches {
+            if matchingFiles.count >= maxFileMatches {
                 truncated = true
                 break
             }
-            if contentMode && contentLines.count >= Self.maxContentLines {
+            if contentMode && contentLines.count >= maxContentLines {
                 truncated = true
                 break
             }
@@ -159,8 +188,9 @@ struct GrepTool: AgentTool {
             }
             guard resourceValues.isRegularFile == true else { continue }
 
-            // Skip oversized files.
-            if let fileSize = resourceValues.fileSize, UInt64(fileSize) > Self.maxFileSize {
+            // Skip oversized files — but COUNT them so the skip is reported, never silent.
+            if let fileSize = resourceValues.fileSize, UInt64(fileSize) > maxFileSizeBytes {
+                oversizedSkipped += 1
                 continue
             }
 
@@ -204,7 +234,7 @@ struct GrepTool: AgentTool {
                 for (idx, line) in lines.enumerated() {
                     let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
                     if regex.firstMatch(in: line, range: lineRange) != nil {
-                        if contentLines.count < Self.maxContentLines {
+                        if contentLines.count < maxContentLines {
                             contentLines.append("\(resolvedFile):\(idx + 1):\(line)")
                         } else {
                             truncated = true
@@ -224,25 +254,31 @@ struct GrepTool: AgentTool {
             }
         }
 
+        // Oversized files that were skipped are surfaced (never a silent miss) — a match could
+        // live in one of them; the caller can raise `max_file_size_mb` to include them.
+        let skipNote = oversizedSkipped > 0
+            ? "\n\n[\(oversizedSkipped) file(s) skipped for exceeding the \(maxFileSizeMB) MB size limit — raise `max_file_size_mb` to search them]"
+            : ""
+
         // Format output. "no matches" is a successful empty result, not a failure.
         if contentMode {
             if contentLines.isEmpty {
-                return .success("No matches found for pattern '\(pattern)' in \(path).")
+                return .success("No matches found for pattern '\(pattern)' in \(path)." + skipNote)
             }
             var output = contentLines.joined(separator: "\n")
             if truncated {
-                output += "\n\n[Results truncated: \(contentLines.count) lines from \(matchingFiles.count) files shown]"
+                output += "\n\n[Results truncated: \(contentLines.count) lines from \(matchingFiles.count) files shown — raise `max_line_count`]"
             }
-            return .success(output)
+            return .success(output + skipNote)
         } else {
             if matchingFiles.isEmpty {
-                return .success("No files matched pattern '\(pattern)' in \(path).")
+                return .success("No files matched pattern '\(pattern)' in \(path)." + skipNote)
             }
             var output = matchingFiles.joined(separator: "\n")
             if truncated {
-                output += "\n\n[Results truncated: showing \(Self.maxFileMatches) of potentially more matches]"
+                output += "\n\n[Results truncated: showing \(maxFileMatches) of potentially more matches — raise `max_file_count`]"
             }
-            return .success(output)
+            return .success(output + skipNote)
         }
     }
 }
