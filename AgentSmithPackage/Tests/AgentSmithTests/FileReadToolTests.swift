@@ -68,6 +68,46 @@ struct FileReadToolTests {
         #expect(result.output.contains("startingLineNum"))
     }
 
+    @Test("whole reads over five megabytes fail with line-window guidance")
+    func wholeReadOverFiveMegabytesFails() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let path = try writeLargeLineFixture(in: dir)
+
+        let result = try await FileReadTool().execute(
+            arguments: ["path": .string(path)],
+            context: TestToolContext.make()
+        )
+
+        #expect(!result.succeeded)
+        #expect(result.output.contains("too large to read whole"))
+        #expect(result.output.contains("startingLineNum"))
+        #expect(result.output.contains("maxLines"))
+    }
+
+    @Test("line-window reads can select from files over five megabytes")
+    func lineWindowReadOverFiveMegabytesSucceeds() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let path = try writeLargeLineFixture(in: dir)
+
+        let result = try await FileReadTool().execute(
+            arguments: [
+                "path": .string(path),
+                "startingLineNum": .int(5_500),
+                "maxLines": .int(2)
+            ],
+            context: TestToolContext.make()
+        )
+
+        #expect(result.succeeded)
+        #expect(result.output.contains("  5500  line-5500 "))
+        #expect(result.output.contains("  5501  line-5501 "))
+        #expect(!result.output.contains("line-5499"))
+        #expect(!result.output.contains("line-5502"))
+        #expect(result.output.contains("[File has 6000 total lines"))
+    }
+
     @Test("missing file returns failure")
     func missingFileFailure() async throws {
         let result = try await FileReadTool().execute(
@@ -219,5 +259,14 @@ struct FileReadToolTests {
         )
         #expect(result.succeeded)
         #expect(result.output.contains("hello"))
+    }
+
+    private func writeLargeLineFixture(in dir: TempDir) throws -> String {
+        let filler = String(repeating: "x", count: 1024)
+        let body = (1...6_000)
+            .map { "line-\($0) \(filler)" }
+            .joined(separator: "\n")
+        #expect(body.utf8.count > FileReadTool.maxCharacters)
+        return try dir.write(body, to: "large.txt")
     }
 }

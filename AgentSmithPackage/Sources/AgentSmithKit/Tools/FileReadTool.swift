@@ -45,10 +45,9 @@ struct FileReadTool: AgentTool {
     ]
 
     /// Maximum characters in total output to prevent context overflow. Also the whole-file size
-    /// ceiling: a file larger than this currently can't be read even with `startingLineNum`/`maxLines`,
-    /// because the file is loaded in full before being windowed. (A future streaming read could
-    /// page through larger files.)
-    static let maxCharacters = 1_000_000
+    /// ceiling for reads that do not request a specific line window. Explicit line-window reads
+    /// stream the selected lines first, then apply this cap to the selected output.
+    static let maxCharacters = 5 * 1024 * 1024
     /// Default number of lines to return when no limit is specified.
     private static let defaultLineLimit = 2500
     /// PDFs with more pages than this require an explicit pages parameter.
@@ -96,7 +95,14 @@ struct FileReadTool: AgentTool {
             if case .int(let o) = arguments["startingLineNum"] { offset = max(1, o) } else { offset = 1 }
             let limit: Int
             if case .int(let l) = arguments["maxLines"] { limit = max(1, l) } else { limit = Self.defaultLineLimit }
-            outcome = Self.readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit)
+            let lineWindowRequested = arguments["startingLineNum"] != nil || arguments["maxLines"] != nil
+            outcome = Self.readText(
+                at: url,
+                resolvedPath: resolvedPath,
+                offset: offset,
+                limit: limit,
+                lineWindowRequested: lineWindowRequested
+            )
 
         case .binary:
             outcome = Self.binaryMetadata(at: resolvedPath, originalPath: path)
@@ -184,12 +190,21 @@ struct FileReadTool: AgentTool {
 
     // MARK: - Text Reading
 
-    private static func readText(at url: URL, resolvedPath: String, offset: Int, limit: Int) -> ReadOutcome {
+    private static func readText(
+        at url: URL,
+        resolvedPath: String,
+        offset: Int,
+        limit: Int,
+        lineWindowRequested: Bool
+    ) -> ReadOutcome {
         // Check file size before reading.
         do {
             let attrs = try FileManager.default.attributesOfItem(atPath: resolvedPath)
             if let fileSize = attrs[.size] as? UInt64, fileSize > maxCharacters {
-                return failure("Error: File is too large to read (\(fileSize) bytes, maximum is \(maxCharacters)).")
+                guard lineWindowRequested else {
+                    return failure("Error: File is too large to read whole (\(fileSize) bytes, maximum is \(maxCharacters)). Pass `startingLineNum` and `maxLines` to read a smaller line window.")
+                }
+                return Self.readTextWindowStreaming(at: resolvedPath, offset: offset, limit: limit)
             }
         } catch {
             return failure("Error checking file size: \(error.localizedDescription)")
@@ -226,7 +241,7 @@ struct FileReadTool: AgentTool {
             output += String(format: "%6d  %@\n", lineNumber, line)
         }
 
-        // Truncate output if it exceeds the character cap.
+        // Truncate selected output if it exceeds the character cap.
         if output.count > maxCharacters {
             let truncatedIndex = output.index(output.startIndex, offsetBy: maxCharacters)
             output = String(output[..<truncatedIndex])
@@ -241,6 +256,80 @@ struct FileReadTool: AgentTool {
 
         // A genuine text read (including an empty file) is the only outcome that may gate
         // a subsequent file_edit.
+        return ReadOutcome(output: output, succeeded: true, contentBearingTextRead: true)
+    }
+
+    /// Streams only the requested line window from a large UTF-8 text file. This is the path that
+    /// makes `startingLineNum` / `maxLines` useful for files that are too large to read whole.
+    private static func readTextWindowStreaming(at resolvedPath: String, offset: Int, limit: Int) -> ReadOutcome {
+        guard let handle = FileHandle(forReadingAtPath: resolvedPath) else {
+            return failure("Error: Unable to open file for reading.")
+        }
+        defer { try? handle.close() }
+
+        let startLine = offset
+        let endLineExclusive = offset + limit
+        var currentLine = 1
+        var selected: [(lineNumber: Int, text: String)] = []
+        var outputChars = 0
+        var outputTruncated = false
+        var pending = Data()
+        var endedWithNewline = false
+        let chunkSize = 64 * 1024
+
+        func processLine(_ lineData: Data) -> ReadOutcome? {
+            defer { currentLine += 1 }
+            guard currentLine >= startLine && currentLine < endLineExclusive else { return nil }
+            guard let line = String(data: lineData, encoding: .utf8) else {
+                return failure("Error reading file: selected line \(currentLine) is not valid UTF-8.")
+            }
+            let formatted = String(format: "%6d  %@\n", currentLine, line)
+            if outputChars + formatted.count > maxCharacters {
+                outputTruncated = true
+                return nil
+            }
+            outputChars += formatted.count
+            selected.append((currentLine, line))
+            return nil
+        }
+
+        while true {
+            let chunk = handle.readData(ofLength: chunkSize)
+            if chunk.isEmpty { break }
+            endedWithNewline = chunk.last == 0x0A
+            pending.append(chunk)
+
+            while let newlineIndex = pending.firstIndex(of: 0x0A) {
+                let lineData = pending[..<newlineIndex]
+                if let failure = processLine(Data(lineData)) { return failure }
+                pending.removeSubrange(...newlineIndex)
+            }
+        }
+
+        if !pending.isEmpty || endedWithNewline || currentLine == 1 {
+            if let failure = processLine(pending) { return failure }
+        }
+
+        let totalLines = currentLine - 1
+        let startIndex = offset - 1
+        guard startIndex < totalLines else {
+            return failure("Error: startingLineNum \(offset) is beyond the end of the file (\(totalLines) lines).")
+        }
+
+        var output = ""
+        output.reserveCapacity(min(outputChars + 160, maxCharacters + 160))
+        for line in selected {
+            output += String(format: "%6d  %@\n", line.lineNumber, line.text)
+        }
+        if outputTruncated {
+            output += "\n\n[Output truncated at \(maxCharacters) characters]"
+        }
+
+        let shownEnd = selected.last?.lineNumber ?? (offset - 1)
+        if shownEnd < totalLines {
+            output += "\n[File has \(totalLines) total lines. Showing lines \(offset) through \(shownEnd).]"
+        }
+
         return ReadOutcome(output: output, succeeded: true, contentBearingTextRead: true)
     }
 
@@ -407,7 +496,7 @@ struct FileReadTool: AgentTool {
 
         switch contentType {
         case .text:
-            return readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit).output
+            return readText(at: url, resolvedPath: resolvedPath, offset: offset, limit: limit, lineWindowRequested: offset != 1 || limit != defaultLineLimit).output
         case .pdf:
             return readPDF(at: url, pages: nil).output
         case .image:

@@ -2,6 +2,14 @@
 
 ## Planned
 
+### Oversized LLM inputs need holistic chunking/backpressure (2026-07-20)
+
+Memory reconciliation and hybrid `web_fetch` extraction now send full inputs to avoid hiding decisive details past an arbitrary prefix cut. That is semantically better, but it can still overflow the provider context when memories or fetched pages are huge. Add a holistic large-input path: chunk or retrieve relevant slices, preserve enough context for conflict detection/extraction, and report when the model saw only a bounded subset. This should cover memory reconcile, web extraction, validator evidence payloads, and any future summarizer-style calls through one shared policy.
+
+### Tool-configurable search caps need hard ceilings (2026-07-20)
+
+`grep` exposes `max_file_count`, `max_line_count`, and `max_file_size_mb` so agents can deliberately widen a search, but those values currently have no hard upper bound. Add system-owned ceilings plus clear result notes when caller-requested limits are clamped. Keep the model-facing knobs useful, but prevent accidental huge directory walks, memory spikes from eager URL collection, and oversized result construction.
+
 ### Layered model-metadata composition — the authoritative design (decided 2026-07-17) ✅ IMPLEMENTED
 
 **Status: all five rollout steps shipped 2026-07-17** (SwiftLLMKit 0.0.77–0.0.82; app follows).
