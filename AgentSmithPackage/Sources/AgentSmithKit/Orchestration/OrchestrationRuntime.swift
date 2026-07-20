@@ -542,8 +542,14 @@ public actor OrchestrationRuntime {
                 smaller context. Preserve, with specifics (task titles and IDs verbatim): \
                 (1) the user's requests, stated preferences, and any permissions they granted; \
                 (2) tasks created, run, reviewed, and their outcomes; \
-                (3) unresolved questions, commitments, or anything awaiting follow-up. \
-                Omit tool-call mechanics and routine acknowledgments. Under 400 words.
+                (3) unresolved questions, commitments, or anything awaiting follow-up; \
+                (4) any unresolved worker escalation or help request that arrived as an inbound \
+                message — the blocker a worker raised and the exact action it awaits from the user \
+                or Smith; \
+                (5) a brief recap of the most recent messages exchanged among you (Smith), the \
+                user, the system, and the worker Brown, so the immediate conversational state is \
+                clear. Omit tool-call mechanics and routine acknowledgments — but a worker's \
+                blocker or request for help is never routine; preserve it verbatim. Under 400 words.
                 """),
             .user(transcript)
         ]
