@@ -315,7 +315,7 @@ public actor AgentActor {
 
     private var maxToolCallsPerIteration: Int
     /// Maximum concurrent Security Agent evaluations to prevent overwhelming the LLM backend.
-    private static let maxConcurrentEvaluations = 5
+    private static let maxConcurrentEvaluations = 8
 
     /// Worst-case character overhead for tool definitions and per-turn suffixes
     /// that are sent with each API call but not stored in conversationHistory.

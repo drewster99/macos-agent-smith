@@ -28,7 +28,7 @@ public enum EvaluationRunner {
     }
 
     /// How many grammar-violating responses are re-prompted before giving up.
-    static let maxParseRetries = 3
+    static let maxParseRetries = 8
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "EvaluationRunner")
 

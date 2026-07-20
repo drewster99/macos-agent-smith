@@ -237,12 +237,12 @@ struct SecurityEvaluatorTests {
 
     @Test("totally unparseable response retries and falls back to denied")
     func unparseableFallsBack() async {
-        // Five identical unparseable responses → exhaust retries → fallback.
+        // Eight identical unparseable responses → exhaust retries (maxRetries) → fallback.
         let junk = textResponse("I don't have a verdict for you. Sorry.")
-        let (evaluator, provider, _) = makeEvaluator(responses: Array(repeating: junk, count: 5))
+        let (evaluator, provider, _) = makeEvaluator(responses: Array(repeating: junk, count: 8))
         let d = await evaluate(evaluator)
         #expect(d.approved == false)
-        #expect(provider.callCount == 5)
+        #expect(provider.callCount == 8)
     }
 
     @Test("first response unparseable, second is clean SAFE → approved")

@@ -224,7 +224,10 @@ struct EvaluationRunnerLoopTests {
     @Test("Persistent grammar violations end in ERROR, never a fake verdict")
     func persistentParseFailureErrors() async {
         let provider = MockLLMProvider(responses: [LLMResponse(text: "I feel good about this one!")])
-        let outcome = await runOutcome(makeDefinition(), provider: provider)
+        // maxTurns must exceed maxParseRetries (8) so persistent grammar violations hit the
+        // parse-retry cap (the path this test exercises) rather than turn exhaustion, which the
+        // sibling `turnExhaustionErrors` test covers.
+        let outcome = await runOutcome(makeDefinition(maxTurns: 20), provider: provider)
         guard case .error(let why) = outcome else {
             Issue.record("expected error, got \(outcome)")
             return

@@ -350,7 +350,7 @@ public actor OrchestrationRuntime {
     /// keep making progress (any criterion newly accepted or waived resets the counter).
     var maxConsecutiveValidationRoundsWithoutProgress = 5
     /// Per-report criterion parallelism cap.
-    var validationParallelism = 5
+    var validationParallelism = 8
     /// Per-task reentrancy guard for validation runs.
     var tasksBeingValidated: Set<UUID> = []
     /// The in-flight validation Task per task, so a pause/stop can cancel it — the
@@ -560,7 +560,7 @@ public actor OrchestrationRuntime {
             response = try await provider.send(
                 messages: messages,
                 tools: [],
-                overrides: LLMCallOverrides(maxOutputTokens: 2000)
+                overrides: LLMCallOverrides(maxOutputTokens: 5000)
             )
         } catch {
             return "Compaction failed — the summary call errored: \(error.localizedDescription). Smith's context is unchanged."

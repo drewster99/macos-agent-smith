@@ -172,7 +172,7 @@ actor SecurityEvaluator {
     /// Cap on parse-failure retries within a single evaluation. Each unparseable verdict
     /// costs one retry; LLM call errors also cost one retry. The loop ends on a parsed verdict,
     /// parse-retry exhaustion, tool-round exhaustion (see `maxToolRounds`), or task cancellation.
-    private static let maxRetries = 5
+    private static let maxRetries = 8
 
     /// Hard cap on evidence-gathering (file_read / attach_file) rounds within a single evaluation.
     /// Once hit, subsequent LLM calls are made with NO tools so the model must commit to a verdict,
