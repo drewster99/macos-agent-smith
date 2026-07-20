@@ -2,19 +2,15 @@ import Foundation
 
 /// Defines Smith's tool set and enhanced system prompt.
 enum SmithBehavior {
-    /// Tools available to the Smith agent. `validatorCatalogSummary`, when supplied, is
-    /// baked into `set_acceptance_criteria`'s description so Smith sees the installed
-    /// validators on every turn (the GhTool auth-snapshot pattern).
-    public static func tools(validatorCatalogSummary: String? = nil) -> [any AgentTool] {
+    /// Tools available to the Smith agent.
+    public static func tools() -> [any AgentTool] {
         [
             MessageUserTool(),
             MessageBrownTool(),
             ReviewWorkTool(),
             ProvideHelpTool(),
             CreateTaskTool(),
-            SetAcceptanceCriteriaTool(validatorCatalogSummary: validatorCatalogSummary),
-            DefineValidatorTool(),
-            ListValidatorsTool(),
+            SetAcceptanceCriteriaTool(),
             RunTaskTool(),
             UpdateTaskTool(),
             AmendTaskTool(),
@@ -157,9 +153,7 @@ enum SmithBehavior {
           need to perform. The security agent will choose the best tools for the job.
         - If a request spans multiple tasks, note which tasks are related inside each description.
         - When you do want to queue several tasks before any of them run, create the first one (it will auto-start), then wait — subsequent ones will queue behind it.
-        - `acceptance_criteria`: **provide these on every real task** — derive 1 or more concrete, evidence-checkable criteria from what the user asked for, including any validation the user explicitly requested. Each criterion is judged independently against the submitted result; they ARE your quality control. These are precisely and the only way the worker's final results will be checked, so be explicit and detailed. You may create any number of acceptance criteria - whatever is appropriate to the task. For a simple task like "how much free space is in my home directory", you'll probably have a single simple criterion. For a complex task you could have any number of criteria. Choose the right criteria and the right number of them for the job at hand. Give extra thought to the organization and breakdown of your acceptance criteria if you end up with more than a dozen. Items are plain strings (like "the result must list the amount of free space in GB or MB"), or objects `{text, waivable?, validator_name?, prepare?, inline_validator?}` when a criterion needs a named/custom validator or a dynamic prepare function. Omit only for trivial reminder-style tasks (the default whole-task check covers those).
-            You may also define a "prepare" style validator with `define_validator` and use it in a criterion, which allows you to
-            specify a prompt that returns an array of items, where each item will be passed to the validator individually.
+        - `acceptance_criteria`: **provide these on every real task**. Every item is `{name, validation_prompt, input_enumerator_prompt?, waivable?}`. `name` is a short display-only label. `validation_prompt` is required and contains every instruction for the validation LLM, including the concrete evidence that proves success. A non-blank `input_enumerator_prompt` instructs a separate LLM to return a JSON array containing only strings; every returned string becomes an independent subcheck passed to the validation LLM as `itemToEvaluate` together with `validation_prompt`, and every subcheck must pass. Example: `{name: "Translations complete", input_enumerator_prompt: "Return only [\"german.txt\", \"french.txt\"].", validation_prompt: "Verify itemToEvaluate names a complete translation file and confirm it from the evidence directory."}`. Omit criteria only for trivial reminder-style tasks.
             **Every criterion must be PROVABLE from evidence the worker can actually produce.** The validation system \
             judges each criterion ONLY on evidence — files it can read, command output, the worker's recorded tool \
             activity — NEVER on the worker's say-so. So write each criterion to state, in addition to WHAT must be true, \
@@ -194,17 +188,7 @@ enum SmithBehavior {
         - `steps`: **provide an initial step list whenever the work has a natural sequence** — it seeds the worker's plan and gives validators a record to check against. The worker owns and evolves it from there. Be thorough when enumerating steps.
 
         ### `set_acceptance_criteria(task_id, criteria)`
-        Set (REPLACE) a task's acceptance criteria after creation — each criterion is `{text, waivable?, validator_name?, prepare?, inline_validator?}`. Use when the user adds requirements mid-task, when an escalation shows the criteria were wrong, or to attach a specialized validator from the registry to a criterion. Unchanged criteria keep their already-accepted status; edited or new ones get judged fresh. Pass the COMPLETE list each time.
-
-        ### `define_validator(name, kind, description, system_prompt, overwrite?)`
-        Author a REUSABLE custom evaluator in the registry, then reference it by name from criteria. Two kinds:
-        - `validator` — judges one criterion against the submitted work. Your `system_prompt` states WHAT to check and how strictly; the response format and the read-only evidence tools are supplied automatically. A validator reached through a criterion's `prepare` automatically judges each enumerated item — no flag needed.
-        - `prepare` — enumerates the ITEMS a dynamic criterion judges one by one (files in a folder, steps in the plan, entries in a report). Your prompt states what to enumerate; it can use read-only tools to look.
-        The enumerate-and-check pattern: `define_validator` a prepare + a validator, then set a criterion with `prepare: "<prepare-name>", validator_name: "<validator-name>"`. When the user describes HOW they want work validated, capture it as a validator so future tasks reuse it.
-        For a one-off check, skip the registry: put `inline_validator: {system_prompt: "..."}` directly on the criterion (inline, task-scoped).
-
-        ### `list_validators()`
-        List the registry's available acceptance validators with descriptions (plus any broken definition files). Use before naming a `validator_name` in `set_acceptance_criteria`.
+        Set (REPLACE) a task's acceptance criteria after creation. Each criterion is `{name, validation_prompt, input_enumerator_prompt?, waivable?}`. Unchanged names retain identity, but changing either prompt causes fresh judgment. Pass the COMPLETE list each time.
 
         ### `run_task(task_id, instructions)`
         Start an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context, auto-spawns Brown+Security Agent.

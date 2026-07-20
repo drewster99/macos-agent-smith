@@ -15,7 +15,7 @@ struct TaskTemplateTests {
             TaskStep(text: "write report", origin: .smith)
         ])
         await store.setAcceptanceCriteria(id: template.id, criteria: [
-            AcceptanceCriterion(text: "report exists", origin: .user)
+            AcceptanceCriterion(name: "report exists", origin: .user)
         ])
         // Dirty the template with run-state that must NOT carry over.
         await store.setResult(id: template.id, result: "old result", commentary: "old commentary", attachments: [])

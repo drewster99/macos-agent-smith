@@ -112,7 +112,9 @@ public actor TaskStore {
         }
         let clonedCriteria = template.acceptanceCriteria.map { criterion in
             AcceptanceCriterion(
-                text: criterion.text,
+                name: criterion.name,
+                validationPrompt: criterion.validationPrompt,
+                inputEnumeratorPrompt: criterion.inputEnumeratorPrompt,
                 waivable: criterion.waivable,
                 origin: criterion.origin,
                 validator: criterion.validator,
@@ -488,8 +490,9 @@ public actor TaskStore {
     /// does NOT touch `result` — there is no completed work to deliver.
     // MARK: - Acceptance criteria (requester-owned)
 
-    /// Replaces the task's acceptance criteria. Any criterion whose text, waivable flag,
-    /// or validator CHANGED — and any new criterion — loses its sticky verdict (its
+    /// Replaces the task's acceptance criteria. Any criterion whose validation prompt,
+    /// input enumerator, waivable flag, or legacy validator selection CHANGED — and any
+    /// new criterion — loses its sticky verdict (its
     /// records stay in the audit ledger; only the "settled" reading resets, because the
     /// contract it was judged against no longer exists). Unchanged criteria keep their
     /// verdicts.
@@ -499,7 +502,13 @@ public actor TaskStore {
         var changedIDs: Set<UUID> = []
         for criterion in criteria {
             if let previous = previousByID[criterion.id] {
-                if previous != criterion { changedIDs.insert(criterion.id) }
+                if previous.validationPrompt != criterion.validationPrompt
+                    || previous.inputEnumeratorPrompt != criterion.inputEnumeratorPrompt
+                    || previous.waivable != criterion.waivable
+                    || previous.validator != criterion.validator
+                    || previous.prepare != criterion.prepare {
+                    changedIDs.insert(criterion.id)
+                }
             } else {
                 changedIDs.insert(criterion.id)
             }
@@ -511,7 +520,7 @@ public actor TaskStore {
         if var validation = task.validation {
             // Drop records for changed criteria (stickiness reset) AND for criteria no
             // longer on the task — orphaned records otherwise haunt every settled-count
-            // ("4 of 3 settled", observed 2026-07-09 after Smith rewrote criterion text,
+            // ("4 of 3 settled", observed 2026-07-09 after Smith rewrote a criterion,
             // which mints new IDs and strands the old IDs' accepts in the ledger).
             validation.verdictRecords.removeAll {
                 changedIDs.contains($0.criterionID) || !currentIDs.contains($0.criterionID)
@@ -647,7 +656,11 @@ public actor TaskStore {
         let currentByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let fresh = records.filter { record in
             guard let judged = judgedByID[record.criterionID], let current = currentByID[record.criterionID] else { return false }
-            return current.validator == judged.validator && current.prepare == judged.prepare && current.waivable == judged.waivable
+            return current.validationPrompt == judged.validationPrompt
+                && current.inputEnumeratorPrompt == judged.inputEnumeratorPrompt
+                && current.validator == judged.validator
+                && current.prepare == judged.prepare
+                && current.waivable == judged.waivable
         }
         guard !fresh.isEmpty else { return [] }
         var validation = task.validation ?? TaskValidationState()

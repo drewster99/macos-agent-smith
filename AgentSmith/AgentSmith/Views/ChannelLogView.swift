@@ -855,7 +855,7 @@ private struct MessageRow: View, Equatable {
               case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
         switch d {
         case "autoApproved":
-            // The reason varies (read-only evidence vs identical WARN retry) — use the actual
+            // The reason varies (trusted filesystem read vs identical WARN retry) — use the actual
             // disposition message rather than assuming one kind of auto-approval.
             if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
                 return "Auto-approved (\(msg))"

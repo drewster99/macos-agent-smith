@@ -10,11 +10,10 @@ import Foundation
 public struct CreateTaskTool: AgentTool {
     public let name = "create_task"
     public let toolDescription = """
-        Create a new task. If no other task is currently running or awaiting review, the new task \
-        auto-starts immediately and the system restarts on it — you do NOT need a follow-up \
-        `run_task` call. If another task is running or awaiting review, the new task is queued as \
-        pending; the response tells you so and you should leave it alone until the current task \
-        finishes. \
+        Create a new task. If the configured maximum task concurrency has a free worker slot, the \
+        new task auto-starts immediately and the system restarts on it — you do NOT need a \
+        follow-up `run_task` call. If every worker slot is occupied, the new task is queued as \
+        pending; the response tells you so and you should leave it alone until a slot becomes free. \
         \
         Optional `scheduled_run_at`: an ISO-8601 timestamp at which the task should run. When \
         set, the task is created with status `scheduled` (auto-start is suppressed) and a timer is \
@@ -52,7 +51,17 @@ public struct CreateTaskTool: AgentTool {
             ]),
             "acceptance_criteria": .dictionary([
                 "type": .string("array"),
-                "description": .string("Acceptance criteria — the checklist the automated validation system judges the worker's submission against. PROVIDE THESE ON EVERY REAL TASK: derive concrete, evidence-checkable criteria from what the user asked for (as many as the task needs — one for something simple, more for something complex), including any validation the user explicitly requested. Each item is either a STRING (criterion text, default validator) or an OBJECT {text, waivable?, validator_name?, prepare?, inline_validator?} — the same shapes as `set_acceptance_criteria`, so custom/named validators and dynamic prepare functions can be attached at creation. Each criterion is judged ONLY on evidence (files, command output, recorded tool activity), never on the worker's say-so, so each must NAME the proof that satisfies it: phrase as 'X must be true; evidence of completion: <the file/output/log/URL that proves it>'. A criterion asserting an outcome with no checkable proof cannot be accepted and stalls the task. Write each criterion as STRUCTURED MARKDOWN — never a run-on sentence — and make its logic explicit for the literal validator: several all-required things → a list under 'must include ALL of:'; alternatives (this OR that) → a nested list under 'must be ONE of:'. The validator is EXTREMELY strict and literal: write each so a CORRECT result passes even in edge cases — ties, zero/empty results, nonexistent targets, ambiguous inputs (e.g. 'identifies the most-starred repository, or reports a tie / that none exists, whichever the data shows'). If the worker can do the task correctly and still fail the criterion as written, the criterion is wrong. If proving something needs a capability the worker may lack (launching an app, a screenshot), make that criterion waivable or state the alternative evidence that would satisfy it. HARD GATES: when the description states a MUST-FAIL / abort precondition ('MUST FAIL', 'fail immediately', 'do not proceed if'), encode it as a non-waivable criterion that FAILS when the condition is not met — with NO OR-alternative or 'document and continue' escape; honoring a user-declared failure IS correctness, so the 'don't be over-strict' rule does not apply to it. Omit only for trivial reminder-style tasks.")
+                "items": .dictionary([
+                    "type": .string("object"),
+                    "properties": .dictionary([
+                        "name": .dictionary(["type": .string("string"), "description": .string("Short display-only name.")]),
+                        "validation_prompt": .dictionary(["type": .string("string"), "description": .string("Required instructions for the validation LLM: what to check and what evidence is sufficient.")]),
+                        "input_enumerator_prompt": .dictionary(["type": .string("string"), "description": .string("Optional instructions for an LLM that MUST return a JSON array of strings. Each string is checked independently with validation_prompt; every item must pass.")]),
+                        "waivable": .dictionary(["type": .string("boolean"), "description": .string("Whether WAIVE is permitted. Default false.")])
+                    ]),
+                    "required": .array([.string("name"), .string("validation_prompt")])
+                ]),
+                "description": .string("Acceptance criteria for every real task. `name` is display-only; put all judgment instructions and concrete evidence requirements in required `validation_prompt`. Optional non-blank `input_enumerator_prompt` must return a JSON array of strings; each string becomes an independent subcheck handed to the validation LLM with `validation_prompt`, and every subcheck must pass. Example: {\"name\":\"Translations complete\",\"input_enumerator_prompt\":\"Return only [\\\"german.txt\\\", \\\"french.txt\\\"].\",\"validation_prompt\":\"Verify itemToEvaluate names a complete translation file and confirm it from the evidence directory.\"}. Write prompts so correct work passes, including edge cases and explicit alternatives. Encode user-declared MUST-FAIL gates as non-waivable criteria with no escape hatch.")
             ]),
             "steps": .dictionary([
                 "type": .string("array"),
@@ -140,16 +149,13 @@ public struct CreateTaskTool: AgentTool {
 
         // Parse acceptance criteria BEFORE creating the task — bad criteria then mean
         // NO task, not an orphaned banner-less task plus a "fix it later" errand.
-        // Criteria accept the same shapes as set_acceptance_criteria: plain strings, or
-        // {text, waivable?, validator_name?, prepare?, inline_validator?} objects — so Smith
-        // can attach custom validators at creation time, not just after.
+        // Criteria accept the same task-scoped prompt contract as set_acceptance_criteria.
         var seedCriteria: [AcceptanceCriterion] = []
         if case .array(let rawCriteria) = arguments["acceptance_criteria"], !rawCriteria.isEmpty {
-            let registry = await context.loadEvaluatorRegistry()
-            switch CriterionArgumentParsing.parse(rawCriteria, registry: registry) {
+            switch CriterionArgumentParsing.parse(rawCriteria) {
             case .success(let parsed):
                 seedCriteria = parsed.map {
-                    AcceptanceCriterion(text: $0.text, waivable: $0.waivable, origin: .smith, validator: $0.validator, prepare: $0.prepare)
+                    AcceptanceCriterion(name: $0.name, validationPrompt: $0.validationPrompt, inputEnumeratorPrompt: $0.inputEnumeratorPrompt, waivable: $0.waivable, origin: .smith)
                 }
             case .failure(let problem):
                 return .failure("Task NOT created — the acceptance_criteria are invalid: \(problem.message) Fix them and call create_task again.")

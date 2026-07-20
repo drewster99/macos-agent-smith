@@ -205,10 +205,6 @@ public struct ToolContext: Sendable {
     /// tools compare in-progress task counts against this. Defaults to 1 for contexts
     /// built outside the runtime.
     public let workerCapacity: @Sendable () async -> Int
-    /// Persists a Smith-authored evaluator definition into the session registry.
-    /// Returns nil on success or a human-readable refusal. Defaults to a visible
-    /// "unconfigured" failure for contexts built outside the runtime.
-    public let saveEvaluatorDefinition: @Sendable (EvaluatorDefinition, _ overwrite: Bool) async -> String?
     /// Liveness lease check: returns true while the runtime still tracks this agent as a
     /// live, current agent. The agent's run loop consults this around every LLM turn and
     /// self-stops on false — the dead-man's switch that kills an agent whose runtime
@@ -343,7 +339,6 @@ public struct ToolContext: Sendable {
         beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
         loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
         workerCapacity: @escaping @Sendable () async -> Int = { 1 },
-        saveEvaluatorDefinition: @escaping @Sendable (EvaluatorDefinition, Bool) async -> String? = { _, _ in "no evaluator registry is configured" },
         isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
@@ -404,7 +399,6 @@ public struct ToolContext: Sendable {
         self.beginTaskValidation = beginTaskValidation
         self.loadEvaluatorRegistry = loadEvaluatorRegistry
         self.workerCapacity = workerCapacity
-        self.saveEvaluatorDefinition = saveEvaluatorDefinition
         self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange
         self.onSecurityAgentProcessingStateChange = onSecurityAgentProcessingStateChange

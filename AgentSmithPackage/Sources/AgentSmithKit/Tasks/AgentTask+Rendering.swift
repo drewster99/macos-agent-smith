@@ -21,12 +21,7 @@ extension AgentTask {
         let blocks = acceptanceCriteria.enumerated().map { index, criterion -> String in
             var qualifiers: [String] = []
             if criterion.waivable { qualifiers.append("waivable") }
-            switch criterion.validator {
-            case .registry(let name): qualifiers.append("validator: \(name)")
-            case .inline(let definition): qualifiers.append("validator: \(definition.name) (inline)")
-            case .none: break
-            }
-            if let prepare = criterion.prepare { qualifiers.append("prepare: \(prepare)") }
+            if criterion.inputEnumeratorPrompt != nil { qualifiers.append("enumerated inputs") }
             let suffix = qualifiers.isEmpty ? "" : " _(\(qualifiers.joined(separator: ", ")))_"
             let verdict = includeVerdicts
                 ? (ledger?.latestVerdict(for: criterion.id)).map { " — \(OrchestrationRuntime.describeVerdict($0))" } ?? ""

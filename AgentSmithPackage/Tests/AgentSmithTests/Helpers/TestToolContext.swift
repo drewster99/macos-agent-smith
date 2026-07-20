@@ -61,8 +61,7 @@ enum TestToolContext {
         stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
         taskEvidenceDirectory: URL? = nil,
-        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
-        saveEvaluatorDefinition: @escaping @Sendable (EvaluatorDefinition, Bool) async -> String? = { _, _ in "no evaluator registry is configured in test" }
+        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil }
     ) -> ToolContext {
         ToolContext(
             agentID: agentID,
@@ -76,7 +75,6 @@ enum TestToolContext {
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
             loadEvaluatorRegistry: loadEvaluatorRegistry,
-            saveEvaluatorDefinition: saveEvaluatorDefinition,
             memoryStore: memoryStore,
             extractWebContent: extractWebContent,
             recordFileRead: { path in fileReadTracker.record(path) },

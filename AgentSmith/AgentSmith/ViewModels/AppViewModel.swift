@@ -1291,23 +1291,6 @@ final class AppViewModel {
         await taskStore.setSteps(id: id, steps: steps)
     }
 
-    /// Registry names the task-detail criteria editor can offer/validate against,
-    /// loaded fresh from the session's evaluators directory (the registry hot-loads;
-    /// a stale snapshot here would refuse names that are actually installed).
-    /// Registry validator/prepare names, loaded OFF the main thread. `EvaluatorRegistry.load`
-    /// enumerates a directory and decodes its `*.json` files — synchronous disk I/O that must not
-    /// run on the UI thread when the user taps the acceptance-criteria editor.
-    nonisolated func availableEvaluatorNames() async -> (validators: [String], prepares: [String]) {
-        let dir = persistenceManager.evaluatorsDirectory
-        return await Task.detached {
-            let registry = EvaluatorRegistry.load(from: dir)
-            return (
-                registry.definitions(ofKind: .validator).map(\.name),
-                registry.definitions(ofKind: .prepare).map(\.name)
-            )
-        }.value
-    }
-
     func pauseTask(id: UUID) async {
         let slug = id.uuidString.prefix(8)
         let entry = Date()

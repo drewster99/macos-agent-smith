@@ -368,12 +368,12 @@ actor SecurityEvaluator {
         // can ride this path.
         if autoApproveReadOnlyEvidence, readOnlyAutoApproveEligible,
            Self.readOnlyFilesystemEvidenceTools.contains(toolName) {
-            let disposition = SecurityDisposition(approved: true, message: "read-only evidence", isAutoApproval: true)
-            appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved read-only evidence)", toolCallID: toolCallID)
+            let disposition = SecurityDisposition(approved: true, message: "trusted read-only filesystem access", isAutoApproval: true)
+            appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved trusted read-only filesystem access)", toolCallID: toolCallID)
             recordEvaluation(
                 toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
-                prompt: "(auto-approved without LLM evaluation: read-only filesystem evidence tool)",
-                response: "SAFE — auto-approved read-only evidence tool",
+                prompt: "(auto-approved without LLM evaluation: trusted read-only filesystem access)",
+                response: "SAFE — auto-approved trusted read-only filesystem access",
                 disposition: disposition, startTime: Date(), toolCallID: toolCallID ?? ""
             )
             return disposition

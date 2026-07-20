@@ -317,8 +317,7 @@ public enum EvaluationRunner {
         return .success(.verdict(token: spec.token, reason: reason.isEmpty ? nil : reason))
     }
 
-    /// Extracts the first top-level JSON array from the text (models often wrap arrays
-    /// in prose or code fences) and re-encodes each element as a compact fragment.
+    /// Extracts the first top-level JSON array of strings from the text.
     static func parseJSONArray(_ text: String) -> ParseResult {
         guard let open = text.firstIndex(of: "["), let close = text.lastIndex(of: "]"), open < close else {
             return .failure("no JSON array found in response")
@@ -328,25 +327,14 @@ public enum EvaluationRunner {
               let array = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
             return .failure("bracketed text is not a valid JSON array")
         }
-        var fragments: [String] = []
+        var strings: [String] = []
         for element in array {
-            if JSONSerialization.isValidJSONObject(element) {
-                guard let fragmentData = try? JSONSerialization.data(withJSONObject: element, options: [.sortedKeys]),
-                      let fragment = String(data: fragmentData, encoding: .utf8) else {
-                    return .failure("array element could not be re-encoded")
-                }
-                fragments.append(fragment)
-            } else if let string = element as? String {
-                fragments.append(string)
-            } else if let number = element as? NSNumber {
-                fragments.append(number.stringValue)
-            } else if element is NSNull {
-                fragments.append("null")
-            } else {
-                return .failure("unsupported array element type")
+            guard let string = element as? String else {
+                return .failure("every JSON array element must be a string")
             }
+            strings.append(string)
         }
-        return .success(.items(fragments))
+        return .success(.items(strings))
     }
 
     static func formatRetryNudge(for grammar: EvaluatorDefinition.OutputGrammar, problem: String) -> String {
@@ -363,7 +351,7 @@ public enum EvaluationRunner {
         case .jsonArray:
             return """
                 Your response did not match the required format (\(problem)). Respond again with a \
-                single JSON array (no prose outside it).
+                single JSON array containing only strings (no prose outside it).
                 """
         }
     }

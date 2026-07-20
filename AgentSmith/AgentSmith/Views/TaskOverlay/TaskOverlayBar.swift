@@ -303,7 +303,7 @@ struct TaskOverlayColumn: View {
                 Image(systemName: Self.verdictSymbol(latest?.verdict))
                     .font(AppFonts.taskOverlayIcon)
                     .foregroundStyle(Self.verdictColor(latest?.verdict, taskStatus: task.status))
-                Text(criterion.text)
+                Text(criterion.name)
                     .font(.caption)
                     .foregroundStyle(.primary)
                     .lineLimit(2)

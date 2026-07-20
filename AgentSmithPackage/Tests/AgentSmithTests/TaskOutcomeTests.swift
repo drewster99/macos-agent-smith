@@ -19,7 +19,7 @@ struct TaskOutcomeTests {
         var acceptance: [AcceptanceCriterion] = []
         var records: [CriterionVerdictRecord] = []
         for entry in criteria {
-            let criterion = AcceptanceCriterion(text: "c", waivable: entry.waivable, origin: .user)
+            let criterion = AcceptanceCriterion(name: "c", waivable: entry.waivable, origin: .user)
             acceptance.append(criterion)
             if let verdict = entry.verdict {
                 records.append(CriterionVerdictRecord(

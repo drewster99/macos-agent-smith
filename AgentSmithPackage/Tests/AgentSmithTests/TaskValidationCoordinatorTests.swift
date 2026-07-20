@@ -118,8 +118,8 @@ struct TaskValidationCoordinatorTests {
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
         await runtime.start()
         let criteria = [
-            AcceptanceCriterion(text: "A: code compiles", origin: .user),
-            AcceptanceCriterion(text: "B: log file written", origin: .user)
+            AcceptanceCriterion(name: "A: code compiles", origin: .user),
+            AcceptanceCriterion(name: "B: log file written", origin: .user)
         ]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
@@ -162,7 +162,7 @@ struct TaskValidationCoordinatorTests {
     func waiveOnNonWaivableEscalates() async {
         let (runtime, directory) = makeRuntime(verdictScript: ["WAIVE: does not apply here"])
         await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(text: "must always hold", waivable: false, origin: .user)]
+        let criteria = [AcceptanceCriterion(name: "must always hold", waivable: false, origin: .user)]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -174,7 +174,7 @@ struct TaskValidationCoordinatorTests {
     func waivableWaives() async {
         let (runtime, directory) = makeRuntime(verdictScript: ["WAIVE: this task has no UI to screenshot"])
         await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(text: "screenshots attached", waivable: true, origin: .smith)]
+        let criteria = [AcceptanceCriterion(name: "screenshots attached", waivable: true, origin: .smith)]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -212,7 +212,7 @@ struct TaskValidationCoordinatorTests {
         // consecutive rounds with nothing newly settled — not the specific number.
         await runtime.setMaxConsecutiveValidationRoundsWithoutProgress(3)
         await runtime.start()
-        let criteria = [AcceptanceCriterion(text: "the fix actually works", origin: .user)]
+        let criteria = [AcceptanceCriterion(name: "the fix actually works", origin: .user)]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
         let store = await runtime.taskStore
 
@@ -352,7 +352,8 @@ struct TaskValidationCoordinatorTests {
     @Test("Validator input keeps rubric and result apart: criterion in the system prompt, result in a JSON field, with the verdict-format firewall")
     func validatorInputSeparatesRubricFromResult() {
         let criterion = AcceptanceCriterion(
-            text: #"Result must be in the format "Result: <result>" and begin with "Result:""#,
+            name: "Result format",
+            validationPrompt: #"Result must be in the format "Result: <result>" and begin with "Result:""#,
             origin: .user
         )
         let system = OrchestrationRuntime.composeValidatorSystemPrompt(
@@ -360,9 +361,9 @@ struct TaskValidationCoordinatorTests {
             criterion: criterion,
             hasItem: false
         )
-        // The criterion reads as an instruction in the system prompt, clearly labeled.
-        #expect(system.contains("## Acceptance criterion"))
-        #expect(system.contains(criterion.text))
+        #expect(system.contains("## Validation instructions"))
+        #expect(system.contains(criterion.validationPrompt))
+        #expect(!system.contains("Result format"), "the display name is not an LLM instruction")
         // The firewall that fixes the bug: ACCEPT/REJECT/WAIVE is the validator's format,
         // never a requirement on the worker's result.
         #expect(system.contains("is how YOU respond"))
@@ -410,9 +411,13 @@ struct TaskValidationCoordinatorTests {
             "ACCEPT",
             "ACCEPT"
         ])
-        try installPrepareDefinition(named: "list-items", in: directory)
         await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(text: "every item is valid", origin: .user, prepare: "list-items")]
+        let criteria = [AcceptanceCriterion(
+            name: "Every item is valid",
+            validationPrompt: "Check the supplied item has its required header.",
+            inputEnumeratorPrompt: "Return the items to validate as a JSON array of strings.",
+            origin: .user
+        )]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -421,7 +426,7 @@ struct TaskValidationCoordinatorTests {
 
         let final = await runtime.taskStore.task(id: task.id)
         #expect(final?.validation?.verdictRecords.count == 1, "one record summarizes the whole map")
-        #expect(final?.validation?.pinnedDefinitions["list-items"] != nil, "the prepare body pins like a validator")
+        #expect(final?.acceptanceCriteria.first?.inputEnumeratorPrompt != nil, "the task itself owns the enumerator prompt")
     }
 
     @Test("A dynamic criterion with an empty prepare result waives (when waivable) → completes")
@@ -432,7 +437,7 @@ struct TaskValidationCoordinatorTests {
         // Empty enumeration is honored as a pass only when the criterion is WAIVABLE — a misfiring
         // or hallucinated-empty prepare on a NON-waivable criterion escalates instead of silently
         // passing an unexamined requirement (see judgeDynamicCriterion's empty-items gate).
-        let criteria = [AcceptanceCriterion(text: "every item is valid", waivable: true, origin: .user, prepare: "list-items")]
+        let criteria = [AcceptanceCriterion(name: "every item is valid", waivable: true, origin: .user, prepare: "list-items")]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -451,7 +456,7 @@ struct TaskValidationCoordinatorTests {
         await runtime.setEvaluatorConfiguration(directory: directory)
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
         await runtime.start()
-        let criteria = [AcceptanceCriterion(text: "every item is valid", origin: .user, prepare: "list-items")]
+        let criteria = [AcceptanceCriterion(name: "every item is valid", origin: .user, prepare: "list-items")]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -468,7 +473,7 @@ struct TaskValidationCoordinatorTests {
         }
 
         // The dynamic debug log covers the prepare exchange AND each item's exchange.
-        #expect(record?.responseLog?.contains("## prepare: list-items") == true)
+        #expect(record?.responseLog?.contains("input-enumerator") == true)
         #expect(record?.responseLog?.contains("## item 2: beta") == true)
 
         await runtime.stopAll()
@@ -478,7 +483,7 @@ struct TaskValidationCoordinatorTests {
     func dynamicCriterionMissingPrepareEscalates() async throws {
         let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
         await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(text: "c", origin: .user, prepare: "does-not-exist")]
+        let criteria = [AcceptanceCriterion(name: "c", origin: .user, prepare: "does-not-exist")]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -499,7 +504,7 @@ struct TaskValidationCoordinatorTests {
             Issue.record("factory refused a valid definition")
             return
         }
-        let criteria = [AcceptanceCriterion(text: "the summary is in French", origin: .smith, validator: .inline(inline))]
+        let criteria = [AcceptanceCriterion(name: "the summary is in French", origin: .smith, validator: .inline(inline))]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -515,7 +520,7 @@ struct TaskValidationCoordinatorTests {
     func missingValidatorEscalates() async {
         let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
         await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(text: "c", origin: .user, validator: .registry("does-not-exist"))]
+        let criteria = [AcceptanceCriterion(name: "c", origin: .user, validator: .registry("does-not-exist"))]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)

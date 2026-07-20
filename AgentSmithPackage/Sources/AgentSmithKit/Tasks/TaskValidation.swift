@@ -24,10 +24,8 @@ public enum TaskAuthorship: String, Codable, Sendable {
 /// One item of a task's acceptance contract. Judged by an evaluator at `.validating`;
 /// the array lives on the task itself — the task is the source of truth.
 public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
-    /// Which evaluation function judges this criterion. `.registry` names a definition
-    /// in the user-owned registry; `.inline` embeds a Smith-authored definition whose
-    /// capabilities are capped (read-only evidence tools, default model) so authoring
-    /// one grants nothing new. Nil → the shipped `default` definition.
+    /// Legacy persisted validator selection. New criteria carry their task-scoped
+    /// instructions directly in `validationPrompt`.
     public enum Validator: Codable, Sendable, Equatable {
         case registry(String)
         case inline(EvaluatorDefinition)
@@ -60,35 +58,83 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
     }
 
     public let id: UUID
-    public var text: String
+    /// Short user-facing label. It is never used as an LLM instruction.
+    public var name: String
+    /// Required instructions given to the LLM that judges this criterion.
+    public var validationPrompt: String
+    /// Optional instructions given to an LLM that must return a JSON array of strings.
+    /// Each returned string is then judged independently using `validationPrompt`.
+    public var inputEnumeratorPrompt: String?
+    /// The active enumerator instruction. Nil, empty, and whitespace-only values all
+    /// mean that this criterion is a single validation check.
+    public var effectiveInputEnumeratorPrompt: String? {
+        guard let trimmed = inputEnumeratorPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+    /// Source compatibility for code that still renders criterion text. Persisted data
+    /// uses `name`, and this value is display-only.
+    public var text: String {
+        get { name }
+        set { name = newValue }
+    }
     /// Whether the validator may WAIVE this criterion as not-applicable. A WAIVE against
     /// a non-waivable criterion is recorded as an ERROR (a validator/author disagreement
     /// escalates; it never silently passes or fails the work).
     public var waivable: Bool
     public var origin: TaskAuthorship
+    /// Legacy persisted validator selection, retained only so existing tasks decode.
     public var validator: Validator?
-    /// Registry name of a `prepare`-kind evaluator. When set, the criterion is DYNAMIC:
-    /// the prepare function emits a JSON array of items (over any source — the step
-    /// list arrives via slots, world sources like files via its tools), and EACH item
-    /// is judged by `validator` with the item bound to the `{{item}}` slot. Every item
-    /// must pass for the criterion to pass. Optional-and-synthesized so tasks written
-    /// before this field decode unchanged.
+    /// Legacy persisted input-enumerator name, retained only so existing tasks decode.
     public var prepare: String?
 
     public init(
         id: UUID = UUID(),
-        text: String,
+        name: String,
+        validationPrompt: String? = nil,
+        inputEnumeratorPrompt: String? = nil,
         waivable: Bool = false,
         origin: TaskAuthorship,
         validator: Validator? = nil,
         prepare: String? = nil
     ) {
         self.id = id
-        self.text = text
+        self.name = name
+        self.validationPrompt = validationPrompt ?? name
+        self.inputEnumeratorPrompt = inputEnumeratorPrompt
         self.waivable = waivable
         self.origin = origin
         self.validator = validator
         self.prepare = prepare
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, text, validationPrompt, inputEnumeratorPrompt, waivable, origin, validator, prepare
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+            ?? container.decode(String.self, forKey: .text)
+        validationPrompt = try container.decodeIfPresent(String.self, forKey: .validationPrompt) ?? name
+        inputEnumeratorPrompt = try container.decodeIfPresent(String.self, forKey: .inputEnumeratorPrompt)
+        waivable = try container.decodeIfPresent(Bool.self, forKey: .waivable) ?? false
+        origin = try container.decode(TaskAuthorship.self, forKey: .origin)
+        validator = try container.decodeIfPresent(Validator.self, forKey: .validator)
+        prepare = try container.decodeIfPresent(String.self, forKey: .prepare)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(validationPrompt, forKey: .validationPrompt)
+        try container.encodeIfPresent(inputEnumeratorPrompt, forKey: .inputEnumeratorPrompt)
+        try container.encode(waivable, forKey: .waivable)
+        try container.encode(origin, forKey: .origin)
+        try container.encodeIfPresent(validator, forKey: .validator)
+        try container.encodeIfPresent(prepare, forKey: .prepare)
     }
 }
 

@@ -41,65 +41,64 @@ struct TaskDetailWindow: View {
     @State private var editedCriteria: [EditableCriterion] = []
     @State private var isEditingSteps = false
     @State private var editedSteps: [EditableStep] = []
-    /// Registry names loaded when an editor opens, used to validate typed names.
-    @State private var knownValidatorNames: [String] = []
-    @State private var knownPrepareNames: [String] = []
 
     /// Editing model for one acceptance criterion. Criterion identity is preserved
-    /// through edits (the store resets sticky verdicts only when content changed).
-    /// An original `.inline` validator survives a save only while the name field is
-    /// left empty — typing a registry name replaces it.
+    /// through edits; the store resets sticky verdicts only when the validation contract changes.
+    /// Legacy validator/prepare fields are preserved unless the prompt fields are edited.
     private struct EditableCriterion: Identifiable {
         let id: UUID
-        var text: String
+        var name: String
+        var validationPrompt: String
+        var inputEnumeratorPrompt: String
         var waivable: Bool
-        var validatorName: String
-        var prepareName: String
         let origin: TaskAuthorship
-        let originalInlineValidator: AcceptanceCriterion.Validator?
+        let originalValidator: AcceptanceCriterion.Validator?
+        let originalPrepare: String?
+        let originalValidationPrompt: String
+        let originalInputEnumeratorPrompt: String
 
         init(criterion: AcceptanceCriterion) {
             id = criterion.id
-            text = criterion.text
+            name = criterion.name
+            validationPrompt = criterion.validationPrompt
+            inputEnumeratorPrompt = criterion.inputEnumeratorPrompt ?? ""
             waivable = criterion.waivable
-            switch criterion.validator {
-            case .registry(let name):
-                validatorName = name
-                originalInlineValidator = nil
-            case .inline:
-                validatorName = ""
-                originalInlineValidator = criterion.validator
-            case nil:
-                validatorName = ""
-                originalInlineValidator = nil
-            }
-            prepareName = criterion.prepare ?? ""
             origin = criterion.origin
+            originalValidator = criterion.validator
+            originalPrepare = criterion.prepare
+            originalValidationPrompt = criterion.validationPrompt
+            originalInputEnumeratorPrompt = criterion.inputEnumeratorPrompt ?? ""
         }
 
         init() {
             id = UUID()
-            text = ""
+            name = ""
+            validationPrompt = ""
+            inputEnumeratorPrompt = ""
             waivable = false
-            validatorName = ""
-            prepareName = ""
             origin = .user
-            originalInlineValidator = nil
+            originalValidator = nil
+            originalPrepare = nil
+            originalValidationPrompt = ""
+            originalInputEnumeratorPrompt = ""
         }
 
         func built() -> AcceptanceCriterion? {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            let name = validatorName.trimmingCharacters(in: .whitespaces)
-            let validator: AcceptanceCriterion.Validator? = name.isEmpty ? originalInlineValidator : .registry(name)
-            let prepare = prepareName.trimmingCharacters(in: .whitespaces)
+            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedValidationPrompt = validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty, !trimmedValidationPrompt.isEmpty else { return nil }
+            let trimmedEnumeratorPrompt = inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            let preservesLegacyDefinition = trimmedValidationPrompt == originalValidationPrompt
+                && trimmedEnumeratorPrompt == originalInputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             return AcceptanceCriterion(
                 id: id,
-                text: trimmed,
+                name: trimmedName,
+                validationPrompt: trimmedValidationPrompt,
+                inputEnumeratorPrompt: trimmedEnumeratorPrompt.isEmpty ? nil : trimmedEnumeratorPrompt,
                 waivable: waivable,
                 origin: origin,
-                validator: validator,
-                prepare: prepare.isEmpty ? nil : prepare
+                validator: preservesLegacyDefinition ? originalValidator : nil,
+                prepare: preservesLegacyDefinition ? originalPrepare : nil
             )
         }
     }
@@ -725,27 +724,6 @@ struct TaskDetailWindow: View {
         editedCriteria = task.acceptanceCriteria.map(EditableCriterion.init)
         if editedCriteria.isEmpty { editedCriteria = [EditableCriterion()] }
         isEditingAcceptance = true
-        // Load the known evaluator names OFF the main thread; the editor opens immediately and the
-        // name lists (used only to flag unknown typed names at Save time) populate when ready. The
-        // @State lists persist across opens, so only the very first open sees them momentarily empty.
-        Task {
-            let names = await viewModel.availableEvaluatorNames()
-            knownValidatorNames = names.validators
-            knownPrepareNames = names.prepares
-        }
-    }
-
-    /// Registry names typed into the editor that don't exist — saving with these would
-    /// make every future validation round escalate, so Save refuses them up front.
-    private var unknownCriteriaNames: [String] {
-        var unknown: [String] = []
-        for row in editedCriteria {
-            let validator = row.validatorName.trimmingCharacters(in: .whitespaces)
-            if !validator.isEmpty && !knownValidatorNames.contains(validator) { unknown.append(validator) }
-            let prepare = row.prepareName.trimmingCharacters(in: .whitespaces)
-            if !prepare.isEmpty && !knownPrepareNames.contains(prepare) { unknown.append(prepare) }
-        }
-        return unknown
     }
 
     @ViewBuilder
@@ -754,7 +732,7 @@ struct TaskDetailWindow: View {
             ForEach($editedCriteria) { $row in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        TextField("Criterion — one concrete, checkable requirement", text: $row.text, axis: .vertical)
+                        TextField("Display name", text: $row.name)
                             .textFieldStyle(.roundedBorder)
                         Button {
                             editedCriteria.removeAll { $0.id == row.id }
@@ -765,24 +743,15 @@ struct TaskDetailWindow: View {
                         .foregroundStyle(.secondary)
                         .help("Remove criterion")
                     }
+                    TextField("Validation prompt — required LLM instructions", text: $row.validationPrompt, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Input enumerator prompt (optional; must return an array of strings)", text: $row.inputEnumeratorPrompt, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
                     HStack(spacing: 12) {
                         Toggle("Waivable", isOn: $row.waivable)
                             .toggleStyle(.checkbox)
                             .font(.caption)
-                        TextField("validator (default)", text: $row.validatorName)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.caption)
-                            .frame(maxWidth: 180)
-                        TextField("prepare (none)", text: $row.prepareName)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.caption)
-                            .frame(maxWidth: 180)
                         Spacer()
-                    }
-                    if row.originalInlineValidator != nil && row.validatorName.trimmingCharacters(in: .whitespaces).isEmpty {
-                        Text("Keeps this criterion's inline validator; typing a registry name replaces it.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -794,17 +763,6 @@ struct TaskDetailWindow: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(AppColors.disclosureToggle)
-
-            if !knownValidatorNames.isEmpty || !knownPrepareNames.isEmpty {
-                Text("Validators: \(knownValidatorNames.joined(separator: ", "))\(knownPrepareNames.isEmpty ? "" : " · Prepare: \(knownPrepareNames.joined(separator: ", "))")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            if !unknownCriteriaNames.isEmpty {
-                Text("Unknown in the registry: \(unknownCriteriaNames.joined(separator: ", "))")
-                    .font(.caption)
-                    .foregroundStyle(AppColors.verdictError)
-            }
 
             HStack {
                 Text("Removing all criteria reverts to the default whole-task check. Edited criteria are re-judged; unchanged ones keep their verdicts.")
@@ -822,7 +780,6 @@ struct TaskDetailWindow: View {
                     isEditingAcceptance = false
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!unknownCriteriaNames.isEmpty)
             }
         }
     }
@@ -852,7 +809,7 @@ struct TaskDetailWindow: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Self.verdictColor(latest?.verdict).opacity(0.15)))
-                    Text(criterion.text)
+                    Text(criterion.name)
                         .font(.body)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -886,6 +843,10 @@ struct TaskDetailWindow: View {
     private func criterionExpandedDetail(_ criterion: AcceptanceCriterion, task: AgentTask) -> some View {
         let records = (task.validation?.verdictRecords ?? []).filter { $0.criterionID == criterion.id }
         VStack(alignment: .leading, spacing: 6) {
+            debugTextBox(title: "Validation prompt", text: criterion.validationPrompt)
+            if let inputEnumeratorPrompt = criterion.inputEnumeratorPrompt {
+                debugTextBox(title: "Input enumerator prompt", text: inputEnumeratorPrompt)
+            }
             if let pinned = Self.pinnedDefinition(for: criterion, in: task) {
                 Button {
                     if expandedValidatorPromptIDs.contains(criterion.id) {
@@ -1011,12 +972,14 @@ struct TaskDetailWindow: View {
     private static func criterionQualifiers(_ criterion: AcceptanceCriterion) -> String? {
         var parts: [String] = []
         if criterion.waivable { parts.append("waivable") }
+        if criterion.inputEnumeratorPrompt != nil { parts.append("enumerated inputs") }
+        // Legacy persisted tasks may still show their historical registry qualifier.
         switch criterion.validator {
         case .registry(let name): parts.append("validator: \(name)")
         case .inline(let definition): parts.append("validator: \(definition.name) (inline)")
         case nil: break
         }
-        if let prepare = criterion.prepare { parts.append("prepare: \(prepare)") }
+        if let prepare = criterion.prepare { parts.append("legacy prepare: \(prepare)") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
@@ -1033,7 +996,7 @@ struct TaskDetailWindow: View {
 
     private static func formattedAcceptance(_ task: AgentTask) -> String {
         task.acceptanceCriteria.map { criterion in
-            var line = "- \(criterion.text)"
+            var line = "- \(criterion.name)"
             if let qualifiers = criterionQualifiers(criterion) { line += " (\(qualifiers))" }
             if let latest = task.validation?.latestVerdict(for: criterion.id) {
                 line += "\n  \(latest.verdict.displayLabel)"

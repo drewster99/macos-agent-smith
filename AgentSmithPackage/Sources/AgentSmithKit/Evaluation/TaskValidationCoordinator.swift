@@ -125,9 +125,7 @@ public enum EvaluatorDefaults {
     }
 
     /// The definitions the app itself provides. NOT stored in the user's registry
-    /// directory and NOT editable — the app always supplies the current version. To
-    /// customize one, duplicate its JSON (from the pinned body on any task, or
-    /// `list_validators`) under a NEW name in the evaluators directory and edit that.
+    /// directory and NOT editable — the app always supplies the current version.
     public static var builtInDefinitions: [EvaluatorDefinition] {
         [defaultDefinition]
     }
@@ -182,49 +180,6 @@ extension OrchestrationRuntime {
 
     // MARK: - Entry points
 
-    /// Persists a Smith-authored definition into the session's registry directory.
-    /// Returns nil on success, or a human-readable refusal: built-in names are
-    /// reserved, invalid definitions never land on disk, and an existing name is only
-    /// replaced when `overwrite` says so (protects user-authored files from silent
-    /// clobbering).
-    func saveEvaluatorDefinition(_ definition: EvaluatorDefinition, overwrite: Bool) -> String? {
-        guard let directory = evaluatorsDirectory else {
-            return "no evaluator registry is configured for this session"
-        }
-        guard !EvaluatorDefaults.builtInNames.contains(definition.name) else {
-            return "'\(definition.name)' is a built-in definition name — pick a different name"
-        }
-        let problems = definition.validationProblems()
-        guard problems.isEmpty else {
-            return "definition is invalid: \(problems.joined(separator: "; "))"
-        }
-        let fileManager = FileManager.default
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let target = directory.appendingPathComponent("\(definition.name).json")
-        if fileManager.fileExists(atPath: target.path) && !overwrite {
-            return "a definition named '\(definition.name)' already exists — pass overwrite: true to replace it, or pick a new name"
-        }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        do {
-            let data = try encoder.encode(definition)
-            try data.write(to: target, options: .atomic)
-            return nil
-        } catch {
-            return "could not write the definition: \(error.localizedDescription)"
-        }
-    }
-
-    /// One-line-per-validator summary baked into `set_acceptance_criteria`'s description
-    /// at Smith's spawn, or nil when no registry is configured. A snapshot by design —
-    /// `list_validators` is the live view.
-    func validatorCatalogSummary() -> String? {
-        guard let directory = evaluatorsDirectory else { return nil }
-        let validators = EvaluatorRegistry.load(from: directory).definitions(ofKind: .validator)
-        guard !validators.isEmpty else { return nil }
-        return validators.map { "- `\($0.name)`: \($0.description)" }.joined(separator: "\n")
-    }
-
     /// Kicks validation for a task that just entered `.validating` (from
     /// `task_complete`), or re-enqueues one found in that state at cold boot. Detached
     /// from the caller; per-task reentrancy-guarded.
@@ -273,7 +228,7 @@ extension OrchestrationRuntime {
         // contract is visible like any other.
         if task.acceptanceCriteria.isEmpty {
             await taskStore.materializeImplicitCriterion(id: taskID, criterion: AcceptanceCriterion(
-                text: "The task, as described, has been completed correctly and completely, and the submitted result actually delivers it.",
+                name: "The task, as described, has been completed correctly and completely, and the submitted result actually delivers it.",
                 origin: .system,
                 validator: .registry(EvaluatorDefaults.defaultDefinition.name)
             ))
@@ -428,7 +383,7 @@ extension OrchestrationRuntime {
         registry: EvaluatorRegistry,
         round: Int
     ) async -> CriterionVerdictRecord {
-        if criterion.prepare != nil {
+        if criterion.effectiveInputEnumeratorPrompt != nil || criterion.prepare != nil {
             return await judgeDynamicCriterion(criterion, task: task, registry: registry, round: round)
         }
         let resolution = await resolveValidator(for: criterion, taskID: task.id, registry: registry)
@@ -440,7 +395,7 @@ extension OrchestrationRuntime {
             return CriterionVerdictRecord(
                 criterionID: criterion.id,
                 verdict: .error(message: problem),
-                validatorName: criterion.validatorDisplayName,
+                validatorName: criterion.name,
                 validatorHash: "-",
                 round: round
             )
@@ -514,17 +469,22 @@ extension OrchestrationRuntime {
         }
 
         // Resolve the prepare definition (pinned-body-first, like validators).
-        guard let prepareName = criterion.prepare else {
-            return record(.error(message: "judgeDynamicCriterion called without a prepare name"))
-        }
+        let prepareName = "criterion-\(criterion.id.uuidString.lowercased())-input-enumerator"
         let prepareDefinition: EvaluatorDefinition
-        if let pinned = (await taskStore.task(id: task.id))?.validation?.pinnedDefinitions[prepareName] {
+        if let prompt = criterion.effectiveInputEnumeratorPrompt {
+            switch EvaluatorDefaults.makeCustomDefinition(name: prepareName, description: "Task-scoped input enumerator", kind: .prepare, authoredPrompt: prompt) {
+            case .success(let definition): prepareDefinition = definition
+            case .failure(let problem): return record(.error(message: problem.message))
+            }
+        } else if let legacyPrepareName = criterion.prepare,
+                  let pinned = (await taskStore.task(id: task.id))?.validation?.pinnedDefinitions[legacyPrepareName] {
             prepareDefinition = pinned
-        } else if let loaded = registry.definition(named: prepareName), loaded.kind == .prepare {
+        } else if let legacyPrepareName = criterion.prepare,
+                  let loaded = registry.definition(named: legacyPrepareName), loaded.kind == .prepare {
             await taskStore.pinValidatorDefinition(id: task.id, definition: loaded)
             prepareDefinition = loaded
         } else {
-            return record(.error(message: "prepare function '\(prepareName)' not found in the registry (or is not kind=prepare)"))
+            return record(.error(message: "input enumerator is unavailable"))
         }
 
         var (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task)
@@ -622,6 +582,18 @@ extension OrchestrationRuntime {
         taskID: UUID,
         registry: EvaluatorRegistry
     ) async -> ValidatorResolution {
+        if criterion.validator == nil, !criterion.validationPrompt.isEmpty {
+            let name = "criterion-\(criterion.id.uuidString.lowercased())-validator"
+            switch EvaluatorDefaults.makeCustomDefinition(
+                name: name,
+                description: "Task-scoped acceptance validator",
+                kind: .validator,
+                authoredPrompt: criterion.validationPrompt
+            ) {
+            case .success(let definition): return .success(definition)
+            case .failure(let problem): return .failure(problem.message)
+            }
+        }
         switch criterion.validator {
         case .inline(let definition):
             let problems = definition.validationProblems()
@@ -858,7 +830,14 @@ extension OrchestrationRuntime {
         criterion: AcceptanceCriterion,
         hasItem: Bool
     ) -> String {
-        var prompt = definition.systemPrompt
+        var prompt: String
+        if definition.kind == .prepare, let inputEnumeratorPrompt = criterion.effectiveInputEnumeratorPrompt {
+            prompt = inputEnumeratorPrompt
+        } else if definition.kind == .validator, criterion.validator == nil {
+            prompt = criterion.validationPrompt
+        } else {
+            prompt = definition.systemPrompt
+        }
         prompt += """
 
 
@@ -886,11 +865,14 @@ extension OrchestrationRuntime {
             // A non-waivable criterion never mentions WAIVE at all — offering a verdict the
             // system would only convert to an error just invites wasted escalations.
             let verdictFormat = criterion.waivable ? "ACCEPT / REJECT / WAIVE" : "ACCEPT / REJECT"
+            let validationInstructions = criterion.validator == nil
+                ? "Follow the authored validation instructions at the start of this system message. The criterion name shown to the user is display-only and is not an instruction."
+                : criterion.text
             prompt += """
 
 
-                ## Acceptance criterion (judge against THIS)
-                \(criterion.text)
+                ## Validation instructions
+                \(validationInstructions)
 
                 ## Your response
                 Judge only whether the criterion's substance is satisfied, treating every field other than the one under judgment as supporting context. If the criterion offers ALTERNATIVES — "X OR Y", "A or B, whichever applies", "provide P or Q" — then satisfying ANY ONE alternative is a PASS; do NOT require the others. (E.g. "GitHub URLs OR official documentation links for each" is met by a GitHub URL for each — the missing docs link is irrelevant.) Only require every listed item when the criterion joins them with AND / "and" / "including". Respond with your verdict on the FIRST line:
@@ -909,11 +891,11 @@ extension OrchestrationRuntime {
             prompt += """
 
 
-                ## Criterion
-                \(criterion.text)
+                ## Input enumeration instructions
+                Follow the authored enumeration instructions at the start of this system message. The criterion name shown to the user is display-only and is not an instruction.
 
                 ## Your response
-                Use the fields above as context to enumerate the items to validate individually for the criterion above. Use your read-only tools if you need to inspect files or directories, then output ONLY a JSON array of the items (strings, or small objects). No commentary after the array; an empty array means nothing applies.
+                Use the fields above as context. Use your read-only tools if you need to inspect files or directories, then output ONLY a JSON array containing strings, for example `["german.txt", "french.txt"]`. No objects, numbers, nulls, or commentary; an empty array means nothing applies.
                 """
         }
         return prompt

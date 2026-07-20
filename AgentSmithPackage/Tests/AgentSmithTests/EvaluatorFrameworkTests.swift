@@ -129,22 +129,33 @@ struct EvaluationRunnerParsingTests {
         #expect(reason == "missing tests")
     }
 
-    @Test("JSON array parses through prose wrapping, mixed element types")
+    @Test("JSON array parses string inputs and rejects non-string elements")
     func jsonArrayParsing() {
         let text = """
         Here are the items you asked for:
-        [{"path": "/a.txt"}, "bare-string", 42, null]
+        ["/a.txt", "bare-string"]
         Hope that helps!
         """
         guard case .success(.items(let items)) = EvaluationRunner.parseJSONArray(text) else {
             Issue.record("expected success")
             return
         }
-        #expect(items.count == 4)
-        #expect(items[0].contains("\"path\""))
+        #expect(items.count == 2)
+        #expect(items[0] == "/a.txt")
         #expect(items[1] == "bare-string")
-        #expect(items[2] == "42")
-        #expect(items[3] == "null")
+
+        for wrapped in [#"{ ["a", "b", "c"] }"#, #"{"any_key":["a", "b", "c"]}"#] {
+            guard case .success(.items(let wrappedItems)) = EvaluationRunner.parseJSONArray(wrapped) else {
+                Issue.record("expected a wrapped string array to be accepted")
+                continue
+            }
+            #expect(wrappedItems == ["a", "b", "c"])
+        }
+        if case .failure(let reason) = EvaluationRunner.parseJSONArray(#"[{"path":"/a.txt"}]"#) {
+            #expect(reason.contains("must be a string"))
+        } else {
+            Issue.record("expected object input to be rejected")
+        }
     }
 
     @Test("Missing array is a parse failure, not a crash")

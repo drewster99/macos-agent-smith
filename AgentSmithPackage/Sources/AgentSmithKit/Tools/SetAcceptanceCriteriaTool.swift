@@ -21,39 +21,24 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                 "items": .dictionary([
                     "type": .string("object"),
                     "properties": .dictionary([
-                        "text": .dictionary([
+                        "name": .dictionary([
                             "type": .string("string"),
-                            "description": .string("The criterion — one concrete, evidence-checkable requirement.")
+                            "description": .string("Short display name. Display-only; not an LLM instruction.")
                         ]),
                         "waivable": .dictionary([
                             "type": .string("boolean"),
                             "description": .string("Whether the validator may WAIVE this criterion as not applicable. Default false.")
                         ]),
-                        "validator_name": .dictionary([
+                        "validation_prompt": .dictionary([
                             "type": .string("string"),
-                            "description": .string("Optional registry validator name (from `list_validators`). Omit for the default acceptance validator.")
+                            "description": .string("Required instructions for the LLM that judges this criterion. State what to check and what evidence is sufficient.")
                         ]),
-                        "prepare": .dictionary([
+                        "input_enumerator_prompt": .dictionary([
                             "type": .string("string"),
-                            "description": .string("Optional registry name of a prepare-kind evaluator, making this criterion DYNAMIC: the prepare function emits a list of items (e.g. every file in a folder, every step in the plan) and EACH item is judged independently by the criterion's validator. Every item must pass. Create prepare functions with `define_validator`.")
-                        ]),
-                        "inline_validator": .dictionary([
-                            "type": .string("object"),
-                            "properties": .dictionary([
-                                "system_prompt": .dictionary([
-                                    "type": .string("string"),
-                                    "description": .string("The judgment instructions: what to check and how strictly. Do NOT restate the output format — the ACCEPT/REJECT/WAIVE contract is appended automatically.")
-                                ]),
-                                "name": .dictionary([
-                                    "type": .string("string"),
-                                    "description": .string("Optional kebab-case display name for this inline validator.")
-                                ])
-                            ]),
-                            "required": .array([.string("system_prompt")]),
-                            "description": .string("An INLINE Smith-authored validator for this one criterion (task-scoped; not saved to the registry). You write only the judgment prompt — grammar, standard inputs, and the read-only evidence toolset are supplied by the system. Mutually exclusive with `validator_name`. For a reusable validator, use `define_validator` instead.")
+                            "description": .string("Optional instructions for an LLM that MUST return a JSON array containing only strings. Each string is passed separately to the validation LLM together with validation_prompt; every item must pass.")
                         ])
                     ]),
-                    "required": .array([.string("text")])
+                    "required": .array([.string("name"), .string("validation_prompt")])
                 ]),
                 "description": .string("The COMPLETE list of acceptance criteria for the task, replacing any existing list.")
             ])
@@ -61,12 +46,8 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         "required": .array([.string("task_id"), .string("criteria")])
     ]
 
-    /// The `validatorCatalogSummary`, when supplied, is baked into the tool description so
-    /// Smith sees the installed validators on every turn without a `list_validators` round
-    /// trip (the GhTool auth-snapshot pattern). Registry edits mid-session still surface
-    /// through `list_validators`; the baked list refreshes at the next Smith spawn.
-    public init(validatorCatalogSummary: String? = nil) {
-        var description = """
+    public init() {
+        let description = """
             Set a task's acceptance criteria — the checklist the automated validation system \
             judges the worker's submission against (you do NOT review routine submissions; \
             validation does). Derive criteria from what the user actually asked for, including any \
@@ -86,20 +67,20 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             written, the criterion is wrong; repeated no-progress rejections FAIL the task. \
             \
             This REPLACES the task's whole criteria list: pass every criterion that should apply, \
-            not just new ones. Criteria whose text is unchanged keep their already-accepted status; \
-            edited or new ones are judged fresh (from the next round, if validation is mid-round). \
+            not just new ones. Criteria whose name is unchanged keep their identity; criteria whose \
+            validation prompt, input enumerator prompt, or waivable flag changes are judged fresh \
+            (from the next round, if validation is mid-round). \
             \
-            Each criterion may name a `validator` from the registry (see `list_validators`); \
-            omitted means the default acceptance validator. Set `waivable: true` only where the \
+            `name` is display-only. `validation_prompt` is required and is the sole authored \
+            instruction sent to the judging LLM. Optional `input_enumerator_prompt` must produce a \
+            JSON array of strings; each string is handed separately to the judging LLM together \
+            with `validation_prompt`, and every item must pass. Set `waivable: true` only where the \
             criterion might genuinely not apply and the validator may say so. \
             HARD GATES: when the task description states a MUST-FAIL / abort precondition ("MUST FAIL", \
             "fail immediately", "do not proceed if"), encode it as a `waivable: false` criterion that FAILS \
             when the condition is not met — with NO OR-alternative or "document and continue" escape. \
             Honoring a user-declared failure IS correctness; the "don't be over-strict" rule does not apply to it.
             """
-        if let validatorCatalogSummary, !validatorCatalogSummary.isEmpty {
-            description += "\n\nInstalled validators (snapshot at your spawn — `list_validators` for the live list):\n" + validatorCatalogSummary
-        }
         self.toolDescription = description
     }
 
@@ -122,17 +103,12 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             return .failure("Task '\(task.title)' is completed — its acceptance criteria can no longer be changed.")
         }
         guard case .array(let rawCriteria) = arguments["criteria"], !rawCriteria.isEmpty else {
-            return .failure("'criteria' must be a non-empty array of {text, waivable?, validator?} objects.")
+            return .failure("'criteria' must be a non-empty array of {name, validation_prompt, input_enumerator_prompt?, waivable?} objects.")
         }
 
-        // Parse + validate against the live registry BEFORE touching the task — a
-        // criterion pointing at a missing evaluator would fail every round until fixed.
-        // Shared with create_task: strings or {text, waivable?, validator_name?, prepare?,
-        // inline_validator?} objects, where inline_validator is a Smith-authored INLINE
-        // validator (task-scoped, capability-capped by construction).
-        let registry = await context.loadEvaluatorRegistry()
+        // Parse the complete task-scoped prompt contract before touching the task.
         let parsed: [CriterionArgumentParsing.ParsedCriterion]
-        switch CriterionArgumentParsing.parse(rawCriteria, registry: registry) {
+        switch CriterionArgumentParsing.parse(rawCriteria) {
         case .success(let criteria):
             parsed = criteria
         case .failure(let problem):
@@ -144,26 +120,27 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
 
         // Unchanged text keeps the criterion's identity so its sticky ACCEPT survives;
         // the store drops verdicts for anything that actually changed.
-        let existingByText = Dictionary(task.acceptanceCriteria.map { ($0.text, $0) }, uniquingKeysWith: { a, _ in a })
+        let existingByName = Dictionary(task.acceptanceCriteria.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
         let criteria = parsed.map { entry -> AcceptanceCriterion in
-            if let existing = existingByText[entry.text] {
+            if let existing = existingByName[entry.name] {
                 var updated = existing
                 updated.waivable = entry.waivable
-                updated.validator = entry.validator
-                updated.prepare = entry.prepare
+                updated.validationPrompt = entry.validationPrompt
+                updated.inputEnumeratorPrompt = entry.inputEnumeratorPrompt
+                updated.validator = nil
+                updated.prepare = nil
                 return updated
             }
-            return AcceptanceCriterion(text: entry.text, waivable: entry.waivable, origin: .smith, validator: entry.validator, prepare: entry.prepare)
+            return AcceptanceCriterion(name: entry.name, validationPrompt: entry.validationPrompt, inputEnumeratorPrompt: entry.inputEnumeratorPrompt, waivable: entry.waivable, origin: .smith)
         }
 
         await context.taskStore.setAcceptanceCriteria(id: taskID, criteria: criteria)
 
         let rendered = criteria.map { criterion -> String in
-            var line = "- \(criterion.text)"
+            var line = "- \(criterion.name)"
             var qualifiers: [String] = []
             if criterion.waivable { qualifiers.append("waivable") }
-            if case .registry(let name) = criterion.validator { qualifiers.append("validator: \(name)") }
-            if let prepare = criterion.prepare { qualifiers.append("prepare: \(prepare)") }
+            if criterion.inputEnumeratorPrompt != nil { qualifiers.append("enumerated inputs") }
             if !qualifiers.isEmpty { line += " (\(qualifiers.joined(separator: ", ")))" }
             return line
         }.joined(separator: "\n")
