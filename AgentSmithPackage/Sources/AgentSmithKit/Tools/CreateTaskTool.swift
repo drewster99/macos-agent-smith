@@ -164,6 +164,10 @@ public struct CreateTaskTool: AgentTool {
                     "type": .string("boolean"),
                     "description": .string("Make this a TEMPLATE. A template never runs itself. Each time it's started, a fresh instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly (either manually or on a schedule) and get a clean run each time. Default `false`. When you schedule a RECURRING run on a task with `schedule_task_action`, it becomes a template automatically.")
                 ]),
+                "template_instance_title_template": .dictionary([
+                    "type": .string("string"),
+                    "description": .string("Optional template-only title pattern for cloned instances, using {{input_name}} placeholders. Example: \"Localize {{target_app}}\".")
+                ]),
                 "template_inputs": .dictionary([
                     "type": .string("array"),
                     "items": .dictionary([
@@ -323,6 +327,22 @@ public struct CreateTaskTool: AgentTool {
         if scheduledRunAt != nil && templateInputDefinitions.contains(where: \.required) {
             return .failure("Task NOT created — scheduled_run_at cannot be used with required template_inputs yet because scheduled template runs do not carry input_values. Create the template without scheduled_run_at, then run it manually with input_values.")
         }
+        let templateInstanceTitleTemplate: String?
+        if case .string(let rawTitleTemplate) = arguments["template_instance_title_template"] {
+            guard isTemplate else {
+                return .failure("template_instance_title_template is valid only when is_template is true.")
+            }
+            let trimmed = rawTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                templateInstanceTitleTemplate = nil
+            } else if let problem = TemplateStringRenderer.validate(trimmed, allowedNames: Set(templateInputDefinitions.map(\.name))) {
+                return .failure("Task NOT created — template_instance_title_template is invalid: \(problem)")
+            } else {
+                templateInstanceTitleTemplate = trimmed
+            }
+        } else {
+            templateInstanceTitleTemplate = nil
+        }
 
         let task = await context.taskStore.addTask(
             title: title,
@@ -332,6 +352,11 @@ public struct CreateTaskTool: AgentTool {
             isTemplate: isTemplate,
             templateInputDefinitions: templateInputDefinitions
         )
+        if isTemplate, let templateInstanceTitleTemplate {
+            if let problem = await context.taskStore.setTemplateInstanceTitleTemplate(id: task.id, titleTemplate: templateInstanceTitleTemplate) {
+                return .failure("Task created but instance title template could not be saved: \(problem)")
+            }
+        }
 
         if !seedCriteria.isEmpty {
             await context.taskStore.setAcceptanceCriteria(id: task.id, criteria: seedCriteria)

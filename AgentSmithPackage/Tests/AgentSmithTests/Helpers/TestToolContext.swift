@@ -61,7 +61,8 @@ enum TestToolContext {
         stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
         taskEvidenceDirectory: URL? = nil,
-        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil }
+        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
+        reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .success("reported") }
     ) -> ToolContext {
         ToolContext(
             agentID: agentID,
@@ -75,6 +76,7 @@ enum TestToolContext {
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
             loadEvaluatorRegistry: loadEvaluatorRegistry,
+            reportInboundUserMessage: reportInboundUserMessage,
             memoryStore: memoryStore,
             extractWebContent: extractWebContent,
             recordFileRead: { path in fileReadTracker.record(path) },

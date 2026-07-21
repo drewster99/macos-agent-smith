@@ -82,6 +82,10 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// template tasks may define these directly. Template instances retain a snapshot so
     /// their historical context stays stable if the template is edited later.
     public var templateInputDefinitions: [TemplateInputDefinition]
+    /// Optional title pattern used when this template creates an instance. Supports simple
+    /// `{{input_name}}` placeholders resolved from the instance's template input values.
+    /// Nil means instances keep the template's own title.
+    public var templateInstanceTitleTemplate: String?
     /// Resolved input values captured when a template instance is created. Only cloned
     /// template instances should carry values; ordinary tasks and templates keep this empty.
     public var templateInputValues: [String: String]
@@ -278,6 +282,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         isTemplate: Bool = false,
         parentTaskID: UUID? = nil,
         templateInputDefinitions: [TemplateInputDefinition] = [],
+        templateInstanceTitleTemplate: String? = nil,
         templateInputValues: [String: String] = [:]
     ) {
         self.id = id
@@ -312,13 +317,14 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.isTemplate = isTemplate
         self.parentTaskID = parentTaskID
         self.templateInputDefinitions = templateInputDefinitions
+        self.templateInstanceTitleTemplate = templateInstanceTitleTemplate
         self.templateInputValues = templateInputValues
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInputValues
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues
     }
 
     public init(from decoder: Decoder) throws {
@@ -355,6 +361,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         isTemplate = try c.decodeIfPresent(Bool.self, forKey: .isTemplate) ?? false
         parentTaskID = try c.decodeIfPresent(UUID.self, forKey: .parentTaskID)
         templateInputDefinitions = try c.decodeIfPresent([TemplateInputDefinition].self, forKey: .templateInputDefinitions) ?? []
+        templateInstanceTitleTemplate = try c.decodeIfPresent(String.self, forKey: .templateInstanceTitleTemplate)
         templateInputValues = try c.decodeIfPresent([String: String].self, forKey: .templateInputValues) ?? [:]
     }
 
@@ -408,6 +415,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         if !templateInputDefinitions.isEmpty {
             try c.encode(templateInputDefinitions, forKey: .templateInputDefinitions)
         }
+        try c.encodeIfPresent(templateInstanceTitleTemplate, forKey: .templateInstanceTitleTemplate)
         if !templateInputValues.isEmpty {
             try c.encode(templateInputValues, forKey: .templateInputValues)
         }

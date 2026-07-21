@@ -23,6 +23,29 @@ public struct ToolExecutionResult: Sendable {
     }
 }
 
+/// A user-authored message observed by a worker task outside the live chat UI.
+public struct InboundUserMessageReport: Sendable, Equatable {
+    /// Human-readable provenance for where the message came from.
+    public let source: String
+    /// The observed external message body, treated as untrusted data by the runtime.
+    public let message: String
+    /// Optional observed sender identity or account.
+    public let sender: String?
+    /// Optional observed subject, title, or thread label.
+    public let subject: String?
+    /// Optional observed timestamp reported by the source system.
+    public let receivedAt: String?
+
+    /// Creates an inbound user message report for runtime injection into Smith.
+    public init(source: String, message: String, sender: String? = nil, subject: String? = nil, receivedAt: String? = nil) {
+        self.source = source
+        self.message = message
+        self.sender = sender
+        self.subject = subject
+        self.receivedAt = receivedAt
+    }
+}
+
 /// A tool that an agent can invoke via LLM tool calling.
 public protocol AgentTool: Sendable {
     /// Unique name for this tool (must match the LLM tool definition).
@@ -233,6 +256,9 @@ public struct ToolContext: Sendable {
     public let listScheduledWakes: @Sendable () async -> [ScheduledWake]
     /// Cancels a single wake by id. Returns true on success.
     public let cancelScheduledWake: @Sendable (UUID) async -> Bool
+    /// Reports an externally observed user message to the runtime, which wraps it with
+    /// provenance and injects it into Smith's private queue.
+    public let reportInboundUserMessage: @Sendable (InboundUserMessageReport) async -> ToolExecutionResult
     /// Signals a full system restart for a new task. Called by create_task and run_task. The
     /// optional `amendment` is applied to the *started* task — for a template start that means the
     /// cloned instance, never the reusable template itself (pass nil for a non-template, whose
@@ -346,6 +372,7 @@ public struct ToolContext: Sendable {
         scheduleWake: @escaping @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome = { _, _, _, _, _, _ in .error("Scheduling not configured.") },
         listScheduledWakes: @escaping @Sendable () async -> [ScheduledWake] = { [] },
         cancelScheduledWake: @escaping @Sendable (UUID) async -> Bool = { _ in false },
+        reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .failure("Inbound message reporting is not configured.") },
         restartForNewTask: @escaping @Sendable (UUID, String?) async -> Void = { _, _ in },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
@@ -406,6 +433,7 @@ public struct ToolContext: Sendable {
         self.scheduleWake = scheduleWake
         self.listScheduledWakes = listScheduledWakes
         self.cancelScheduledWake = cancelScheduledWake
+        self.reportInboundUserMessage = reportInboundUserMessage
         self.restartForNewTask = restartForNewTask
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore

@@ -124,6 +124,44 @@ struct TaskTemplateTests {
         #expect(!instance.renderedDescriptionWithTemplateInputs().contains("locale:"))
     }
 
+    @Test("Template instance title template renders from snapshotted inputs")
+    func templateInstanceTitleTemplateRendersFromInputs() async {
+        let store = TaskStore()
+        let template = await store.addTask(title: "Localize App", description: "Localize it.", isTemplate: true)
+        _ = await store.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name.", required: true)
+        ])
+        let titleError = await store.setTemplateInstanceTitleTemplate(
+            id: template.id,
+            titleTemplate: "Localize {{target_app}}"
+        )
+        #expect(titleError == nil)
+
+        switch await store.instantiateTemplate(templateID: template.id, inputValues: ["target_app": "Notes"]) {
+        case .success(let instance):
+            #expect(instance.title == "Localize Notes")
+            #expect(instance.templateInputValues == ["target_app": "Notes"])
+        case .failure(let message):
+            Issue.record("valid title template should instantiate: \(message)")
+        }
+    }
+
+    @Test("Template clones inherit user tool overrides but not scoped approvals")
+    func templateCloneInheritsToolOverridesNotApprovedTools() async {
+        let store = TaskStore()
+        let template = await store.addTask(title: "Check messages", description: "Check source.", isTemplate: true)
+        await store.setApprovedTools(id: template.id, approvedTools: ["file_read"])
+        await store.setUserToolOverride(id: template.id, tool: ReportInboundUserMessageTool.toolName, enabled: true)
+
+        switch await store.instantiateTemplate(templateID: template.id, inputValues: [:]) {
+        case .success(let instance):
+            #expect(instance.userToolOverrides == [ReportInboundUserMessageTool.toolName: true])
+            #expect(instance.approvedTools == nil)
+        case .failure(let message):
+            Issue.record("template should instantiate: \(message)")
+        }
+    }
+
     @Test("Only templates can define template inputs")
     func onlyTemplatesCanDefineInputs() async {
         let store = TaskStore()

@@ -12,6 +12,7 @@ struct MainViewToolbar: ToolbarContent {
     let onStart: () -> Void
     let onResetAndRestart: () -> Void
     let onOpenMemoryBrowser: () -> Void
+    let onNewTask: () -> Void
 
     var body: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
@@ -58,6 +59,8 @@ struct MainViewToolbar: ToolbarContent {
             .help(shared.taskOverlayVisible ? "Hide the task overlay bar" : "Show the task overlay bar")
 
             Button("Memory Browser", systemImage: "brain", action: onOpenMemoryBrowser)
+
+            Button("New Task", systemImage: "plus.circle", action: onNewTask)
 
             Button("Clear Conversation", systemImage: "trash") {
                 Task { await viewModel.clearConversation() }

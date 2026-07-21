@@ -1267,6 +1267,69 @@ final class AppViewModel {
         }
     }
 
+    func createManualTask(
+        title: String,
+        description: String,
+        isTemplate: Bool,
+        templateInputDefinitions: [TemplateInputDefinition],
+        templateInstanceTitleTemplate: String?,
+        acceptanceCriteria: [AcceptanceCriterion],
+        steps: [TaskStep]
+    ) async -> Bool {
+        guard let taskStore else { return false }
+        if isTemplate, let problem = TemplateInputValidation.validateDefinitions(templateInputDefinitions) {
+            taskActionError = problem
+            return false
+        }
+        if isTemplate,
+           let titleTemplate = templateInstanceTitleTemplate?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !titleTemplate.isEmpty,
+           let problem = TemplateStringRenderer.validate(titleTemplate, allowedNames: Set(templateInputDefinitions.map(\.name))) {
+            taskActionError = problem
+            return false
+        }
+        let task = await taskStore.addTask(
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+            description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+            isTemplate: isTemplate,
+            templateInputDefinitions: isTemplate ? templateInputDefinitions : []
+        )
+        if isTemplate, let problem = await taskStore.setTemplateInstanceTitleTemplate(id: task.id, titleTemplate: templateInstanceTitleTemplate) {
+            taskActionError = problem
+            return false
+        }
+        if !acceptanceCriteria.isEmpty {
+            await taskStore.setAcceptanceCriteria(id: task.id, criteria: acceptanceCriteria)
+        }
+        if !steps.isEmpty {
+            await taskStore.setSteps(id: task.id, steps: steps)
+        }
+        return true
+    }
+
+    func updateTaskDefinition(
+        id: UUID,
+        title: String,
+        description: String,
+        isTemplate: Bool,
+        templateInputDefinitions: [TemplateInputDefinition],
+        templateInstanceTitleTemplate: String?
+    ) async -> Bool {
+        guard let taskStore else { return false }
+        if let problem = await taskStore.updateDefinition(
+            id: id,
+            title: title,
+            description: description,
+            isTemplate: isTemplate,
+            templateInputDefinitions: templateInputDefinitions,
+            templateInstanceTitleTemplate: templateInstanceTitleTemplate
+        ) {
+            taskActionError = problem
+            return false
+        }
+        return true
+    }
+
     /// Replaces a task's acceptance criteria from the task-detail editor. Gated to
     /// states where no worker or validator is actively consuming the contract; the
     /// store drops sticky verdicts for criteria that actually changed.

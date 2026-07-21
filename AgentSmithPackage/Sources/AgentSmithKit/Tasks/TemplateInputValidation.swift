@@ -1,17 +1,22 @@
 import Foundation
 
-enum TemplateInputValidation {
-    struct ResolvedInputs: Sendable, Equatable {
-        var values: [String: String]
-        var missingRequiredNames: [String]
+public enum TemplateInputValidation {
+    public struct ResolvedInputs: Sendable, Equatable {
+        /// Resolved, trimmed input values keyed by template input name.
+        public var values: [String: String]
+        /// Required input names that were not provided with non-empty values.
+        public var missingRequiredNames: [String]
     }
 
-    enum ResolutionResult: Sendable, Equatable {
+    public enum ResolutionResult: Sendable, Equatable {
+        /// Resolved input values and any missing required input names.
         case success(ResolvedInputs)
+        /// A validation problem that prevents using the provided input values.
         case failure(String)
     }
 
-    static func validateDefinitions(_ definitions: [TemplateInputDefinition]) -> String? {
+    /// Validates template input definitions before they are stored on a task.
+    public static func validateDefinitions(_ definitions: [TemplateInputDefinition]) -> String? {
         var seen = Set<String>()
         for definition in definitions {
             let name = definition.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -28,7 +33,8 @@ enum TemplateInputValidation {
         return nil
     }
 
-    static func resolveValues(
+    /// Resolves raw user-provided values against the template input definitions.
+    public static func resolveValues(
         definitions: [TemplateInputDefinition],
         rawValues: [String: String]
     ) -> ResolutionResult {
@@ -54,7 +60,8 @@ enum TemplateInputValidation {
         return .success(ResolvedInputs(values: normalizedValues, missingRequiredNames: missing))
     }
 
-    private static func isValidName(_ name: String) -> Bool {
+    /// Returns whether a template input or placeholder name uses the supported identifier format.
+    public static func isValidName(_ name: String) -> Bool {
         guard let first = name.unicodeScalars.first, isLowercaseLetter(first) else { return false }
         return name.unicodeScalars.allSatisfy { scalar in
             isLowercaseLetter(scalar) || isDigit(scalar) || scalar == "_"

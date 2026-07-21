@@ -110,7 +110,7 @@ struct ToolsSettingsView: View {
 
     private func policyBinding(_ tool: String) -> Binding<ToolPolicy> {
         Binding(
-            get: { shared.globalToolPolicies[tool] ?? .default },
+            get: { shared.globalToolPolicies[tool] ?? ToolPolicy.builtInDefaults[tool] ?? .default },
             set: { newValue in
                 if newValue == .default {
                     shared.globalToolPolicies.removeValue(forKey: tool)

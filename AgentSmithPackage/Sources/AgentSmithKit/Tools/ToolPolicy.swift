@@ -16,4 +16,11 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
     case always
     /// Never offer this tool, regardless of the scoping verdict.
     case never
+
+    /// Built-in safety defaults for tools that should not be enabled by automatic scoping alone.
+    /// User global policy entries can override these, and per-task overrides still have the
+    /// highest non-system precedence.
+    public static let builtInDefaults: [String: ToolPolicy] = [
+        ReportInboundUserMessageTool.toolName: .never
+    ]
 }

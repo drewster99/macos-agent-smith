@@ -28,6 +28,7 @@ public enum BrownBehavior {
             TaskCompleteTool(),
             RequestHelpTool(),
             ReplyToUserTool(),
+            ReportInboundUserMessageTool(),
             BashTool(),
             GhTool(authStatusSnapshot: ghAuthStatusSnapshot ?? "(auth status was not captured for this spawn)"),
             WebSearchTool(),

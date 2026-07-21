@@ -179,6 +179,7 @@ struct TaskRowButton: View {
 
     @Environment(\.openWindow) private var openWindow
     @State private var templateRunInputTask: AgentTask?
+    @State private var taskEditorTask: AgentTask?
 
     var body: some View {
         Button {
@@ -206,6 +207,11 @@ struct TaskRowButton: View {
                 onCancel: { templateRunInputTask = nil }
             )
         }
+        .sheet(item: $taskEditorTask) { task in
+            TaskEditorSheet(mode: .edit(task), viewModel: viewModel) {
+                taskEditorTask = nil
+            }
+        }
     }
 
     @ViewBuilder
@@ -213,6 +219,11 @@ struct TaskRowButton: View {
         Button(action: { copyTaskIDToPasteboard(task.id) }, label: {
             Label("Copy Task ID", systemImage: "doc.on.doc")
         })
+        if task.status.isDescriptionEditable {
+            Button(action: { taskEditorTask = task }, label: {
+                Label("Edit", systemImage: "pencil")
+            })
+        }
         Divider()
         switch style {
         case .active:

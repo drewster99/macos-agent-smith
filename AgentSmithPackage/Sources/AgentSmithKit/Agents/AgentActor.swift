@@ -585,11 +585,18 @@ public actor AgentActor {
         return texts.reversed().joined(separator: "\n---\n")
     }
 
-    /// Applies the global tool policy, then per-task user overrides, on top of a base approved set.
-    /// Order is deliberate: global `.always`/`.never` override the automatic verdict; per-task
+    /// Applies built-in defaults, global tool policy, then per-task user overrides, on top of a base approved set.
+    /// Order is deliberate: policy `.always`/`.never` override the automatic verdict; per-task
     /// overrides then override the globals. Forced lifecycle tools are handled separately (above all).
     private func resolveEffectiveApproved(base: Set<String>, candidates: Set<String>) -> Set<String> {
         var result = base
+        for (name, policy) in ToolPolicy.builtInDefaults where candidates.contains(name) {
+            switch policy {
+            case .never: result.remove(name)
+            case .always: result.insert(name)
+            case .default: break
+            }
+        }
         for name in candidates {
             switch globalToolPolicy[name] {
             case .never: result.remove(name)

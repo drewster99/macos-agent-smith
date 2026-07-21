@@ -87,6 +87,7 @@ public actor TaskStore {
             task.templateInputValues = [:]
         } else {
             task.templateInputDefinitions = []
+            task.templateInstanceTitleTemplate = nil
             task.templateInputValues = [:]
         }
         if isTemplate && task.status.isTerminal {
@@ -114,6 +115,87 @@ public actor TaskStore {
         task.templateInputDefinitions = definitions
         task.templateInputValues = [:]
         task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+        return nil
+    }
+
+    public func setTemplateInstanceTitleTemplate(id: UUID, titleTemplate: String?) -> String? {
+        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+        guard task.isTemplate else {
+            return "Task '\(task.title)' is not a template. Only template tasks can define an instance title template."
+        }
+        let normalized = titleTemplate?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalized, !normalized.isEmpty {
+            let names = Set(task.templateInputDefinitions.map(\.name))
+            if let problem = TemplateStringRenderer.validate(normalized, allowedNames: names) {
+                return problem
+            }
+            task.templateInstanceTitleTemplate = normalized
+        } else {
+            task.templateInstanceTitleTemplate = nil
+        }
+        task.updatedAt = Date()
+        task.lastEditedAt = Date()
+        tasks[id] = task
+        onChange?()
+        return nil
+    }
+
+    @discardableResult
+    public func updateDefinition(
+        id: UUID,
+        title: String,
+        description: String,
+        isTemplate: Bool,
+        templateInputDefinitions: [TemplateInputDefinition],
+        templateInstanceTitleTemplate: String?
+    ) -> String? {
+        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+        guard task.status.isDescriptionEditable else {
+            return "Task '\(task.title)' cannot be edited while it is \(task.status.rawValue)."
+        }
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return "Title must not be empty." }
+        guard !description.isEmpty else { return "Description must not be empty." }
+        if isTemplate, let problem = TemplateInputValidation.validateDefinitions(templateInputDefinitions) {
+            return problem
+        }
+        let normalizedTitleTemplate = templateInstanceTitleTemplate?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isTemplate, let normalizedTitleTemplate, !normalizedTitleTemplate.isEmpty {
+            let names = Set(templateInputDefinitions.map(\.name))
+            if let problem = TemplateStringRenderer.validate(normalizedTitleTemplate, allowedNames: names) {
+                return problem
+            }
+        }
+
+        task.title = title
+        task.description = description
+        task.isTemplate = isTemplate
+        if isTemplate {
+            task.templateInputDefinitions = templateInputDefinitions
+            task.templateInstanceTitleTemplate = normalizedTitleTemplate?.isEmpty == false ? normalizedTitleTemplate : nil
+            task.templateInputValues = [:]
+            if task.status.isTerminal {
+                preserveResultIntoHistory(&task)
+                task.status = .pending
+                task.result = nil
+                task.commentary = nil
+                task.resultAttachments = []
+                task.resultItems = []
+                task.completedAt = nil
+                task.startedAt = nil
+                task.validation = nil
+            }
+        } else {
+            task.templateInputDefinitions = []
+            task.templateInstanceTitleTemplate = nil
+            task.templateInputValues = [:]
+        }
+        let now = Date()
+        task.updatedAt = now
+        task.lastEditedAt = now
         tasks[id] = task
         onChange?()
         return nil
@@ -177,12 +259,26 @@ public actor TaskStore {
                 prepare: criterion.prepare
             )
         }
+        let instanceTitle: String
+        if let titleTemplate = template.templateInstanceTitleTemplate,
+           !titleTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            switch TemplateStringRenderer.render(titleTemplate, values: resolvedInputs.values) {
+            case .success(let rendered):
+                let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
+                instanceTitle = trimmed.isEmpty ? template.title : trimmed
+            case .failure(let message):
+                return .failure(message)
+            }
+        } else {
+            instanceTitle = template.title
+        }
         let instance = AgentTask(
-            title: template.title,
+            title: instanceTitle,
             description: template.description,
             status: .pending,
             disposition: .active,
             descriptionAttachments: template.descriptionAttachments,
+            userToolOverrides: template.userToolOverrides,
             acceptanceCriteria: clonedCriteria,
             steps: clonedSteps,
             isTemplate: false,

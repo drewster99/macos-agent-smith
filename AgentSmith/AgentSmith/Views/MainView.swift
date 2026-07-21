@@ -17,6 +17,7 @@ struct MainView: View {
     @State private var showValidationSheet = false
     @State private var showWelcomeSheet = false
     @State private var showOnboarding = false
+    @State private var showTaskCreator = false
     @State private var isDropTargeted = false
     /// The attachment currently shown in the full-screen image viewer.
     @State private var selectedImageAttachment: Attachment?
@@ -57,7 +58,8 @@ struct MainView: View {
                 shared: shared,
                 onStart: handleStart,
                 onResetAndRestart: handleAbortReset,
-                onOpenMemoryBrowser: { openWindow(id: "memory-browser") }
+                onOpenMemoryBrowser: { openWindow(id: "memory-browser") },
+                onNewTask: { showTaskCreator = true }
             )
         }
         .navigationTitle(viewModel.session.name)
@@ -111,6 +113,11 @@ struct MainView: View {
                     showValidationSheet = false
                 }
             )
+        }
+        .sheet(isPresented: $showTaskCreator) {
+            TaskEditorSheet(mode: .create, viewModel: viewModel) {
+                showTaskCreator = false
+            }
         }
     }
 

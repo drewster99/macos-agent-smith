@@ -10,6 +10,7 @@ enum SmithBehavior {
             ReviewWorkTool(),
             ProvideHelpTool(),
             CreateTaskTool(),
+            EditTaskTool(),
             SetTemplateInputsTool(),
             SetAcceptanceCriteriaTool(),
             RunTaskTool(),
@@ -132,7 +133,7 @@ enum SmithBehavior {
         - Use `get_task_details` with returned IDs when you need full descriptions, validation prompts, input enumerator prompts, steps, results, or history.
         - When the user asks about past work that isn't in active tasks, search inactive tasks before saying you don't know.
 
-        ### `create_task(title, description, scheduled_run_at?, attachment_ids?, acceptance_criteria?, steps?)`
+        ### `create_task(title, description, scheduled_run_at?, attachment_ids?, acceptance_criteria?, steps?, is_template?, template_inputs?, template_instance_title_template?)`
         Create a new task. If a worker slot is free, the task auto-starts immediately — you do NOT need a follow-up `run_task` call. If all slots are busy, the new task is queued as pending and the response tells you so; in that case just leave it alone — auto-run starts it when a slot frees. NEVER poll `run_task` on a queued task and NEVER set its status via `update_task`.
         - Check if a pre-existing pending or paused task for this same purpose already exists before creating duplicates.
         - Check the prior task list for tasks that might be relevant to this task, especially recent ones.
@@ -160,6 +161,10 @@ enum SmithBehavior {
         - When you do want to queue several tasks before any of them run, create the first one (it will auto-start), then wait — subsequent ones will queue behind it.
         - Make sure you understand all `create_task` parameters, such as `scheduled_run_at`, `attachment_ids`, and especially `acceptance_criteria`. Again, make sure you read the tool and parameter descriptions.
         - Template tasks may define string-only `template_inputs` when `is_template: true`. Template input names must be lower_snake_case style (`target_app`, `locale`) and are provided later through `run_task(input_values:)`.
+        - Template tasks may also define `template_instance_title_template`, such as `Localize {{target_app}}`, so each cloned instance title names the concrete target.
+
+        ### `edit_task(task_id, title?, description?, is_template?, template_inputs?, template_instance_title_template?, tool_overrides?)`
+        Edit an existing task's definition while it is not actively running. Use this for title fixes, full description replacement, converting a task into/out of a template, replacing template inputs, setting the cloned-instance title template, or setting per-task worker tool overrides (`"auto"`, `"on"`, `"off"`). Use `set_acceptance_criteria` for criteria and let Brown own the step list once a task starts.
 
         ### `set_template_inputs(task_id, template_inputs)`
         Set (REPLACE) a TEMPLATE task's string-only input definitions after creation. Each input is `{name, description, required?}`. Non-template tasks cannot define template inputs. Pass the COMPLETE list each time; pass `[]` to clear all template inputs.

@@ -102,9 +102,10 @@ struct TaskToolOverrideEditor: View {
             // Count only tools that actually appear as rows. Forced lifecycle tools are approved
             // by scoping but deliberately not listed, so counting raw `approvedTools` made the
             // header disagree with the visible list.
-            let n = approved.subtracting(Self.forcedLifecycle).count
+            let n = groups.flatMap(\.tools).filter { effectiveEnabled($0) }.count
             let o = task.userToolOverrides?.count ?? 0
-            Text(o > 0 ? "\(n) approved · \(o) override\(o == 1 ? "" : "s")" : "\(n) approved")
+            let approvalText = task.approvedTools == nil ? "Not scoped yet" : "\(n) approved"
+            Text(o > 0 ? "\(approvalText) · \(o) override\(o == 1 ? "" : "s")" : approvalText)
                 .foregroundStyle(.secondary)
         }
     }
@@ -136,7 +137,7 @@ struct TaskToolOverrideEditor: View {
 
     private func row(_ tool: String) -> some View {
         let override = task.userToolOverrides?[tool]
-        let effective = override ?? approved.contains(tool)
+        let effective = effectiveEnabled(tool)
         return HStack(spacing: 8) {
             Image(systemName: effective ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(effective ? Color.green : Color.secondary)
@@ -153,6 +154,18 @@ struct TaskToolOverrideEditor: View {
             .labelsHidden()
             .fixedSize()
             .controlSize(.small)
+        }
+    }
+
+    private func effectiveEnabled(_ tool: String) -> Bool {
+        if let override = task.userToolOverrides?[tool] { return override }
+        switch viewModel.shared.globalToolPolicies[tool] ?? ToolPolicy.builtInDefaults[tool] ?? .default {
+        case .always:
+            return true
+        case .never:
+            return false
+        case .default:
+            return approved.contains(tool)
         }
     }
 
