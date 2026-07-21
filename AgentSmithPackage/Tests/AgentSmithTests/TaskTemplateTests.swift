@@ -146,6 +146,29 @@ struct TaskTemplateTests {
         }
     }
 
+    @Test("Changing template inputs cannot strand an invalid instance title template")
+    func changingTemplateInputsPreservesTitleTemplateValidity() async {
+        let store = TaskStore()
+        let template = await store.addTask(title: "Localize App", description: "Localize it.", isTemplate: true)
+        _ = await store.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name.", required: true)
+        ])
+        let titleError = await store.setTemplateInstanceTitleTemplate(
+            id: template.id,
+            titleTemplate: "Localize {{target_app}}"
+        )
+        #expect(titleError == nil)
+
+        let inputError = await store.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "app_name", description: "App name.", required: true)
+        ])
+
+        #expect(inputError?.contains("instance title template") == true)
+        let unchangedTemplate = await store.task(id: template.id)
+        #expect(unchangedTemplate?.templateInputDefinitions.map(\.name) == ["target_app"])
+        #expect(unchangedTemplate?.templateInstanceTitleTemplate == "Localize {{target_app}}")
+    }
+
     @Test("Template clones inherit user tool overrides but not scoped approvals")
     func templateCloneInheritsToolOverridesNotApprovedTools() async {
         let store = TaskStore()

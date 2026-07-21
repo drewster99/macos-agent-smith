@@ -1333,25 +1333,29 @@ final class AppViewModel {
     /// Replaces a task's acceptance criteria from the task-detail editor. Gated to
     /// states where no worker or validator is actively consuming the contract; the
     /// store drops sticky verdicts for criteria that actually changed.
-    func setTaskAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async {
-        guard let taskStore else { return }
+    @discardableResult
+    func setTaskAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async -> Bool {
+        guard let taskStore else { return false }
         guard let task = await taskStore.task(id: id), task.status.isValidationContractEditable else {
             taskActionError = "Acceptance criteria can't be edited while the task is running, validating, or completed."
-            return
+            return false
         }
         await taskStore.setAcceptanceCriteria(id: id, criteria: criteria)
+        return true
     }
 
     /// Replaces a task's step list from the task-detail editor (same gating). The user
     /// holds full authority over the plan — unlike the worker, edits here may delete
     /// steps outright rather than tombstoning them.
-    func setTaskSteps(id: UUID, steps: [TaskStep]) async {
-        guard let taskStore else { return }
+    @discardableResult
+    func setTaskSteps(id: UUID, steps: [TaskStep]) async -> Bool {
+        guard let taskStore else { return false }
         guard let task = await taskStore.task(id: id), task.status.isValidationContractEditable else {
             taskActionError = "Steps can't be edited while the task is running, validating, or completed."
-            return
+            return false
         }
         await taskStore.setSteps(id: id, steps: steps)
+        return true
     }
 
     func pauseTask(id: UUID) async {

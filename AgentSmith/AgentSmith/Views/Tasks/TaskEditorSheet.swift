@@ -194,9 +194,16 @@ struct TaskEditorSheet: View {
                     Label("Add Criterion", systemImage: "plus.circle")
                 }
                 .buttonStyle(.plain)
+                .disabled(!canEditValidationContract)
+            }
+            if !canEditValidationContract {
+                Text("Acceptance criteria are locked for this task status.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             ForEach($criteria) { $row in
                 criterionCard(row: $row, number: criterionNumber(for: row.id))
+                    .disabled(!canEditValidationContract)
             }
         }
     }
@@ -266,6 +273,12 @@ struct TaskEditorSheet: View {
                     Label("Add Step", systemImage: "plus.circle")
                 }
                 .buttonStyle(.plain)
+                .disabled(!canEditValidationContract)
+            }
+            if !canEditValidationContract {
+                Text("Seed steps are locked for this task status.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             ForEach($steps) { $row in
                 HStack {
@@ -278,6 +291,7 @@ struct TaskEditorSheet: View {
                     }
                     .buttonStyle(.plain)
                 }
+                .disabled(!canEditValidationContract)
             }
         }
     }
@@ -296,6 +310,15 @@ struct TaskEditorSheet: View {
     private var isCreate: Bool {
         if case .create = mode { return true }
         return false
+    }
+
+    private var canEditValidationContract: Bool {
+        switch mode {
+        case .create:
+            return true
+        case .edit(let task):
+            return task.status.isValidationContractEditable
+        }
     }
 
     private func save() {
@@ -336,7 +359,7 @@ struct TaskEditorSheet: View {
             return
         }
         Task {
-            let saved: Bool
+            var saved: Bool
             switch mode {
             case .create:
                 saved = await viewModel.createManualTask(
@@ -357,9 +380,10 @@ struct TaskEditorSheet: View {
                     templateInputDefinitions: builtInputs,
                     templateInstanceTitleTemplate: instanceTitleTemplate
                 )
-                if saved {
-                    await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: builtCriteria)
-                    await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
+                if saved && canEditValidationContract {
+                    let criteriaSaved = await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: builtCriteria)
+                    let stepsSaved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
+                    saved = criteriaSaved && stepsSaved
                 }
             }
             if saved {

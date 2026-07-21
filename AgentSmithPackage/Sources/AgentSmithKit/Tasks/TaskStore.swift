@@ -112,6 +112,11 @@ public actor TaskStore {
         if let error = TemplateInputValidation.validateDefinitions(definitions) {
             return error
         }
+        if let titleTemplate = task.templateInstanceTitleTemplate,
+           !titleTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let problem = TemplateStringRenderer.validate(titleTemplate, allowedNames: Set(definitions.map(\.name))) {
+            return "Template inputs would invalidate the instance title template: \(problem) Clear or update the title template first."
+        }
         task.templateInputDefinitions = definitions
         task.templateInputValues = [:]
         task.updatedAt = Date()

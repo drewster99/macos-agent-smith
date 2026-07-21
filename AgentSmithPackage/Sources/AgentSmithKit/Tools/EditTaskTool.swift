@@ -78,6 +78,13 @@ public struct EditTaskTool: AgentTool {
         let titleTemplate = arguments.keys.contains("template_instance_title_template")
             ? Self.optionalString(arguments["template_instance_title_template"])
             : task.templateInstanceTitleTemplate
+        let parsedOverrides: [(tool: String, enabled: Bool?)]
+        switch Self.parseToolOverrides(arguments["tool_overrides"]) {
+        case .success(let overrides):
+            parsedOverrides = overrides
+        case .failure(let message):
+            return .failure(message)
+        }
 
         if let problem = await context.taskStore.updateDefinition(
             id: taskID,
@@ -90,22 +97,8 @@ public struct EditTaskTool: AgentTool {
             return .failure(problem)
         }
 
-        if case .dictionary(let overrides) = arguments["tool_overrides"] {
-            for (tool, rawState) in overrides {
-                guard case .string(let state) = rawState else {
-                    return .failure("tool_overrides values must be 'auto', 'on', or 'off'.")
-                }
-                switch state {
-                case "auto":
-                    await context.taskStore.setUserToolOverride(id: taskID, tool: tool, enabled: nil)
-                case "on":
-                    await context.taskStore.setUserToolOverride(id: taskID, tool: tool, enabled: true)
-                case "off":
-                    await context.taskStore.setUserToolOverride(id: taskID, tool: tool, enabled: false)
-                default:
-                    return .failure("Invalid tool override state '\(state)' for \(tool). Use 'auto', 'on', or 'off'.")
-                }
-            }
+        for override in parsedOverrides {
+            await context.taskStore.setUserToolOverride(id: taskID, tool: override.tool, enabled: override.enabled)
         }
 
         return .success("Task '\(title)' updated.")
@@ -113,6 +106,11 @@ public struct EditTaskTool: AgentTool {
 
     private enum ParseResult {
         case success([TemplateInputDefinition])
+        case failure(String)
+    }
+
+    private enum ToolOverrideParseResult {
+        case success([(tool: String, enabled: Bool?)])
         case failure(String)
     }
 
@@ -136,6 +134,30 @@ public struct EditTaskTool: AgentTool {
             return .failure(problem)
         }
         return .success(definitions)
+    }
+
+    private static func parseToolOverrides(_ rawValue: AnyCodable?) -> ToolOverrideParseResult {
+        guard let rawValue else { return .success([]) }
+        guard case .dictionary(let overrides) = rawValue else {
+            return .failure("tool_overrides must be an object whose values are 'auto', 'on', or 'off'.")
+        }
+        var parsed: [(tool: String, enabled: Bool?)] = []
+        for (tool, rawState) in overrides {
+            guard case .string(let state) = rawState else {
+                return .failure("tool_overrides values must be 'auto', 'on', or 'off'.")
+            }
+            switch state {
+            case "auto":
+                parsed.append((tool: tool, enabled: nil))
+            case "on":
+                parsed.append((tool: tool, enabled: true))
+            case "off":
+                parsed.append((tool: tool, enabled: false))
+            default:
+                return .failure("Invalid tool override state '\(state)' for \(tool). Use 'auto', 'on', or 'off'.")
+            }
+        }
+        return .success(parsed)
     }
 
     private static func optionalString(_ value: AnyCodable?) -> String? {
