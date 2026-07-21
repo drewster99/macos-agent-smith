@@ -178,6 +178,7 @@ struct TaskRowButton: View {
     let viewModel: AppViewModel
 
     @Environment(\.openWindow) private var openWindow
+    @State private var templateRunInputTask: AgentTask?
 
     var body: some View {
         Button {
@@ -186,10 +187,25 @@ struct TaskRowButton: View {
                 openWindow: openWindow
             )
         } label: {
-            TaskRow(task: task, style: style, viewModel: viewModel)
+            TaskRow(
+                task: task,
+                style: style,
+                viewModel: viewModel,
+                onStartRunnableTask: startRunnableTask
+            )
         }
         .buttonStyle(.plain)
         .contextMenu { contextMenu(task: task, style: style, viewModel: viewModel) }
+        .sheet(item: $templateRunInputTask) { task in
+            TemplateRunInputSheet(
+                task: task,
+                onRun: { values in
+                    templateRunInputTask = nil
+                    Task { await viewModel.startTask(task, templateInputValues: values) }
+                },
+                onCancel: { templateRunInputTask = nil }
+            )
+        }
     }
 
     @ViewBuilder
@@ -285,7 +301,7 @@ struct TaskRowButton: View {
             EmptyView()
 
         case .pending, .paused, .interrupted:
-            Button(action: { Task { await viewModel.startTask(task) } }, label: {
+            Button(action: { startRunnableTask(task) }, label: {
                 Label(runActionTitle(for: task.status), systemImage: "play.fill")
             })
             Divider()
@@ -306,6 +322,14 @@ struct TaskRowButton: View {
                 Label("Delete", systemImage: "trash")
             })
         }
+    }
+
+    private func startRunnableTask(_ task: AgentTask) {
+        if task.shouldPromptForTemplateRunInputs {
+            templateRunInputTask = task
+            return
+        }
+        Task { await viewModel.startTask(task) }
     }
 }
 
@@ -328,6 +352,7 @@ private struct TaskRow: View {
     let task: AgentTask
     let style: TaskRowStyle
     let viewModel: AppViewModel
+    let onStartRunnableTask: (AgentTask) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -418,7 +443,7 @@ private struct TaskRow: View {
 
     @ViewBuilder
     private func runInlineControl() -> some View {
-        Button(action: { Task { await viewModel.startTask(task) } }, label: {
+        Button(action: { onStartRunnableTask(task) }, label: {
             Image(systemName: "play.fill")
                 .imageScale(.small)
                 .foregroundStyle(.secondary)

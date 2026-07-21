@@ -1579,7 +1579,7 @@ final class AppViewModel {
     /// Manually starts (or resumes) a pending / paused / interrupted task without waiting for
     /// Smith to pick it up — drives the same `run_task` path the orchestrator uses. Refuses
     /// when every worker slot is taken, mirroring the `run_task` tool's capacity gate.
-    func startTask(_ task: AgentTask) async {
+    func startTask(_ task: AgentTask, templateInputValues: [String: String] = [:]) async {
         guard task.status.isRunnable else {
             taskActionError = "This task can't be run right now (status: \(task.status.rawValue))."
             return
@@ -1594,7 +1594,7 @@ final class AppViewModel {
             taskActionError = "All \(capacity) task slot(s) are busy (\(names)). Wait for one to finish — or raise “Max simultaneous tasks” in Settings."
             return
         }
-        await runtime?.restartForNewTask(taskID: task.id)
+        await runtime?.restartForNewTask(taskID: task.id, templateInputValues: templateInputValues)
     }
 
     func updatePollInterval(for role: AgentRole, interval: TimeInterval) async {

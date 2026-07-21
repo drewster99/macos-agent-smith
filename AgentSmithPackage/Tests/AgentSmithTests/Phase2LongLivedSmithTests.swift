@@ -206,6 +206,32 @@ struct Phase2LongLivedSmithTests {
         await runtime.stopAll()
     }
 
+    @Test("Starting a template through the runtime preserves supplied template inputs")
+    func templateStartPreservesRuntimeInputValues() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.start()
+        let store = await runtime.taskStore
+        let template = await store.addTask(title: "Targeted run", description: "d", isTemplate: true)
+        _ = await store.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name or bundle ID.", required: true),
+            TemplateInputDefinition(name: "locale", description: "Locale to test.", required: false)
+        ])
+
+        await runtime.restartForNewTask(
+            taskID: template.id,
+            templateInputValues: ["target_app": "  Notes  ", "locale": "   "]
+        )
+        await runtime.waitForPendingRestarts()
+
+        let instances = await store.allTasks().filter { $0.parentTaskID == template.id }
+        #expect(instances.count == 1)
+        #expect(instances.first?.status == .running)
+        #expect(instances.first?.templateInputValues == ["target_app": "Notes"])
+
+        await runtime.stopAll()
+    }
+
     @Test("A per-run amendment lands on the cloned instance, never the template")
     func templateAmendmentAppliesToCloneNotTemplate() async {
         let runtime = makeRuntime()

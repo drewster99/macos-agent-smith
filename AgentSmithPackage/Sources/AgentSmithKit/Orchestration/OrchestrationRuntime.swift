@@ -1440,7 +1440,11 @@ public actor OrchestrationRuntime {
     /// Routed through `lifecycleQueue` so it serializes with every other lifecycle
     /// transition. Fire-and-forget by design (tools cannot await a transition that may
     /// tear down the very agent making the call).
-    public func restartForNewTask(taskID: UUID, amendment: String? = nil) {
+    public func restartForNewTask(
+        taskID: UUID,
+        amendment: String? = nil,
+        templateInputValues: [String: String] = [:]
+    ) {
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
             // Template interception: starting a template never runs the template — it
@@ -1449,7 +1453,11 @@ public actor OrchestrationRuntime {
             // is the single chokepoint every start path funnels through (run_task, the
             // play button, auto-advance, scheduled wakes), so all of them clone. Any
             // per-run amendment lands on the started (cloned) task, not the template.
-            guard let startID = await self.resolveStartTarget(taskID: taskID, amendment: amendment) else {
+            guard let startID = await self.resolveStartTarget(
+                taskID: taskID,
+                amendment: amendment,
+                templateInputValues: templateInputValues
+            ) else {
                 return
             }
             if await self.hasLiveSmith() {
@@ -1472,10 +1480,14 @@ public actor OrchestrationRuntime {
     /// If `taskID` is a template, clone a fresh instance, note it on the template, and
     /// announce the instance; return the ID to actually start (the instance, or the
     /// original for a non-template). Runs on the lifecycle queue via `restartForNewTask`.
-    private func resolveStartTarget(taskID: UUID, amendment: String? = nil) async -> UUID? {
+    private func resolveStartTarget(
+        taskID: UUID,
+        amendment: String? = nil,
+        templateInputValues: [String: String] = [:]
+    ) async -> UUID? {
         guard let task = await taskStore.task(id: taskID), task.isTemplate else { return taskID }
         let instance: AgentTask
-        switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: [:]) {
+        switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: templateInputValues) {
         case .success(let created):
             instance = created
         case .failure(let message):

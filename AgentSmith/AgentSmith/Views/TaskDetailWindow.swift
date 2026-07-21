@@ -41,6 +41,7 @@ struct TaskDetailWindow: View {
     @State private var editedCriteria: [EditableCriterion] = []
     @State private var isEditingSteps = false
     @State private var editedSteps: [EditableStep] = []
+    @State private var templateRunInputTask: AgentTask?
 
     /// Editing model for one acceptance criterion. Criterion identity is preserved
     /// through edits; the store resets sticky verdicts only when the validation contract changes.
@@ -219,6 +220,16 @@ struct TaskDetailWindow: View {
                 onCancel: { isShowingPDFSheet = false }
             )
         }
+        .sheet(item: $templateRunInputTask) { task in
+            TemplateRunInputSheet(
+                task: task,
+                onRun: { values in
+                    templateRunInputTask = nil
+                    Task { await viewModel.startTask(task, templateInputValues: values) }
+                },
+                onCancel: { templateRunInputTask = nil }
+            )
+        }
     }
 
     // MARK: - Body
@@ -344,7 +355,7 @@ struct TaskDetailWindow: View {
             Spacer()
             if task.status.isRunnable {
                 Button {
-                    Task { await viewModel.startTask(task) }
+                    startRunnableTask(task)
                 } label: {
                     Label(runActionTitle(for: task.status), systemImage: "play.fill")
                 }
@@ -360,6 +371,14 @@ struct TaskDetailWindow: View {
             Button("Done") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }
+    }
+
+    private func startRunnableTask(_ task: AgentTask) {
+        if task.shouldPromptForTemplateRunInputs {
+            templateRunInputTask = task
+            return
+        }
+        Task { await viewModel.startTask(task) }
     }
 
     // MARK: - Section dispatch
