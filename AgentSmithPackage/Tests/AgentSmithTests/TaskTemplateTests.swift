@@ -71,7 +71,66 @@ struct TaskTemplateTests {
     func toggleOff() async {
         let store = TaskStore()
         let task = await store.addTask(title: "t", description: "d", isTemplate: true)
+        _ = await store.setTemplateInputDefinitions(id: task.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name", required: true)
+        ])
         await store.setTemplate(id: task.id, isTemplate: false)
         #expect(await store.task(id: task.id)?.isTemplate == false)
+        #expect(await store.task(id: task.id)?.templateInputDefinitions.isEmpty == true)
+        #expect(await store.task(id: task.id)?.templateInputValues.isEmpty == true)
+    }
+
+    @Test("Template inputs validate, resolve, and snapshot onto instances")
+    func templateInputsValidateResolveAndSnapshot() async {
+        let store = TaskStore()
+        let template = await store.addTask(title: "Localization", description: "Test app.", isTemplate: true)
+        let setError = await store.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name or bundle ID.", required: true),
+            TemplateInputDefinition(name: "locale", description: "Locale to test.", required: false)
+        ])
+        #expect(setError == nil)
+
+        switch await store.instantiateTemplate(templateID: template.id, inputValues: ["target_ap": "Typo"]) {
+        case .success:
+            Issue.record("unknown template input should reject instantiation")
+        case .failure(let message):
+            #expect(message.contains("Unknown template input"))
+        }
+
+        switch await store.instantiateTemplate(templateID: template.id, inputValues: [:]) {
+        case .success:
+            Issue.record("missing required input should reject instantiation")
+        case .failure(let message):
+            #expect(message.contains("Missing required template input"))
+            #expect(message.contains("target_app"))
+        }
+
+        let instance: AgentTask
+        switch await store.instantiateTemplate(templateID: template.id, inputValues: [
+            "target_app": "  Localizer  ",
+            "locale": "   "
+        ]) {
+        case .success(let created):
+            instance = created
+        case .failure(let message):
+            Issue.record("valid template inputs should instantiate: \(message)")
+            return
+        }
+
+        #expect(instance.parentTaskID == template.id)
+        #expect(instance.templateInputDefinitions.map(\.name) == ["target_app", "locale"])
+        #expect(instance.templateInputValues == ["target_app": "Localizer"])
+        #expect(instance.renderedTemplateInputValues()?.contains("target_app: Localizer") == true)
+        #expect(!instance.renderedDescriptionWithTemplateInputs().contains("locale:"))
+    }
+
+    @Test("Only templates can define template inputs")
+    func onlyTemplatesCanDefineInputs() async {
+        let store = TaskStore()
+        let task = await store.addTask(title: "Ordinary", description: "d")
+        let error = await store.setTemplateInputDefinitions(id: task.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name", required: true)
+        ])
+        #expect(error?.contains("not a template") == true)
     }
 }

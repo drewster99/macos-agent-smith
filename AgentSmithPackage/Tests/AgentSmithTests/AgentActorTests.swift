@@ -9,10 +9,23 @@ struct AgentActorTests {
     /// `MemoryStore`. Sharing avoids paying the engine init cost N times.
     private static let sharedEngine = SemanticSearchEngine()
 
+    private actor RestartRecorder {
+        private var recordedIDs: [UUID] = []
+
+        func record(_ id: UUID) {
+            recordedIDs.append(id)
+        }
+
+        func ids() -> [UUID] {
+            recordedIDs
+        }
+    }
+
     private func makeContext(
         channel: MessageChannel = MessageChannel(),
         taskStore: TaskStore = TaskStore(),
-        role: AgentRole = .brown
+        role: AgentRole = .brown,
+        restartForNewTask: @escaping @Sendable (UUID, String?) async -> Void = { _, _ in }
     ) throws -> ToolContext {
         ToolContext(
             agentID: UUID(),
@@ -23,6 +36,7 @@ struct AgentActorTests {
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
+            restartForNewTask: restartForNewTask,
             memoryStore: MemoryStore(engine: Self.sharedEngine),
             setToolExecutionStatus: { _, _ in },
             hasToolSucceeded: { _ in false },
@@ -74,6 +88,212 @@ struct AgentActorTests {
         let tasks = await taskStore.allTasks()
         #expect(tasks.count == 1)
         #expect(tasks[0].title == "Test task")
+    }
+
+    @Test("CreateTaskTool creates template input definitions only for templates")
+    func createTaskTemplateInputsRequireTemplate() async throws {
+        let taskStore = TaskStore()
+        let context = try makeContext(taskStore: taskStore, role: .smith)
+        let tool = CreateTaskTool()
+
+        let rejected = try await tool.execute(
+            arguments: [
+                "title": .string("Ordinary"),
+                "description": .string("A test"),
+                "template_inputs": .array([
+                    .dictionary([
+                        "name": .string("target_app"),
+                        "description": .string("App name"),
+                        "required": .bool(true)
+                    ])
+                ])
+            ],
+            context: context
+        )
+        #expect(!rejected.succeeded)
+        #expect(rejected.output.contains("is_template is true"))
+
+        let created = try await tool.execute(
+            arguments: [
+                "title": .string("Template"),
+                "description": .string("A reusable task"),
+                "is_template": .bool(true),
+                "template_inputs": .array([
+                    .dictionary([
+                        "name": .string("target_app"),
+                        "description": .string("App name or bundle ID"),
+                        "required": .bool(true)
+                    ])
+                ])
+            ],
+            context: context
+        )
+        #expect(created.succeeded)
+        let template = try #require(await taskStore.allTasks().first { $0.title == "Template" })
+        #expect(template.isTemplate)
+        #expect(template.templateInputDefinitions.map(\.name) == ["target_app"])
+        #expect(template.templateInputDefinitions.first?.required == true)
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let scheduled = try await tool.execute(
+            arguments: [
+                "title": .string("Scheduled template"),
+                "description": .string("A scheduled reusable task"),
+                "scheduled_run_at": .string(formatter.string(from: Date().addingTimeInterval(60))),
+                "is_template": .bool(true),
+                "template_inputs": .array([
+                    .dictionary([
+                        "name": .string("target_app"),
+                        "description": .string("App name or bundle ID"),
+                        "required": .bool(true)
+                    ])
+                ])
+            ],
+            context: context
+        )
+        #expect(!scheduled.succeeded)
+        #expect(scheduled.output.contains("scheduled_run_at cannot be used with required template_inputs"))
+    }
+
+    @Test("SetTemplateInputsTool replaces definitions on templates only")
+    func setTemplateInputsReplacesDefinitions() async throws {
+        let taskStore = TaskStore()
+        let ordinary = await taskStore.addTask(title: "Ordinary", description: "d")
+        let template = await taskStore.addTask(title: "Template", description: "d", isTemplate: true)
+        let context = try makeContext(taskStore: taskStore, role: .smith)
+        let tool = SetTemplateInputsTool()
+
+        let rejected = try await tool.execute(
+            arguments: [
+                "task_id": .string(ordinary.id.uuidString),
+                "template_inputs": .array([])
+            ],
+            context: context
+        )
+        #expect(!rejected.succeeded)
+        #expect(rejected.output.contains("not a template"))
+
+        let updated = try await tool.execute(
+            arguments: [
+                "task_id": .string(template.id.uuidString),
+                "template_inputs": .array([
+                    .dictionary([
+                        "name": .string("target_app"),
+                        "description": .string("App name"),
+                        "required": .bool(true)
+                    ]),
+                    .dictionary([
+                        "name": .string("locale"),
+                        "description": .string("Locale"),
+                        "required": .bool(false)
+                    ])
+                ])
+            ],
+            context: context
+        )
+        #expect(updated.succeeded)
+        let refreshed = try #require(await taskStore.task(id: template.id))
+        #expect(refreshed.templateInputDefinitions.map(\.name) == ["target_app", "locale"])
+    }
+
+    @Test("RunTaskTool instantiates templates with input values")
+    func runTaskInstantiatesTemplateWithInputValues() async throws {
+        let taskStore = TaskStore()
+        let channel = MessageChannel()
+        let recorder = RestartRecorder()
+        let template = await taskStore.addTask(title: "Localization", description: "Base description", isTemplate: true)
+        _ = await taskStore.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name", required: true),
+            TemplateInputDefinition(name: "locale", description: "Locale", required: false)
+        ])
+        let context = try makeContext(
+            channel: channel,
+            taskStore: taskStore,
+            role: .smith,
+            restartForNewTask: { id, _ in await recorder.record(id) }
+        )
+
+        let result = try await RunTaskTool().execute(
+            arguments: [
+                "task_id": .string(template.id.uuidString),
+                "instructions": .string("Run the smoke suite only."),
+                "input_values": .dictionary([
+                    "target_app": .string("  Localizer  "),
+                    "locale": .string(" ")
+                ])
+            ],
+            context: context
+        )
+
+        #expect(result.succeeded)
+        let restartedIDs = await recorder.ids()
+        #expect(restartedIDs.count == 1)
+        let instanceID = try #require(restartedIDs.first)
+        let instance = try #require(await taskStore.task(id: instanceID))
+        #expect(instance.parentTaskID == template.id)
+        #expect(instance.templateInputValues == ["target_app": "Localizer"])
+        #expect(instance.description.contains("Run the smoke suite only."))
+        #expect(await taskStore.task(id: template.id)?.description == "Base description")
+
+        let messages = await channel.allMessages()
+        let createdMessage = try #require(messages.first { $0.metadata?["clonedFromTemplate"] == .string(template.id.uuidString) })
+        guard case .string(let taskDescription)? = createdMessage.metadata?["taskDescription"] else {
+            Issue.record("missing taskDescription metadata")
+            return
+        }
+        #expect(taskDescription.contains("## Template inputs"))
+        #expect(taskDescription.contains("target_app: Localizer"))
+    }
+
+    @Test("RunTaskTool rejects invalid template input values before instantiating")
+    func runTaskRejectsInvalidTemplateInputs() async throws {
+        let taskStore = TaskStore()
+        let recorder = RestartRecorder()
+        let ordinary = await taskStore.addTask(title: "Ordinary", description: "d")
+        let template = await taskStore.addTask(title: "Localization", description: "Base description", isTemplate: true)
+        _ = await taskStore.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name", required: true)
+        ])
+        let context = try makeContext(
+            taskStore: taskStore,
+            role: .smith,
+            restartForNewTask: { id, _ in await recorder.record(id) }
+        )
+
+        let nonTemplate = try await RunTaskTool().execute(
+            arguments: [
+                "task_id": .string(ordinary.id.uuidString),
+                "instructions": .string("User confirmed: proceed as described"),
+                "input_values": .dictionary(["target_app": .string("Localizer")])
+            ],
+            context: context
+        )
+        #expect(!nonTemplate.succeeded)
+        #expect(nonTemplate.output.contains("Ordinary non-template tasks cannot accept template inputs"))
+
+        let missing = try await RunTaskTool().execute(
+            arguments: [
+                "task_id": .string(template.id.uuidString),
+                "instructions": .string("User confirmed: proceed as described")
+            ],
+            context: context
+        )
+        #expect(!missing.succeeded)
+        #expect(missing.output.contains("Missing required template input"))
+
+        let unknown = try await RunTaskTool().execute(
+            arguments: [
+                "task_id": .string(template.id.uuidString),
+                "instructions": .string("User confirmed: proceed as described"),
+                "input_values": .dictionary(["target_ap": .string("Typo")])
+            ],
+            context: context
+        )
+        #expect(!unknown.succeeded)
+        #expect(unknown.output.contains("Unknown template input"))
+        #expect((await taskStore.allTasks().filter { $0.parentTaskID == template.id }).isEmpty)
+        #expect(await recorder.ids().isEmpty)
     }
 
     // MARK: - MessageUserTool
@@ -171,6 +391,9 @@ struct AgentActorTests {
         await taskStore.setAcceptanceCriteria(id: template.id, criteria: [
             AcceptanceCriterion(name: "Audit exists", validationPrompt: "full prompt is hidden from list_tasks", inputEnumeratorPrompt: "full enumerator is hidden from list_tasks", origin: .smith)
         ])
+        _ = await taskStore.setTemplateInputDefinitions(id: template.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name", required: true)
+        ])
         await taskStore.addTask(title: "Unrelated", description: "nothing to see")
 
         let tool = ListTasksTool()
@@ -200,6 +423,9 @@ struct AgentActorTests {
         #expect(task["isScheduled"] as? Bool == true)
         #expect(task["scheduledRunAt"] as? String != nil)
         #expect(task["descriptionWasTruncated"] as? Bool == true)
+        #expect(task["templateInputDefinitionCount"] as? Int == 1)
+        #expect(task["requiredTemplateInputCount"] as? Int == 1)
+        #expect(task["missingRequiredTemplateInputNames"] as? [String] == ["target_app"])
         let criteria = try #require(task["acceptanceCriteriaSummaries"] as? [[String: Any]])
         #expect(criteria.first?["name"] as? String == "Audit exists")
         #expect(criteria.first?["hasInputEnumeratorPrompt"] as? Bool == true)

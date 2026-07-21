@@ -10,7 +10,7 @@ nonisolated private let runTaskLogger = Logger(subsystem: "com.agentsmith", cate
 /// that" means "rerun on the same task ID", not "create a new one."
 struct RunTaskTool: AgentTool {
     let name = "run_task"
-    let toolDescription = "Run an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context and auto-spawns Brown+Security Agent. Failed and completed tasks are auto-reset (prior result/commentary cleared, status flipped back to pending) before running — this is how you reopen a completed task without creating a duplicate. The `instructions` field is REQUIRED — include any updates, permissions, scope changes, or clarifications from the user. These are appended to the task description and survive the restart.\nIMPORTANT: Only one task can run at a time. Calling `run_task` will STOP any currently executing task."
+    let toolDescription = "Run an existing pending, paused, interrupted, failed, or completed task. For ordinary tasks, failed and completed tasks are auto-reset (prior result/commentary cleared, status flipped back to pending) before running. For template tasks, this instantiates a fresh task instance every time; pass `input_values` for that run's template inputs. Unknown input names or missing required inputs reject the call and no task runs. The `instructions` field is REQUIRED — include any updates, permissions, scope changes, or clarifications from the user. Ordinary tasks append these to their description; template tasks apply them only to the fresh instance.\nIMPORTANT: Existing task concurrency controls sequencing. Multiple template runs may be queued; workers start as slots free."
 
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
@@ -22,6 +22,31 @@ struct RunTaskTool: AgentTool {
             "instructions": .dictionary([
                 "type": .string("string"),
                 "description": .string("Instructions to append to the task description. Include any new permissions, scope changes, or clarifications from the user. If the user said nothing new, summarize their confirmation (e.g. 'User confirmed: proceed as described'). These survive the restart and are visible to Brown and Security Agent.")
+            ]),
+            "input_values": .dictionary([
+                "type": .string("object"),
+                "additionalProperties": .dictionary(["type": .string("string")]),
+                "description": .string("""
+                    Template-only string input values for this run, keyed by template input name. Valid only when task_id points to a template. Unknown input names reject the call. Blank optional values are omitted. Missing required values reject the call.
+
+                    Example 1 — run a localization template for one app:
+                    {
+                      "target_app": "Localizer",
+                      "locale": "de-DE"
+                    }
+
+                    Example 2 — queue several runs of the same template one at a time by calling run_task repeatedly with different values:
+                    First call:
+                    {
+                      "target_app": "App A"
+                    }
+                    Second call:
+                    {
+                      "target_app": "App B"
+                    }
+
+                    Do not provide input_values for ordinary non-template tasks. Do not guess names; use list_tasks for input summaries or get_task_details for full template input definitions.
+                    """)
             ])
         ]),
         "required": .array([.string("task_id"), .string("instructions")])
@@ -76,6 +101,18 @@ struct RunTaskTool: AgentTool {
             // a future log search can identify when this fallback fired.
             runTaskLogger.notice("auto-resolved missing task_id → \(taskID.uuidString, privacy: .public) (\(task.title, privacy: .public))")
         }
+
+        let suppliedInputValues: [String: String]
+        switch Self.parseTemplateInputValues(arguments["input_values"]) {
+        case .success(let values):
+            suppliedInputValues = values
+        case .failure(let message):
+            return .failure(message)
+        }
+        if !task.isTemplate && !suppliedInputValues.isEmpty {
+            return .failure("input_values are valid only when task_id points to a template. Ordinary non-template tasks cannot accept template inputs.")
+        }
+
         // If the task lives in the global archived/deleted store, pull it back into this session's
         // active list before reopening — the reset/reopen paths operate on the active store, and
         // run_task means "redo this one here" (lands in the current session).
@@ -123,7 +160,7 @@ struct RunTaskTool: AgentTool {
             $0.disposition == .active && $0.id != taskID &&
             ($0.status == .starting || $0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
         }
-        if slotHolders.count >= capacity {
+        if !task.isTemplate && slotHolders.count >= capacity {
             // Help requests and reviews deserve a pointed message — resolving one is
             // usually the fastest way to free a slot.
             if let helpTask = slotHolders.first(where: { $0.status == .awaitingReview && $0.helpRequest != nil }) {
@@ -195,12 +232,63 @@ struct RunTaskTool: AgentTool {
             }
         }
 
-        await context.restartForNewTask(task.id, deferredTemplateAmendment)
+        let startTaskID: UUID
+        var templateInstanceNote = ""
+        if task.isTemplate {
+            let instance: AgentTask
+            switch await context.taskStore.instantiateTemplate(templateID: task.id, inputValues: suppliedInputValues) {
+            case .success(let created):
+                instance = created
+            case .failure(let message):
+                return .failure(message)
+            }
+            if let deferredTemplateAmendment, !deferredTemplateAmendment.isEmpty {
+                await context.taskStore.amendDescription(id: instance.id, amendment: deferredTemplateAmendment)
+            }
+            await context.taskStore.addUpdate(id: task.id, message: "Started instance \(instance.id.uuidString) from this template.")
+            let announced = await context.taskStore.task(id: instance.id) ?? instance
+            await context.post(ChannelMessage(
+                sender: .system,
+                content: announced.title,
+                metadata: [
+                    "messageKind": .string("task_created"),
+                    "taskID": .string(announced.id.uuidString),
+                    "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
+                    "clonedFromTemplate": .string(task.id.uuidString)
+                ]
+            ))
+            startTaskID = instance.id
+            templateInstanceNote = " Created template instance \(instance.id.uuidString)."
+        } else {
+            startTaskID = task.id
+        }
+
+        await context.restartForNewTask(startTaskID, nil)
 
         let autoNote = autoResolved
             ? " (auto-resolved task_id because it was omitted from the call and only one task was eligible)"
             : ""
-        return .success("Running task '\(task.title)' (ID: \(task.id)).\(autoNote)\(amendmentNote) System is restarting with a clean context to begin work.")
+        return .success("Running task '\(task.title)' (ID: \(startTaskID)).\(templateInstanceNote)\(autoNote)\(amendmentNote) System is restarting with a clean context to begin work.")
+    }
+
+    private enum TemplateInputValueParseResult {
+        case success([String: String])
+        case failure(String)
+    }
+
+    private static func parseTemplateInputValues(_ rawValue: AnyCodable?) -> TemplateInputValueParseResult {
+        guard let rawValue else { return .success([:]) }
+        guard case .dictionary(let dictionary) = rawValue else {
+            return .failure("input_values must be an object mapping template input names to string values.")
+        }
+        var values: [String: String] = [:]
+        for (key, value) in dictionary {
+            guard case .string(let stringValue) = value else {
+                return .failure("input_values.\(key) must be a string. Template inputs are string-only in this version.")
+            }
+            values[key] = stringValue
+        }
+        return .success(values)
     }
 
     /// When exactly one active task is in a pending/paused/interrupted status (the

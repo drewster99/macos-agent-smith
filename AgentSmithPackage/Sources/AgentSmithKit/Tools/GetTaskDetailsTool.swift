@@ -5,8 +5,8 @@ struct GetTaskDetailsTool: AgentTool {
     let name = "get_task_details"
     let toolDescription = """
         Fetch the full details of one or more tasks by their IDs, including title, description, \
-        scheduling/template metadata, acceptance criteria, steps, commentary, progress updates, \
-        and result. Pass an array of task IDs (max 10) \
+        scheduling/template metadata, template input definitions/values, acceptance criteria, \
+        steps, commentary, progress updates, and result. Pass an array of task IDs (max 10) \
         to retrieve several tasks in a single call.
         """
 
@@ -112,6 +112,17 @@ struct GetTaskDetailsTool: AgentTool {
             parts.append("parentTemplateID: \(parentTaskID.uuidString)")
         }
         parts.append("Description: \(task.description)")
+
+        if let definitions = task.renderedTemplateInputDefinitions() {
+            parts.append("Template input definitions:\n\(definitions)")
+        }
+        if let values = task.renderedTemplateInputValues() {
+            parts.append("Template input values:\n\(values)")
+        }
+        let missingRequiredInputs = task.missingRequiredTemplateInputNames
+        if !missingRequiredInputs.isEmpty {
+            parts.append("Missing required template inputs: \(missingRequiredInputs.joined(separator: ", "))")
+        }
 
         if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: true, includePrompts: true) {
             parts.append("Acceptance criteria (each judged independently; the number is stable):\n\(criteria)")

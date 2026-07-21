@@ -667,7 +667,7 @@ extension OrchestrationRuntime {
         var fields: [String: String] = [
             "resultsToEvaluate": task.result ?? "(none submitted)",
             "taskTitle": task.title,
-            "taskDescription": task.description,
+            "taskDescription": task.renderedDescriptionWithTemplateInputs(),
             "workerTools": workerToolNames.sorted().joined(separator: ", "),
             "workerActivity": await workerActivityDigest(for: task),
             "workerSteps": Self.renderSteps(task.steps)

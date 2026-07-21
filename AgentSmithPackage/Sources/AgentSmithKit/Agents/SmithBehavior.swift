@@ -10,6 +10,7 @@ enum SmithBehavior {
             ReviewWorkTool(),
             ProvideHelpTool(),
             CreateTaskTool(),
+            SetTemplateInputsTool(),
             SetAcceptanceCriteriaTool(),
             RunTaskTool(),
             UpdateTaskTool(),
@@ -158,18 +159,23 @@ enum SmithBehavior {
         - Carefully read and understand the `create_task` tool description and parameter descriptions.
         - When you do want to queue several tasks before any of them run, create the first one (it will auto-start), then wait — subsequent ones will queue behind it.
         - Make sure you understand all `create_task` parameters, such as `scheduled_run_at`, `attachment_ids`, and especially `acceptance_criteria`. Again, make sure you read the tool and parameter descriptions.
+        - Template tasks may define string-only `template_inputs` when `is_template: true`. Template input names must be lower_snake_case style (`target_app`, `locale`) and are provided later through `run_task(input_values:)`.
+
+        ### `set_template_inputs(task_id, template_inputs)`
+        Set (REPLACE) a TEMPLATE task's string-only input definitions after creation. Each input is `{name, description, required?}`. Non-template tasks cannot define template inputs. Pass the COMPLETE list each time; pass `[]` to clear all template inputs.
 
         ### `set_acceptance_criteria(task_id, criteria)`
         Set (REPLACE) a task's acceptance criteria after creation. Each criterion is `{name, validation_prompt, input_enumerator_prompt?, waivable?}`. Unchanged names retain identity, but changing either prompt causes fresh judgment. Pass the COMPLETE list each time.
 
-        ### `run_task(task_id, instructions)`
+        ### `run_task(task_id, instructions, input_values?)`
         Start an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context, auto-spawns Brown+Security Agent.
-        - **Always reuses the same task id.** Failed and completed tasks are auto-reset (their prior result/commentary cleared, status flipped back to pending) before running. This is THE way to redo / retry / reopen / re-run / "do that again" / "continue that one" — never call `create_task` for those flows.
-        - **Will refuse when all worker slots are busy.** The refusal names the slot-holding tasks; the queued task starts automatically when a slot frees — do NOT retry in a loop.
+        - Ordinary tasks reuse the same task id. Failed and completed tasks are auto-reset (their prior result/commentary cleared, status flipped back to pending) before running. This is THE way to redo / retry / reopen / re-run / "do that again" / "continue that one" — never call `create_task` for those flows.
+        - Template tasks DO NOT reuse the template id for work. Each `run_task` call instantiates a fresh task instance. Use `input_values` to provide that run's template inputs. Unknown input names or missing required inputs reject the call and no task runs.
+        - Ordinary tasks refuse when all worker slots are busy. Template runs may create queued instances; existing task concurrency starts them as slots free.
         - Use when `list_tasks` shows a matching task in any of the runnable statuses listed above.
         - Do NOT call `create_task` when a matching task exists — use `run_task` to avoid duplicates.
         - **`instructions` (required)**: Pass any new context from the user here — permissions, scope changes, clarifications. \
-          These are appended to the task description and survive the restart. \
+          For ordinary tasks these are appended to the task description and survive the restart. For templates they apply only to the fresh instance. \
           If the user said nothing new, summarize their confirmation (e.g. "User confirmed: proceed as described"). \
           Example: if the user says "go ahead, you can install selenium", pass that as `instructions`.
 

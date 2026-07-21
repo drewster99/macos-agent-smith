@@ -83,6 +83,12 @@ public actor TaskStore {
     public func setTemplate(id: UUID, isTemplate: Bool) {
         guard var task = tasks[id] else { return }
         task.isTemplate = isTemplate
+        if isTemplate {
+            task.templateInputValues = [:]
+        } else {
+            task.templateInputDefinitions = []
+            task.templateInputValues = [:]
+        }
         if isTemplate && task.status.isTerminal {
             preserveResultIntoHistory(&task)
             task.result = nil
@@ -97,6 +103,22 @@ public actor TaskStore {
         onChange?()
     }
 
+    public func setTemplateInputDefinitions(id: UUID, definitions: [TemplateInputDefinition]) -> String? {
+        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+        guard task.isTemplate else {
+            return "Task '\(task.title)' is not a template. Only template tasks can define template inputs."
+        }
+        if let error = TemplateInputValidation.validateDefinitions(definitions) {
+            return error
+        }
+        task.templateInputDefinitions = definitions
+        task.templateInputValues = [:]
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+        return nil
+    }
+
     /// Clones a template into a fresh, runnable INSTANCE and adds it to the store.
     /// Carries over the "what to do" fields — title, description, description
     /// attachments, the step plan (each reset to `.pending`, notes cleared), and the
@@ -106,7 +128,41 @@ public actor TaskStore {
     /// fields (`isTemplate = false`, `scheduledRunAt = nil`). Sets `parentTaskID` to the
     /// template. Returns the instance, or nil if the template is missing.
     public func cloneTemplateInstance(templateID: UUID) -> AgentTask? {
-        guard let template = tasks[templateID] else { return nil }
+        switch instantiateTemplate(templateID: templateID, inputValues: [:]) {
+        case .success(let instance): return instance
+        case .failure: return nil
+        }
+    }
+
+    public enum TemplateInstantiationResult: Sendable, Equatable {
+        case success(AgentTask)
+        case failure(String)
+    }
+
+    public func instantiateTemplate(templateID: UUID, inputValues: [String: String]) -> TemplateInstantiationResult {
+        guard let template = tasks[templateID] else {
+            return .failure("Template task not found: \(templateID.uuidString)")
+        }
+        guard template.isTemplate else {
+            return .failure("Task '\(template.title)' is not a template and cannot accept template inputs.")
+        }
+        let resolvedInputs: TemplateInputValidation.ResolvedInputs
+        switch TemplateInputValidation.resolveValues(definitions: template.templateInputDefinitions, rawValues: inputValues) {
+        case .success(let resolved):
+            resolvedInputs = resolved
+        case .failure(let message):
+            return .failure(message)
+        }
+        guard resolvedInputs.missingRequiredNames.isEmpty else {
+            let details = template.templateInputDefinitions
+                .filter { resolvedInputs.missingRequiredNames.contains($0.name) }
+                .map { "- \($0.name): \($0.description)" }
+                .joined(separator: "\n")
+            return .failure("""
+                Missing required template input(s): \(resolvedInputs.missingRequiredNames.joined(separator: ", ")).
+                \(details)
+                """)
+        }
         let clonedSteps = template.steps.map { step in
             TaskStep(text: step.text, status: .pending, note: nil, origin: step.origin)
         }
@@ -130,11 +186,13 @@ public actor TaskStore {
             acceptanceCriteria: clonedCriteria,
             steps: clonedSteps,
             isTemplate: false,
-            parentTaskID: template.id
+            parentTaskID: template.id,
+            templateInputDefinitions: template.templateInputDefinitions,
+            templateInputValues: resolvedInputs.values
         )
         tasks[instance.id] = instance
         onChange?()
-        return instance
+        return .success(instance)
     }
 
     /// Adds a new task and returns it. Also archives any completed tasks older than 4 hours.
@@ -147,9 +205,11 @@ public actor TaskStore {
         description: String,
         scheduledRunAt: Date? = nil,
         descriptionAttachments: [Attachment] = [],
-        isTemplate: Bool = false
+        isTemplate: Bool = false,
+        templateInputDefinitions: [TemplateInputDefinition] = []
     ) async -> AgentTask {
         await archiveStaleCompleted()
+        let definitions = isTemplate ? templateInputDefinitions : []
         let initialStatus: AgentTask.Status = (scheduledRunAt.map { $0 > Date() } ?? false) ? .scheduled : .pending
         let task = AgentTask(
             title: title,
@@ -157,7 +217,8 @@ public actor TaskStore {
             status: initialStatus,
             scheduledRunAt: scheduledRunAt,
             descriptionAttachments: descriptionAttachments,
-            isTemplate: isTemplate
+            isTemplate: isTemplate,
+            templateInputDefinitions: definitions
         )
         tasks[task.id] = task
         onChange?()

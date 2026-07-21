@@ -26,7 +26,7 @@ enum ToolSafetyClassification {
         // Low-risk side-effecting (lifecycle / orchestration)
         "task_update", "task_complete", "request_help", "reply_to_user",
         "message_user", "message_brown", "review_work", "provide_help", "create_task", "run_task",
-        "update_task", "amend_task", "schedule_task_action", "reschedule_wake", "cancel_wake",
+        "update_task", "amend_task", "set_template_inputs", "schedule_task_action", "reschedule_wake", "cancel_wake",
         // Destructive
         "file_write", "file_edit", "save_memory", "manage_task_disposition",
         "terminate_agent", "abort", "bash", "gh", "run_applescript"

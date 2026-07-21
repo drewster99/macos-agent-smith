@@ -325,6 +325,9 @@ struct ValidationAgentSurfaceTests {
                 origin: .smith
             )
         ])
+        _ = await taskStore.setTemplateInputDefinitions(id: task.id, definitions: [
+            TemplateInputDefinition(name: "target_app", description: "App name or bundle ID.", required: true)
+        ])
         await taskStore.setSummary(id: task.id, summary: "This should not be returned.")
         await taskStore.setResult(id: task.id, result: "Done", commentary: nil)
 
@@ -339,6 +342,8 @@ struct ValidationAgentSurfaceTests {
         #expect(result.output.contains("isScheduled: true"))
         #expect(result.output.contains("scheduledRunAt:"))
         #expect(result.output.contains("hasParentTemplate: false"))
+        #expect(result.output.contains("Template input definitions:\n- target_app [required]: App name or bundle ID."))
+        #expect(result.output.contains("Missing required template inputs: target_app"))
         #expect(result.output.contains("Validation prompt:\nValidate every provided file path."))
         #expect(result.output.contains("Input enumerator prompt:\nReturn a JSON array of file paths."))
         #expect(!result.output.contains("Summary:"))

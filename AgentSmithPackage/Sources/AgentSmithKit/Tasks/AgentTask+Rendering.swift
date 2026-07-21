@@ -5,6 +5,34 @@ import Foundation
 /// the SAME 1-based numbers. "Criterion 5" and "Step 3" therefore mean the same thing in the
 /// briefing, in a tool result, in the validator's rejection punch list, and in the UI.
 extension AgentTask {
+    func renderedDescriptionWithTemplateInputs() -> String {
+        guard let templateInputValues = renderedTemplateInputValues() else { return description }
+        return "\(description)\n\n## Template inputs\n\(templateInputValues)"
+    }
+
+    func renderedTemplateInputDefinitions() -> String? {
+        guard !templateInputDefinitions.isEmpty else { return nil }
+        return templateInputDefinitions.map { definition in
+            let requirement = definition.required ? "required" : "optional"
+            return "- \(definition.name) [\(requirement)]: \(definition.description)"
+        }.joined(separator: "\n")
+    }
+
+    func renderedTemplateInputValues() -> String? {
+        guard !templateInputValues.isEmpty else { return nil }
+        return templateInputValues.keys.sorted().map { name in
+            "- \(name): \(templateInputValues[name] ?? "")"
+        }.joined(separator: "\n")
+    }
+
+    var missingRequiredTemplateInputNames: [String] {
+        templateInputDefinitions
+            .filter {
+                $0.required && (templateInputValues[$0.name]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            }
+            .map(\.name)
+            .sorted()
+    }
 
     /// The acceptance criteria as a numbered list. Criterion N is its 1-based position in
     /// `acceptanceCriteria`. When `includeVerdicts` is true, each line carries the latest

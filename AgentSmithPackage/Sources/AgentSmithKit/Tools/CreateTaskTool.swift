@@ -163,6 +163,55 @@ public struct CreateTaskTool: AgentTool {
                 "is_template": .dictionary([
                     "type": .string("boolean"),
                     "description": .string("Make this a TEMPLATE. A template never runs itself. Each time it's started, a fresh instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly (either manually or on a schedule) and get a clean run each time. Default `false`. When you schedule a RECURRING run on a task with `schedule_task_action`, it becomes a template automatically.")
+                ]),
+                "template_inputs": .dictionary([
+                    "type": .string("array"),
+                    "items": .dictionary([
+                        "type": .string("object"),
+                        "properties": .dictionary([
+                            "name": .dictionary([
+                                "type": .string("string"),
+                                "description": .string("Stable machine-readable key. Must match ^[a-z][a-z0-9_]*$ and be unique within the template.")
+                            ]),
+                            "description": .dictionary([
+                                "type": .string("string"),
+                                "description": .string("User/agent-facing help text explaining what value to provide.")
+                            ]),
+                            "required": .dictionary([
+                                "type": .string("boolean"),
+                                "description": .string("true if this input must be provided before the template can run. Default false.")
+                            ])
+                        ]),
+                        "required": .array([.string("name"), .string("description")])
+                    ]),
+                    "description": .string("""
+                        Optional string-only template input definitions. Valid only when `is_template` is true. Required inputs must be supplied as `input_values` when run_task instantiates the template; non-template tasks cannot define inputs.
+
+                        Example 1 — a localization template that needs an app name:
+                        [
+                          {
+                            "name": "target_app",
+                            "description": "App name or bundle ID to test, e.g. Localizer or com.example.Localizer.",
+                            "required": true
+                          },
+                          {
+                            "name": "locale",
+                            "description": "Optional locale to test, e.g. de-DE. Leave blank to use the task's default locale guidance.",
+                            "required": false
+                          }
+                        ]
+
+                        Example 2 — a repeatable repository audit:
+                        [
+                          {
+                            "name": "repository_path",
+                            "description": "Absolute path to the repository to inspect.",
+                            "required": true
+                          }
+                        ]
+
+                        Names must match ^[a-z][a-z0-9_]*$ and must be unique. Values are strings only. Blank optional values are omitted when the template runs.
+                        """)
                 ])
             ]
         ),
@@ -257,13 +306,31 @@ public struct CreateTaskTool: AgentTool {
 
         var isTemplate = false
         if case .bool(let flag) = arguments["is_template"] { isTemplate = flag }
+        let templateInputDefinitions: [TemplateInputDefinition]
+        if case .array(let rawTemplateInputs) = arguments["template_inputs"] {
+            guard isTemplate else {
+                return .failure("template_inputs are valid only when is_template is true. Ordinary non-template tasks cannot define template inputs.")
+            }
+            switch Self.parseTemplateInputDefinitions(rawTemplateInputs) {
+            case .success(let definitions):
+                templateInputDefinitions = definitions
+            case .failure(let message):
+                return .failure("Task NOT created — template_inputs are invalid: \(message)")
+            }
+        } else {
+            templateInputDefinitions = []
+        }
+        if scheduledRunAt != nil && templateInputDefinitions.contains(where: \.required) {
+            return .failure("Task NOT created — scheduled_run_at cannot be used with required template_inputs yet because scheduled template runs do not carry input_values. Create the template without scheduled_run_at, then run it manually with input_values.")
+        }
 
         let task = await context.taskStore.addTask(
             title: title,
             description: description,
             scheduledRunAt: scheduledRunAt,
             descriptionAttachments: resolvedAttachments,
-            isTemplate: isTemplate
+            isTemplate: isTemplate,
+            templateInputDefinitions: templateInputDefinitions
         )
 
         if !seedCriteria.isEmpty {
@@ -408,7 +475,10 @@ public struct CreateTaskTool: AgentTool {
         // when explicitly started (run_task / play button / a scheduled run), which then
         // clones a fresh instance.
         if isTemplate {
-            return .success("Template task created (ID: \(task.id), title: \"\(title)\").\(contextNote) It won't run on its own — starting it (run_task, the play button, or a scheduled run) clones a fresh instance each time.")
+            let inputNote = templateInputDefinitions.isEmpty
+                ? ""
+                : " Template inputs: \(templateInputDefinitions.map(\.name).joined(separator: ", "))."
+            return .success("Template task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(inputNote) It won't run on its own — starting it (run_task, the play button, or a scheduled run) clones a fresh instance each time.")
         }
 
         // Auto-start the new task when a worker slot is free. Prevents the failure mode
@@ -483,6 +553,37 @@ public struct CreateTaskTool: AgentTool {
                 """
         }
         return "Missing required argument 'description' for create_task (title='\(title)'). Re-call with description=<one-paragraph detail of what needs to be done>."
+    }
+
+    private enum TemplateInputParseResult {
+        case success([TemplateInputDefinition])
+        case failure(String)
+    }
+
+    private static func parseTemplateInputDefinitions(_ rawInputs: [AnyCodable]) -> TemplateInputParseResult {
+        var definitions: [TemplateInputDefinition] = []
+        for raw in rawInputs {
+            guard case .dictionary(let fields) = raw else {
+                return .failure("Every template input must be an object with required 'name' and 'description' fields.")
+            }
+            guard case .string(let rawName) = fields["name"] else {
+                return .failure("Every template input requires a string 'name'.")
+            }
+            guard case .string(let rawDescription) = fields["description"] else {
+                return .failure("Template input '\(rawName)' requires a string 'description'.")
+            }
+            let required: Bool
+            if case .bool(let value) = fields["required"] {
+                required = value
+            } else {
+                required = false
+            }
+            definitions.append(TemplateInputDefinition(name: rawName, description: rawDescription, required: required))
+        }
+        if let problem = TemplateInputValidation.validateDefinitions(definitions) {
+            return .failure(problem)
+        }
+        return .success(definitions)
     }
 }
 

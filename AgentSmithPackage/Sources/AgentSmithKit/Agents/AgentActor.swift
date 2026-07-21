@@ -1150,7 +1150,7 @@ public actor AgentActor {
             candidateTools: toolRegistry.candidateTools,
             taskTitle: task.title,
             taskID: task.id.uuidString,
-            taskDescription: task.description
+            taskDescription: task.renderedDescriptionWithTemplateInputs()
         )
         toolContext.onSecurityAgentProcessingStateChange(false)
         guard result.succeeded else { return }
@@ -1918,7 +1918,7 @@ public actor AgentActor {
                     entries.append(ParallelEntry(
                         batchIndex: batchIndex, call: call, tool: tool, siblings: siblings,
                         taskTitle: currentTask?.title, taskID: currentTask?.id.uuidString,
-                        taskDescription: currentTask?.description
+                        taskDescription: currentTask?.renderedDescriptionWithTemplateInputs()
                     ))
                     await postToolRequestToChannel(call, tool: tool, task: currentTask, parallelIndex: batchIndex, parallelCount: parallelCount, siblingCallSummaries: approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil })
                 }
@@ -2298,7 +2298,7 @@ public actor AgentActor {
             toolParameterDefs: toolParameterDefs,
             taskTitle: currentTask?.title,
             taskID: currentTask?.id.uuidString,
-            taskDescription: currentTask?.description,
+            taskDescription: currentTask?.renderedDescriptionWithTemplateInputs(),
             siblingCalls: siblings,
             agentRoleName: configuration.role.displayName,
             agentContext: agentContext,
@@ -2541,7 +2541,7 @@ public actor AgentActor {
         if let task {
             metadata["taskTitle"] = .string(task.title)
             metadata["taskID"] = .string(task.id.uuidString)
-            metadata["taskDescription"] = .string(task.description)
+            metadata["taskDescription"] = .string(task.renderedDescriptionWithTemplateInputs())
         }
         if parallelCount > 1 {
             metadata["parallelIndex"] = .int(parallelIndex)

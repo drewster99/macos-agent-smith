@@ -339,7 +339,15 @@ struct ListTasksTool: AgentTool {
             truncatedDescriptionPreview: description.text,
             descriptionWasTruncated: description.wasTruncated,
             acceptanceCriteriaSummaries: task.acceptanceCriteria.map { AcceptanceCriterionSummary(name: $0.name, waivable: $0.waivable, hasInputEnumeratorPrompt: $0.inputEnumeratorPrompt != nil) },
-            acceptanceCriteriaCount: task.acceptanceCriteria.count
+            acceptanceCriteriaCount: task.acceptanceCriteria.count,
+            templateInputDefinitionSummaries: task.templateInputDefinitions.map {
+                TemplateInputDefinitionSummary(name: $0.name, required: $0.required)
+            },
+            templateInputDefinitionCount: task.templateInputDefinitions.count,
+            requiredTemplateInputCount: task.templateInputDefinitions.filter(\.required).count,
+            missingRequiredTemplateInputNames: task.missingRequiredTemplateInputNames,
+            hasTemplateInputValues: !task.templateInputValues.isEmpty,
+            templateInputValueNames: task.templateInputValues.keys.sorted()
         )
     }
 
@@ -399,11 +407,22 @@ struct ListTasksTool: AgentTool {
         let descriptionWasTruncated: Bool
         let acceptanceCriteriaSummaries: [AcceptanceCriterionSummary]
         let acceptanceCriteriaCount: Int
+        let templateInputDefinitionSummaries: [TemplateInputDefinitionSummary]
+        let templateInputDefinitionCount: Int
+        let requiredTemplateInputCount: Int
+        let missingRequiredTemplateInputNames: [String]
+        let hasTemplateInputValues: Bool
+        let templateInputValueNames: [String]
     }
 
     private struct AcceptanceCriterionSummary: Encodable {
         let name: String
         let waivable: Bool
         let hasInputEnumeratorPrompt: Bool
+    }
+
+    private struct TemplateInputDefinitionSummary: Encodable {
+        let name: String
+        let required: Bool
     }
 }

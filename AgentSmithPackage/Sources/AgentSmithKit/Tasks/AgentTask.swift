@@ -78,6 +78,13 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// ordinary tasks and for templates themselves. Lets future UI group instances
     /// under their template; for now it's just a recorded lineage.
     public var parentTaskID: UUID?
+    /// Inputs this template requires or accepts before a run can be instantiated. Only
+    /// template tasks may define these directly. Template instances retain a snapshot so
+    /// their historical context stays stable if the template is edited later.
+    public var templateInputDefinitions: [TemplateInputDefinition]
+    /// Resolved input values captured when a template instance is created. Only cloned
+    /// template instances should carry values; ordinary tasks and templates keep this empty.
+    public var templateInputValues: [String: String]
 
     /// The most recent set of tool names the security agent approved for the worker on this
     /// task (per-task tool scoping). A **record**, not the gate — the live registry is the
@@ -269,7 +276,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         steps: [TaskStep] = [],
         validation: TaskValidationState? = nil,
         isTemplate: Bool = false,
-        parentTaskID: UUID? = nil
+        parentTaskID: UUID? = nil,
+        templateInputDefinitions: [TemplateInputDefinition] = [],
+        templateInputValues: [String: String] = [:]
     ) {
         self.id = id
         self.title = title
@@ -302,12 +311,14 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.validation = validation
         self.isTemplate = isTemplate
         self.parentTaskID = parentTaskID
+        self.templateInputDefinitions = templateInputDefinitions
+        self.templateInputValues = templateInputValues
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInputValues
     }
 
     public init(from decoder: Decoder) throws {
@@ -343,6 +354,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
         isTemplate = try c.decodeIfPresent(Bool.self, forKey: .isTemplate) ?? false
         parentTaskID = try c.decodeIfPresent(UUID.self, forKey: .parentTaskID)
+        templateInputDefinitions = try c.decodeIfPresent([TemplateInputDefinition].self, forKey: .templateInputDefinitions) ?? []
+        templateInputValues = try c.decodeIfPresent([String: String].self, forKey: .templateInputValues) ?? [:]
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -392,5 +405,24 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(validation, forKey: .validation)
         if isTemplate { try c.encode(true, forKey: .isTemplate) }
         try c.encodeIfPresent(parentTaskID, forKey: .parentTaskID)
+        if !templateInputDefinitions.isEmpty {
+            try c.encode(templateInputDefinitions, forKey: .templateInputDefinitions)
+        }
+        if !templateInputValues.isEmpty {
+            try c.encode(templateInputValues, forKey: .templateInputValues)
+        }
+    }
+}
+
+/// A string-only input definition owned by a template task.
+public struct TemplateInputDefinition: Codable, Sendable, Equatable {
+    public var name: String
+    public var description: String
+    public var required: Bool
+
+    public init(name: String, description: String, required: Bool) {
+        self.name = name
+        self.description = description
+        self.required = required
     }
 }

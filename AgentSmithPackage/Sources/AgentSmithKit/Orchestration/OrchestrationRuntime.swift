@@ -866,6 +866,9 @@ public actor OrchestrationRuntime {
     func composeBrownTaskBriefing(for task: AgentTask) async -> String {
         var parts: [String] = []
         parts.append("Task: \"\(task.title)\" (ID: \(task.id.uuidString))\n\n\(task.description)")
+        if let templateInputValues = task.renderedTemplateInputValues() {
+            parts.append("## Template inputs\n\(templateInputValues)")
+        }
         // A prior acknowledgment means this is a resume (respawn after interruption, or a
         // rejection sent back for revision). The synthetic ack hasn't run yet at briefing time,
         // so the counter still reflects earlier attempts. State it explicitly here — Brown no
@@ -1446,7 +1449,9 @@ public actor OrchestrationRuntime {
             // is the single chokepoint every start path funnels through (run_task, the
             // play button, auto-advance, scheduled wakes), so all of them clone. Any
             // per-run amendment lands on the started (cloned) task, not the template.
-            let startID = await self.resolveStartTarget(taskID: taskID, amendment: amendment)
+            guard let startID = await self.resolveStartTarget(taskID: taskID, amendment: amendment) else {
+                return
+            }
             if await self.hasLiveSmith() {
                 await self.performStartTaskWithLiveSmith(taskID: startID)
                 return
@@ -1467,9 +1472,20 @@ public actor OrchestrationRuntime {
     /// If `taskID` is a template, clone a fresh instance, note it on the template, and
     /// announce the instance; return the ID to actually start (the instance, or the
     /// original for a non-template). Runs on the lifecycle queue via `restartForNewTask`.
-    private func resolveStartTarget(taskID: UUID, amendment: String? = nil) async -> UUID {
+    private func resolveStartTarget(taskID: UUID, amendment: String? = nil) async -> UUID? {
         guard let task = await taskStore.task(id: taskID), task.isTemplate else { return taskID }
-        guard let instance = await taskStore.cloneTemplateInstance(templateID: taskID) else { return taskID }
+        let instance: AgentTask
+        switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: [:]) {
+        case .success(let created):
+            instance = created
+        case .failure(let message):
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Could not start template \"\(task.title)\": \(message)",
+                metadata: ["isError": .bool(true)]
+            ))
+            return nil
+        }
         // Apply any per-run instructions to the fresh INSTANCE, never the reusable template — else
         // one run's one-off text would weld onto the template and every future clone would inherit it.
         // Re-read after amending so the announced description reflects the applied instructions
@@ -1485,7 +1501,7 @@ public actor OrchestrationRuntime {
             metadata: [
                 "messageKind": .string("task_created"),
                 "taskID": .string(announced.id.uuidString),
-                "taskDescription": .string(announced.description),
+                "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
                 "clonedFromTemplate": .string(taskID.uuidString)
             ]
         ))
@@ -3007,7 +3023,7 @@ public actor OrchestrationRuntime {
                     candidateTools: builtIns + mcpTools,
                     taskTitle: task.title,
                     taskID: task.id.uuidString,
-                    taskDescription: task.description
+                    taskDescription: task.renderedDescriptionWithTemplateInputs()
                 )
                 await notifyProcessingStateChange(role: .securityAgent, isProcessing: false)
                 guard scoping.succeeded else {
