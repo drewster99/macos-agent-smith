@@ -108,10 +108,16 @@ struct AgentActorTests {
             context: makeContext(taskStore: taskStore)
         )
 
-        #expect(result.output.contains("Showing tasks 1–2 of 2"))
-        #expect(result.output.contains("Task A"))
-        #expect(result.output.contains("Task B"))
         #expect(result.succeeded)
+        let json = try #require(Self.decodeJSONObject(result.output))
+        #expect(json["completeDetails"] as? Bool == false)
+        let pagination = try #require(json["pagination"] as? [String: Any])
+        #expect(pagination["totalMatching"] as? Int == 2)
+        let tasks = try #require(json["tasks"] as? [[String: Any]])
+        #expect(tasks.count == 2)
+        #expect(tasks.contains { $0["title"] as? String == "Task A" })
+        #expect(tasks.contains { $0["title"] as? String == "Task B" })
+        #expect(tasks.allSatisfy { $0.keys.contains("truncatedDescriptionPreview") })
     }
 
     @Test("ListTasksTool filters by status")
@@ -127,10 +133,12 @@ struct AgentActorTests {
             context: makeContext(taskStore: taskStore)
         )
 
-        #expect(result.output.contains("Showing tasks 1–1 of 1"))
-        #expect(result.output.contains("Done task"))
-        #expect(!result.output.contains("Pending task"))
         #expect(result.succeeded)
+        let json = try #require(Self.decodeJSONObject(result.output))
+        let tasks = try #require(json["tasks"] as? [[String: Any]])
+        #expect(tasks.count == 1)
+        #expect(tasks.first?["title"] as? String == "Done task")
+        #expect(tasks.first?["status"] as? String == "completed")
     }
 
     @Test("ListTasksTool returns empty message when no tasks")
@@ -140,9 +148,96 @@ struct AgentActorTests {
             arguments: [:],
             context: makeContext()
         )
-        #expect(result.output == "No tasks found matching the given filters.")
         // Empty result is a successful query — the search worked, nothing matched.
         #expect(result.succeeded)
+        let json = try #require(Self.decodeJSONObject(result.output))
+        #expect(json["note"] as? String == "No tasks found matching the given filters.")
+        let pagination = try #require(json["pagination"] as? [String: Any])
+        #expect(pagination["totalMatching"] as? Int == 0)
+        let tasks = try #require(json["tasks"] as? [[String: Any]])
+        #expect(tasks.isEmpty)
+    }
+
+    @Test("ListTasksTool supports template, schedule, query, and date filters")
+    func listTasksAdvancedFilters() async throws {
+        let taskStore = TaskStore()
+        let scheduledRunAt = Date().addingTimeInterval(3_600)
+        let template = await taskStore.addTask(
+            title: "Daily translation audit",
+            description: String(repeating: "Translation ", count: 80),
+            scheduledRunAt: scheduledRunAt,
+            isTemplate: true
+        )
+        await taskStore.setAcceptanceCriteria(id: template.id, criteria: [
+            AcceptanceCriterion(name: "Audit exists", validationPrompt: "full prompt is hidden from list_tasks", inputEnumeratorPrompt: "full enumerator is hidden from list_tasks", origin: .smith)
+        ])
+        await taskStore.addTask(title: "Unrelated", description: "nothing to see")
+
+        let tool = ListTasksTool()
+        let result = try await tool.execute(
+            arguments: [
+                "status_filter": .string("scheduled"),
+                "is_template": .bool(true),
+                "is_scheduled": .bool(true),
+                "query": .string("translation"),
+                "created_before": .string(ISO8601DateFormatter().string(from: Date().addingTimeInterval(60))),
+                "scheduled_after": .string(ISO8601DateFormatter().string(from: Date())),
+                "scheduled_before": .string(ISO8601DateFormatter().string(from: Date().addingTimeInterval(7_200)))
+            ],
+            context: makeContext(taskStore: taskStore)
+        )
+
+        #expect(result.succeeded)
+        let json = try #require(Self.decodeJSONObject(result.output))
+        let filters = try #require(json["filters"] as? [String: Any])
+        #expect(filters["is_template"] as? Bool == true)
+        #expect(filters["is_scheduled"] as? Bool == true)
+        let tasks = try #require(json["tasks"] as? [[String: Any]])
+        #expect(tasks.count == 1)
+        let task = try #require(tasks.first)
+        #expect(task["id"] as? String == template.id.uuidString)
+        #expect(task["isTemplate"] as? Bool == true)
+        #expect(task["isScheduled"] as? Bool == true)
+        #expect(task["scheduledRunAt"] as? String != nil)
+        #expect(task["descriptionWasTruncated"] as? Bool == true)
+        let criteria = try #require(task["acceptanceCriteriaSummaries"] as? [[String: Any]])
+        #expect(criteria.first?["name"] as? String == "Audit exists")
+        #expect(criteria.first?["hasInputEnumeratorPrompt"] as? Bool == true)
+        #expect(!result.output.contains("full prompt is hidden from list_tasks"))
+        #expect(!result.output.contains("full enumerator is hidden from list_tasks"))
+    }
+
+    @Test("ListTasksTool supports parent template and inactive disposition filters")
+    func listTasksParentAndDispositionFilters() async throws {
+        let inactive = InactiveTaskStore()
+        let taskStore = TaskStore(inactiveStore: inactive)
+        let template = await taskStore.addTask(title: "Template", description: "Reusable", isTemplate: true)
+        let instance = try #require(await taskStore.cloneTemplateInstance(templateID: template.id))
+        let archived = await taskStore.addTask(title: "Archived", description: "Inactive")
+        _ = await taskStore.archive(id: archived.id)
+
+        let tool = ListTasksTool()
+        let instances = try await tool.execute(
+            arguments: [
+                "has_parent_template": .bool(true),
+                "parent_task_id": .string(template.id.uuidString)
+            ],
+            context: makeContext(taskStore: taskStore)
+        )
+        let instanceTasks = try #require((Self.decodeJSONObject(instances.output)?["tasks"]) as? [[String: Any]])
+        #expect(instanceTasks.count == 1)
+        #expect(instanceTasks.first?["id"] as? String == instance.id.uuidString)
+        #expect(instanceTasks.first?["hasParentTemplate"] as? Bool == true)
+        #expect(instanceTasks.first?["parentTemplateID"] as? String == template.id.uuidString)
+
+        let archivedResult = try await tool.execute(
+            arguments: ["disposition_filter": .string("archived")],
+            context: makeContext(taskStore: taskStore)
+        )
+        let archivedTasks = try #require((Self.decodeJSONObject(archivedResult.output)?["tasks"]) as? [[String: Any]])
+        #expect(archivedTasks.count == 1)
+        #expect(archivedTasks.first?["id"] as? String == archived.id.uuidString)
+        #expect(archivedTasks.first?["disposition"] as? String == "archived")
     }
 
     // MARK: - ChannelMessage Codable
@@ -161,6 +256,15 @@ struct AgentActorTests {
         #expect(decoded.content == "With file")
         #expect(decoded.attachments.count == 1)
         #expect(decoded.attachments[0].filename == "test.txt")
+    }
+
+    private static func decodeJSONObject(_ text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        do {
+            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - MemoryEntry round-trip

@@ -9,13 +9,15 @@ extension AgentTask {
     /// The acceptance criteria as a numbered list. Criterion N is its 1-based position in
     /// `acceptanceCriteria`. When `includeVerdicts` is true, each line carries the latest
     /// verdict (ACCEPT / REJECT — reason / …) from the validation ledger, so a resuming worker
-    /// sees at a glance which criteria still need work. Returns `nil` when there are no criteria.
+    /// sees at a glance which criteria still need work. When `includePrompts` is true, the
+    /// task-scoped validator and input-enumerator prompts are included for full contract
+    /// inspection. Returns `nil` when there are no criteria.
     /// Each criterion renders as a markdown block — a bold `**Criterion N**` header (with any
     /// qualifiers/verdict) followed by the criterion's own text on the next line. A header (rather
     /// than a `N. ` list prefix) so a criterion whose text is itself structured markdown — nested
     /// lists making "must be ONE of …" / "must include ALL of …" explicit — renders cleanly instead
     /// of colliding with the outer numbering.
-    func renderedAcceptanceCriteria(includeVerdicts: Bool) -> String? {
+    func renderedAcceptanceCriteria(includeVerdicts: Bool, includePrompts: Bool = false) -> String? {
         guard !acceptanceCriteria.isEmpty else { return nil }
         let ledger = validation
         let blocks = acceptanceCriteria.enumerated().map { index, criterion -> String in
@@ -26,7 +28,14 @@ extension AgentTask {
             let verdict = includeVerdicts
                 ? (ledger?.latestVerdict(for: criterion.id)).map { " — \(OrchestrationRuntime.describeVerdict($0))" } ?? ""
                 : ""
-            return "**Criterion \(index + 1)**\(suffix)\(verdict)\n\(criterion.text)"
+            var block = "**Criterion \(index + 1)**\(suffix)\(verdict)\n\(criterion.text)"
+            if includePrompts {
+                block += "\nValidation prompt:\n\(criterion.validationPrompt)"
+                if let inputEnumeratorPrompt = criterion.inputEnumeratorPrompt, !inputEnumeratorPrompt.isEmpty {
+                    block += "\nInput enumerator prompt:\n\(inputEnumeratorPrompt)"
+                }
+            }
+            return block
         }
         return blocks.joined(separator: "\n\n")
     }

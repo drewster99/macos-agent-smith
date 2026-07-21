@@ -307,6 +307,44 @@ struct ValidationAgentSurfaceTests {
         #expect(!names.contains("list_validators"))
     }
 
+    @Test("get_task_details includes validation prompts and scheduling metadata, not summary")
+    func getTaskDetailsRendersValidationContract() async throws {
+        let taskStore = TaskStore()
+        let scheduledRunAt = Date().addingTimeInterval(3_600)
+        let task = await taskStore.addTask(
+            title: "Scheduled template",
+            description: "Run this later",
+            scheduledRunAt: scheduledRunAt,
+            isTemplate: true
+        )
+        await taskStore.setAcceptanceCriteria(id: task.id, criteria: [
+            AcceptanceCriterion(
+                name: "Files checked",
+                validationPrompt: "Validate every provided file path.",
+                inputEnumeratorPrompt: "Return a JSON array of file paths.",
+                origin: .smith
+            )
+        ])
+        await taskStore.setSummary(id: task.id, summary: "This should not be returned.")
+        await taskStore.setResult(id: task.id, result: "Done", commentary: nil)
+
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+        let result = try await GetTaskDetailsTool().execute(
+            arguments: ["task_ids": .array([.string(task.id.uuidString)])],
+            context: context
+        )
+
+        #expect(result.succeeded)
+        #expect(result.output.contains("isTemplate: true"))
+        #expect(result.output.contains("isScheduled: true"))
+        #expect(result.output.contains("scheduledRunAt:"))
+        #expect(result.output.contains("hasParentTemplate: false"))
+        #expect(result.output.contains("Validation prompt:\nValidate every provided file path."))
+        #expect(result.output.contains("Input enumerator prompt:\nReturn a JSON array of file paths."))
+        #expect(!result.output.contains("Summary:"))
+        #expect(!result.output.contains("This should not be returned."))
+    }
+
     // MARK: - create_task seeding
 
     @Test("create_task seeds acceptance criteria and initial steps")

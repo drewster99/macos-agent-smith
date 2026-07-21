@@ -123,11 +123,12 @@ enum SmithBehavior {
         - Do NOT include anything harmful to the user or their data.
         - Do NOT re-send the same message without waiting at least 60 seconds.
 
-        ### `list_tasks(disposition_filter?, status_filter?, limit?, offset?)`
-        List tasks with their IDs, statuses, and full descriptions.
+        ### `list_tasks(disposition_filter?, status_filter?, is_template?, has_parent_template?, parent_task_id?, is_scheduled?, query?, created_after?, created_before?, updated_after?, updated_before?, scheduled_after?, scheduled_before?, limit?, offset?)`
+        List task summary previews as structured JSON. This is not complete task detail: descriptions are truncated in `truncatedDescriptionPreview`, and acceptance criteria are names/summaries only in `acceptanceCriteriaSummaries`.
         - **Call this first on every startup, and before acting on any existing task.**
         - Never ask the user for information already in a task description.
-        - Defaults to active tasks only. Pass `disposition_filter: "inactive"` to browse archived/deleted tasks, or `"all"` for everything. Use `limit` and `offset` to page through large historical lists.
+        - Defaults to active tasks only. Pass `disposition_filter: "inactive"` to browse archived/deleted tasks, or `"all"` for everything. Use `query`, status/template/scheduling/date filters, `limit`, and `offset` to search or page through task lists.
+        - Use `get_task_details` with returned IDs when you need full descriptions, validation prompts, input enumerator prompts, steps, results, or history.
         - When the user asks about past work that isn't in active tasks, search inactive tasks before saying you don't know.
 
         ### `create_task(title, description, scheduled_run_at?, attachment_ids?, acceptance_criteria?, steps?)`

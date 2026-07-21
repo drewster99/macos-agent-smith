@@ -5,7 +5,8 @@ struct GetTaskDetailsTool: AgentTool {
     let name = "get_task_details"
     let toolDescription = """
         Fetch the full details of one or more tasks by their IDs, including title, description, \
-        commentary, progress updates, result, and summary. Pass an array of task IDs (max 10) \
+        scheduling/template metadata, acceptance criteria, steps, commentary, progress updates, \
+        and result. Pass an array of task IDs (max 10) \
         to retrieve several tasks in a single call.
         """
 
@@ -101,9 +102,18 @@ struct GetTaskDetailsTool: AgentTool {
         parts.append("Title: \(task.title)")
         parts.append("Status: \(task.status.rawValue)")
         parts.append("Disposition: \(task.disposition.rawValue)")
+        parts.append("isTemplate: \(task.isTemplate)")
+        parts.append("isScheduled: \(task.scheduledRunAt != nil)")
+        if let scheduledRunAt = task.scheduledRunAt {
+            parts.append("scheduledRunAt: \(Self.formatDate(scheduledRunAt))")
+        }
+        parts.append("hasParentTemplate: \(task.parentTaskID != nil)")
+        if let parentTaskID = task.parentTaskID {
+            parts.append("parentTemplateID: \(parentTaskID.uuidString)")
+        }
         parts.append("Description: \(task.description)")
 
-        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: true) {
+        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: true, includePrompts: true) {
             parts.append("Acceptance criteria (each judged independently; the number is stable):\n\(criteria)")
         }
 
@@ -120,10 +130,6 @@ struct GetTaskDetailsTool: AgentTool {
                 "  - [\(Self.formatDate(update.date))] \(update.message)"
             }
             parts.append("Progress updates:\n\(updateLines.joined(separator: "\n"))")
-        }
-
-        if let summary = task.summary, !summary.isEmpty {
-            parts.append("Summary: \(summary)")
         }
 
         if let result = task.result, !result.isEmpty {

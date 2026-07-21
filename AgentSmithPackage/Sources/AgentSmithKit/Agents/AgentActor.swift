@@ -2095,7 +2095,11 @@ public actor AgentActor {
                                 : []
                             result = await executeWithApproval(call, tool: tool, parallelIndex: batchIndex, parallelCount: segment.calls.count, siblingCallSummaries: siblings)
                         } else {
-                            result = await directExecute(call, tool: tool).result
+                            result = await directExecute(
+                                call,
+                                tool: tool,
+                                postVisibility: shouldPostDirectToolVisibility(tool)
+                            ).result
                         }
                     } else {
                         result = "Unknown tool: \(call.name)"
@@ -2358,7 +2362,22 @@ public actor AgentActor {
         ))
     }
 
-    private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> (result: String, succeeded: Bool) {
+    private func shouldPostDirectToolVisibility(_ tool: any AgentTool) -> Bool {
+        configuration.role == .smith && !mustEvaluate(tool)
+    }
+
+    private func directExecute(_ call: LLMToolCall, tool: any AgentTool, postVisibility: Bool = false) async -> (result: String, succeeded: Bool) {
+        if postVisibility {
+            await postToolRequestToChannel(
+                call,
+                tool: tool,
+                task: nil,
+                parallelIndex: 0,
+                parallelCount: 1,
+                siblingCallSummaries: []
+            )
+        }
+
         let agentIDPrefix = String(id.uuidString.prefix(8))
         let outcome = await Self.runToolWithTimeout(call, tool: tool, context: toolContext) { name, seconds in
             Self.stopLogger.warning("Tool '\(name, privacy: .public)' execution exceeded \(seconds, privacy: .public)s — cancelled (agent=\(agentIDPrefix, privacy: .public))")
@@ -2367,6 +2386,15 @@ public actor AgentActor {
         turnToolResultChars += outcome.result.count
         await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
         recordToolOutcome(name: call.name, succeeded: outcome.succeeded)
+        if postVisibility {
+            await Self.postToolOutputToChannel(
+                result: outcome.result,
+                call: call,
+                role: configuration.role,
+                context: toolContext,
+                taskTitle: channelTaskTitle
+            )
+        }
         return (outcome.result, outcome.succeeded)
     }
 
