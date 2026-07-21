@@ -10,7 +10,14 @@ import Foundation
 public struct CreateTaskTool: AgentTool {
     public let name = "create_task"
     public let toolDescription = """
-        Create a new task. If the configured maximum task concurrency has a free worker slot, the \
+        Create a new task.
+
+        Writing the parameters to pass to `create_task` is the most important job you will ever do.
+        Accuracy, clarity, conciseness and completeness are absolutely paramount. Study the tool
+        descriptions, including the given examples, and think through to make sure everything will
+        work as expected.
+
+        If the configured maximum task concurrency has a free worker slot, the \
         new task auto-starts immediately and the system restarts on it — you do NOT need a \
         follow-up `run_task` call. If every worker slot is occupied, the new task is queued as \
         pending; the response tells you so and you should leave it alone until a slot becomes free. \
@@ -19,60 +26,146 @@ public struct CreateTaskTool: AgentTool {
         set, the task is created with status `scheduled` (auto-start is suppressed) and a timer is \
         auto-scheduled to fire at that time and instruct you to call `run_task`. Do NOT call \
         `schedule_task_action` separately when you've already passed `scheduled_run_at` — that \
-        would double-schedule the run. \
+        would double-schedule the run. Separately call `schedule_task_action` after the task is \
+        created if you want to set up a RECURRING task. \
         \
         IMPORTANT — `attachment_ids`: if the user's message included ANY attachments (an image, \
         screenshot, PDF, or other file — shown to you as `[filename](file://…) … id=<UUID>` \
         markdown links), and the worker might need them to do the task, you MUST pass their EXACT \
         `id=` UUIDs in the `attachment_ids` array. The worker (Brown) does NOT see the user's \
         attachments unless you forward them here — omitting them means the worker is blind to the \
-        screenshot/file the user provided.
+        screenshot/file the user provided. You can use the `attach_file` tool to create attachment IDs for \
+        any other files you want the worker agent to use during the task. Using `attach_file` copies \
+        the named files into attachment storage, so avoid using it for files that the worker agent \
+        should modify in-place. If files need to be modified in place or if you need to reference an \
+        entire folder, include the path of the file/folder in your `description` parameter text.
         """
 
     public let parameters: [String: AnyCodable] = [
         "type": .string("object"),
-        "properties": .dictionary([
-            "title": .dictionary([
-                "type": .string("string"),
-                "description": .string("Short title for the task.")
-            ]),
-            "description": .dictionary([
-                "type": .string("string"),
-                "description": .string("Detailed description of what needs to be done. This description should include (1) A detailed description of the goal or problem being solved, (2) A markdown-formatted step by step list of all the things that need to be done, including any relevant inputs, data files, or user directives, (3) The desired result/output of the task, (4) A brief list of verifications, tests, or other steps to be taken to confirm successful completion and a second section for success verification / things to test or double-check for completeness.")
-            ]),
-            "scheduled_run_at": .dictionary([
-                "type": .string("string"),
-                "description": .string("Optional ISO-8601 timestamp. When set and in the future, the task is created with status `scheduled` and a paired timer fires at that time to run it. Use when the user says \"do X at <time>\".")
-            ]),
-            "attachment_ids": .dictionary([
-                "type": .string("array"),
-                "items": .dictionary(["type": .string("string")]),
-                "description": .string("Optional UUID strings of attachments to include with this task. Use when the user attached an image, PDF, or file the worker will need. The IDs are surfaced in the user's incoming message as `[filename](file://…) … id=<UUID>` markdown links. Forward the EXACT id values verbatim. Brown will see image attachments as image content and any non-image attachments as text references with file paths.")
-            ]),
-            "acceptance_criteria": .dictionary([
-                "type": .string("array"),
-                "items": .dictionary([
-                    "type": .string("object"),
-                    "properties": .dictionary([
-                        "name": .dictionary(["type": .string("string"), "description": .string("Short display-only name.")]),
-                        "validation_prompt": .dictionary(["type": .string("string"), "description": .string("Required instructions for the validation LLM: what to check and what evidence is sufficient.")]),
-                        "input_enumerator_prompt": .dictionary(["type": .string("string"), "description": .string("Optional instructions for an LLM that MUST return a JSON array of strings. Each string is checked independently with validation_prompt; every item must pass.")]),
-                        "waivable": .dictionary(["type": .string("boolean"), "description": .string("Whether WAIVE is permitted. Default false.")])
-                    ]),
-                    "required": .array([.string("name"), .string("validation_prompt")])
+        "properties": .dictionary(
+            [
+                "title": .dictionary([
+                    "type": .string("string"),
+                    "description": .string("Short title for the task.")
                 ]),
-                "description": .string("Acceptance criteria for every real task. `name` is display-only; put all judgment instructions and concrete evidence requirements in required `validation_prompt`. Optional non-blank `input_enumerator_prompt` must return a JSON array of strings; each string becomes an independent subcheck handed to the validation LLM with `validation_prompt`, and every subcheck must pass. Example: {\"name\":\"Translations complete\",\"input_enumerator_prompt\":\"Return only [\\\"german.txt\\\", \\\"french.txt\\\"].\",\"validation_prompt\":\"Verify itemToEvaluate names a complete translation file and confirm it from the evidence directory.\"}. Write prompts so correct work passes, including edge cases and explicit alternatives. Encode user-declared MUST-FAIL gates as non-waivable criteria with no escape hatch.")
-            ]),
-            "steps": .dictionary([
-                "type": .string("array"),
-                "items": .dictionary(["type": .string("string")]),
-                "description": .string("Initial step list for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. The worker owns and evolves it from there (`manage_steps`); validators see the final list including anything skipped or removed.")
-            ]),
-            "is_template": .dictionary([
-                "type": .string("boolean"),
-                "description": .string("Make this a TEMPLATE. A template never runs itself — each time it's started, a fresh instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly and get a clean run each time. Default false. (When you schedule a RECURRING run on a task, it becomes a template automatically.)")
-            ])
-        ]),
+                "description": .dictionary([
+                    "type": .string("string"),
+                    "description": .string("""
+
+                        Detailed description of what needs to be done, based closely on the directive(s) provided by the user. This communication must be clear, concise and complete. It is the one and only embodiment of the user's intent, and as such it must be embodied perfectly. Consider including the user's text verbatim. Make sure your final description doesn't miss or misrepresent any nuance in the user's request. Pay attention not only to the user's specific words and details, but also think about what the user MOST LIKELY MEANT. The worker agent won't see ANY of your conversations with the user. Everything it needs must be detailed here.
+                        Include a Capabilities Needed section at the bottom of your description, where you list bullet points of capabilities that the worker agent will likely need to complete the task. Never name a specific tool. For example, don't say "grep", say "Search for content in files". Don't say "bash", specify the specific things the agent will need to do with the shell, like "Find source code files", "Edit files", "Compile the Xcode project", etc..
+
+                        Use the `steps` parameter to include a clear step-by-step todo list of steps the worker agent should take to complete the task.
+                        Use the `acceptance_criteria` parameter to spell out what 'done' and 'complete' look like, and how to verify/validate.
+                    """)
+                ]),
+                "scheduled_run_at": .dictionary([
+                    "type": .string("string"),
+                    "description": .string("Optional ISO-8601 timestamp. When set and in the future, the task is created with status `scheduled` and a paired timer fires at that time to run it. Use when the user says \"do X at <time>\". If the user wants a recurring task, consider creating this task as a template by setting the `is_template` parameter to `true`. To schedule the task on a recurring schedule, follow up with a `schedule_task_action` call after the `create_task` call completes.")
+                ]),
+                "attachment_ids": .dictionary([
+                    "type": .string("array"),
+                    "items": .dictionary(["type": .string("string")]),
+                    "description": .string("UUID strings of attachments to include with this task. Use when the user attached an image, PDF, or file the worker will need. The IDs are surfaced in the user's incoming message as `[filename](file://…) … id=<UUID>` markdown links. Forward the EXACT id values verbatim. Brown will see image attachments as image content and any non-image attachments as text references with file paths.")
+                ]),
+                "acceptance_criteria": .dictionary(
+                    [
+                        "type": .string("array"),
+                        "items": .dictionary(
+                            [
+                                "type": .string("object"),
+                                "properties": .dictionary(
+                                    [
+                                        "name": .dictionary(
+                                            [
+                                                "type": .string("string"),
+                                                "description": .string("""
+                                                    Short display-only name. This is how the user will see this deliverable in the user interface, so this text should be meaningful to the user.
+
+                                                    Example 1: "Verifying JSON downloaded"
+
+                                                    Example 2: "Checking provided word is allowed"
+                                                    """)
+                                            ]
+                                        ),
+                                        "validation_prompt": .dictionary(
+                                            [
+                                                "type": .string(
+                                                    "string"
+                                                ),
+                                                "description": .string(
+                                                    """
+                                                    Detailed instructions for the validator - what to check, how to check it, what kind \
+                                                    of evidence is acceptable, what is considered a failure/rejection. This \
+                                                    prompt will typically be interpreted very literally, so be sure it is clear, \
+                                                    concise and complete.
+
+                                                    Example 1: "Confirm that the worker agent ran a web search and fetched the JSON file from the website. Also confirm the JSON file exists - the agent must either have attached it or given a path to the file. If they gave a path, confirm you can read the path. If all true, ACCEPT this item. Else REJECT."
+
+                                                    Example 2 might be used when an enumerator is provided: "Look at the provided enumeration input and confirm that the term provided exists in list of words found in the file /tmp/allowed_words.txt.  If the word is found, ACCEPT this item. If not, REJECT."
+
+                                                    Example 3: "If the user mentioned buffalos, ACCEPT.  If the user mentioned horses, REJECT. If the user didn't mention either buffalos or horses, WAIVE this item."
+                                                    """
+                                                )
+                                            ]
+                                        ),
+                                        "input_enumerator_prompt": .dictionary(
+                                            [
+                                                "type": .string(
+                                                    "string"
+                                                ),
+                                                "description": .string(
+                                                    """
+                                                    Optional: Instructions for an LLM that MUST return a JSON array of strings. Each string is checked *independently* with the `validation_prompt`. Every item must pass for this acceptance criterion to be accepted. If any are rejected, this entire criterion is rejected.
+
+                                                    Example 1 enumerates Java files in a particular directory/folder. The `validation_prompt` will then be applied to each file returned: "Do a directory listing of the /tmp/foo folder and return a JSON array of strings, one for each '.java' file in that folder. For each file returned, include the full path."
+
+                                                    Example 2 instructs the LLM to return a hardcoded list: "Respond with these items in a JSON array, and nothing else - no other text, commentary, etc.: Flour, Sugar, Ham"
+                                                    """
+                                                )
+                                            ]
+                                        ),
+                                        "waivable": .dictionary(
+                                            [
+                                                "type": .string(
+                                                    "boolean"
+                                                ),
+                                                "description": .string(
+                                                    "Whether WAIVE is permitted. Default false. Waivable items may be skipped at the discretion of the validator."
+                                                )
+                                            ]
+                                        )
+                                    ]
+                                ),
+                                "required": .array([.string("name"), .string("validation_prompt")])
+                            ]
+                        ),
+                        "description": .string("""
+                            Acceptance / validation criteria -- the list of deliverables -- for this task. ALL items must either \
+                            pass (be accepted) or be waived for the task to be considered successful.
+
+                            Put all validation instructions and list acceptable evidence into `validation_prompt`.
+
+                            If the `validation_prompt` should be run on an arbitrary number of items, use the optional `input_enumerator_prompt`. The `input_enumerator_prompt` must instruct the LLM to return a JSON array of strings; each string will be validated with the `validation_prompt` independently, and every subcheck must pass. If any fail, the given criterion is rejected.
+
+                            Write prompts so correct work passes, including edge cases and explicit alternatives. Encode user-declared MUST-FAIL gates as non-waivable criteria with no escape hatch.
+                            """)
+                    ]
+                ),
+                "steps": .dictionary([
+                    "type": .string("array"),
+                    "items": .dictionary(["type": .string("string")]),
+                    "description": .string("""
+                        Initial to-do list of steps for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. Note that these steps are guidance to the worker agent, not requirements. Once the task starts, the worker owns this to-do list and may edit, delete, re-order items as it wishes. Validators see only the *final* list.
+                        """)
+                ]),
+                "is_template": .dictionary([
+                    "type": .string("boolean"),
+                    "description": .string("Make this a TEMPLATE. A template never runs itself. Each time it's started, a fresh instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly (either manually or on a schedule) and get a clean run each time. Default `false`. When you schedule a RECURRING run on a task with `schedule_task_action`, it becomes a template automatically.")
+                ])
+            ]
+        ),
         "required": .array([.string("title"), .string("description")])
     ]
 
