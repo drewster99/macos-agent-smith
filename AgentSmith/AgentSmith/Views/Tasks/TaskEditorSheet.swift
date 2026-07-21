@@ -196,28 +196,63 @@ struct TaskEditorSheet: View {
                 .buttonStyle(.plain)
             }
             ForEach($criteria) { $row in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        TextField("Name", text: $row.name)
-                            .textFieldStyle(.roundedBorder)
-                        Toggle("Waivable", isOn: $row.waivable)
-                            .toggleStyle(.checkbox)
-                        Button {
-                            criteria.removeAll { $0.id == row.id }
-                        } label: {
-                            Image(systemName: "minus.circle")
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    TextField("Validation prompt", text: $row.validationPrompt, axis: .vertical)
-                        .lineLimit(2...5)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Input enumerator prompt", text: $row.inputEnumeratorPrompt, axis: .vertical)
-                        .lineLimit(1...4)
-                        .textFieldStyle(.roundedBorder)
-                }
+                criterionCard(row: $row, number: criterionNumber(for: row.id))
             }
         }
+    }
+
+    private func criterionCard(row: Binding<CriterionRow>, number: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                requirementChip(number)
+                TextField("Name", text: row.name)
+                    .textFieldStyle(.roundedBorder)
+                Toggle("Waivable", isOn: row.waivable)
+                    .toggleStyle(.checkbox)
+                Button {
+                    criteria.removeAll { $0.id == row.wrappedValue.id }
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.plain)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                fieldLabel("Validation prompt")
+                TextField("Validation prompt", text: row.validationPrompt, axis: .vertical)
+                    .lineLimit(2...5)
+                    .textFieldStyle(.roundedBorder)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                fieldLabel("Input enumerator prompt")
+                TextField("Input enumerator prompt", text: row.inputEnumeratorPrompt, axis: .vertical)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+        .padding(12)
+        .background(AppColors.secondaryBackground)
+        .clipShape(.rect(cornerRadius: 10))
+    }
+
+    private func requirementChip(_ number: Int) -> some View {
+        Text("R\(number)")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(AppColors.subtleRowBackgroundLift)
+            .clipShape(Capsule())
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    private func criterionNumber(for id: UUID) -> Int {
+        guard let index = criteria.firstIndex(where: { $0.id == id }) else { return 0 }
+        return index + 1
     }
 
     private func stepsSection() -> some View {

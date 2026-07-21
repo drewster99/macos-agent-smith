@@ -316,6 +316,9 @@ final class SharedAppState {
     /// scene whose session matches acts on it, so the menu command correctly routes to
     /// the frontmost tab.
     var renameSessionRequestID: UUID?
+    /// Signal from the File menu to the focused `MainView` that it should show the
+    /// manual task creation sheet for this session ID.
+    var createTaskRequestID: UUID?
     /// Set to true after `loadPersistedState()` finishes.
     var hasLoadedPersistedState = false
     /// Whether the launch splash should currently render. Starts true at process start and

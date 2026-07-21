@@ -32,7 +32,7 @@ struct MainView: View {
 
     var body: some View {
         NavigationSplitView {
-            MainViewSidebar(viewModel: viewModel)
+            MainViewSidebar(viewModel: viewModel, onCreateTask: { showTaskCreator = true })
         } detail: {
             MainViewDetailColumn(
                 viewModel: viewModel,
@@ -68,6 +68,14 @@ struct MainView: View {
         }
         .onChange(of: shared.hasLoadedPersistedState) { _, _ in
             evaluateStartupGate()
+        }
+        .onChange(of: shared.createTaskRequestID) { _, newValue in
+            guard newValue == viewModel.session.id else { return }
+            // Project rule: defer @State / @Observable mutations out of `.onChange`.
+            DispatchQueue.main.async {
+                shared.createTaskRequestID = nil
+                showTaskCreator = true
+            }
         }
         .onAppear {
             // Project rule: defer @State mutations out of lifecycle closures.

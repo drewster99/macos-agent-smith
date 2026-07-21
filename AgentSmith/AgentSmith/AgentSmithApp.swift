@@ -83,6 +83,14 @@ struct AgentSmithApp: App {
         .defaultLaunchBehavior(CapabilityEvalRunner.isRequested ? .suppressed : .automatic)
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("Create Task\u{2026}") {
+                    if let id = shared.focusedSessionID {
+                        shared.createTaskRequestID = id
+                    }
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(shared.focusedSessionID == nil)
+
                 Button("New Session") {
                     let focused = shared.focusedSessionID
                     Task {
@@ -92,7 +100,7 @@ struct AgentSmithApp: App {
                         openWindow(id: "app-main")
                     }
                 }
-                .keyboardShortcut("n", modifiers: .command)
+                .keyboardShortcut("n", modifiers: [.command, .shift])
 
                 Button("Rename Session\u{2026}") {
                     if let id = shared.focusedSessionID {
