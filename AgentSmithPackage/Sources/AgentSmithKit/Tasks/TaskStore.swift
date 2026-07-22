@@ -80,28 +80,27 @@ public actor TaskStore {
     /// Becoming a template normalizes a terminal task to a clean `.pending` launcher
     /// (prior result preserved into history) so it's startable and carries no stale
     /// run-state — a template never runs itself.
-    public func setTemplate(id: UUID, isTemplate: Bool) {
-        guard var task = tasks[id] else { return }
+    @discardableResult
+    public func setTemplate(id: UUID, isTemplate: Bool) -> String? {
+        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+        guard !task.status.isInProgress else {
+            return "Task '\(task.title)' cannot be converted while it is \(task.status.rawValue). Stop or finish it first."
+        }
+        let wasTemplate = task.isTemplate
         task.isTemplate = isTemplate
         if isTemplate {
+            preservePriorRunAsTemplateChildIfNeeded(&task, wasTemplate: wasTemplate)
             task.templateInputValues = [:]
+            normalizeTemplateLauncher(&task)
         } else {
             task.templateInputDefinitions = []
             task.templateInstanceTitleTemplate = nil
             task.templateInputValues = [:]
         }
-        if isTemplate && task.status.isTerminal {
-            preserveResultIntoHistory(&task)
-            task.result = nil
-            task.commentary = nil
-            task.completedAt = nil
-            task.startedAt = nil
-            task.validation = nil
-            task.status = .pending
-        }
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
+        return nil
     }
 
     public func setTemplateInputDefinitions(id: UUID, definitions: [TemplateInputDefinition]) -> String? {
@@ -175,24 +174,16 @@ public actor TaskStore {
             }
         }
 
+        let wasTemplate = task.isTemplate
         task.title = title
         task.description = description
         task.isTemplate = isTemplate
         if isTemplate {
+            preservePriorRunAsTemplateChildIfNeeded(&task, wasTemplate: wasTemplate)
             task.templateInputDefinitions = templateInputDefinitions
             task.templateInstanceTitleTemplate = normalizedTitleTemplate?.isEmpty == false ? normalizedTitleTemplate : nil
             task.templateInputValues = [:]
-            if task.status.isTerminal {
-                preserveResultIntoHistory(&task)
-                task.status = .pending
-                task.result = nil
-                task.commentary = nil
-                task.resultAttachments = []
-                task.resultItems = []
-                task.completedAt = nil
-                task.startedAt = nil
-                task.validation = nil
-            }
+            normalizeTemplateLauncher(&task)
         } else {
             task.templateInputDefinitions = []
             task.templateInstanceTitleTemplate = nil
@@ -204,6 +195,46 @@ public actor TaskStore {
         tasks[id] = task
         onChange?()
         return nil
+    }
+
+    private func hasPriorRunState(_ task: AgentTask) -> Bool {
+        task.startedAt != nil
+            || task.completedAt != nil
+            || task.result != nil
+            || task.commentary != nil
+            || !task.resultAttachments.isEmpty
+            || !task.resultItems.isEmpty
+            || task.validation != nil
+            || task.status.isTerminal
+    }
+
+    private func preservePriorRunAsTemplateChildIfNeeded(_ task: inout AgentTask, wasTemplate: Bool) {
+        guard !wasTemplate, hasPriorRunState(task) else { return }
+        var historicalRun = task
+        historicalRun.id = UUID()
+        historicalRun.isTemplate = false
+        historicalRun.parentTaskID = task.id
+        historicalRun.assigneeIDs = []
+        historicalRun.templateInputDefinitions = []
+        historicalRun.templateInstanceTitleTemplate = nil
+        historicalRun.templateInputValues = [:]
+        historicalRun.scheduledRunAt = nil
+        historicalRun.updatedAt = Date()
+        tasks[historicalRun.id] = historicalRun
+        appendUpdate(to: &task, "Converted this task into a template. Preserved the prior run as child task \(historicalRun.id.uuidString).")
+    }
+
+    private func normalizeTemplateLauncher(_ task: inout AgentTask) {
+        task.status = .pending
+        task.result = nil
+        task.commentary = nil
+        task.resultAttachments = []
+        task.resultItems = []
+        task.completedAt = nil
+        task.startedAt = nil
+        task.validation = nil
+        task.assigneeIDs = []
+        task.helpRequest = nil
     }
 
     /// Clones a template into a fresh, runnable INSTANCE and adds it to the store.

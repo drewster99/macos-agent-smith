@@ -29,19 +29,24 @@ public struct TaskWorkspace: Sendable {
             .appendingPathComponent(taskID.uuidString, isDirectory: true)
     }
 
-    public var evidenceDirectory: URL? {
+    /// The persistent per-task directory under the session workspace root, when available.
+    /// Evidence lives inside this directory; future task-owned durable artifacts should live
+    /// beside `evidence` here rather than under the user's project tree.
+    public var persistentDirectory: URL? {
         workspaceRoot?
             .appendingPathComponent("tasks", isDirectory: true)
             .appendingPathComponent(taskID.uuidString, isDirectory: true)
+    }
+
+    public var evidenceDirectory: URL? {
+        persistentDirectory?
             .appendingPathComponent("evidence", isDirectory: true)
     }
 
     /// The `<root>/tasks/<taskID>` directory that holds the evidence dir — removed wholesale on
     /// hard task deletion. `nil` when no workspace root is configured.
     public var persistentTaskDirectory: URL? {
-        workspaceRoot?
-            .appendingPathComponent("tasks", isDirectory: true)
-            .appendingPathComponent(taskID.uuidString, isDirectory: true)
+        persistentDirectory
     }
 
     /// Whether `resolvedPath` (already symlink-resolved) is inside `directory`. Boundary-aware so

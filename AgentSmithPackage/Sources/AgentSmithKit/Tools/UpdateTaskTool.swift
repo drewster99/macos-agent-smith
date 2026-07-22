@@ -50,15 +50,17 @@ struct UpdateTaskTool: AgentTool {
         // Template toggle — independent of status. May be sent alone or with a status.
         var appliedTemplate: Bool?
         if case .bool(let flag) = arguments["is_template"] {
-            await context.taskStore.setTemplate(id: taskID, isTemplate: flag)
+            if let problem = await context.taskStore.setTemplate(id: taskID, isTemplate: flag) {
+                return .failure(problem)
+            }
             appliedTemplate = flag
         }
 
         // Status is optional when a template toggle is present, so a caller can flip the
         // template flag without also restating the status.
         guard case .string(let statusString) = arguments["status"] else {
-            if appliedTemplate != nil {
-                return .success("Task \(taskIDString) is \(appliedTemplate! ? "now a template" : "no longer a template").")
+            if let appliedTemplate {
+                return .success("Task \(taskIDString) is \(appliedTemplate ? "now a template" : "no longer a template").")
             }
             throw ToolCallError.missingRequiredArgument("status")
         }

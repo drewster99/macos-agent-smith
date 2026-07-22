@@ -19,12 +19,16 @@ struct TaskListView: View {
 
     @State private var showArchived = false
     @State private var showDeleted = false
+    @State private var collapsedParentTaskIDs: Set<UUID> = []
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let activeTasks = viewModel.activeTaskList
         let archivedTasks = viewModel.archivedTaskList
         let deletedTasks = viewModel.recentlyDeletedTaskList
+        let activeTaskFamilies = taskFamilies(for: activeTasks)
+        let archivedTaskFamilies = taskFamilies(for: archivedTasks)
+        let deletedTaskFamilies = taskFamilies(for: deletedTasks)
 
         Group {
             if activeTasks.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
@@ -35,8 +39,14 @@ struct TaskListView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(activeTasks) { task in
-                        TaskListRow(task: task, style: .active, viewModel: viewModel)
+                    ForEach(activeTaskFamilies) { family in
+                        TaskFamilyRows(
+                            family: family,
+                            style: .active,
+                            viewModel: viewModel,
+                            isCollapsed: collapsedParentTaskIDs.contains(family.id),
+                            onToggleCollapsed: { toggleCollapsedParent(family.id) }
+                        )
                     }
 
                     if !archivedTasks.isEmpty || !deletedTasks.isEmpty {
@@ -45,15 +55,27 @@ struct TaskListView: View {
 
                     if showArchived && !archivedTasks.isEmpty {
                         TaskSectionHeader(title: "Archived")
-                        ForEach(archivedTasks) { task in
-                            TaskListRow(task: task, style: .archived, viewModel: viewModel)
+                        ForEach(archivedTaskFamilies) { family in
+                            TaskFamilyRows(
+                                family: family,
+                                style: .archived,
+                                viewModel: viewModel,
+                                isCollapsed: collapsedParentTaskIDs.contains(family.id),
+                                onToggleCollapsed: { toggleCollapsedParent(family.id) }
+                            )
                         }
                     }
 
                     if showDeleted && !deletedTasks.isEmpty {
                         TaskSectionHeader(title: "Deleted")
-                        ForEach(deletedTasks) { task in
-                            TaskListRow(task: task, style: .recentlyDeleted, viewModel: viewModel)
+                        ForEach(deletedTaskFamilies) { family in
+                            TaskFamilyRows(
+                                family: family,
+                                style: .recentlyDeleted,
+                                viewModel: viewModel,
+                                isCollapsed: collapsedParentTaskIDs.contains(family.id),
+                                onToggleCollapsed: { toggleCollapsedParent(family.id) }
+                            )
                         }
                     }
                 }
@@ -65,6 +87,32 @@ struct TaskListView: View {
             actions: { Button("OK") { viewModel.taskActionError = nil } },
             message: { Text(viewModel.taskActionError ?? "") }
         )
+    }
+
+    private func toggleCollapsedParent(_ taskID: UUID) {
+        if collapsedParentTaskIDs.contains(taskID) {
+            collapsedParentTaskIDs.remove(taskID)
+        } else {
+            collapsedParentTaskIDs.insert(taskID)
+        }
+    }
+
+    private func taskFamilies(for tasks: [AgentTask]) -> [TaskFamily] {
+        let tasksByID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+        var childrenByParentID: [UUID: [AgentTask]] = [:]
+        var parents: [AgentTask] = []
+
+        for task in tasks {
+            if let parentTaskID = task.parentTaskID, tasksByID[parentTaskID] != nil {
+                childrenByParentID[parentTaskID, default: []].append(task)
+            } else {
+                parents.append(task)
+            }
+        }
+
+        return parents.map { parent in
+            TaskFamily(parent: parent, children: childrenByParentID[parent.id] ?? [])
+        }
     }
 
     @ViewBuilder
@@ -96,6 +144,72 @@ struct TaskListView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+}
+
+private struct TaskFamily: Identifiable {
+    let parent: AgentTask
+    let children: [AgentTask]
+
+    var id: UUID { parent.id }
+}
+
+private struct TaskFamilyRows: View {
+    let family: TaskFamily
+    let style: TaskRowStyle
+    let viewModel: AppViewModel
+    let isCollapsed: Bool
+    let onToggleCollapsed: () -> Void
+
+    private var hasChildren: Bool {
+        !family.children.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if hasChildren {
+                TaskListRow(task: family.parent, style: style, viewModel: viewModel)
+                    .overlay(alignment: .topLeading) {
+                        disclosureButton()
+                            .offset(x: -8, y: 8)
+                    }
+            } else {
+                TaskListRow(task: family.parent, style: style, viewModel: viewModel)
+            }
+
+            if hasChildren && !isCollapsed {
+                ForEach(family.children) { child in
+                    childRow(child)
+                }
+            }
+        }
+    }
+
+    private func disclosureButton() -> some View {
+        Button(action: onToggleCollapsed, label: {
+            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 24)
+                .contentShape(Rectangle())
+        })
+        .buttonStyle(.plain)
+        .help(isCollapsed ? "Show child tasks" : "Hide child tasks")
+    }
+
+    private func childRow(_ task: AgentTask) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Rectangle()
+                .fill(Color(.separatorColor).opacity(0.7))
+                .frame(width: 1)
+                .padding(.leading, 16)
+                .padding(.trailing, 11)
+                .padding(.vertical, 8)
+
+            TaskListRow(task: task, style: style, viewModel: viewModel)
+                .frame(maxWidth: .infinity)
+        }
+        .background(AppColors.subtleRowBackground.opacity(0.35))
     }
 }
 
@@ -407,7 +521,7 @@ private struct TaskRow: View {
 
     @ViewBuilder
     private func statusIcon() -> some View {
-        Image(systemName: TaskStatusBadge.icon(for: task.status))
+        Image(systemName: statusIconName)
             .foregroundStyle(iconForeground)
             .imageScale(.medium)
             .frame(width: 18)
@@ -419,9 +533,19 @@ private struct TaskRow: View {
             )
     }
 
+    private var statusIconName: String {
+        if style == .active, hasScheduledWakes, task.status != .starting, task.status != .running, task.status != .validating {
+            return "clock"
+        }
+        return TaskStatusBadge.icon(for: task.status)
+    }
+
     private var iconForeground: AnyShapeStyle {
         switch style {
         case .active:
+            if hasScheduledWakes, task.status != .starting, task.status != .running, task.status != .validating {
+                return AnyShapeStyle(TaskStatusBadge.color(for: .scheduled))
+            }
             return AnyShapeStyle(TaskStatusBadge.color(for: task.status))
         case .archived:
             return AnyShapeStyle(TaskStatusBadge.color(for: task.status).opacity(0.5))
@@ -568,8 +692,15 @@ private struct TaskRow: View {
             case .active:
                 if task.status != .running {
                     HStack(spacing: 4) {
-                        outcomeOrStatusChip()
-                        ScheduledRunsIndicator(task: task, viewModel: viewModel)
+                        if hasScheduledWakes {
+                            ScheduledRunsIndicator(task: task, viewModel: viewModel)
+                            if !task.isTemplate {
+                                outcomeOrStatusChip()
+                            }
+                        } else {
+                            outcomeOrStatusChip()
+                            ScheduledRunsIndicator(task: task, viewModel: viewModel)
+                        }
                     }
                 }
             case .archived:
@@ -581,6 +712,10 @@ private struct TaskRow: View {
                 EmptyView()
             }
         }
+    }
+
+    private var hasScheduledWakes: Bool {
+        !(viewModel.pendingWakesByTaskID[task.id] ?? []).isEmpty
     }
 
     /// Estimated cost chip. Reads from the cache populated by the row-level

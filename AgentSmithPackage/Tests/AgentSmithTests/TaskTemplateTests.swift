@@ -52,19 +52,26 @@ struct TaskTemplateTests {
         #expect(templateAfter?.result == "old result")
     }
 
-    @Test("Toggling a terminal task into a template normalizes it to a clean pending launcher")
+    @Test("Toggling a terminal task into a template preserves the prior run as a child")
     func toggleTerminalTaskNormalizes() async {
         let store = TaskStore()
         let task = await store.addTask(title: "One-off", description: "d")
         await store.setResult(id: task.id, result: "done", commentary: nil, attachments: [])
         await store.updateStatus(id: task.id, status: .completed)
 
-        await store.setTemplate(id: task.id, isTemplate: true)
+        let error = await store.setTemplate(id: task.id, isTemplate: true)
+        #expect(error == nil)
         let t = await store.task(id: task.id)
         #expect(t?.isTemplate == true)
         #expect(t?.status == .pending, "a template must be a startable launcher, not a stale completed task")
         #expect(t?.result == nil)
-        #expect(t?.updates.contains { $0.message.contains("Replacing previous result") } == true, "prior result preserved in history")
+        #expect(t?.updates.contains { $0.message.contains("Preserved the prior run as child task") } == true)
+
+        let children = await store.allTasks().filter { $0.parentTaskID == task.id }
+        #expect(children.count == 1)
+        #expect(children.first?.isTemplate == false)
+        #expect(children.first?.status == .completed)
+        #expect(children.first?.result == "done")
     }
 
     @Test("Toggling template off leaves an ordinary task")
@@ -78,6 +85,18 @@ struct TaskTemplateTests {
         #expect(await store.task(id: task.id)?.isTemplate == false)
         #expect(await store.task(id: task.id)?.templateInputDefinitions.isEmpty == true)
         #expect(await store.task(id: task.id)?.templateInputValues.isEmpty == true)
+    }
+
+    @Test("In-progress tasks cannot be converted to templates")
+    func inProgressTaskCannotConvertToTemplate() async {
+        let store = TaskStore()
+        let task = await store.addTask(title: "Running", description: "d")
+        await store.updateStatus(id: task.id, status: .running)
+
+        let error = await store.setTemplate(id: task.id, isTemplate: true)
+
+        #expect(error?.contains("cannot be converted") == true)
+        #expect(await store.task(id: task.id)?.isTemplate == false)
     }
 
     @Test("Template inputs validate, resolve, and snapshot onto instances")

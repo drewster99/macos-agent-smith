@@ -136,7 +136,23 @@ struct ScheduleTaskActionTool: AgentTool {
         // pile prior results into one task). Smith can toggle it off via update_task if
         // they specifically want in-place updates instead.
         if action == .run, recurrenceResult.value != nil, !task.isTemplate {
-            await context.taskStore.setTemplate(id: taskID, isTemplate: true)
+            if let problem = await context.taskStore.setTemplate(id: taskID, isTemplate: true) {
+                return .failure("Cannot schedule recurring runs for this task: \(problem)")
+            }
+        }
+
+        if action == .run, recurrenceResult.value != nil, replacesID == nil {
+            let existingRecurringRuns = await context.listScheduledWakes()
+                .filter { wake in
+                    wake.taskID == taskID
+                        && wake.recurrence != nil
+                        && wake.instructions.contains("`run_task`")
+                }
+                .sorted { $0.wakeAt < $1.wakeAt }
+            replacesID = existingRecurringRuns.first?.id
+            for wake in existingRecurringRuns.dropFirst() {
+                _ = await context.cancelScheduledWake(wake.id)
+            }
         }
 
         let imperative = action.imperativeText(for: task, extra: extra)

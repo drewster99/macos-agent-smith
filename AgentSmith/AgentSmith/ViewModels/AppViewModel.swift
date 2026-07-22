@@ -126,6 +126,32 @@ final class AppViewModel {
             ?? shared.deletedTasks.first { $0.id == id }
     }
 
+    func scheduledWakes(for taskID: UUID) -> [ScheduledWake] {
+        pendingWakesByTaskID[taskID] ?? []
+    }
+
+    func workspaceReferences(for task: AgentTask) -> [(label: String, path: String)] {
+        var rows = Self.workspaceReferences(taskID: task.id, labelPrefix: nil, root: persistenceManager.sessionWorkspaceDirectory)
+        if let parentTaskID = task.parentTaskID {
+            rows.append(contentsOf: Self.workspaceReferences(taskID: parentTaskID, labelPrefix: "Parent", root: persistenceManager.sessionWorkspaceDirectory))
+        }
+        return rows
+    }
+
+    private static func workspaceReferences(taskID: UUID, labelPrefix: String?, root: URL) -> [(label: String, path: String)] {
+        let workspace = TaskWorkspace(taskID: taskID, workspaceRoot: root)
+        let prefix = labelPrefix.map { $0 + " " } ?? ""
+        var rows: [(label: String, path: String)] = []
+        if let persistentDirectory = workspace.persistentDirectory {
+            rows.append((prefix + "Folder", persistentDirectory.path))
+        }
+        rows.append((prefix + "Scratch", workspace.temporaryDirectory.path))
+        if let evidenceDirectory = workspace.evidenceDirectory {
+            rows.append((prefix + "Evidence", evidenceDirectory.path))
+        }
+        return rows
+    }
+
     /// Builds `pendingWakesByTaskID` from `activeTimers`, dropping wakes whose fire time
     /// has already passed and sorting each task's wakes ascending. Each task row only
     /// reads its own slice, so an unrelated timer fire/cancel doesn't re-render every row.
@@ -1207,6 +1233,9 @@ final class AppViewModel {
 
     func archiveTask(id: UUID) async {
         guard let taskStore else { return }
+        if let task = tasks.first(where: { $0.id == id }), !task.status.isInProgress {
+            await runtime?.terminateTaskAgents(taskID: id)
+        }
         let succeeded = await taskStore.archive(id: id)
         if !succeeded {
             taskActionError = "This task is in progress and cannot be archived."
@@ -1228,7 +1257,11 @@ final class AppViewModel {
 
     func deleteTask(id: UUID) async {
         guard let taskStore else { return }
-        let title = tasks.first { $0.id == id }?.title ?? "(unknown)"
+        let task = tasks.first { $0.id == id }
+        let title = task?.title ?? "(unknown)"
+        if let task, !task.status.isInProgress {
+            await runtime?.terminateTaskAgents(taskID: id)
+        }
         let succeeded = await taskStore.softDelete(id: id)
         if succeeded {
             await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user deleted this task. It is no longer active — do not work on it, wait for it, or treat it as in progress.")

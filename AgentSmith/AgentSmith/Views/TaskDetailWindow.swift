@@ -1467,6 +1467,18 @@ struct TaskDetailWindow: View {
             }
 
             GridRow {
+                metadataLabel("Template")
+                templateLine(for: task)
+            }
+
+            if let parentTaskID = task.parentTaskID {
+                GridRow {
+                    metadataLabel("Parent")
+                    copyablePath(parentTaskID.uuidString, compact: true)
+                }
+            }
+
+            GridRow {
                 metadataLabel("Created")
                 Text(task.createdAt.formatted(date: .abbreviated, time: .standard))
             }
@@ -1496,6 +1508,14 @@ struct TaskDetailWindow: View {
                 GridRow {
                     metadataLabel("Scheduled")
                     scheduledLine(for: scheduled)
+                }
+            }
+
+            let wakes = viewModel.scheduledWakes(for: task.id)
+            if !wakes.isEmpty {
+                GridRow(alignment: .top) {
+                    metadataLabel(wakes.count == 1 ? "Next Run" : "Next Runs")
+                    scheduledWakesLine(wakes)
                 }
             }
 
@@ -1530,8 +1550,78 @@ struct TaskDetailWindow: View {
                     TaskToolOverrideEditor(task: task, viewModel: viewModel)
                 }
             }
+
+            let workspaceRows = viewModel.workspaceReferences(for: task)
+            if !workspaceRows.isEmpty {
+                GridRow(alignment: .top) {
+                    metadataLabel("Folders")
+                    workspaceLines(workspaceRows)
+                }
+            }
         }
         .font(.callout)
+    }
+
+    private func templateLine(for task: AgentTask) -> some View {
+        HStack(spacing: 8) {
+            if task.isTemplate {
+                Label("Template", systemImage: "doc.on.doc")
+                    .foregroundStyle(AppColors.scheduledFutureAccent)
+            } else if task.parentTaskID != nil {
+                Label("Template instance", systemImage: "arrow.triangle.branch")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("No")
+                    .foregroundStyle(.secondary)
+            }
+            if task.isTemplate && task.shouldPromptForTemplateRunInputs {
+                Text("\(task.templateInputDefinitions.count) input\(task.templateInputDefinitions.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func scheduledWakesLine(_ wakes: [ScheduledWake]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(wakes, id: \.id) { wake in
+                HStack(spacing: 6) {
+                    Image(systemName: wake.recurrence == nil ? "clock" : "arrow.triangle.2.circlepath")
+                        .foregroundStyle(TaskStatusBadge.color(for: .scheduled))
+                    scheduledLine(for: wake.wakeAt)
+                    if let recurrence = wake.recurrence {
+                        Text(recurrence.displayDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func workspaceLines(_ rows: [(label: String, path: String)]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(row.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64, alignment: .leading)
+                    copyablePath(row.path, compact: false)
+                }
+            }
+        }
+    }
+
+    private func copyablePath(_ text: String, compact: Bool) -> some View {
+        HStack(spacing: 4) {
+            Text(text)
+                .font(compact ? .caption.monospaced() : .caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            copyButton(text: text, id: text)
+        }
     }
 
     private func scheduledLine(for date: Date) -> some View {
