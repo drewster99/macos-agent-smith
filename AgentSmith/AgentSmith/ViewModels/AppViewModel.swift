@@ -906,15 +906,6 @@ final class AppViewModel {
             await self?.handleTimerEvent(event)
         }
 
-        // Live resolver for the scheduled-wakes-interrupt policy — consulted on every
-        // auto-run wake fire so toggling the setting takes effect immediately without
-        // restarting the runtime. The closure captures the @Observable shared state and
-        // reads its current value each invocation.
-        let sharedState = shared
-        await newRuntime.setScheduledWakesInterruptResolver {
-            await MainActor.run { sharedState.scheduledWakesInterruptRunning }
-        }
-
         // Wire the disk-replay loader. The runtime calls this from inside `start()` —
         // every restart path (cold launch AND `restartForNewTask`) — so wakes survive both
         // app quit and run_task restarts. The snapshot is loaded fresh from disk each time

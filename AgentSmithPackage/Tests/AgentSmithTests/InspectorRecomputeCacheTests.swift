@@ -73,7 +73,6 @@ struct InspectorRecomputeCacheTests {
             "tool_request",
             "tool_output",
             "scheduled_run_deferred",
-            "scheduled_run_interrupting",
             "submission_auto_rejected",
         ]
         // If you remove a kind from `bannerKinds`, also remove its case from
@@ -84,7 +83,7 @@ struct InspectorRecomputeCacheTests {
         #expect(bannerKinds.contains("task_created"))
         #expect(bannerKinds.contains("memory_saved"))
         #expect(nonBannerKinds.contains("tool_request"))
-        #expect(total == 19, "Expected 19 known messageKind strings (14 banner + 5 non-banner); update both this test and ChannelBannerKind together.")
+        #expect(total == 18, "Expected 18 known messageKind strings (14 banner + 4 non-banner); update both this test and ChannelBannerKind together.")
         #expect(bannerKinds.intersection(nonBannerKinds).isEmpty, "A kind should be either a banner or a plain row, not both")
     }
 

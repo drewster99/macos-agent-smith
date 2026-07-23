@@ -158,11 +158,6 @@ public actor OrchestrationRuntime {
     /// wake in the previous Smith's in-memory list.
     private var loadPersistedWakes: (@Sendable () async -> [ScheduledWake])?
 
-    /// Resolver that returns the live "scheduled wakes interrupt running task" policy.
-    /// Set by the app layer; the closure reads `SharedAppState.scheduledWakesInterruptRunning`
-    /// on each invocation so toggling the setting takes effect immediately for in-flight
-    /// runtimes. When unset, defaults to false (let the running task finish first).
-    private var scheduledWakesInterruptResolver: (@Sendable () async -> Bool)?
 
     /// Tasks queued to run as soon as the current in-flight task finishes (or is
     /// paused/interrupted), in FIFO order. Populated by `dispatchAutoRunWake` when a
@@ -436,12 +431,6 @@ public actor OrchestrationRuntime {
         loadPersistedWakes = handler
     }
 
-    /// Wires the live policy resolver. The closure is consulted on every auto-run wake
-    /// fire, so toggling `SharedAppState.scheduledWakesInterruptRunning` takes effect
-    /// immediately without restarting the runtime.
-    public func setScheduledWakesInterruptResolver(_ resolver: @escaping @Sendable () async -> Bool) {
-        scheduledWakesInterruptResolver = resolver
-    }
 
     /// Wires the per-session persistence for the pending-scheduled-run queue. The runtime
     /// calls `load` once inside `start()` to seed the queue, and calls `persist` after
@@ -671,7 +660,9 @@ public actor OrchestrationRuntime {
         await smith?.restoreScheduledWakes(wakes)
     }
 
-    /// Routes an auto-run wake fire deterministically based on `scheduledWakesInterrupt`.
+    /// Routes an auto-run wake fire: start now if a worker slot is free, otherwise queue (never
+    /// evict a running task). A scheduled run is a commitment to the user, so both paths run
+    /// independently of the "Auto-run next task" setting.
     ///
     /// **No task in flight** → `restartForNewTask` immediately, regardless of policy.
     ///
@@ -699,43 +690,24 @@ public actor OrchestrationRuntime {
         }
 
         guard let scheduledTask = await taskStore.task(id: taskID) else { return }
-        let interrupt = await scheduledWakesInterruptResolver?() ?? false
 
-        if interrupt {
-            // Pause the running task so its Brown context is saved, queue it for resume,
-            // then start the scheduled task. When the scheduled task completes the
-            // termination hook drains the queue and resumes the paused task.
-            await taskStore.updateStatus(id: blocker.id, status: .paused)
-            pendingScheduledRunQueue.append(blocker.id)
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
-            await channel.post(ChannelMessage(
-                sender: .system,
-                content: "Pausing '\(blocker.title)' to run scheduled task '\(scheduledTask.title)'. Will resume '\(blocker.title)' when the scheduled task finishes.",
-                metadata: [
-                    "messageKind": .string("scheduled_run_interrupting"),
-                    "scheduledTaskID": .string(taskID.uuidString),
-                    "scheduledTaskTitle": .string(scheduledTask.title),
-                    "blockingTaskID": .string(blocker.id.uuidString),
-                    "blockingTaskTitle": .string(blocker.title)
-                ]
-            ))
-            restartForNewTask(taskID: taskID)
-        } else {
-            pendingScheduledRunQueue.append(taskID)
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
-            await channel.post(ChannelMessage(
-                sender: .system,
-                content: "Scheduled task '\(scheduledTask.title)' fired while '\(blocker.title)' is \(blocker.status.rawValue). Queued — will run after the current task finishes.",
-                metadata: [
-                    "messageKind": .string("scheduled_run_deferred"),
-                    "scheduledTaskID": .string(taskID.uuidString),
-                    "scheduledTaskTitle": .string(scheduledTask.title),
-                    "blockingTaskID": .string(blocker.id.uuidString),
-                    "blockingTaskTitle": .string(blocker.title),
-                    "blockingTaskStatus": .string(blocker.status.rawValue)
-                ]
-            ))
-        }
+        // At capacity, ALWAYS queue — never evict. The former "make room" path (pause a running
+        // task to run the scheduled one, resume it after) is gone by design: a scheduled run waits
+        // its turn like any other queued work rather than interrupting live work.
+        pendingScheduledRunQueue.append(taskID)
+        await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Scheduled task '\(scheduledTask.title)' fired while '\(blocker.title)' is \(blocker.status.rawValue). Queued — will run after the current task finishes.",
+            metadata: [
+                "messageKind": .string("scheduled_run_deferred"),
+                "scheduledTaskID": .string(taskID.uuidString),
+                "scheduledTaskTitle": .string(scheduledTask.title),
+                "blockingTaskID": .string(blocker.id.uuidString),
+                "blockingTaskTitle": .string(blocker.title),
+                "blockingTaskStatus": .string(blocker.status.rawValue)
+            ]
+        ))
     }
 
     /// Drains the head of `pendingScheduledRunQueue` if no task is currently in flight.

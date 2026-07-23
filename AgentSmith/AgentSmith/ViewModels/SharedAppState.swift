@@ -81,17 +81,6 @@ final class SharedAppState {
         didSet { UserDefaults.standard.set(showRestartChrome, forKey: "showRestartChrome") }
     }
 
-    /// Controls what happens when a scheduled task's wake fires while another task is
-    /// currently `.running` or `.awaitingReview`. Independent of `autoRunNextTask` —
-    /// scheduled wakes ALWAYS run when their time comes, regardless of that flag.
-    /// - `true`: pause the running task, run the scheduled task to completion, then
-    ///   resume the paused task. Disrupts in-flight work but honours the schedule
-    ///   precisely.
-    /// - `false` (default): let the running task finish, then run the scheduled task.
-    ///   Preserves in-flight work; the schedule slips by the running task's tail.
-    var scheduledWakesInterruptRunning: Bool = SharedAppState.boolDefault(key: "scheduledWakesInterruptRunning", default: false) {
-        didSet { UserDefaults.standard.set(scheduledWakesInterruptRunning, forKey: "scheduledWakesInterruptRunning") }
-    }
 
     /// How many tasks may run concurrently, each with its own worker (Brown). 1–10;
     /// default 4. Starting beyond this never evicts a running task: run_task and the

@@ -16,11 +16,12 @@ struct UpdateTaskTool: AgentTool {
                 "type": .string("string"),
                 "enum": .array([
                     .string("pending"),
-                    .string("running"),
+                    .string("paused"),
+                    .string("interrupted"),
                     .string("completed"),
                     .string("failed")
                 ]),
-                "description": .string("The new status for the task: pending, paused, completed, or failed. `running` is NOT settable here — use `run_task`, which actually spawns the worker. `awaitingReview` and `validating` are reserved — submissions enter validation via Brown's `task_complete`, and only a validation escalation parks a task in review. Optional when `is_template` is provided.")
+                "description": .string("The new status for the task: pending, paused, interrupted, completed, or failed. `running` is NOT settable here — use `run_task`, which actually spawns the worker. `awaitingReview` and `validating` are reserved — submissions enter validation via Brown's `task_complete`, and only a validation escalation parks a task in review. Optional when `is_template` is provided.")
             ]),
             "is_template": .dictionary([
                 "type": .string("boolean"),
@@ -65,7 +66,7 @@ struct UpdateTaskTool: AgentTool {
             throw ToolCallError.missingRequiredArgument("status")
         }
         guard let status = AgentTask.Status(rawValue: statusString) else {
-            return .failure("Invalid status: \(statusString). Valid values: pending, paused, completed, failed")
+            return .failure("Invalid status: \(statusString). Valid values: pending, paused, interrupted, completed, failed")
         }
 
         if status == .running {

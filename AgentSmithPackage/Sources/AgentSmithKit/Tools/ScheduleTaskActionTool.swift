@@ -243,7 +243,10 @@ public enum TaskActionKind: String, Sendable, Codable {
         case .stop:
             return "Call `update_task` on \(task.id.uuidString) with status `interrupted` to stop the task \"\(task.title)\"." + suffix
         case .summarize:
-            return "Call `list_tasks` to refresh state, then `message_user` with a brief summary of progress on the task \"\(task.title)\" (id \(task.id.uuidString))." + suffix
+            // `get_task_details`, not `list_tasks`: list_tasks now returns truncated summary
+            // previews (no result/updates/commentary) and may not even include this task, so it
+            // can't back a progress summary. get_task_details fetches the full record by id.
+            return "Call `get_task_details` for \(task.id.uuidString), then `message_user` with a brief summary of progress on the task \"\(task.title)\"." + suffix
         }
     }
 }

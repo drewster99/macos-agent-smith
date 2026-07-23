@@ -542,6 +542,31 @@ struct AgentActorTests {
         #expect(stored?.status == .pending)
     }
 
+    @Test("UpdateTaskTool accepts paused and interrupted, still rejects running")
+    func updateTaskAcceptsPausedAndInterrupted() async throws {
+        let tool = UpdateTaskTool()
+
+        for status in ["paused", "interrupted"] {
+            let taskStore = TaskStore()
+            let task = await taskStore.addTask(title: "T", description: "d")
+            let result = try await tool.execute(
+                arguments: ["task_id": .string(task.id.uuidString), "status": .string(status)],
+                context: makeContext(taskStore: taskStore)
+            )
+            #expect(result.succeeded, "status \(status) should be settable via update_task")
+            #expect(await taskStore.task(id: task.id)?.status.rawValue == status)
+        }
+
+        // `running` is still refused — it must go through run_task (which spawns a worker).
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "T", description: "d")
+        let running = try await tool.execute(
+            arguments: ["task_id": .string(task.id.uuidString), "status": .string("running")],
+            context: makeContext(taskStore: taskStore)
+        )
+        #expect(!running.succeeded)
+    }
+
     // MARK: - MockLLMProvider
 
     @Test("MockLLMProvider returns canned responses in order")

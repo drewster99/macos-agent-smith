@@ -2883,16 +2883,19 @@ public actor AgentActor {
             await toolContext.taskStore.promoteScheduledToPending(id: taskID)
         }
 
-        // Partition wakes. If exactly one auto-run wake fires in this batch, drive it
-        // through the runtime directly. If multiple auto-runs fire concurrently, fall
-        // back to Smith-driven for ALL of them — `restartForNewTask` is single-target
-        // and serializing them would clobber each other (last-one-wins).
+        // Partition wakes: every auto-run wake dispatches directly through the runtime; the rest
+        // go to Smith. The old "only when exactly ONE fires" restriction dated to the single-worker
+        // era ("restartForNewTask is single-target, they'd clobber each other"). That no longer
+        // holds — `restartForNewTask` serializes on the lifecycle queue, each call claims its own
+        // task via CAS, and the capacity gate queues any overflow instead of evicting. So two
+        // dailies firing at the same instant BOTH auto-run.
         let autoRunCandidates = due.filter(Self.wakeIsAutoRunRunTask)
         let runDirectly: [ScheduledWake]
         let smithWakes: [ScheduledWake]
-        if autoRunCandidates.count == 1, let only = autoRunCandidates.first, onAutoRunTask != nil {
-            runDirectly = [only]
-            smithWakes = due.filter { $0.id != only.id }
+        if onAutoRunTask != nil {
+            let autoRunIDs = Set(autoRunCandidates.map(\.id))
+            runDirectly = autoRunCandidates
+            smithWakes = due.filter { !autoRunIDs.contains($0.id) }
         } else {
             runDirectly = []
             smithWakes = due

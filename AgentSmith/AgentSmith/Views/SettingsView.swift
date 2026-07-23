@@ -131,17 +131,6 @@ struct SettingsView: View {
 
             Divider()
 
-            Text("Scheduling")
-                .font(AppFonts.sectionHeader)
-
-            Toggle("Scheduled tasks interrupt the running task", isOn: $shared.scheduledWakesInterruptRunning)
-
-            Text("When ON: a scheduled task's wake pauses any currently running task, runs the scheduled task to completion, then resumes the paused task. When OFF (default): the running task finishes first, then the scheduled task runs. Either way, scheduled tasks ALWAYS run when their wake fires — independent of \"Auto-run next task\".")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
             Text("Security")
                 .font(AppFonts.sectionHeader)
 
