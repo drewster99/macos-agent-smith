@@ -23,6 +23,10 @@ public struct TimerEvent: Identifiable, Codable, Sendable, Equatable {
     /// Set on `.cancelled` events. Lets the UI distinguish user-cancellation from
     /// auto-cancellation when the linked task ended.
     public let cancellationCause: WakeCancellationCause?
+    /// The wake's structured task action, when it had one. Lets the history view label the row
+    /// from `bannerLabel` instead of scraping the imperative prose. Nil for reminders and for
+    /// events persisted before this field existed (decoded via `decodeIfPresent`).
+    public let action: TaskActionKind?
 
     public enum Kind: String, Codable, Sendable {
         case scheduled
@@ -41,7 +45,8 @@ public struct TimerEvent: Identifiable, Codable, Sendable, Equatable {
         recurrenceDescription: String? = nil,
         coalescedCount: Int? = nil,
         scheduledFireAt: Date? = nil,
-        cancellationCause: WakeCancellationCause? = nil
+        cancellationCause: WakeCancellationCause? = nil,
+        action: TaskActionKind? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -54,6 +59,7 @@ public struct TimerEvent: Identifiable, Codable, Sendable, Equatable {
         self.coalescedCount = coalescedCount
         self.scheduledFireAt = scheduledFireAt
         self.cancellationCause = cancellationCause
+        self.action = action
     }
 }
 
@@ -105,7 +111,8 @@ public extension TimerEvent {
             instructions: wake.instructions,
             taskID: wake.taskID,
             recurrenceDescription: wake.recurrence?.displayDescription,
-            scheduledFireAt: wake.wakeAt
+            scheduledFireAt: wake.wakeAt,
+            action: wake.action
         )
     }
 
@@ -118,7 +125,8 @@ public extension TimerEvent {
             taskID: primary.taskID,
             recurrenceDescription: primary.recurrence?.displayDescription,
             coalescedCount: batchSize > 1 ? batchSize : nil,
-            scheduledFireAt: primary.wakeAt
+            scheduledFireAt: primary.wakeAt,
+            action: primary.action
         )
     }
 
@@ -131,7 +139,8 @@ public extension TimerEvent {
             taskID: wake.taskID,
             recurrenceDescription: wake.recurrence?.displayDescription,
             scheduledFireAt: wake.wakeAt,
-            cancellationCause: cause
+            cancellationCause: cause,
+            action: wake.action
         )
     }
 }

@@ -1024,7 +1024,7 @@ final class AppViewModel {
     /// and a friendly action summary parsed from the imperative — `run_task: "Title"` rather
     /// than the verbose `Call \`run_task\` on <UUID> to start the task "Title".` form.
     private static func transcriptLine(for event: TimerEvent) -> String {
-        let action = friendlyAction(from: event.instructions) ?? event.instructions
+        let action = friendlyAction(for: event) ?? event.instructions
         switch event.kind {
         case .scheduled:
             let timeStr = event.scheduledFireAt.map(formatScheduledTime) ?? "(no time)"
@@ -1046,13 +1046,18 @@ final class AppViewModel {
         }
     }
 
-    /// Parses the controlled `TaskActionKind.imperativeText` shape into `verb: "title"`.
-    /// Returns `nil` for any imperative that doesn't match that shape (e.g. legacy
-    /// `schedule_reminder` payloads still in persisted state), where the caller should
-    /// fall back to the raw text.
-    private static func friendlyAction(from imperative: String) -> String? {
-        let verb = imperative.firstMatch(of: /`([a-z_]+)`/).map { String($0.output.1) }
-        let title = imperative.firstMatch(of: /"([^"]+)"/).map { String($0.output.1) }
+    /// A friendly one-line action summary for a timer event — `Run: "Title"` rather than the
+    /// verbose imperative. Prefers the event's STRUCTURED `action` (`bannerLabel`); the quoted
+    /// title is scraped from the instructions (it's plain data, not a tool name). Falls back to
+    /// the old verb-scrape only for events with no structured action (reminders, legacy rows),
+    /// and returns nil when even that doesn't match so the caller shows the raw instructions.
+    private static func friendlyAction(for event: TimerEvent) -> String? {
+        let title = event.instructions.firstMatch(of: /"([^"]+)"/).map { String($0.output.1) }
+        if let action = event.action {
+            if let title { return "\(action.bannerLabel): \"\(title)\"" }
+            return action.bannerLabel
+        }
+        let verb = event.instructions.firstMatch(of: /`([a-z_]+)`/).map { String($0.output.1) }
         guard let verb, let title else { return nil }
         return "\(verb): \"\(title)\""
     }

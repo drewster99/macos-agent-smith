@@ -1120,7 +1120,8 @@ public actor OrchestrationRuntime {
                 recurrence: recurrence,
                 originalID: wake.originalID,
                 previousFireAt: fireAt.addingTimeInterval(-interval),
-                survivesTaskTermination: wake.survivesTaskTermination
+                survivesTaskTermination: wake.survivesTaskTermination,
+                action: wake.action
             )
         }
 
@@ -1140,7 +1141,8 @@ public actor OrchestrationRuntime {
                     recurrence: recurrence,
                     originalID: wake.originalID,
                     previousFireAt: previousFireAt,
-                    survivesTaskTermination: wake.survivesTaskTermination
+                    survivesTaskTermination: wake.survivesTaskTermination,
+                    action: wake.action
                 )
             }
         }
@@ -1164,7 +1166,9 @@ public actor OrchestrationRuntime {
                 _ = await smithAgent.scheduleWake(
                     wakeAt: fireAt,
                     instructions: imperative,
-                    taskID: task.id
+                    taskID: task.id,
+                    survivesTaskTermination: TaskActionKind.run.survivesTaskTermination,
+                    action: .run
                 )
             } else {
                 await taskStore.promoteScheduledToPending(id: task.id)
@@ -3498,15 +3502,16 @@ public actor OrchestrationRuntime {
                 guard let self else { return }
                 Task { await self.notifyToolExecutionStateChange(role: role, toolName: toolName, started: started) }
             },
-            scheduleWake: { [followUpScheduler] wakeAt, instructions, taskID, replacesID, recurrence, survivesTaskTermination in
+            scheduleWake: { [followUpScheduler] request in
                 guard let followUpScheduler else { return .error("Scheduler not available.") }
                 return await followUpScheduler.scheduleWake(
-                    wakeAt: wakeAt,
-                    instructions: instructions,
-                    taskID: taskID,
-                    replacesID: replacesID,
-                    recurrence: recurrence,
-                    survivesTaskTermination: survivesTaskTermination
+                    wakeAt: request.wakeAt,
+                    instructions: request.instructions,
+                    taskID: request.taskID,
+                    replacesID: request.replacesID,
+                    recurrence: request.recurrence,
+                    survivesTaskTermination: request.survivesTaskTermination,
+                    action: request.action
                 )
             },
             listScheduledWakes: { [followUpScheduler] in

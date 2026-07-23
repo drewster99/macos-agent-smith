@@ -21,8 +21,8 @@ struct ScheduleTaskActionTool: AgentTool {
         `action` must be one of: \
           • run        — start/resume/restart the task (calls run_task at fire time) \
           • pause      — flip the task to paused (calls update_task) \
-          • stop       — flip the task to interrupted (calls update_task) \
-          • summarize  — describe progress to the user (call list_tasks + message_user) \
+          • interrupt  — flip the task to interrupted (calls update_task) \
+          • summarize  — describe progress to the user (calls get_task_details + message_user) \
         \
         Optional: `extra_instructions` — additional context appended to the auto-rendered \
         imperative (e.g. "and tell Drew it's done"). `recurrence` for repeating actions. \
@@ -54,7 +54,7 @@ struct ScheduleTaskActionTool: AgentTool {
                 "enum": .array([
                     .string("run"),
                     .string("pause"),
-                    .string("stop"),
+                    .string("interrupt"),
                     .string("summarize")
                 ]),
                 "description": .string("Action to perform when the timer fires. Required.")
@@ -95,8 +95,8 @@ struct ScheduleTaskActionTool: AgentTool {
             return .failure("task_id is required and must be a valid UUID.")
         }
         guard case .string(let actionRaw) = arguments["action"],
-              let action = TaskActionKind(rawValue: actionRaw.lowercased()) else {
-            return .failure("action is required and must be one of: run, pause, stop, summarize.")
+              let action = TaskActionKind(lenient: actionRaw) else {
+            return .failure("action is required and must be one of: run, pause, interrupt, summarize.")
         }
         guard let task = await context.taskStore.task(id: taskID) else {
             return .failure("Task \(taskID.uuidString) not found.")
@@ -146,7 +146,7 @@ struct ScheduleTaskActionTool: AgentTool {
                 .filter { wake in
                     wake.taskID == taskID
                         && wake.recurrence != nil
-                        && wake.instructions.contains("`run_task`")
+                        && wake.action == .run
                 }
                 .sorted { $0.wakeAt < $1.wakeAt }
             replacesID = existingRecurringRuns.first?.id
@@ -156,14 +156,15 @@ struct ScheduleTaskActionTool: AgentTool {
         }
 
         let imperative = action.imperativeText(for: task, extra: extra)
-        let outcome = await context.scheduleWake(
-            wakeAt,
-            imperative,
-            taskID,
-            replacesID,
-            recurrenceResult.value,
-            action.survivesTaskTermination
-        )
+        let outcome = await context.scheduleWake(WakeRequest(
+            wakeAt: wakeAt,
+            instructions: imperative,
+            taskID: taskID,
+            replacesID: replacesID,
+            recurrence: recurrenceResult.value,
+            survivesTaskTermination: action.survivesTaskTermination,
+            action: action
+        ))
         // Surface the schedule as a dedicated channel banner so the user sees a task-style
         // row ("Pause", "Stop", "Summarize" — each with its own icon) instead of the
         // generic `System ⏰ scheduled …` line. The paired timer_activity row gets
@@ -191,7 +192,16 @@ struct ScheduleTaskActionTool: AgentTool {
 /// itself as an imperative ("Call run_task on <id>...") so the wake fires with a clear
 /// directive rather than a vague memo.
 public enum TaskActionKind: String, Sendable, Codable {
-    case run, pause, stop, summarize
+    case run, pause, interrupt, summarize
+
+    /// Parses an action string leniently: the legacy value `"stop"` maps to `.interrupt` (the
+    /// action was renamed to match the status it actually sets). Nil for anything unrecognized.
+    public init?(lenient raw: String) {
+        let lowered = raw.lowercased()
+        if lowered == "stop" { self = .interrupt; return }
+        guard let parsed = TaskActionKind(rawValue: lowered) else { return nil }
+        self = parsed
+    }
 
     /// Headline shown in the channel-log banner that announces a `schedule_task_action` —
     /// pairs with `bannerSymbolName` and `bannerLabel` for the four user-visible variants.
@@ -201,12 +211,12 @@ public enum TaskActionKind: String, Sendable, Codable {
         task.title
     }
 
-    /// Action label for the banner ("Pause", "Stop", "Summarize", "Run").
+    /// Action label for the banner ("Pause", "Interrupt", "Summarize", "Run").
     public var bannerLabel: String {
         switch self {
         case .run: return "Run"
         case .pause: return "Pause"
-        case .stop: return "Stop"
+        case .interrupt: return "Interrupt"
         case .summarize: return "Summarize"
         }
     }
@@ -214,12 +224,12 @@ public enum TaskActionKind: String, Sendable, Codable {
     /// Whether this action's wake should survive the linked task's first termination. True
     /// for actions whose explicit purpose is to act on a task whose previous run is already
     /// done — `run` (rerun the task) and `summarize` (often scheduled *after* the task has
-    /// finished). False for `pause` / `stop` since neither is meaningful once the task has
+    /// finished). False for `pause` / `interrupt` since neither is meaningful once the task has
     /// terminated.
     public var survivesTaskTermination: Bool {
         switch self {
         case .run, .summarize: return true
-        case .pause, .stop: return false
+        case .pause, .interrupt: return false
         }
     }
 
@@ -228,7 +238,7 @@ public enum TaskActionKind: String, Sendable, Codable {
         switch self {
         case .run: return "play.circle.fill"
         case .pause: return "pause.circle.fill"
-        case .stop: return "stop.circle.fill"
+        case .interrupt: return "stop.circle.fill"
         case .summarize: return "doc.text.magnifyingglass"
         }
     }
@@ -240,7 +250,7 @@ public enum TaskActionKind: String, Sendable, Codable {
             return "Call `run_task` on \(task.id.uuidString) to start the task \"\(task.title)\"." + suffix
         case .pause:
             return "Call `update_task` on \(task.id.uuidString) with status `paused` to pause the task \"\(task.title)\"." + suffix
-        case .stop:
+        case .interrupt:
             return "Call `update_task` on \(task.id.uuidString) with status `interrupted` to stop the task \"\(task.title)\"." + suffix
         case .summarize:
             // `get_task_details`, not `list_tasks`: list_tasks now returns truncated summary

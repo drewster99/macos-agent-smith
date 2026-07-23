@@ -245,13 +245,11 @@ public struct ToolContext: Sendable {
     /// has returned. Multiple concurrent calls (parallel-tool batches) are fine; ordering
     /// of starts/ends is preserved per call ID.
     public let onToolExecutionStateChange: @Sendable (_ toolName: String, _ started: Bool) -> Void
-    /// Schedules a deferred wake-up. See `ScheduledWake` for the per-wake record. Returns
-    /// `.scheduled(wake)` or `.error(...)`. Args: wakeAt, instructions, taskID, replacesID,
-    /// recurrence, survivesTaskTermination. Pass `survivesTaskTermination: true` for wakes
-    /// whose intent is to act on a task whose previous run has already terminated (e.g.
-    /// `run_task`, `summarize`) — otherwise the first run's completion will wipe every
-    /// queued future wake against the same task.
-    let scheduleWake: @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome
+    /// Schedules a deferred wake-up, described by a `WakeRequest`. Returns `.scheduled(wake)` or
+    /// `.error(...)`. Set `survivesTaskTermination: true` for wakes whose intent is to act on a
+    /// task whose previous run has already terminated (e.g. `run`, `summarize`), and set `action`
+    /// so the fired wake dispatches structurally rather than by parsing its prose.
+    let scheduleWake: @Sendable (WakeRequest) async -> ScheduleWakeOutcome
     /// Returns all currently-scheduled wakes for the calling agent (sorted by `wakeAt`).
     public let listScheduledWakes: @Sendable () async -> [ScheduledWake]
     /// Cancels a single wake by id. Returns true on success.
@@ -369,7 +367,7 @@ public struct ToolContext: Sendable {
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onToolExecutionStateChange: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
-        scheduleWake: @escaping @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome = { _, _, _, _, _, _ in .error("Scheduling not configured.") },
+        scheduleWake: @escaping @Sendable (WakeRequest) async -> ScheduleWakeOutcome = { _ in .error("Scheduling not configured.") },
         listScheduledWakes: @escaping @Sendable () async -> [ScheduledWake] = { [] },
         cancelScheduledWake: @escaping @Sendable (UUID) async -> Bool = { _ in false },
         reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .failure("Inbound message reporting is not configured.") },

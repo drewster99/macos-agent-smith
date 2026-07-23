@@ -63,7 +63,7 @@ enum TestToolContext {
         taskEvidenceDirectory: URL? = nil,
         loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
         reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .success("reported") },
-        scheduleWake: @escaping @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome = { _, _, _, _, _, _ in .error("Scheduling not configured in test.") }
+        scheduleWake: @escaping @Sendable (WakeRequest) async -> ScheduleWakeOutcome = { _ in .error("Scheduling not configured in test.") }
     ) -> ToolContext {
         ToolContext(
             agentID: agentID,

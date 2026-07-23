@@ -646,7 +646,8 @@ public actor AgentActor {
         recurrence: Recurrence? = nil,
         originalID: UUID? = nil,
         previousFireAt: Date? = nil,
-        survivesTaskTermination: Bool = false
+        survivesTaskTermination: Bool = false,
+        action: TaskActionKind? = nil
     ) -> ScheduleWakeOutcome {
         let trimmedInstructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedInstructions.isEmpty else {
@@ -665,7 +666,8 @@ public actor AgentActor {
             recurrence: recurrence,
             originalID: originalID,
             previousFireAt: previousFireAt,
-            survivesTaskTermination: survivesTaskTermination
+            survivesTaskTermination: survivesTaskTermination,
+            action: action
         )
         scheduledWakes.append(wake)
         scheduledWakes.sort { $0.wakeAt < $1.wakeAt }
@@ -731,14 +733,13 @@ public actor AgentActor {
         onAutoRunTask = handler
     }
 
-    /// Returns true when this wake was scheduled by `TaskActionKind.run.imperativeText` —
-    /// i.e. its imperative starts with "Call \`run_task\` on ". This is the only action
-    /// whose execution is fully mechanical (no LLM judgment required), so the runtime
-    /// can drive it directly. The wake's `taskID` is the source of truth for which task
-    /// to run; the imperative string match is just the action discriminator.
+    /// Returns true when this wake performs the `run` task action against a task. `run` is the
+    /// only action whose execution is fully mechanical (no LLM judgment), so the runtime drives it
+    /// directly. Reads the wake's STRUCTURED `action` — never its `instructions`, which are display
+    /// prose. (Legacy wakes with no persisted action recover `.run` from their prose once, at
+    /// decode; see `ScheduledWake.legacyActionFromInstructions`.)
     static func wakeIsAutoRunRunTask(_ wake: ScheduledWake) -> Bool {
-        wake.taskID != nil
-            && wake.instructions.hasPrefix("Call `run_task` on ")
+        wake.action == .run && wake.taskID != nil
     }
 
     /// Starts the agent's run loop.
@@ -2950,7 +2951,8 @@ public actor AgentActor {
                 recurrence: recurrence,
                 originalID: wake.originalID,
                 previousFireAt: wake.wakeAt,
-                survivesTaskTermination: wake.survivesTaskTermination
+                survivesTaskTermination: wake.survivesTaskTermination,
+                action: wake.action
             )
             scheduledWakes.append(nextWake)
             onWakeScheduled?(nextWake)

@@ -17,13 +17,14 @@ struct ScheduleReminderToolTests {
     private func makeContext(recorder: WakeRecorder) -> ToolContext {
         TestToolContext.make(
             agentRole: .smith,
-            scheduleWake: { wakeAt, instructions, taskID, replacesID, recurrence, survives in
+            scheduleWake: { request in
                 let wake = ScheduledWake(
-                    wakeAt: wakeAt,
-                    instructions: instructions,
-                    taskID: taskID,
-                    recurrence: recurrence,
-                    survivesTaskTermination: survives
+                    wakeAt: request.wakeAt,
+                    instructions: request.instructions,
+                    taskID: request.taskID,
+                    recurrence: request.recurrence,
+                    survivesTaskTermination: request.survivesTaskTermination,
+                    action: request.action
                 )
                 await recorder.record(wake)
                 return .scheduled(wake)

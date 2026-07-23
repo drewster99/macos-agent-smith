@@ -18,7 +18,8 @@ actor FollowUpScheduler {
         taskID: UUID? = nil,
         replacesID: UUID? = nil,
         recurrence: Recurrence? = nil,
-        survivesTaskTermination: Bool = false
+        survivesTaskTermination: Bool = false,
+        action: TaskActionKind? = nil
     ) async -> ScheduleWakeOutcome {
         guard let agent else {
             return .error("Agent is not running.")
@@ -29,7 +30,8 @@ actor FollowUpScheduler {
             taskID: taskID,
             replacesID: replacesID,
             recurrence: recurrence,
-            survivesTaskTermination: survivesTaskTermination
+            survivesTaskTermination: survivesTaskTermination,
+            action: action
         )
     }
 

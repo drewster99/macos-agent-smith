@@ -489,7 +489,7 @@ struct ChannelLogView: View, Equatable {
             )
         case .taskActionScheduled:
             let actionRaw = message.stringMetadata("actionKind") ?? "run"
-            let action = TaskActionKind(rawValue: actionRaw) ?? .run
+            let action = TaskActionKind(lenient: actionRaw) ?? .run
             TaskActionScheduledBanner(
                 actionLabel: action.bannerLabel,
                 symbolName: action.bannerSymbolName,

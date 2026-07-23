@@ -94,44 +94,69 @@ struct ScheduledTaskAndTimerEventTests {
 
     // MARK: - 3aa. Auto-run wake discriminator
 
-    /// Wakes scheduled by `TaskActionKind.run.imperativeText` are recognized as "auto-run"
-    /// and bypass Smith — the runtime drives `restartForNewTask` directly. Other actions
-    /// (pause, stop, summarize) still flow through Smith because they
-    /// require LLM judgment or multi-step execution.
-    @Test("wakeIsAutoRunRunTask matches run-imperatives only when a taskID is present")
+    /// Auto-run is decided by the STRUCTURED `action` field, never by parsing `instructions`.
+    /// `run` (with a taskID) is the only action the runtime drives directly; everything else flows
+    /// through Smith. These fixtures deliberately DECOUPLE the prose from the action so the test
+    /// can't pass by accident of the instruction text.
+    @Test("wakeIsAutoRunRunTask reads the structured action, not the prose")
     func autoRunDiscriminator() {
         let taskID = UUID()
-        let task = AgentTask(id: taskID, title: "demo", description: "...")
 
-        let runWake = ScheduledWake(
-            wakeAt: Date(),
-            instructions: TaskActionKind.run.imperativeText(for: task, extra: nil),
-            taskID: taskID
-        )
+        // action == .run with a taskID → auto-run, even with junk instructions.
+        let runWake = ScheduledWake(wakeAt: Date(), instructions: "anything at all", taskID: taskID, action: .run)
         #expect(AgentActor.wakeIsAutoRunRunTask(runWake) == true)
 
-        let pauseWake = ScheduledWake(
+        // action != .run → NOT auto-run, even if the prose is run-shaped. This is the case the old
+        // prose match got wrong.
+        let summarizeWithRunProse = ScheduledWake(
             wakeAt: Date(),
-            instructions: TaskActionKind.pause.imperativeText(for: task, extra: nil),
-            taskID: taskID
+            instructions: "Call `run_task` on \(taskID.uuidString) to start the task \"x\".",
+            taskID: taskID,
+            action: .summarize
         )
+        #expect(AgentActor.wakeIsAutoRunRunTask(summarizeWithRunProse) == false)
+
+        let pauseWake = ScheduledWake(wakeAt: Date(), instructions: "p", taskID: taskID, action: .pause)
         #expect(AgentActor.wakeIsAutoRunRunTask(pauseWake) == false)
 
-        let stopWake = ScheduledWake(
-            wakeAt: Date(),
-            instructions: TaskActionKind.stop.imperativeText(for: task, extra: nil),
-            taskID: taskID
-        )
-        #expect(AgentActor.wakeIsAutoRunRunTask(stopWake) == false)
+        let interruptWake = ScheduledWake(wakeAt: Date(), instructions: "i", taskID: taskID, action: .interrupt)
+        #expect(AgentActor.wakeIsAutoRunRunTask(interruptWake) == false)
 
-        // Run-shaped imperative without a taskID — still treated as Smith-driven
-        // because the runtime has nothing to call `restartForNewTask` against.
-        let runWakeNoTaskID = ScheduledWake(
+        // action == .run but no taskID → nothing to run against.
+        let runNoTask = ScheduledWake(wakeAt: Date(), instructions: "r", taskID: nil, action: .run)
+        #expect(AgentActor.wakeIsAutoRunRunTask(runNoTask) == false)
+
+        // A bare reminder (action nil) is never auto-run, even with run-shaped prose.
+        let reminderWithRunProse = ScheduledWake(
             wakeAt: Date(),
-            instructions: TaskActionKind.run.imperativeText(for: task, extra: nil),
-            taskID: nil
+            instructions: "Call `run_task` on \(taskID.uuidString) to start the task \"x\".",
+            taskID: nil,
+            action: nil
         )
-        #expect(AgentActor.wakeIsAutoRunRunTask(runWakeNoTaskID) == false)
+        #expect(AgentActor.wakeIsAutoRunRunTask(reminderWithRunProse) == false)
+    }
+
+    @Test("A legacy wake with no persisted action recovers .run from run-shaped prose, once, at decode")
+    func legacyWakeActionMigration() throws {
+        let taskID = UUID()
+        // Simulate a PRE-migration persisted wake: no `action`, no `structuredDispatch` marker,
+        // run-shaped instructions.
+        let legacyJSON = """
+            {"id":"\(UUID().uuidString)","wakeAt":0,"instructions":"Call `run_task` on \(taskID.uuidString) to start the task \\"x\\".","taskID":"\(taskID.uuidString)"}
+            """
+        let data = try #require(legacyJSON.data(using: .utf8))
+        let decoded = try JSONDecoder().decode(ScheduledWake.self, from: data)
+        #expect(decoded.action == .run, "legacy run-shaped wake recovers .run")
+
+        // A NEW reminder whose prose is ALSO run-shaped must NOT be mis-migrated — it round-trips
+        // with action nil because it carries the structuredDispatch marker.
+        let reminder = ScheduledWake(
+            wakeAt: Date(),
+            instructions: "Call `run_task` on \(taskID.uuidString) to start the task \"x\".",
+            action: nil
+        )
+        let roundTripped = try JSONDecoder().decode(ScheduledWake.self, from: JSONEncoder().encode(reminder))
+        #expect(roundTripped.action == nil, "a structured nil-action wake stays nil, no legacy inference")
     }
 
     // MARK: - 3a. Wake-fire promotes linked .scheduled task

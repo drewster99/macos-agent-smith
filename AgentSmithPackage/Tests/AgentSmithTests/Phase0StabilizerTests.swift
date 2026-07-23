@@ -100,10 +100,14 @@ struct WakeReplayFilterTests {
     }
 
     private func autoRunWake(taskID: UUID, wakeAt: Date) -> ScheduledWake {
+        // Auto-run is now decided by the structured `action`, so a run wake must carry it — this
+        // matches how the tools build run wakes in production (a legacy persisted wake would
+        // recover .run from its prose at decode, but these fixtures are built in-memory).
         ScheduledWake(
             wakeAt: wakeAt,
             instructions: "Call `run_task` on \(taskID.uuidString) to start the task \"t\".",
-            taskID: taskID
+            taskID: taskID,
+            action: .run
         )
     }
 

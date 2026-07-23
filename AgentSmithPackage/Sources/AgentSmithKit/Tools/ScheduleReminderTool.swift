@@ -110,9 +110,15 @@ public struct ScheduleReminderTool: AgentTool {
             return .failure("Invalid recurrence: \(message)")
         }
 
-        // No taskID, and `survivesTaskTermination` is meaningless without one — a reminder is
-        // never cancelled by task cleanup because that only targets wakes naming a task.
-        let outcome = await context.scheduleWake(wakeAt, instructions, nil, replacesID, recurrence.value, false)
+        // No taskID and no action — a reminder is a bare "deliver this text to Smith" wake.
+        // `survivesTaskTermination` is meaningless without a task, and `action: nil` is exactly
+        // what routes it to Smith as prose rather than a mechanical task action.
+        let outcome = await context.scheduleWake(WakeRequest(
+            wakeAt: wakeAt,
+            instructions: instructions,
+            replacesID: replacesID,
+            recurrence: recurrence.value
+        ))
         return TimerArgumentParsing.formatScheduleOutcome(outcome, kind: "Reminder")
     }
 }

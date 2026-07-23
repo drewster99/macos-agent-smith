@@ -36,6 +36,12 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
     /// moment the first run completes.
     public var survivesTaskTermination: Bool
 
+    /// The structured task action this wake performs, when it came from a task-action schedule.
+    /// This is the SINGLE source of "what does this wake do" — consumers branch on it and NEVER
+    /// on `instructions`, which is human-facing prose free to change. Nil for a bare reminder (no
+    /// task action) and for a wake persisted before this field existed whose prose isn't run-shaped.
+    public var action: TaskActionKind?
+
     public init(
         id: UUID = UUID(),
         wakeAt: Date,
@@ -44,7 +50,8 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         recurrence: Recurrence? = nil,
         originalID: UUID? = nil,
         previousFireAt: Date? = nil,
-        survivesTaskTermination: Bool = false
+        survivesTaskTermination: Bool = false,
+        action: TaskActionKind? = nil
     ) {
         self.id = id
         self.wakeAt = wakeAt
@@ -54,11 +61,12 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         self.originalID = originalID ?? id
         self.previousFireAt = previousFireAt
         self.survivesTaskTermination = survivesTaskTermination
+        self.action = action
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, wakeAt, instructions, taskID, recurrence, originalID, previousFireAt
-        case survivesTaskTermination
+        case survivesTaskTermination, action, structuredDispatch
         case legacyReason = "reason"
     }
 
@@ -77,6 +85,21 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         self.originalID = try c.decodeIfPresent(UUID.self, forKey: .originalID) ?? id
         self.previousFireAt = try c.decodeIfPresent(Date.self, forKey: .previousFireAt)
         self.survivesTaskTermination = try c.decodeIfPresent(Bool.self, forKey: .survivesTaskTermination) ?? false
+
+        // `structuredDispatch` is written true by every post-migration wake, so its ABSENCE means
+        // exactly one thing: a wake persisted before `action` existed. That makes the legacy prose
+        // inference a one-time migration, never a permanent matcher — a NEW reminder whose prose
+        // happens to be run-shaped keeps its real `action` (nil), because it IS marked structured.
+        let isStructured = try c.decodeIfPresent(Bool.self, forKey: .structuredDispatch) ?? false
+        if isStructured {
+            if let raw = try c.decodeIfPresent(String.self, forKey: .action) {
+                self.action = TaskActionKind(lenient: raw)
+            } else {
+                self.action = nil
+            }
+        } else {
+            self.action = Self.legacyActionFromInstructions(self.instructions)
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -93,6 +116,52 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         if survivesTaskTermination {
             try c.encode(true, forKey: .survivesTaskTermination)
         }
+        // Always stamp the marker so an absent key unambiguously flags a pre-migration record.
+        try c.encode(true, forKey: .structuredDispatch)
+        try c.encodeIfPresent(action, forKey: .action)
+    }
+
+    /// Recovers `action` for a wake persisted before the field existed. A FROZEN literal,
+    /// deliberately NOT derived from `TaskActionKind.run.imperativeText` — it reads what OLD builds
+    /// wrote (which never changes), so today's wording is free to evolve without breaking it. Only
+    /// `run` is recovered: it's the only action any branch drives mechanically; legacy
+    /// pause/interrupt/summarize decode to nil and route through Smith, which is safe.
+    private static func legacyActionFromInstructions(_ instructions: String) -> TaskActionKind? {
+        instructions.hasPrefix("Call `run_task` on ") ? .run : nil
+    }
+}
+
+/// A labeled request to schedule a wake, passed through the `ToolContext.scheduleWake` closure.
+/// Replaces what would otherwise be a 7-positional-argument closure — the mostly-optional fields
+/// are unreadable positionally and the `action` addition tipped it over.
+public struct WakeRequest: Sendable {
+    public var wakeAt: Date
+    public var instructions: String
+    public var taskID: UUID?
+    public var replacesID: UUID?
+    public var recurrence: Recurrence?
+    public var survivesTaskTermination: Bool
+    /// The structured task action, when this wake performs one (run/pause/interrupt/summarize).
+    /// Nil for a bare reminder. This is what lets the fired wake dispatch structurally, never by
+    /// parsing `instructions`.
+    public var action: TaskActionKind?
+
+    public init(
+        wakeAt: Date,
+        instructions: String,
+        taskID: UUID? = nil,
+        replacesID: UUID? = nil,
+        recurrence: Recurrence? = nil,
+        survivesTaskTermination: Bool = false,
+        action: TaskActionKind? = nil
+    ) {
+        self.wakeAt = wakeAt
+        self.instructions = instructions
+        self.taskID = taskID
+        self.replacesID = replacesID
+        self.recurrence = recurrence
+        self.survivesTaskTermination = survivesTaskTermination
+        self.action = action
     }
 }
 

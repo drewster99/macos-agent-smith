@@ -95,14 +95,15 @@ struct RescheduleWakeTool: AgentTool {
             newRecurrence = existing.recurrence
         }
 
-        let outcome = await context.scheduleWake(
-            newFireTime,
-            existing.instructions,
-            existing.taskID,
-            existing.id,
-            newRecurrence,
-            existing.survivesTaskTermination
-        )
+        let outcome = await context.scheduleWake(WakeRequest(
+            wakeAt: newFireTime,
+            instructions: existing.instructions,
+            taskID: existing.taskID,
+            replacesID: existing.id,
+            recurrence: newRecurrence,
+            survivesTaskTermination: existing.survivesTaskTermination,
+            action: existing.action
+        ))
         return TimerArgumentParsing.formatScheduleOutcome(outcome, kind: "Rescheduled wake")
     }
 }
