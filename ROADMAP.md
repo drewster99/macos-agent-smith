@@ -435,11 +435,14 @@ free-slot scheduled RUN routes through the durable `pendingScheduledRunQueue` be
 notification settles (was: lost on a crash-in-spawn-window with auto-advance off), the CAS claim
 keeping enqueue-then-drain idempotent.
 
-**Follow-up (not yet done):** `AgentActor.checkScheduledWake` + the owned-wake methods survive ONLY
-as the no-broker fallback for isolated unit tests (production never hits them; they're marked
-legacy). Migrating `ScheduledWakeTests` et al. (~68 refs) to drive `WakeScheduler` directly, then
-deleting the dead agent code, is the clean removal pass. Also: `WakeScheduler.stop()` isn't wired to
-full runtime teardown (harmless — the armed timer holds `[weak self]`, so it no-ops on fire).
+**✅ Dead code removed (no fallbacks).** `AgentActor` no longer carries any wake machinery —
+`scheduledWakes`, all owned-wake methods, the timer/auto-run/dispatch wiring, `checkScheduledWake` /
+`dispatchWakesLocally`, and the `drainQueuedNotifications` fallback + the `idleWait` wake-clamp are
+gone. The auto-run discriminator moved to `ScheduledWake.isAutoRunRunTask`. `WakeScheduler` is the
+single source of scheduling truth; the wake tests (`ScheduledWakeTests`, `ScheduledWakePersistence
+Tests`, `ScheduledTaskAndTimerEventTests`) drive it directly. Remaining nit: `WakeScheduler.stop()`
+isn't wired to full runtime teardown — harmless, the armed timer holds `[weak self]` so it no-ops on
+fire.
 
 ### 13. Open decisions
 
