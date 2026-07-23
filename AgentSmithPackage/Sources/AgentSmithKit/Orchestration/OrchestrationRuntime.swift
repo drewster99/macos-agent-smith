@@ -845,6 +845,14 @@ public actor OrchestrationRuntime {
     /// task isn't currently working (already finished, pending, paused) — never a clobber. Returns
     /// whether the status flip applied.
     private func applyNotificationTaskStatus(_ taskID: UUID, _ status: AgentTask.Status) async -> Bool {
+        // Gate the destructive terminate to the SAME states the CAS accepts. Without this, a
+        // scheduled pause/interrupt firing on an `.awaitingReview` task — which keeps its Brown alive
+        // and PARKED (waiting on Smith) — would tear that Brown down (losing its context, freeing its
+        // slot), then the CAS would fail (`.awaitingReview` isn't in the set) and the handler would
+        // report "skipped": worker silently destroyed, user told nothing happened. The CAS below is
+        // still the atomic authority; this guard just prevents the terminate outside its window.
+        guard let task = await taskStore.task(id: taskID),
+              task.status == .running || task.status == .validating else { return false }
         await terminateTaskAgents(taskID: taskID)
         return await taskStore.updateStatus(id: taskID, to: status, ifCurrentlyIn: [.running, .validating])
     }
@@ -1263,7 +1271,11 @@ public actor OrchestrationRuntime {
         if case .interval(let seconds) = recurrence, seconds >= Recurrence.minimumIntervalSeconds {
             let interval = TimeInterval(seconds)
             let elapsed = now.timeIntervalSince(wake.wakeAt)
-            let steps = max(1, Int(floor(elapsed / interval)) + 1)
+            // `Int(_:)` traps on a non-finite or out-of-range Double — mirror the guard in
+            // `Recurrence.nextOccurrence(after:notBefore:)` so an absurd/corrupt persisted `wakeAt`
+            // (hand-edited `scheduled_wakes.json`) can't crash the app at cold-boot replay.
+            let ratio = (elapsed / interval).rounded(.down)
+            let steps = (ratio.isFinite && ratio < Double(Int.max - 1)) ? max(1, Int(ratio) + 1) : 1
             let fireAt = wake.wakeAt.addingTimeInterval(TimeInterval(steps) * interval)
             return ScheduledWake(
                 wakeAt: fireAt,
@@ -2035,6 +2047,11 @@ public actor OrchestrationRuntime {
         if let persistWakes = persistScheduledWakes {
             await wakeScheduler.setPersistence(persistWakes)
         }
+        // This is a NEW Smith (performStart re-spawns it; the live-Smith task-start path doesn't run
+        // here). The broker is memoized and survives the re-spawn, so clear any lease the PREVIOUS
+        // Smith left outstanding — otherwise this Smith's first drain would ack away that undelivered
+        // batch and lose it. Cleared → the new Smith re-delivers the durable outbox (at-least-once).
+        await broker.resetLease(for: .smith)
         await smithAgent.setDrainNotifications { [weak broker] in
             guard let broker else { return [] }
             return await broker.drainPendingDeliveries(for: .smith).map(\.text)
@@ -2155,6 +2172,7 @@ public actor OrchestrationRuntime {
             $0.disposition == .active
                 && $0.status == .pending
                 && $0.scheduledRunAt != nil
+                && $0.id != resumingTaskID
                 && !alreadyQueued.contains($0.id)
         }
         if !orphanedScheduledRuns.isEmpty {

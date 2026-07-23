@@ -76,6 +76,25 @@ struct NotificationPullDeliveryTests {
         #expect(await broker2.drainPendingDeliveries(for: .smith).map(\.text) == ["important"], "re-delivered, never lost")
     }
 
+    @Test("resetLease: a re-spawned recipient re-delivers the outbox instead of acking away the prior lease")
+    func resetLeaseReDelivers() async {
+        let broker = NotificationBroker(runtime: NoopRuntime())
+        await broker.registerHandler(type: "reminder", DeliverHandler(text: "keep"))
+        await broker.registerPullRecipient(.smith)
+        await broker.submit(reminder("x"))
+
+        // Smith-A drains — leases it, still in the durable outbox.
+        #expect(await broker.drainPendingDeliveries(for: .smith).map(\.text) == ["keep"])
+
+        // Smith-A is torn down and a NEW Smith wired: the runtime clears the lease. The new Smith's
+        // first drain must RE-DELIVER the still-undelivered item, not ack it away.
+        await broker.resetLease(for: .smith)
+        #expect(await broker.drainPendingDeliveries(for: .smith).map(\.text) == ["keep"], "re-delivered after re-spawn")
+        // And now the second drain acks it (delivered), no longer re-delivered.
+        _ = await broker.drainPendingDeliveries(for: .smith)
+        if case .delivered = await broker.deliveryStatus(reminder("x").id) {} else { Issue.record("delivered after ack") }
+    }
+
     @Test("a queued-but-undrained notification is not re-enqueued on re-post")
     func noDoubleEnqueue() async {
         let broker = NotificationBroker(runtime: NoopRuntime())

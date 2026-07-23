@@ -144,6 +144,17 @@ public actor NotificationBroker {
         onPendingEnqueued = handler
     }
 
+    /// Drops a pull recipient's outstanding lease. MUST be called whenever that recipient is
+    /// re-created (e.g. Smith re-spawned by `restartForNewTask`) — the broker (and this in-memory
+    /// lease) is memoized and outlives the recipient, but the lease's ack semantics are tied to the
+    /// RECIPIENT's lifetime, not the broker's. Without this, a fresh recipient's first drain would
+    /// ack away the PRIOR recipient's still-undelivered batch (remove it from the outbox + mark it
+    /// delivered) and lose it. Clearing the lease makes the new recipient re-deliver the outbox
+    /// instead — the intended at-least-once recovery.
+    public func resetLease(for kind: RecipientKind) {
+        leased[kind] = nil
+    }
+
     /// Seed the pending-delivery queue from persisted state at cold boot, so notifications that were
     /// queued-but-not-yet-drained before a restart are handed out on the next drain. Skips ids the
     /// ledger already records as delivered (a drain that raced the crash).
