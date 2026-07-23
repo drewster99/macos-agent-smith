@@ -53,6 +53,45 @@ public enum Recurrence: Sendable, Codable, Equatable {
         }
     }
 
+    /// The next occurrence in this series that is strictly after BOTH the previous fire (`after`)
+    /// and `notBefore` (typically "now"). When the app was offline long enough that stepping one
+    /// period from `after` still lands in the past, this skips the whole missed backlog to the
+    /// first genuinely-future fire — so a caller schedules ONE successor instead of re-firing once
+    /// per elapsed period on every run-loop tick until it catches up (a restart catch-up STORM;
+    /// the ledger cannot dedup it because each caught-up occurrence gets a fresh id). For an on-time
+    /// fire (`after` ≈ `notBefore`) it returns the same value as `nextOccurrence(after:)`, so normal
+    /// cadence is unchanged. Bounded iteration guards a degenerate recurrence that never reaches the
+    /// future.
+    public func nextOccurrence(after: Date, notBefore: Date, calendar: Calendar = Calendar.current) -> Date? {
+        // Interval catch-up is O(1): jump the smallest whole number of periods (≥ 1) that clears
+        // `notBefore`, rather than looping one period at a time.
+        if case .interval(let seconds) = self {
+            guard seconds >= Self.minimumIntervalSeconds else { return nil }
+            let period = TimeInterval(seconds)
+            let gap = notBefore.timeIntervalSince(after)
+            let periods: Int
+            if gap < period {
+                periods = 1
+            } else {
+                let ratio = (gap / period).rounded(.down)
+                // `Int(ratio)` would trap on a non-finite or out-of-range value; a real elapsed gap
+                // never reaches that, but guard it so LLM-authored/absurd wakeAt data can't crash.
+                periods = (ratio.isFinite && ratio < Double(Int.max - 1)) ? Int(ratio) + 1 : 1
+            }
+            return after.addingTimeInterval(period * Double(periods))
+        }
+
+        // Calendar recurrences: step forward until strictly past `notBefore`. Bounded so a
+        // recurrence that can never match (defensive) can't spin forever.
+        var candidate = nextOccurrence(after: after, calendar: calendar)
+        var steps = 0
+        while let current = candidate, current <= notBefore, steps < 100_000 {
+            candidate = nextOccurrence(after: current, calendar: calendar)
+            steps += 1
+        }
+        return candidate
+    }
+
     /// Finds the next real calendar date matching the requested day/time.
     ///
     /// `Calendar.nextDate(..., matchingPolicy: .nextTime)` is intentionally not used here:

@@ -745,7 +745,7 @@ public actor OrchestrationRuntime {
         if let notificationBroker { return notificationBroker }
         let adapter = ClosureNotificationRuntime(
             autoRunTask: { [weak self] taskID in await self?.dispatchAutoRunWake(taskID: taskID) },
-            setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) },
+            setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) ?? false },
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
             postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
         )
@@ -767,9 +767,13 @@ public actor OrchestrationRuntime {
         return broker
     }
 
-    /// Sets a task's status for a mechanical (pause/interrupt) notification action.
-    private func applyNotificationTaskStatus(_ taskID: UUID, _ status: AgentTask.Status) async {
+    /// Sets a task's status for a mechanical (pause/interrupt) notification action. Refuses to
+    /// clobber a task that is missing or already terminal (`completed`/`failed`) — a scheduled
+    /// pause/interrupt that fires after the task finished is stale. Returns whether it applied.
+    private func applyNotificationTaskStatus(_ taskID: UUID, _ status: AgentTask.Status) async -> Bool {
+        guard let task = await taskStore.task(id: taskID), !task.status.isTerminal else { return false }
         await taskStore.updateStatus(id: taskID, status: status)
+        return true
     }
 
     private func notificationTaskTitle(_ taskID: UUID) async -> String? {

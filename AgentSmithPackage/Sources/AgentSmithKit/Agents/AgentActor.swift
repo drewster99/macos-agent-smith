@@ -2917,10 +2917,14 @@ public actor AgentActor {
         }
 
         // Re-schedule any recurring wakes for their next occurrence. The new wake inherits the
-        // chain's `originalID` so the timers UI can group fires across the series.
+        // chain's `originalID` so the timers UI can group fires across the series. `notBefore: now`
+        // collapses catch-up: a wake restored with a long-stale `wakeAt` (app was offline) schedules
+        // its successor in the FUTURE instead of another still-past occurrence that would re-fire
+        // every tick until caught up — a restart storm the ledger can't dedup (each caught-up
+        // occurrence gets a fresh id).
         for wake in due {
             guard let recurrence = wake.recurrence,
-                  let next = recurrence.nextOccurrence(after: wake.wakeAt) else { continue }
+                  let next = recurrence.nextOccurrence(after: wake.wakeAt, notBefore: now) else { continue }
             let nextWake = ScheduledWake(
                 wakeAt: next,
                 instructions: wake.instructions,

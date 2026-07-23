@@ -18,19 +18,29 @@ public struct TaskActionNotificationHandler: NotificationHandler {
         guard let rawTaskID = stringValue(data, "task_id"), let taskID = UUID(uuidString: rawTaskID) else {
             throw NotificationHandlerError("task_action payload missing a valid task_id")
         }
-        let rawAction = stringValue(data, "action") ?? TaskActionKind.run.rawValue
+        // A MISSING action must fail loud, never default — `.run` is the most side-effectful action
+        // (spawns a worker, runs tools, spends tokens), so a garbled/absent action defaulting to it
+        // would auto-run work off corrupt data. Mirror the task_id guard above: throw, don't guess.
+        guard let rawAction = stringValue(data, "action") else {
+            throw NotificationHandlerError("task_action payload missing an action")
+        }
         guard let action = TaskActionKind(lenient: rawAction) else {
             throw NotificationHandlerError("task_action payload has an unknown action '\(rawAction)'")
         }
         switch action {
         case .run:
             await runtime.autoRunTask(taskID)
-        case .pause:
-            await runtime.setTaskStatus(taskID, to: .paused)
-            await runtime.postSystemNotice("Scheduled action: paused \"\(await runtime.taskTitle(taskID) ?? rawTaskID)\".", taskID: taskID)
-        case .interrupt:
-            await runtime.setTaskStatus(taskID, to: .interrupted)
-            await runtime.postSystemNotice("Scheduled action: stopped \"\(await runtime.taskTitle(taskID) ?? rawTaskID)\".", taskID: taskID)
+        case .pause, .interrupt:
+            let targetStatus: AgentTask.Status = (action == .pause) ? .paused : .interrupted
+            let verb = (action == .pause) ? "paused" : "stopped"
+            let title = await runtime.taskTitle(taskID) ?? rawTaskID
+            // `setTaskStatus` refuses to clobber a task that already finished — a scheduled
+            // pause/stop that fires late is stale, so report it as skipped rather than lying.
+            if await runtime.setTaskStatus(taskID, to: targetStatus) {
+                await runtime.postSystemNotice("Scheduled action: \(verb) \"\(title)\".", taskID: taskID)
+            } else {
+                await runtime.postSystemNotice("Scheduled \(action == .pause ? "pause" : "stop") skipped — \"\(title)\" already finished.", taskID: taskID)
+            }
         case .summarize:
             // Summarize is a `task_summary` notification, not `task_action` — reaching here is a
             // routing bug, surfaced loudly rather than silently mishandled.

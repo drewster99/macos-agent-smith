@@ -41,6 +41,44 @@ struct RecurrenceTests {
         #expect(next == Self.date(2026, 4, 26, 9, 0))
     }
 
+    // MARK: - Catch-up collapse (restart storm guard)
+
+    @Test("interval catch-up collapses a day-stale wake to ONE future occurrence, not 1440")
+    func intervalCatchUpCollapses() {
+        // A 60-second reminder whose last fire was a full day before `now`. The naive
+        // nextOccurrence(after:) would return after+60s (still ~a day in the past), which the
+        // run loop would re-fire once per elapsed period until caught up. The catch-up variant
+        // must jump straight to the first fire strictly after `now`.
+        let recurrence = Recurrence.interval(seconds: 60)
+        let lastFire = Self.date(2026, 4, 24, 9, 0)
+        let now = Self.date(2026, 4, 25, 9, 0)
+        let next = recurrence.nextOccurrence(after: lastFire, notBefore: now, calendar: Self.utc)
+        let unwrapped = try! #require(next)
+        #expect(unwrapped > now, "successor must be in the future")
+        #expect(unwrapped.timeIntervalSince(now) <= 60, "and within one period — a single collapsed occurrence")
+        // Proof this differs from the naive step, which stays stale.
+        #expect(recurrence.nextOccurrence(after: lastFire, calendar: Self.utc)! < now)
+    }
+
+    @Test("daily catch-up collapses a 5-day-stale wake to the next single 09:00 after now")
+    func dailyCatchUpCollapses() {
+        let recurrence = Recurrence.daily(at: TimeOfDay(hour: 9, minute: 0))
+        let lastFire = Self.date(2026, 4, 20, 9, 0)
+        let now = Self.date(2026, 4, 25, 10, 0)   // past today's 09:00
+        let next = recurrence.nextOccurrence(after: lastFire, notBefore: now, calendar: Self.utc)
+        #expect(next == Self.date(2026, 4, 26, 9, 0))
+    }
+
+    @Test("on-time fire is unchanged — catch-up variant matches the plain next occurrence")
+    func onTimeFireMatchesPlain() {
+        let recurrence = Recurrence.interval(seconds: 3600)
+        let fire = Self.date(2026, 4, 25, 9, 0)
+        // after == notBefore (fired exactly on time): normal cadence, one period later.
+        let collapsed = recurrence.nextOccurrence(after: fire, notBefore: fire, calendar: Self.utc)
+        #expect(collapsed == recurrence.nextOccurrence(after: fire, calendar: Self.utc))
+        #expect(collapsed == Self.date(2026, 4, 25, 10, 0))
+    }
+
     // MARK: - Weekly
 
     @Test("weekly recurrence picks the next matching weekday")

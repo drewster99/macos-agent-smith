@@ -9,7 +9,7 @@ struct NotificationBrokerTests {
 
     private struct NoopRuntime: NotificationRuntime {
         func autoRunTask(_ taskID: UUID) async {}
-        func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async {}
+        func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { true }
         func taskTitle(_ taskID: UUID) async -> String? { nil }
         func postSystemNotice(_ text: String, taskID: UUID?) async {}
     }

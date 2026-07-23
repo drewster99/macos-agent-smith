@@ -19,13 +19,13 @@ public struct ClosureRecipientTarget: RecipientTarget {
 /// so the notification handlers can drive task lifecycle without a direct dependency on the actor.
 public struct ClosureNotificationRuntime: NotificationRuntime {
     private let autoRun: @Sendable (UUID) async -> Void
-    private let setStatus: @Sendable (UUID, AgentTask.Status) async -> Void
+    private let setStatus: @Sendable (UUID, AgentTask.Status) async -> Bool
     private let title: @Sendable (UUID) async -> String?
     private let systemNotice: @Sendable (String, UUID?) async -> Void
 
     public init(
         autoRunTask: @escaping @Sendable (UUID) async -> Void,
-        setTaskStatus: @escaping @Sendable (UUID, AgentTask.Status) async -> Void,
+        setTaskStatus: @escaping @Sendable (UUID, AgentTask.Status) async -> Bool,
         taskTitle: @escaping @Sendable (UUID) async -> String?,
         postSystemNotice: @escaping @Sendable (String, UUID?) async -> Void
     ) {
@@ -36,7 +36,7 @@ public struct ClosureNotificationRuntime: NotificationRuntime {
     }
 
     public func autoRunTask(_ taskID: UUID) async { await autoRun(taskID) }
-    public func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async { await setStatus(taskID, status) }
+    public func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { await setStatus(taskID, status) }
     public func taskTitle(_ taskID: UUID) async -> String? { await title(taskID) }
     public func postSystemNotice(_ text: String, taskID: UUID?) async { await systemNotice(text, taskID) }
 }

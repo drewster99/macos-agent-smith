@@ -45,6 +45,11 @@ enum TimerArgumentParsing {
         default:
             return .failure("Either delay_seconds or at_time is required.")
         }
+        // A non-finite delay (NaN/inf) slips past both range checks below — NaN compares false to
+        // everything — and `addingTimeInterval(NaN)` yields a garbage Date that never fires. Reject.
+        guard rawDelay.isFinite else {
+            return .failure("Invalid delay_seconds: must be a finite number.")
+        }
         if rawDelay < minDelaySeconds {
             return .failure("Invalid delay_seconds: \(rawDelay) is below the minimum of \(Int(minDelaySeconds)).")
         }
@@ -83,7 +88,12 @@ enum TimerArgumentParsing {
             let seconds = intValue(dict["seconds"]) ?? 0
             let minutes = intValue(dict["minutes"]) ?? 0
             let hours = intValue(dict["hours"]) ?? 0
-            let total = seconds + minutes * 60 + hours * 3600
+            // `minutes * 60 + hours * 3600` traps on overflow for large in-range Ints an LLM might
+            // supply. Compute with overflow-reporting arithmetic and reject rather than crash. An
+            // overflowing value is nonsensical as an interval anyway.
+            guard let total = safeIntervalSeconds(seconds: seconds, minutes: minutes, hours: hours) else {
+                return .invalid("interval recurrence value is too large.")
+            }
             guard total > 0 else {
                 return .invalid("interval recurrence requires a positive `seconds`, `minutes`, or `hours` value.")
             }
@@ -149,11 +159,28 @@ enum TimerArgumentParsing {
         }
     }
 
+    /// `seconds + minutes*60 + hours*3600` with overflow reported as nil rather than a trap.
+    private static func safeIntervalSeconds(seconds: Int, minutes: Int, hours: Int) -> Int? {
+        let (minuteSeconds, mOver) = minutes.multipliedReportingOverflow(by: 60)
+        guard !mOver else { return nil }
+        let (hourSeconds, hOver) = hours.multipliedReportingOverflow(by: 3600)
+        guard !hOver else { return nil }
+        let (partial, p1Over) = seconds.addingReportingOverflow(minuteSeconds)
+        guard !p1Over else { return nil }
+        let (total, p2Over) = partial.addingReportingOverflow(hourSeconds)
+        guard !p2Over else { return nil }
+        return total
+    }
+
     private static func intValue(_ value: AnyCodable?) -> Int? {
         guard let value else { return nil }
         switch value {
         case .int(let v): return v
-        case .double(let v): return Int(v)
+        // `Int(v)` TRAPS on a non-finite or out-of-range Double — an LLM can supply `1e300` or NaN,
+        // so convert defensively and treat the un-representable case as "not a number" (nil).
+        case .double(let v):
+            guard v.isFinite, v >= Double(Int.min), v <= Double(Int.max) else { return nil }
+            return Int(v)
         case .string(let s): return Int(s)
         default: return nil
         }

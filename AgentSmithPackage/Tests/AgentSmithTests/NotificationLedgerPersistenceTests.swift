@@ -8,7 +8,7 @@ struct NotificationLedgerPersistenceTests {
     private actor RuntimeSpy: NotificationRuntime {
         private(set) var autoRan: [UUID] = []
         func autoRunTask(_ taskID: UUID) async { autoRan.append(taskID) }
-        func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async {}
+        func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { true }
         func taskTitle(_ taskID: UUID) async -> String? { nil }
         func postSystemNotice(_ text: String, taskID: UUID?) async {}
     }

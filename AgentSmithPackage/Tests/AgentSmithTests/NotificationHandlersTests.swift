@@ -10,11 +10,21 @@ struct NotificationHandlersTests {
         private(set) var statusSet: [(UUID, AgentTask.Status)] = []
         private(set) var notices: [String] = []
         let titles: [UUID: String]
+        /// When false, `setTaskStatus` records nothing and returns false — models a terminal task
+        /// the runtime refuses to clobber.
+        let statusApplies: Bool
 
-        init(titles: [UUID: String] = [:]) { self.titles = titles }
+        init(titles: [UUID: String] = [:], statusApplies: Bool = true) {
+            self.titles = titles
+            self.statusApplies = statusApplies
+        }
 
         func autoRunTask(_ taskID: UUID) async { autoRan.append(taskID) }
-        func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async { statusSet.append((taskID, status)) }
+        func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool {
+            guard statusApplies else { return false }
+            statusSet.append((taskID, status))
+            return true
+        }
         func taskTitle(_ taskID: UUID) async -> String? { titles[taskID] }
         func postSystemNotice(_ text: String, taskID: UUID?) async { notices.append(text) }
     }
@@ -78,6 +88,38 @@ struct NotificationHandlersTests {
         // The legacy "stop" string still maps to interrupt via lenient parsing.
         #expect(try await handler.handle(note("stop"), runtime: runtime) == .acted)
         #expect(await runtime.statusSet.contains { $0.1 == .interrupted })
+    }
+
+    @Test("A stale pause/interrupt on an already-finished task is skipped, not clobbered")
+    func taskActionSkipsTerminalTask() async throws {
+        let taskID = UUID()
+        let runtime = RuntimeSpy(titles: [taskID: "Done Task"], statusApplies: false)
+        let handler = TaskActionNotificationHandler()
+        let note = AgentNotification(
+            id: NotificationID(namespace: "timer", key: UUID().uuidString),
+            triggerSource: .timer(scheduleID: UUID(), occurrence: Date()),
+            recipient: .runtime, title: "t", createdAt: Date(),
+            payload: Payload(type: "task_action", data: ["action": .string("pause"), "task_id": .string(taskID.uuidString)])
+        )
+        #expect(try await handler.handle(note, runtime: runtime) == .acted)
+        #expect(await runtime.statusSet.isEmpty, "a terminal task's status must not be mutated")
+        #expect(await runtime.notices.contains { $0.contains("skipped") && $0.contains("Done Task") })
+    }
+
+    @Test("task_action with a MISSING action throws — never silently defaults to run")
+    func taskActionMissingActionThrows() async {
+        let handler = TaskActionNotificationHandler()
+        let note = AgentNotification(
+            id: NotificationID(namespace: "timer", key: "k"),
+            triggerSource: .timer(scheduleID: UUID(), occurrence: Date()),
+            recipient: .runtime, title: "t", createdAt: Date(),
+            payload: Payload(type: "task_action", data: ["task_id": .string(UUID().uuidString)])
+        )
+        let spy = RuntimeSpy()
+        await #expect(throws: NotificationHandlerError.self) {
+            _ = try await handler.handle(note, runtime: spy)
+        }
+        #expect(await spy.autoRan.isEmpty, "a missing action must NOT start a task")
     }
 
     @Test("task_action with missing task_id throws (malformed data for our type)")
