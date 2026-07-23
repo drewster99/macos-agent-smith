@@ -1213,7 +1213,7 @@ public actor OrchestrationRuntime {
                     // fired occurrence schedules its successor in memory, but this disk
                     // snapshot can predate that persist (the same race that resurrects
                     // one-shot wakes). Roll the fired occurrence forward to its next
-                    // future fire time — mirroring checkScheduledWake's reschedule — and
+                    // future fire time — mirroring WakeScheduler.fireDue's reschedule — and
                     // let the (taskID, wakeAt) dedupe collapse it if the successor DID
                     // reach disk. One-shot fired wakes just drop.
                     guard let rolled = Self.rolledForwardRecurrence(of: wake, after: now) else {
@@ -1238,7 +1238,7 @@ public actor OrchestrationRuntime {
 
     /// Rolls a fired recurring wake forward to its first occurrence strictly after `now`,
     /// preserving the chain identity (`originalID`, recurrence, survives flag) exactly as
-    /// `AgentActor.checkScheduledWake`'s reschedule does. Returns nil for one-shot wakes
+    /// `WakeScheduler.fireDue`'s reschedule does. Returns nil for one-shot wakes
     /// and for exhausted recurrences. Skipping straight to a FUTURE occurrence — rather
     /// than the next occurrence after the fired one — is deliberate: intermediate
     /// occurrences belong to fire windows that already elapsed, and re-firing them

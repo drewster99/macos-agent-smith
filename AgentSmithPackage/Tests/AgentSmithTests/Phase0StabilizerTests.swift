@@ -234,7 +234,7 @@ struct WakeReplayFilterTests {
         )
         var fired = autoRunWake(taskID: task.id, wakeAt: Date(timeIntervalSinceNow: -300))
         fired.recurrence = .interval(seconds: 600)
-        // The successor checkScheduledWake scheduled before the restart: exactly one
+        // The successor the scheduler scheduled before the restart: exactly one
         // interval after the fired occurrence.
         var successor = autoRunWake(taskID: task.id, wakeAt: fired.wakeAt.addingTimeInterval(600))
         successor.recurrence = .interval(seconds: 600)
