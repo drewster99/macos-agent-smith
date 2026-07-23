@@ -72,16 +72,35 @@ public actor NotificationBroker {
     private var ledgerFlushInFlight = false
     private var ledgerDirty = false
 
+    /// Recipient kinds that PULL rather than push: a `.deliver` for one of these is held in
+    /// `pendingDelivery` until the recipient calls `drainPendingDeliveries`. Smith is the canonical
+    /// pull recipient — his run loop drains his queue — so a fired notification is never pushed into
+    /// him (no reentrancy) and survives his momentary absence (persistence until delivery).
+    private var pullRecipients: Set<RecipientKind> = []
+    /// `.deliver` notifications queued for a pull recipient, held until drained. THIS is the durable
+    /// outbox — persisted via `persistPendingDelivery`, so an undelivered notification survives a
+    /// restart and is handed out on the next drain rather than lost.
+    private var pendingDelivery: [QueuedDelivery] = []
+    private let persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)?
+    /// Fired (best-effort) when something is enqueued for a pull recipient, so an idle recipient can
+    /// wake and drain instead of waiting for its next scheduled tick.
+    private var onPendingEnqueued: (@Sendable (RecipientKind) -> Void)?
+    /// Single-flight coalescing for `persistPendingDelivery`, mirroring the ledger flusher.
+    private var pendingFlushInFlight = false
+    private var pendingDirty = false
+
     private static let logger = Logger(subsystem: "com.agentsmith", category: "Notifications")
 
     public init(
         runtime: any NotificationRuntime,
         ledgerCapacity: Int = 5_000,
-        persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)? = nil
+        persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)? = nil,
+        persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)? = nil
     ) {
         self.runtime = runtime
         self.ledger = DeliveryLedger(capacity: ledgerCapacity)
         self.persistLedger = persistLedger
+        self.persistPendingDelivery = persistPendingDelivery
     }
 
     // MARK: - Registration
@@ -97,9 +116,32 @@ public actor NotificationBroker {
         handlers[type] = handler
     }
 
-    /// Register where `.deliver` text lands for a recipient kind.
+    /// Register where `.deliver` text lands for a recipient kind (PUSH delivery — an outward bridge).
     public func registerRecipientTarget(_ kind: RecipientKind, _ target: any RecipientTarget) {
         targets[kind] = target
+    }
+
+    /// Register a recipient kind as PULL: a `.deliver` for it is queued (and persisted) until the
+    /// recipient calls `drainPendingDeliveries`. Use for in-process recipients that drain on their
+    /// own loop (Smith), so nothing is pushed into them and nothing is lost to a transient absence.
+    public func registerPullRecipient(_ kind: RecipientKind) {
+        pullRecipients.insert(kind)
+    }
+
+    /// Wire the idle-wake nudge for pull recipients (see `onPendingEnqueued`).
+    public func setOnPendingEnqueued(_ handler: @escaping @Sendable (RecipientKind) -> Void) {
+        onPendingEnqueued = handler
+    }
+
+    /// Seed the pending-delivery queue from persisted state at cold boot, so notifications that were
+    /// queued-but-not-yet-drained before a restart are handed out on the next drain. Skips ids the
+    /// ledger already records as delivered (a drain that raced the crash).
+    public func seedPendingDeliveries(_ items: [QueuedDelivery]) {
+        for item in items
+        where !ledger.isSettled(item.notification.id)
+            && !pendingDelivery.contains(where: { $0.notification.id == item.notification.id }) {
+            pendingDelivery.append(item)
+        }
     }
 
     /// Register a pollable source (drained on `tick` and at cold boot).
@@ -181,8 +223,10 @@ public actor NotificationBroker {
     /// routes to the type handler and (for `.deliver`) the recipient target.
     private func deliver(_ notification: AgentNotification) async {
         let id = notification.id
-        // Claim synchronously — before any await — so a concurrent duplicate can't also pass.
-        guard !ledger.isSettled(id), !inFlight.contains(id) else { return }
+        // Claim synchronously — before any await — so a concurrent duplicate can't also pass. A
+        // notification already queued for a pull recipient is also a duplicate (don't re-enqueue).
+        guard !ledger.isSettled(id), !inFlight.contains(id),
+              !pendingDelivery.contains(where: { $0.notification.id == id }) else { return }
         inFlight.insert(id)
         defer { inFlight.remove(id) }
 
@@ -212,19 +256,26 @@ public actor NotificationBroker {
             case .acted:
                 await settle(id, .delivered(now))
             case .deliver(let text):
-                guard let target = targets[notification.recipient.kind] else {
+                let kind = notification.recipient.kind
+                if let target = targets[kind] {
+                    // PUSH recipient (outward bridge). A false return leaves the id unsettled; log
+                    // it so a lost commitment is visible rather than silent.
+                    if await target.deliver(text, for: notification) {
+                        await settle(id, .delivered(now))
+                    } else {
+                        Self.logger.error("Push delivery for recipient \(String(describing: kind), privacy: .public) returned false — notification \(id.description, privacy: .public) left unsettled.")
+                    }
+                } else if pullRecipients.contains(kind) {
+                    // PULL recipient: hold it in the durable pending queue until the recipient
+                    // drains. NOT settled here — it becomes `.delivered` on drain. This is the
+                    // persistence-until-delivery floor; a momentarily-absent recipient loses nothing.
+                    pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
+                    await flushPendingDelivery()
+                    onPendingEnqueued?(kind)
+                } else {
+                    Self.logger.error("No target or pull registration for recipient \(String(describing: kind), privacy: .public) — dropping notification \(id.description, privacy: .public).")
                     await settle(id, .dropped(reason: .noRecipientTarget))
-                    return
                 }
-                if await target.deliver(text, for: notification) {
-                    await settle(id, .delivered(now))
-                }
-                // A false return leaves the id UNSETTLED. Note: there is no durable pending
-                // outbox yet (that lands with the persistence phase), so nothing re-produces an
-                // unsettled notification on its own — a target that needs guaranteed delivery must
-                // durably QUEUE the work and return true (e.g. the `.taskWorker` route queues on
-                // the task for its next spawn). Returning false today means "not delivered, not
-                // queued" — the occurrence is effectively lost until its source produces it again.
             }
         } catch {
             // Malformed data for a type we own — surface loudly, do NOT mark delivered.
@@ -257,5 +308,36 @@ public actor NotificationBroker {
             ledgerDirty = false
             await persistLedger(ledger.snapshot())
         } while ledgerDirty
+    }
+
+    // MARK: - Pull delivery (persistence until delivery)
+
+    /// Hands the calling recipient every notification queued for it, marks each `.delivered`, and
+    /// removes them from the durable pending queue. The recipient (Smith's run loop) appends each
+    /// `text` to its conversation. Marking delivered on drain — not on enqueue — is what makes this
+    /// effectively-once across a restart: a crash before the drain persists leaves the items queued
+    /// for a retry drain; a crash after leaves them delivered and deduped.
+    public func drainPendingDeliveries(for kind: RecipientKind) async -> [QueuedDelivery] {
+        let taken = pendingDelivery.filter { $0.notification.recipient.kind == kind }
+        guard !taken.isEmpty else { return [] }
+        pendingDelivery.removeAll { $0.notification.recipient.kind == kind }
+        let now = Date()
+        for item in taken { ledger.markDelivered(item.notification.id, at: now) }
+        await flushPendingDelivery()
+        await flushLedger()
+        return taken
+    }
+
+    /// Coalesced single-flight persistence for the pending-delivery queue, mirroring `flushLedger`
+    /// so a slow write of an older snapshot can't clobber a newer one on disk.
+    private func flushPendingDelivery() async {
+        guard let persistPendingDelivery else { return }
+        guard !pendingFlushInFlight else { pendingDirty = true; return }
+        pendingFlushInFlight = true
+        defer { pendingFlushInFlight = false }
+        repeat {
+            pendingDirty = false
+            await persistPendingDelivery(pendingDelivery)
+        } while pendingDirty
     }
 }

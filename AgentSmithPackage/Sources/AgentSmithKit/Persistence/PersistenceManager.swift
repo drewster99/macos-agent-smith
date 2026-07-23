@@ -442,6 +442,24 @@ public actor PersistenceManager {
         return Dictionary(uniqueKeysWithValues: keyed.map { (NotificationID(raw: $0.key), $0.value) })
     }
 
+    /// Persists the broker's pending-delivery queue — notifications the notification manager is
+    /// holding for a pull recipient (Smith) until it drains them. This is the durable outbox: an
+    /// undelivered reminder/summary survives an app restart and is handed out on the next drain
+    /// rather than lost. Written on every enqueue/drain (coalesced by the broker). Per-session.
+    public func savePendingDelivery(_ items: [QueuedDelivery]) throws {
+        try ensureDirectories()
+        let data = try JSONEncoder().encode(items)
+        let url = sessionDirectory.appendingPathComponent("notification_pending.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadPendingDelivery() throws -> [QueuedDelivery] {
+        let url = sessionDirectory.appendingPathComponent("notification_pending.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode([QueuedDelivery].self, from: data)
+    }
+
     // MARK: - Pending user messages (per-session)
 
     /// Persists the pending inbound-user-message buffer — messages typed while Smith could not
