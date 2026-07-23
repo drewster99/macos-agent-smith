@@ -1,6 +1,29 @@
 import SwiftUI
 import AgentSmithKit
 
+/// One presentation of `TaskEditorSheet`, and the reason the editor is always driven by
+/// `.sheet(item:)` rather than `.sheet(isPresented:)`.
+///
+/// The editor is a form: its `@State` has to be seeded from the task being edited, which is
+/// normally the anti-pattern `CLAUDE.md` warns about — with `isPresented`, SwiftUI may reuse the
+/// view identity across presentations and the seeding initializer never runs again, so the second
+/// open shows the first open's abandoned edits. Carrying a distinct `id` per presentation makes
+/// each open a genuinely new view, which is what makes seeding from `mode` correct.
+struct TaskEditorPresentation: Identifiable {
+    let id: UUID
+    let mode: TaskEditorSheet.Mode
+
+    /// A brand-new id every time, so reopening "New Task" never inherits a prior draft.
+    static func creating() -> TaskEditorPresentation {
+        TaskEditorPresentation(id: UUID(), mode: .create)
+    }
+
+    /// Keyed by task id — reopening the same task rebuilds the form from current store state.
+    static func editing(_ task: AgentTask) -> TaskEditorPresentation {
+        TaskEditorPresentation(id: task.id, mode: .edit(task))
+    }
+}
+
 struct TaskEditorSheet: View {
     enum Mode {
         case create

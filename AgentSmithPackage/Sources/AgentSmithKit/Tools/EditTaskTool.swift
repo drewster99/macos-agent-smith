@@ -68,6 +68,11 @@ public struct EditTaskTool: AgentTool {
         }
         let definitions: [TemplateInputDefinition]
         if case .array(let rawInputs) = arguments["template_inputs"] {
+            // Refuse rather than silently drop them — a caller that thinks it just defined
+            // inputs would otherwise go on to call run_task with input_values that reject.
+            guard isTemplate else {
+                return .failure("template_inputs are valid only on template tasks. Pass is_template: true in the same call, or use a template task id.")
+            }
             switch Self.parseInputs(rawInputs) {
             case .success(let parsed): definitions = parsed
             case .failure(let message): return .failure(message)

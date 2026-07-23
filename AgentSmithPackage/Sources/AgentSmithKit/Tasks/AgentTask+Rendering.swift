@@ -10,6 +10,10 @@ extension AgentTask {
         return "\(description)\n\n## Template inputs\n\(templateInputValues)"
     }
 
+    var hasSubmittedResult: Bool {
+        !(result?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+
     func renderedTemplateInputDefinitions() -> String? {
         guard !templateInputDefinitions.isEmpty else { return nil }
         return templateInputDefinitions.map { definition in

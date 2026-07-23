@@ -1328,6 +1328,11 @@ final class AppViewModel {
             templateInputDefinitions: isTemplate ? templateInputDefinitions : []
         )
         if isTemplate, let problem = await taskStore.setTemplateInstanceTitleTemplate(id: task.id, titleTemplate: templateInstanceTitleTemplate) {
+            // The title template was validated above, so this is unreachable in practice — but a
+            // half-built task left behind here would be a criteria-less, step-less orphan the user
+            // never asked for, and the editor stays open so they'd likely create a second one.
+            // Roll the creation back rather than leave that behind.
+            _ = await taskStore.softDelete(id: task.id)
             taskActionError = problem
             return false
         }

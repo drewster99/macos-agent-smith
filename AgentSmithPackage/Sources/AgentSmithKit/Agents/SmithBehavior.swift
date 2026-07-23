@@ -22,6 +22,7 @@ enum SmithBehavior {
             TerminateAgentTool(),
             AbortTool(),
             ScheduleTaskActionTool(),
+            ScheduleReminderTool(),
             ListScheduledWakesTool(),
             RescheduleWakeTool(),
             CancelWakeTool(),
@@ -200,12 +201,12 @@ enum SmithBehavior {
 
         ## Timers
 
-        Every timer is task-bound. Pick based on whether the task already exists or not — there is no "free-floating reminder" tool.
+        Pick the timer tool by whether real work is involved, and whether the task already exists.
 
         **Pattern**: when the user says "do X at time T":
           1. If X requires a new task, call `create_task(...)` with `scheduled_run_at: T`. The task is created in `scheduled` status and a timer is auto-registered to run it at T. **Do NOT also call `schedule_task_action` — it's already done.**
           2. If X targets an existing task, call `schedule_task_action(task_id, action, at_time/delay_seconds)` — no `create_task` needed.
-          3. If the user wants a "reminder" with no real work behind it (e.g. "remind me to take a shower at 9pm"), still create a task — `create_task("Remind Drew to take a shower", description: "At 9pm, send Drew a message …", scheduled_run_at: T)`. The task description IS the imperative; Brown executes it when the timer fires. Do not schedule system-based timers, cron jobs, or launch agents, generally, unless the user requests.
+          3. If X is a REMINDER with no real work behind it (e.g. "remind me to take a shower at 9pm"), call `schedule_reminder(instructions, at_time/delay_seconds)`. Do NOT create a task for this — a reminder spawns no worker and needs none. Do not schedule system-based timers, cron jobs, or launch agents, generally, unless the user requests.
 
         ### `create_task(title, description, scheduled_run_at?, attachment_ids)`
         See above. Pass `scheduled_run_at` to defer the run, scheduling it for the specified future date/time. The auto-runner skips scheduled tasks until the timer fires.
@@ -219,13 +220,24 @@ enum SmithBehavior {
         - Use for "run task X at 9pm", "stop task X in 30 minutes", "summarize task X tomorrow morning".
         - The wake's instructions are auto-rendered from `action` + the task's id/title — you cannot make them vague.
 
-        ### Recurrence (`schedule_task_action`)
+        ### `schedule_reminder(instructions, delay_seconds OR at_time, recurrence?, replaces_id?)`
+        Schedule a timer that is NOT bound to any task. When it fires you receive your own \
+        `instructions` text verbatim and act on it. Use for reminders and self-directed follow-ups \
+        that spawn no worker: "remind me to take a shower at 9pm", "check back on the deploy in an hour".
+        - `instructions` must be a direct imperative to YOURSELF naming the exact action — not a memo. \
+          GOOD: "Tell Drew his shower reminder is up via `message_user`." BAD: "Shower reminder."
+        - Never bound to a task, so nothing auto-cancels it — use `cancel_wake` to stop one.
+        - Do NOT create a throwaway task just to hang a reminder on it. That is what this tool is for.
+        - If the reminder DOES imply real work (research, files, commands), create a task instead — \
+          a reminder cannot spawn a worker.
+
+        ### Recurrence (`schedule_task_action` and `schedule_reminder`)
         Pass `recurrence` as an object to repeat the timer:
           - Interval: `{"type":"interval","minutes":30}` (also `seconds`/`hours`; min total 60s)
           - Daily: `{"type":"daily","hour":21,"minute":0}`
           - Weekly: `{"type":"weekly","hour":15,"minute":0,"on":["mon","wed","fri"]}`
           - Monthly: `{"type":"monthly","hour":9,"minute":0,"day_of_month":1}`
-        Recurring timers auto-schedule the next occurrence after each fire — do NOT call schedule_task_action again to repeat.
+        Recurring timers auto-schedule the next occurrence after each fire — do NOT call the scheduling tool again to repeat.
 
         ### `list_scheduled_wakes()`
         Returns every currently-scheduled timer (id, fire time, instructions, optional task_id). Read-only.
@@ -244,7 +256,7 @@ enum SmithBehavior {
 
         ### Timer guidance
         - **Before scheduling, call `list_scheduled_wakes` first** to see existing timers and avoid duplicates.
-        - To move/postpone/bring-forward an existing wake, ALWAYS use `reschedule_wake`. Never use `cancel_wake` followed by `schedule_task_action` for the same logical wake.
+        - To move/postpone/bring-forward an existing wake, ALWAYS use `reschedule_wake`. Never use `cancel_wake` followed by `schedule_task_action` / `schedule_reminder` for the same logical wake.
         - Do NOT use any timer tool to poll Brown's progress — the runtime sends you an automatic Brown-activity digest at regular intervals (only when Brown is actually alive).
         - Do NOT announce timer scheduling to the user — confirm via `message_user` only when the timer represents a meaningful commitment; otherwise stay quiet.
 

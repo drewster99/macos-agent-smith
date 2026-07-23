@@ -190,6 +190,18 @@ struct FileReadTool: AgentTool {
 
     // MARK: - Text Reading
 
+    /// Advances a line number by a line count, saturating at `Int.max` instead of trapping.
+    ///
+    /// `startingLineNum` and `maxLines` arrive as full 64-bit `Int`s decoded straight out of
+    /// LLM-emitted JSON, clamped at the bottom by `max(1, …)` and unbounded at the top — so
+    /// `line + count` genuinely can overflow. Overflow is a TRAP, not a catchable error: it
+    /// takes down the whole app, and the tool-timeout `do`/`catch` around tool execution
+    /// cannot intercept it. Saturating is correct and not merely safe: no file has `Int.max`
+    /// lines, so a saturated window just extends to the end of the file.
+    private static func lineNumber(_ line: Int, advancedBy count: Int) -> Int {
+        count > Int.max - line ? Int.max : line + count
+    }
+
     private static func readText(
         at url: URL,
         resolvedPath: String,
@@ -230,7 +242,7 @@ struct FileReadTool: AgentTool {
             return failure("Error: startingLineNum \(offset) is beyond the end of the file (\(totalLines) lines).")
         }
 
-        let endIndex = min(startIndex + limit, totalLines)
+        let endIndex = min(lineNumber(startIndex, advancedBy: limit), totalLines)
         let selectedLines = allLines[startIndex..<endIndex]
 
         // Format as cat -n: 6-char right-justified line number + two spaces + content.
@@ -268,17 +280,21 @@ struct FileReadTool: AgentTool {
         defer { try? handle.close() }
 
         let startLine = offset
-        let endLineExclusive = offset + limit
+        let endLineExclusive = lineNumber(offset, advancedBy: limit)
         var currentLine = 1
         var selected: [(lineNumber: Int, text: String)] = []
         var outputChars = 0
         var outputTruncated = false
         var pending = Data()
-        var endedWithNewline = false
         let chunkSize = 64 * 1024
 
         func processLine(_ lineData: Data) -> ReadOutcome? {
             defer { currentLine += 1 }
+            // Once the budget is spent, stop SELECTING. Skipping just the oversized line and
+            // continuing would let a later, shorter line be appended after it — producing
+            // silently non-contiguous output (lines 100, 101, 103) under a note that only
+            // says the tail was cut.
+            guard !outputTruncated else { return nil }
             guard currentLine >= startLine && currentLine < endLineExclusive else { return nil }
             guard let line = String(data: lineData, encoding: .utf8) else {
                 return failure("Error reading file: selected line \(currentLine) is not valid UTF-8.")
@@ -296,7 +312,6 @@ struct FileReadTool: AgentTool {
         while true {
             let chunk = handle.readData(ofLength: chunkSize)
             if chunk.isEmpty { break }
-            endedWithNewline = chunk.last == 0x0A
             pending.append(chunk)
 
             while let newlineIndex = pending.firstIndex(of: 0x0A) {
@@ -306,7 +321,11 @@ struct FileReadTool: AgentTool {
             }
         }
 
-        if !pending.isEmpty || endedWithNewline || currentLine == 1 {
+        // Whatever is left after the last newline is a final line WITHOUT a trailing newline.
+        // A file that ends in "\n" leaves nothing here — counting one more line in that case
+        // would invent a phantom blank final line, inflate `totalLines`, and thereby let an
+        // out-of-range `startingLineNum` slip past the bounds check below.
+        if !pending.isEmpty {
             if let failure = processLine(pending) { return failure }
         }
 
@@ -316,13 +335,22 @@ struct FileReadTool: AgentTool {
             return failure("Error: startingLineNum \(offset) is beyond the end of the file (\(totalLines) lines).")
         }
 
+        // A first in-window line wider than the entire budget selects nothing. Returning that as a
+        // SUCCESS with an empty body reads to an agent as "this file is empty" — and it would also
+        // satisfy the prior-read gate that `file_edit` relies on. Fail instead, and say why.
+        guard !(selected.isEmpty && outputTruncated) else {
+            return failure("Error: line \(offset) by itself exceeds the \(maxCharacters)-character output limit, so no lines could be returned. Use `grep` to find what you need within that line.")
+        }
+
         var output = ""
         output.reserveCapacity(min(outputChars + 160, maxCharacters + 160))
         for line in selected {
             output += String(format: "%6d  %@\n", line.lineNumber, line.text)
         }
         if outputTruncated {
-            output += "\n\n[Output truncated at \(maxCharacters) characters]"
+            // Name the cut point: the reader needs to know WHERE the window stopped to continue.
+            let lastKept = selected.last?.lineNumber ?? (offset - 1)
+            output += "\n\n[Output truncated at \(maxCharacters) characters, after line \(lastKept).]"
         }
 
         let shownEnd = selected.last?.lineNumber ?? (offset - 1)

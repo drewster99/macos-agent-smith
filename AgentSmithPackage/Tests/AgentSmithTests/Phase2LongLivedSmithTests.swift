@@ -8,6 +8,15 @@ import SemanticSearch
 @Suite("Long-lived Smith worker cycling")
 struct Phase2LongLivedSmithTests {
 
+    private func waitUntil(timeout: Duration = .seconds(2), _ predicate: @Sendable () async -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if await predicate() { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return await predicate()
+    }
+
     private func makeRuntime(includeBrown: Bool = true, autoRunInterrupted: Bool = false) -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-phase2-tests", isDirectory: true)
@@ -300,6 +309,29 @@ struct Phase2LongLivedSmithTests {
         #expect(await runtime.agentIDForRole(.smith) == smithBefore, "Smith survives the failure too")
         let smithContext = await runtime.contextSnapshot(for: .smith)
         #expect(smithContext?.contains { $0.content.textValue?.contains("could not be started") == true } == true)
+
+        await runtime.stopAll()
+    }
+
+    @Test("Cold boot validates running task that already has submitted result")
+    func coldBootValidatesRunningTaskWithSubmittedResult() async {
+        let runtime = makeRuntime()
+        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Reply to Drew", description: "Send the reply.")
+        await store.updateStatus(id: task.id, status: .running)
+        await store.setResult(id: task.id, result: "Reply sent.", commentary: nil)
+
+        await runtime.start()
+        let recovered = await waitUntil {
+            let status = await store.task(id: task.id)?.status
+            return status == .validating || status == .awaitingReview || status == .completed || status == .failed
+        }
+
+        #expect(recovered)
+        let taskAfter = await store.task(id: task.id)
+        #expect(taskAfter?.status != .interrupted)
+        #expect(taskAfter?.result == "Reply sent.")
 
         await runtime.stopAll()
     }

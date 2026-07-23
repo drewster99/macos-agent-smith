@@ -300,12 +300,7 @@ struct ListTasksTool: AgentTool {
     }
 
     private static func parseISO8601(_ value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: value) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: value)
+        ISO8601Conversion.date(from: value)
     }
 
     private static func renderFilters(arguments: [String: AnyCodable], dispositionFilter: String) -> [String: AnyCodable] {
@@ -368,9 +363,7 @@ struct ListTasksTool: AgentTool {
     }
 
     private static func formatDate(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
+        ISO8601Conversion.string(from: date)
     }
 
     private struct ListTasksResponse: Encodable {

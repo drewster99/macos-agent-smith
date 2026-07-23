@@ -42,7 +42,7 @@ struct TaskDetailWindow: View {
     @State private var isEditingSteps = false
     @State private var editedSteps: [EditableStep] = []
     @State private var templateRunInputTask: AgentTask?
-    @State private var taskEditorTask: AgentTask?
+    @State private var taskEditorPresentation: TaskEditorPresentation?
 
     /// Editing model for one acceptance criterion. Criterion identity is preserved
     /// through edits; the store resets sticky verdicts only when the validation contract changes.
@@ -231,9 +231,9 @@ struct TaskDetailWindow: View {
                 onCancel: { templateRunInputTask = nil }
             )
         }
-        .sheet(item: $taskEditorTask) { task in
-            TaskEditorSheet(mode: .edit(task), viewModel: viewModel) {
-                taskEditorTask = nil
+        .sheet(item: $taskEditorPresentation) { presentation in
+            TaskEditorSheet(mode: presentation.mode, viewModel: viewModel) {
+                taskEditorPresentation = nil
             }
         }
     }
@@ -361,7 +361,7 @@ struct TaskDetailWindow: View {
             Spacer()
             if task.status.isDescriptionEditable {
                 Button {
-                    taskEditorTask = task
+                    taskEditorPresentation = .editing(task)
                 } label: {
                     Label("Edit", systemImage: "pencil")
                 }

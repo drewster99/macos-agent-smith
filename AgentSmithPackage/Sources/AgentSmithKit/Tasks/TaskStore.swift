@@ -93,14 +93,26 @@ public actor TaskStore {
             task.templateInputValues = [:]
             normalizeTemplateLauncher(&task)
         } else {
-            task.templateInputDefinitions = []
-            task.templateInstanceTitleTemplate = nil
-            task.templateInputValues = [:]
+            clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
         }
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
         return nil
+    }
+
+    /// Clears the template authoring fields — but ONLY when an actual template is being demoted.
+    /// A task that was never a template keeps them, and that distinction matters: a template
+    /// INSTANCE is a non-template task carrying a snapshot of its template's input definitions
+    /// plus the concrete `templateInputValues` its run was created with. Those values are the
+    /// record of what that run was told to do — they render into the worker's briefing, the
+    /// security agent's scoping prompt, and the validator payload. Clearing them on an unrelated
+    /// title or description edit silently destroys that record.
+    private func clearTemplateAuthoringFieldsIfDemoting(_ task: inout AgentTask, wasTemplate: Bool) {
+        guard wasTemplate else { return }
+        task.templateInputDefinitions = []
+        task.templateInstanceTitleTemplate = nil
+        task.templateInputValues = [:]
     }
 
     public func setTemplateInputDefinitions(id: UUID, definitions: [TemplateInputDefinition]) -> String? {
@@ -175,20 +187,21 @@ public actor TaskStore {
         }
 
         let wasTemplate = task.isTemplate
-        task.title = title
-        task.description = description
         task.isTemplate = isTemplate
         if isTemplate {
+            // Archive the prior run BEFORE the new title/description land, so the preserved
+            // child records the text the run actually executed under — not the edit that
+            // retired it.
             preservePriorRunAsTemplateChildIfNeeded(&task, wasTemplate: wasTemplate)
             task.templateInputDefinitions = templateInputDefinitions
             task.templateInstanceTitleTemplate = normalizedTitleTemplate?.isEmpty == false ? normalizedTitleTemplate : nil
             task.templateInputValues = [:]
             normalizeTemplateLauncher(&task)
         } else {
-            task.templateInputDefinitions = []
-            task.templateInstanceTitleTemplate = nil
-            task.templateInputValues = [:]
+            clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
         }
+        task.title = title
+        task.description = description
         let now = Date()
         task.updatedAt = now
         task.lastEditedAt = now
@@ -298,7 +311,11 @@ public actor TaskStore {
         let instanceTitle: String
         if let titleTemplate = template.templateInstanceTitleTemplate,
            !titleTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            switch TemplateStringRenderer.render(titleTemplate, values: resolvedInputs.values) {
+            switch TemplateStringRenderer.render(
+                titleTemplate,
+                values: resolvedInputs.values,
+                definedNames: Set(template.templateInputDefinitions.map(\.name))
+            ) {
             case .success(let rendered):
                 let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
                 instanceTitle = trimmed.isEmpty ? template.title : trimmed

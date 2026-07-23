@@ -62,7 +62,8 @@ enum TestToolContext {
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
         taskEvidenceDirectory: URL? = nil,
         loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
-        reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .success("reported") }
+        reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .success("reported") },
+        scheduleWake: @escaping @Sendable (Date, String, UUID?, UUID?, Recurrence?, Bool) async -> ScheduleWakeOutcome = { _, _, _, _, _, _ in .error("Scheduling not configured in test.") }
     ) -> ToolContext {
         ToolContext(
             agentID: agentID,
@@ -76,6 +77,7 @@ enum TestToolContext {
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
             loadEvaluatorRegistry: loadEvaluatorRegistry,
+            scheduleWake: scheduleWake,
             reportInboundUserMessage: reportInboundUserMessage,
             memoryStore: memoryStore,
             extractWebContent: extractWebContent,

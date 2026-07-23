@@ -261,11 +261,135 @@ struct FileReadToolTests {
         #expect(result.output.contains("hello"))
     }
 
-    private func writeLargeLineFixture(in dir: TempDir) throws -> String {
+    @Test("a large file ending in a newline reports its real line count, with no phantom final line")
+    func largeFileEndingInNewlineHasNoPhantomLine() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let path = try writeLargeLineFixture(in: dir, trailingNewline: true)
+
+        let result = try await FileReadTool().execute(
+            arguments: [
+                "path": .string(path),
+                "startingLineNum": .int(5_998),
+                "maxLines": .int(10)
+            ],
+            context: TestToolContext.make()
+        )
+
+        #expect(result.succeeded)
+        #expect(result.output.contains("  6000  line-6000"))
+        // The file has exactly 6000 lines. Counting the empty remainder after the final
+        // newline would report 6001 and emit a blank line 6001.
+        #expect(!result.output.contains("6001"))
+    }
+
+    @Test("a line window past the end of a large file is refused, not answered with a blank line")
+    func lineWindowPastEndOfLargeFileIsRefused() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let path = try writeLargeLineFixture(in: dir, trailingNewline: true)
+
+        let result = try await FileReadTool().execute(
+            arguments: [
+                "path": .string(path),
+                "startingLineNum": .int(6_001),
+                "maxLines": .int(5)
+            ],
+            context: TestToolContext.make()
+        )
+
+        #expect(!result.succeeded)
+        #expect(result.output.contains("beyond the end of the file"))
+        #expect(result.output.contains("6000 lines"))
+    }
+
+    @Test("Extreme line arguments saturate instead of trapping")
+    func extremeLineArgumentsDoNotTrap() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let small = try dir.write("alpha\nbravo\ncharlie\n", to: "small.txt")
+        let large = try writeLargeLineFixture(in: dir, trailingNewline: true)
+
+        // `startingLineNum` / `maxLines` arrive unbounded from LLM-emitted JSON. Overflow is a
+        // TRAP, not a catchable error — before the saturating helper each of these killed the
+        // process. Surviving the call IS the assertion; the outcomes are only sanity checks.
+        let cases: [(path: String, start: Int, limit: Int?)] = [
+            (small, 2, Int.max),          // the easiest kill: guard passes, then startIndex + limit
+            (small, Int.max, nil),
+            (small, Int.max, Int.max),
+            (small, Int.min, Int.max),
+            (large, Int.max, nil),        // >5MB path: default limit alone overflows
+            (large, 1, Int.max),
+            (large, Int.max, Int.max),
+            (large, 2, Int.max)
+        ]
+
+        for testCase in cases {
+            var arguments: [String: AnyCodable] = [
+                "path": .string(testCase.path),
+                "startingLineNum": .int(testCase.start)
+            ]
+            if let limit = testCase.limit { arguments["maxLines"] = .int(limit) }
+            let result = try await FileReadTool().execute(arguments: arguments, context: TestToolContext.make())
+            #expect(!result.output.isEmpty, "start=\(testCase.start) limit=\(String(describing: testCase.limit))")
+        }
+    }
+
+    @Test("Truncated output stays contiguous — no line is skipped and silently backfilled")
+    func truncatedOutputIsContiguous() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        // A giant middle line forces the budget to run out partway through the window. The old
+        // code skipped it and kept appending later, shorter lines — yielding 1, 3, 4.
+        let giant = String(repeating: "g", count: FileReadTool.maxCharacters + 1024)
+        let body = "first\n\(giant)\nthird\nfourth\n"
+        let path = try dir.write(body, to: "giantline.txt")
+
+        let result = try await FileReadTool().execute(
+            arguments: [
+                "path": .string(path),
+                "startingLineNum": .int(1),
+                "maxLines": .int(10)
+            ],
+            context: TestToolContext.make()
+        )
+
+        #expect(result.succeeded)
+        #expect(result.output.contains("     1  first"))
+        #expect(!result.output.contains("third"), "a later short line must not backfill past the cut")
+        #expect(!result.output.contains("fourth"))
+        #expect(result.output.contains("after line 1"))
+    }
+
+    @Test("A single line wider than the output cap fails instead of succeeding empty")
+    func oversizedSingleLineIsFailure() async throws {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let giant = String(repeating: "g", count: FileReadTool.maxCharacters + 1024)
+        let path = try dir.write("\(giant)\nsecond\n", to: "oneline.txt")
+        let tracker = TestToolContext.FileReadTrackerStub()
+
+        let result = try await FileReadTool().execute(
+            arguments: [
+                "path": .string(path),
+                "startingLineNum": .int(1),
+                "maxLines": .int(1)
+            ],
+            context: TestToolContext.make(agentRole: .brown, fileReadTracker: tracker)
+        )
+
+        // Empty-but-successful would read to an agent as "the file is empty", and would also
+        // satisfy the prior-read gate that file_edit checks.
+        #expect(!result.succeeded)
+        #expect(result.output.contains("output limit"))
+    }
+
+    private func writeLargeLineFixture(in dir: TempDir, trailingNewline: Bool = false) throws -> String {
         let filler = String(repeating: "x", count: 1024)
-        let body = (1...6_000)
+        var body = (1...6_000)
             .map { "line-\($0) \(filler)" }
             .joined(separator: "\n")
+        if trailingNewline { body += "\n" }
         #expect(body.utf8.count > FileReadTool.maxCharacters)
         return try dir.write(body, to: "large.txt")
     }

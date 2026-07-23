@@ -213,4 +213,133 @@ struct TaskTemplateTests {
         ])
         #expect(error?.contains("not a template") == true)
     }
+
+    @Test("Editing a template INSTANCE preserves the input values its run was created with")
+    func editingInstancePreservesInputValues() async {
+        let store = TaskStore()
+        let template = await store.addTask(
+            title: "Localize app",
+            description: "Localize the app",
+            isTemplate: true,
+            templateInputDefinitions: [
+                TemplateInputDefinition(name: "target_app", description: "App to localize", required: true)
+            ]
+        )
+        guard case .success(let instance) = await store.instantiateTemplate(
+            templateID: template.id,
+            inputValues: ["target_app": "Localizer"]
+        ) else {
+            Issue.record("template should instantiate")
+            return
+        }
+
+        // Exactly what `edit_task(task_id, title:)` sends for a non-template task.
+        let problem = await store.updateDefinition(
+            id: instance.id,
+            title: "Localize Localizer",
+            description: instance.description,
+            isTemplate: false,
+            templateInputDefinitions: [],
+            templateInstanceTitleTemplate: nil
+        )
+
+        #expect(problem == nil)
+        let edited = await store.task(id: instance.id)
+        #expect(edited?.title == "Localize Localizer")
+        #expect(edited?.templateInputValues == ["target_app": "Localizer"], "a title edit must not erase the run's inputs")
+        #expect(edited?.templateInputDefinitions.count == 1, "the instance keeps its definition snapshot")
+    }
+
+    @Test("Demoting an actual template DOES clear its authoring fields")
+    func demotingTemplateClearsAuthoringFields() async {
+        let store = TaskStore()
+        let template = await store.addTask(
+            title: "Localize app",
+            description: "Localize the app",
+            isTemplate: true,
+            templateInputDefinitions: [
+                TemplateInputDefinition(name: "target_app", description: "App to localize", required: true)
+            ]
+        )
+        let problem = await store.updateDefinition(
+            id: template.id,
+            title: "Localize app",
+            description: "Localize the app",
+            isTemplate: false,
+            templateInputDefinitions: [],
+            templateInstanceTitleTemplate: nil
+        )
+
+        #expect(problem == nil)
+        let demoted = await store.task(id: template.id)
+        #expect(demoted?.isTemplate == false)
+        #expect(demoted?.templateInputDefinitions.isEmpty == true)
+    }
+
+    @Test("An omitted OPTIONAL input renders empty in the instance title instead of failing the run")
+    func optionalInputRendersEmptyInInstanceTitle() async {
+        let store = TaskStore()
+        let template = await store.addTask(
+            title: "Localize",
+            description: "Localize the app",
+            isTemplate: true,
+            templateInputDefinitions: [
+                TemplateInputDefinition(name: "target_app", description: "App", required: true),
+                TemplateInputDefinition(name: "locale", description: "Optional locale", required: false)
+            ]
+        )
+        let saveProblem = await store.setTemplateInstanceTitleTemplate(
+            id: template.id,
+            titleTemplate: "Localize {{target_app}} {{locale}}"
+        )
+        #expect(saveProblem == nil)
+
+        switch await store.instantiateTemplate(templateID: template.id, inputValues: ["target_app": "Localizer"]) {
+        case .success(let instance):
+            #expect(instance.title == "Localize Localizer", "the gap left by the omitted input is collapsed")
+        case .failure(let message):
+            Issue.record("an omitted optional input must not block the run: \(message)")
+        }
+    }
+
+    @Test("A placeholder naming an input that does not exist is still an error")
+    func unknownPlaceholderStillFails() {
+        let rendered = TemplateStringRenderer.render(
+            "Localize {{nope}}",
+            values: ["target_app": "Localizer"],
+            definedNames: ["target_app"]
+        )
+        #expect(rendered == .failure("Unknown template placeholder '{{nope}}'. Valid inputs: target_app."))
+    }
+
+    @Test("Converting a RUN task into a template preserves the prior run under its original text")
+    func convertingToTemplatePreservesOriginalRunText() async {
+        let store = TaskStore()
+        let task = await store.addTask(title: "Check disk space", description: "Report free space on /")
+        await store.setResult(id: task.id, result: "42 GB free.", commentary: nil)
+        await store.updateStatus(id: task.id, status: .completed)
+
+        let problem = await store.updateDefinition(
+            id: task.id,
+            title: "Disk space template",
+            description: "Report free space on the volume named by the input.",
+            isTemplate: true,
+            templateInputDefinitions: [],
+            templateInstanceTitleTemplate: nil
+        )
+        #expect(problem == nil)
+
+        let all = await store.allTasks()
+        guard let preserved = all.first(where: { $0.parentTaskID == task.id }) else {
+            Issue.record("the prior run should be preserved as a child task")
+            return
+        }
+        #expect(preserved.result == "42 GB free.")
+        #expect(preserved.title == "Check disk space", "the archived run keeps the title it actually ran under")
+        #expect(preserved.description == "Report free space on /", "…and the description it actually ran under")
+
+        let launcher = await store.task(id: task.id)
+        #expect(launcher?.title == "Disk space template")
+        #expect(launcher?.status == .pending)
+    }
 }

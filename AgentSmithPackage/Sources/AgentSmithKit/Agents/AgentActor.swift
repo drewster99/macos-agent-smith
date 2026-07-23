@@ -1821,11 +1821,6 @@ public actor AgentActor {
         var calledTaskComplete = false
         var calledCreateTask = false
 
-        let taskLifecycleTools: Set<String> = [
-            "task_update", "task_complete", "request_help", "reply_to_user",
-            "message_user", "message_brown"
-        ]
-
         // Segment calls into contiguous runs of lifecycle vs approval-needing.
         // Each segment completes before the next starts, preserving ordering.
         // e.g. [task_update, file_read x10, task_complete] becomes:
@@ -1839,7 +1834,7 @@ public actor AgentActor {
 
         var segments: [CallSegment] = []
         for call in callsToExecute {
-            let isLifecycle = taskLifecycleTools.contains(call.name)
+            let isLifecycle = Self.taskLifecycleTools.contains(call.name)
             if let last = segments.last, last.isLifecycle == isLifecycle {
                 segments[segments.count - 1].calls.append(call)
             } else {
@@ -2093,30 +2088,46 @@ public actor AgentActor {
                 for (batchIndex, call) in segment.calls.enumerated() {
                     guard isRunning else { break }
                     let result: String
+                    // Carry the tool's real outcome, exactly as the lifecycle branch does. Today
+                    // no park-triggering tool reaches this branch (they are all in
+                    // `taskLifecycleTools`), but hardcoding `false` here would silently break
+                    // the handoff park the moment one of them stopped being a lifecycle tool.
+                    let succeeded: Bool
                     if let tool = activeTools.first(where: { $0.name == call.name }) {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
+                            succeeded = false
                         } else if mustEvaluate(tool) {
                             let siblings = segment.calls.count > 1
                                 ? approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil }
                                 : []
-                            result = await executeWithApproval(call, tool: tool, parallelIndex: batchIndex, parallelCount: segment.calls.count, siblingCallSummaries: siblings)
+                            let outcome = await executeWithApproval(call, tool: tool, parallelIndex: batchIndex, parallelCount: segment.calls.count, siblingCallSummaries: siblings)
+                            result = outcome.result
+                            succeeded = outcome.succeeded
                         } else {
-                            result = await directExecute(
+                            let outcome = await directExecute(
                                 call,
                                 tool: tool,
                                 postVisibility: shouldPostDirectToolVisibility(tool)
-                            ).result
+                            )
+                            result = outcome.result
+                            succeeded = outcome.succeeded
                         }
                     } else {
                         result = "Unknown tool: \(call.name)"
+                        succeeded = false
                         await toolContext.setToolExecutionStatus(call.id, false)
                         recordToolOutcome(name: call.name, succeeded: false)
                     }
                     executedCallIDs.insert(call.id)
-                    updatePostCallFlags(call: call, result: result, succeeded: false, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
+                    updatePostCallFlags(call: call, result: result, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
+                    // Mirrors the lifecycle branch: once control has been handed off, nothing
+                    // further in this turn should run. A no-op today (the lifecycle branch
+                    // already breaks when it sets the flag, so it cannot arrive here already
+                    // set) — it is here so the invariant holds wherever the flag gets set.
+                    if calledTaskComplete { break toolSegments }
                 }
             }
         }
@@ -2270,8 +2281,9 @@ public actor AgentActor {
     }
 
     /// Evaluates a tool call via SecurityEvaluator, posts channel messages, executes if approved.
-    /// Used for sequential tool calls that require approval.
-    private func executeWithApproval(_ call: LLMToolCall, tool: any AgentTool, parallelIndex: Int = 0, parallelCount: Int = 1, siblingCallSummaries: [String] = []) async -> String {
+    /// Used for sequential tool calls that require approval. Returns the tool's outcome alongside
+    /// its result — a denial is a failure, so post-call control flow never reads it as success.
+    private func executeWithApproval(_ call: LLMToolCall, tool: any AgentTool, parallelIndex: Int = 0, parallelCount: Int = 1, siblingCallSummaries: [String] = []) async -> (result: String, succeeded: Bool) {
         let toolDef = tool.definition(for: configuration.role)
         let toolParameterDefs = Self.formatToolParameterDefinitions(toolDef.parameters)
 
@@ -2285,7 +2297,7 @@ public actor AgentActor {
         guard let evaluator = securityEvaluator else {
             assertionFailure("Brown requires tool approval but no SecurityEvaluator is configured")
             Self.agentLogger.error("Tool '\(call.name, privacy: .public)' denied — no SecurityEvaluator configured. This is a configuration bug.")
-            return "Tool execution denied: No security evaluator is configured. Tool cannot be executed without approval."
+            return ("Tool execution denied: No security evaluator is configured. Tool cannot be executed without approval.", false)
         }
 
         let siblings = siblingCallSummaries.isEmpty ? nil : siblingCallSummaries.joined(separator: "\n")
@@ -2322,11 +2334,11 @@ public actor AgentActor {
         )
 
         if disposition.approved {
-            let result = await directExecute(call, tool: tool).result
+            let outcome = await directExecute(call, tool: tool)
             await Self.postToolOutputToChannel(
-                result: result, call: call, role: configuration.role, context: toolContext, taskTitle: channelTaskTitle
+                result: outcome.result, call: call, role: configuration.role, context: toolContext, taskTitle: channelTaskTitle
             )
-            return result
+            return outcome
         } else {
             if let task = currentTask {
                 let update = Self.securityDenialUpdateMessage(
@@ -2339,7 +2351,7 @@ public actor AgentActor {
             // duplicate operation.
             await toolContext.setToolExecutionStatus(call.id, false)
             recordToolOutcome(name: call.name, succeeded: false)
-            return "Tool execution denied: \(disposition.message ?? "No reason given")"
+            return ("Tool execution denied: \(disposition.message ?? "No reason given")", false)
         }
     }
 
@@ -2703,9 +2715,22 @@ public actor AgentActor {
         ))
     }
 
+    /// Tools executed sequentially with no security approval, as one contiguous segment. Kept
+    /// as a named constant (rather than a literal inside the run loop) because
+    /// `handoffLifecycleTools` must stay a subset of it — see `parkingToolsAreLifecycleTools`.
+    static let taskLifecycleTools: Set<String> = [
+        "task_update", "task_complete", "request_help", "reply_to_user",
+        "message_user", "message_brown"
+    ]
+
+    /// The lifecycle tools that hand control to ANOTHER actor, so the calling agent must stop
+    /// after one succeeds. Every name here has to also be in `taskLifecycleTools`: only the
+    /// lifecycle branch of the run loop knows to break out of the remaining segments.
+    static let handoffLifecycleTools: Set<String> = ["task_complete", "request_help"]
+
     /// Whether a successful lifecycle tool transfers control away from the current agent turn.
     static func shouldParkAfterLifecycleTool(named toolName: String, succeeded: Bool) -> Bool {
-        succeeded && (toolName == "task_complete" || toolName == "request_help")
+        succeeded && handoffLifecycleTools.contains(toolName)
     }
 
     private func updatePostCallFlags(call: LLMToolCall, result: String, succeeded: Bool, sentMessage: inout Bool, calledTaskComplete: inout Bool, calledCreateTask: inout Bool) {

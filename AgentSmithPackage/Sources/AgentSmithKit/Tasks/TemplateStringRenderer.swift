@@ -9,8 +9,24 @@ public enum TemplateStringRenderResult: Sendable, Equatable {
 
 /// Renders small user-facing templates with `{{input_name}}` placeholders.
 public enum TemplateStringRenderer {
-    /// Replaces each placeholder with the corresponding resolved input value.
-    public static func render(_ template: String, values: [String: String]) -> TemplateStringRenderResult {
+    /// Replaces each placeholder with its resolved input value.
+    ///
+    /// A placeholder naming a DEFINED input that simply wasn't supplied for this run renders as
+    /// an empty string rather than failing. `validate` accepts any defined name — required or
+    /// not — so failing here would let a purely cosmetic title veto the run it names: a template
+    /// titled `Localize {{app}} ({{locale}})` with `locale` marked optional could never run
+    /// without a locale. Only a placeholder naming an input that does not exist at all is an
+    /// error, and `validate` should already have caught that at authoring time.
+    ///
+    /// Because empty substitution leaves gaps behind, runs of whitespace are collapsed and the
+    /// result is trimmed. Literal punctuation around an omitted placeholder is left alone — it
+    /// is the author's own text, and guessing at which brackets to elide would mangle titles
+    /// that meant to keep them.
+    public static func render(
+        _ template: String,
+        values: [String: String],
+        definedNames: Set<String>
+    ) -> TemplateStringRenderResult {
         var output = ""
         var index = template.startIndex
         while index < template.endIndex {
@@ -27,13 +43,21 @@ public enum TemplateStringRenderer {
             guard !name.isEmpty, rawName == name, TemplateInputValidation.isValidName(name) else {
                 return .failure("Invalid template placeholder '{{\(rawName)}}'. Names must match ^[a-z][a-z0-9_]*$.")
             }
-            guard let value = values[name] else {
-                return .failure("Unknown template placeholder '{{\(name)}}'.")
+            guard definedNames.contains(name) else {
+                return .failure("Unknown template placeholder '{{\(name)}}'. Valid inputs: \(definedNames.sorted().joined(separator: ", ")).")
             }
-            output += value
+            output += values[name] ?? ""
             index = closeRange.upperBound
         }
-        return .success(output)
+        return .success(collapsingWhitespace(output))
+    }
+
+    /// Collapses runs of whitespace to a single space and trims, so an omitted optional input
+    /// doesn't leave a double space or a trailing gap in the rendered title.
+    private static func collapsingWhitespace(_ text: String) -> String {
+        text
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 
     /// Returns a validation problem when the template references invalid or unknown placeholders.

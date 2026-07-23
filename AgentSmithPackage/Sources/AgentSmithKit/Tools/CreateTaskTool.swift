@@ -263,15 +263,7 @@ public struct CreateTaskTool: AgentTool {
 
         var scheduledRunAt: Date?
         if case .string(let isoString) = arguments["scheduled_run_at"] {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            var parsed = formatter.date(from: isoString)
-            if parsed == nil {
-                let lenient = ISO8601DateFormatter()
-                lenient.formatOptions = [.withInternetDateTime]
-                parsed = lenient.date(from: isoString)
-            }
-            guard let resolved = parsed else {
+            guard let resolved = ISO8601Conversion.date(from: isoString) else {
                 return .failure("Invalid scheduled_run_at: '\(isoString)' is not a valid ISO-8601 timestamp.")
             }
             if resolved <= Date().addingTimeInterval(5) {

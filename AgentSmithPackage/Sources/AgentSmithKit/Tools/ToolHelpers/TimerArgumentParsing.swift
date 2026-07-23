@@ -21,17 +21,7 @@ enum TimerArgumentParsing {
         maxDelaySeconds: Double
     ) -> FireTimeResult {
         if let value = arguments["at_time"], case .string(let isoString) = value {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let parsed: Date?
-            if let p = formatter.date(from: isoString) {
-                parsed = p
-            } else {
-                let lenient = ISO8601DateFormatter()
-                lenient.formatOptions = [.withInternetDateTime]
-                parsed = lenient.date(from: isoString)
-            }
-            guard let parsed else {
+            guard let parsed = ISO8601Conversion.date(from: isoString) else {
                 return .failure("Invalid at_time: '\(isoString)' is not a valid ISO-8601 timestamp.")
             }
             let delta = parsed.timeIntervalSince(now)

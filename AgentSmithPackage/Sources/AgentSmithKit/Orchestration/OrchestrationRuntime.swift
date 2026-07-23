@@ -2030,11 +2030,20 @@ public actor OrchestrationRuntime {
         // tasks get promoted to `.pending` so the cold-launch instruction surfaces them.
         await rearmScheduledTaskWakes(excluding: resumingTaskID)
 
+        var activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
+
+        // A crash during `task_complete` can leave the durable result written while the
+        // status is still `.running`. That is submitted work, not resumable Brown work.
+        for task in activeTasks where task.status == .running && task.id != resumingTaskID && task.hasSubmittedResult {
+            await taskStore.addUpdate(id: task.id, message: "Recovered submitted result after restart; resuming acceptance validation without re-running Brown.")
+            await taskStore.updateStatus(id: task.id, status: .validating)
+        }
+
+        activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
+
         // Mark any leftover running tasks as interrupted — no Brown is running them anymore.
         // (Clean shutdowns mark these interrupted via AppViewModel; this catches crashes/force-quits.)
         // Skip the resuming task if present — it will be set to running momentarily.
-        let allTasks = await taskStore.allTasks()
-        let activeTasks = allTasks.filter { $0.disposition == .active }
         let leftoverRunningTasks = activeTasks.filter { $0.status == .running && $0.id != resumingTaskID }
         for task in leftoverRunningTasks {
             await taskStore.updateStatus(id: task.id, status: .interrupted)
@@ -2046,6 +2055,8 @@ public actor OrchestrationRuntime {
         for task in activeTasks where task.status == .starting && task.id != resumingTaskID {
             await taskStore.updateStatus(id: task.id, status: .pending)
         }
+
+        activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
         // Validation is idempotent and restartable: tasks caught mid-validation by a
         // quit/crash re-enqueue from their sticky-verdict state (partial rounds were
@@ -2196,6 +2207,7 @@ public actor OrchestrationRuntime {
         } else {
             // Cold launch — gather all active tasks by status and surface everything to Smith.
             let awaitingReviewTasks = activeTasks.filter { $0.status == .awaitingReview }
+            let validatingTasks = activeTasks.filter { $0.status == .validating }
             let interruptedTasks = activeTasks.filter { $0.status == .interrupted }
             // Templates are `.pending` launchers, not queued work — exclude them from the
             // startup pending list so Smith isn't told they're being auto-started (they
@@ -2282,6 +2294,26 @@ public actor OrchestrationRuntime {
                     "- \(task.title) (id: \(task.id.uuidString))\n  \(task.helpRequest ?? "")"
                 }.joined(separator: "\n")
                 parts.append("\(helpRequestTasks.count) task(s) have a BLOCKER from Brown awaiting your help (not a review):\n\(taskList)\nResolve each with `provide_help`, or `message_user` first if you need something from the user. Do NOT call `review_work` on these.")
+            }
+
+            if !validatingTasks.isEmpty {
+                let taskList = validatingTasks.map { task in
+                    var entry = "- \(task.title) (id: \(task.id.uuidString)) — validation is already running/recovering"
+                    if let result = task.result {
+                        entry += "\n  Submitted result: \(result)"
+                    }
+                    if let commentary = task.commentary {
+                        entry += "\n  Commentary: \(commentary)"
+                    }
+                    return entry
+                }.joined(separator: "\n")
+                parts.append("""
+                    The following task(s) already submitted their result and are in acceptance validation:
+                    \(taskList)
+                    The runtime has re-enqueued validation for these task(s). Do NOT call `run_task`, \
+                    `create_task`, or `message_brown` for them, and do NOT recreate any side-effect work \
+                    they already performed. Wait for validation to complete; if validation escalates, use `review_work`.
+                    """)
             }
 
             // Show interrupted tasks that were NOT auto-resumed (e.g. beyond worker capacity)

@@ -17,7 +17,7 @@ struct MainView: View {
     @State private var showValidationSheet = false
     @State private var showWelcomeSheet = false
     @State private var showOnboarding = false
-    @State private var showTaskCreator = false
+    @State private var taskCreatorPresentation: TaskEditorPresentation?
     @State private var isDropTargeted = false
     /// The attachment currently shown in the full-screen image viewer.
     @State private var selectedImageAttachment: Attachment?
@@ -32,7 +32,7 @@ struct MainView: View {
 
     var body: some View {
         NavigationSplitView {
-            MainViewSidebar(viewModel: viewModel, onCreateTask: { showTaskCreator = true })
+            MainViewSidebar(viewModel: viewModel, onCreateTask: { taskCreatorPresentation = .creating() })
         } detail: {
             MainViewDetailColumn(
                 viewModel: viewModel,
@@ -59,7 +59,7 @@ struct MainView: View {
                 onStart: handleStart,
                 onResetAndRestart: handleAbortReset,
                 onOpenMemoryBrowser: { openWindow(id: "memory-browser") },
-                onNewTask: { showTaskCreator = true }
+                onNewTask: { taskCreatorPresentation = .creating() }
             )
         }
         .navigationTitle(viewModel.session.name)
@@ -74,7 +74,7 @@ struct MainView: View {
             // Project rule: defer @State / @Observable mutations out of `.onChange`.
             DispatchQueue.main.async {
                 shared.createTaskRequestID = nil
-                showTaskCreator = true
+                taskCreatorPresentation = .creating()
             }
         }
         .onAppear {
@@ -122,9 +122,9 @@ struct MainView: View {
                 }
             )
         }
-        .sheet(isPresented: $showTaskCreator) {
-            TaskEditorSheet(mode: .create, viewModel: viewModel) {
-                showTaskCreator = false
+        .sheet(item: $taskCreatorPresentation) { presentation in
+            TaskEditorSheet(mode: presentation.mode, viewModel: viewModel) {
+                taskCreatorPresentation = nil
             }
         }
     }

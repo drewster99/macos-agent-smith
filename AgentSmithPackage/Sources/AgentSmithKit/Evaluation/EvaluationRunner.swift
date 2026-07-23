@@ -127,6 +127,11 @@ public enum EvaluationRunner {
                 for call in response.toolCalls {
                     var parsedArguments: [String: AnyCodable]?
                     let result: String
+                    // The tool's OWN outcome flag, captured at execution. Never re-derived by
+                    // sniffing the result text: evidence tools return file contents, and a file
+                    // that happens to contain a phrase like "no such file" would otherwise read
+                    // back as a failed call.
+                    let succeeded: Bool
                     if let tool = tools.first(where: { $0.name == call.name }) {
                         // When a security gate is provided (validators), every tool call is routed
                         // through it first. For read-only evidence tools it auto-approves without an
@@ -134,6 +139,7 @@ public enum EvaluationRunner {
                         // a behavior change. A denial short-circuits execution.
                         if let securityGate, await securityGate(call, tool) == false {
                             result = "Tool execution denied by security."
+                            succeeded = false
                             parsedArguments = try? call.parsedArguments()
                         } else {
                             do {
@@ -141,17 +147,25 @@ public enum EvaluationRunner {
                                 parsedArguments = arguments
                                 let outcome = try await tool.execute(arguments: arguments, context: toolContext)
                                 result = outcome.output
+                                succeeded = outcome.succeeded
                             } catch {
                                 parsedArguments = try? call.parsedArguments()
                                 result = "Tool error: \(error.localizedDescription)"
+                                succeeded = false
                             }
                         }
                     } else {
                         parsedArguments = try? call.parsedArguments()
                         result = "Tool '\(call.name)' is not permitted for this evaluation."
+                        succeeded = false
                     }
                     await onToolResult?(call, result)
-                    toolObservations.append(ToolObservation(call: call, parsedArguments: parsedArguments, result: result))
+                    toolObservations.append(ToolObservation(
+                        call: call,
+                        parsedArguments: parsedArguments,
+                        result: result,
+                        succeeded: succeeded
+                    ))
                     toolLines.append("→ \(call.name)(\(call.arguments.prefix(200))) → \(result.prefix(300))")
                     messages.append(.toolResult(Self.capToolResult(result), callID: call.id))
                 }
@@ -211,18 +225,12 @@ public enum EvaluationRunner {
         var call: LLMToolCall
         var parsedArguments: [String: AnyCodable]?
         var result: String
+        /// The tool's own reported outcome, recorded at execution time.
+        var succeeded: Bool
 
         var pathArgument: String? {
             guard case .string(let path)? = parsedArguments?["path"] else { return nil }
             return path
-        }
-
-        var succeeded: Bool {
-            let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return !trimmed.hasPrefix("error:")
-                && !trimmed.hasPrefix("tool error:")
-                && !trimmed.hasPrefix("tool execution denied")
-                && !trimmed.contains("no such file")
         }
     }
 
@@ -244,30 +252,34 @@ public enum EvaluationRunner {
         problem.localizedCaseInsensitiveContains("empty response")
     }
 
+    /// Phrases a rejection uses to claim a file was missing or unreadable. Matching prose is
+    /// unavoidable here — the reason is free-form LLM text — but it is only ever a PRE-FILTER.
+    /// The load-bearing check is structural: the reason must name the exact path of a file_read
+    /// this very evaluation ran and that the tool itself reported as succeeded.
+    private static let missingFileClaimPhrases = [
+        "returned an error", "return an error", "tool error",
+        "does not exist", "did not exist", "not exist",
+        "not found", "not readable"
+    ]
+
+    /// Detects a REJECT whose stated reason is "I couldn't read <path>" when this evaluation
+    /// actually read that path successfully. Returning `.error` (rather than the verdict) makes
+    /// the coordinator retry with a fresh validator conversation instead of sending the worker a
+    /// punch list built on a false premise.
     private static func contradictedToolClaim(in outcome: Outcome, observations: [ToolObservation]) -> String? {
         guard case .verdict("REJECT", let reason?) = outcome else { return nil }
         let lowerReason = reason.lowercased()
         guard lowerReason.contains("file_read") || lowerReason.contains("file read") else { return nil }
-        guard lowerReason.contains("returned an error")
-            || lowerReason.contains("return an error")
-            || lowerReason.contains("tool error")
-            || lowerReason.contains("does not exist")
-            || lowerReason.contains("did not exist")
-            || lowerReason.contains("not exist")
-            || lowerReason.contains("not found")
-            || lowerReason.contains("not readable")
-        else { return nil }
+        guard missingFileClaimPhrases.contains(where: { lowerReason.contains($0) }) else { return nil }
 
-        let fileReads = observations.filter { $0.call.name == "file_read" && $0.pathArgument != nil }
-        let successfulReads = fileReads.filter(\.succeeded)
-        let contradicted = successfulReads.first(where: { observation in
-            guard let path = observation.pathArgument else { return false }
-            return reason.contains(path)
-        })
-        guard let contradicted else {
-            return nil
+        // Case-insensitive path match: macOS filesystems are case-insensitive by default, so a
+        // validator echoing a path with different casing is naming the same file.
+        let contradicted = observations.first { observation in
+            guard observation.call.name == "file_read", observation.succeeded,
+                  let path = observation.pathArgument, !path.isEmpty else { return false }
+            return lowerReason.contains(path.lowercased())
         }
-        let path = contradicted.pathArgument ?? "(unknown path)"
+        guard let path = contradicted?.pathArgument else { return nil }
         return "validator rejection contradicted successful file_read for \(path); discarding this validator attempt"
     }
 

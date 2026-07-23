@@ -10,6 +10,12 @@ Memory reconciliation and hybrid `web_fetch` extraction now send full inputs to 
 
 `grep` exposes `max_file_count`, `max_line_count`, and `max_file_size_mb` so agents can deliberately widen a search, but those values currently have no hard upper bound. Add system-owned ceilings plus clear result notes when caller-requested limits are clamped. Keep the model-facing knobs useful, but prevent accidental huge directory walks, memory spikes from eager URL collection, and oversized result construction.
 
+### Tool-output overflow files are never cleaned up (2026-07-22)
+
+`ToolResultCap` spills any tool result over 50 000 chars to `$TMPDIR/AgentSmith-tool-output/tool-output-<uuid>.txt` and hands the agent the path so the tail stays reachable. Nothing ever deletes those files — the app writes them and forgets them, leaving cleanup entirely to the OS's periodic `$TMPDIR` sweep (roughly 3 days of no access). Two consequences: unbounded disk accumulation across long sessions, and full tool output — `bash` transcripts, whole file reads, anything a worker touched — sitting in plaintext far longer than the run that produced it. `$TMPDIR` is per-user and mode 0700 on macOS so this is not an exposure across accounts, but it is a data-retention surface the app neither bounds nor discloses.
+
+Options: sweep the directory at session end / next launch (delete entries older than N hours); scope the directory per session ID so teardown can remove it wholesale; or keep the files but cap total directory size, evicting oldest-first. Whichever way, the retention window should be a named constant rather than "whatever the OS decides." Folds naturally into the limits-centralization item below.
+
 ### Layered model-metadata composition — the authoritative design (decided 2026-07-17) ✅ IMPLEMENTED
 
 **Status: all five rollout steps shipped 2026-07-17** (SwiftLLMKit 0.0.77–0.0.82; app follows).
@@ -1337,8 +1343,8 @@ Across the 2026-07-19 limits pass we hand-bumped a lot of hardcoded magic number
 Candidates flagged so far (value = current default):
 - **Tool timeouts.** `bash`/`gh` subprocess `timeout` (300 s default, caller-raisable) with the `executionTimeout` **3700 s** (~1 h) backstop; `web_fetch` 12 s (HTML→md) / 30 s (fetch) / 180 s (whole call); AppleScript 30 s; `directory_tree` 10 s; `glob` 30 s default / 120 s max. The 3700 s backstop in particular should be a named/tunable constant, not a literal.
 - **Smith `/compact`.** recent-turns-kept **6**, transcript char cap **120 000**, summary output **5000** tokens, summary word budget **600**.
-- **Concurrency / retries.** `validationParallelism` **8**, `maxConcurrentEvaluations` **8**, `SecurityEvaluator.maxRetries` **8**, `EvaluationRunner.maxParseRetries` **8** (note: keep it below a definition's `maxTurns` or turn-exhaustion wins first), worker pool `maxSimultaneousTasks` **4** (already a Setting).
-- **Tool-result caps.** `ToolResultCap` **50 000** overflow threshold / **2000** preview (shared by agents + validator); the validator/prepare output cap **10 000** tokens; `file_read` 2500 lines / 1 000 000 chars; `directory_listing` 50 000 entries.
+- **Concurrency / retries.** `validationParallelism` **8**, `maxConcurrentEvaluations` **8**, `SecurityEvaluator.maxRetries` **8**, `EvaluationRunner.maxVerdictParseRetries` **1** / `maxJSONParseRetries` **8** (note: keep the JSON one below a definition's `maxTurns` or turn-exhaustion wins first), worker pool `maxSimultaneousTasks` **4** (already a Setting).
+- **Tool-result caps.** `ToolResultCap` **50 000** overflow threshold / **2000** preview (shared by agents + validator); the validator/prepare output cap **10 000** tokens; `file_read` 2500 default lines / **5 MB** whole-file ceiling (larger files are readable via an explicit `startingLineNum`/`maxLines` window, which streams); `directory_listing` 50 000 entries.
 - **Inspector ring buffers.** `AgentActor.maxTurnRecords` **100**, `SecurityEvaluator.maxHistory` **100**.
 
 Overlaps with the holistic-oversized-input item above (the char/token caps) — do them together. No behavior change intended; this is "stop hardcoding, expose the knobs."
