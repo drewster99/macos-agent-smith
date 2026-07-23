@@ -312,6 +312,10 @@ public actor AgentActor {
     /// `TaskActionKind.run.imperativeText` AND it carries a `taskID`. Other actions
     /// (pause/stop/summarize) still flow through Smith for now.
     private var onAutoRunTask: (@Sendable (UUID) async -> Void)?
+    /// When set, fired wakes are dispatched through this (the runtime posts each to the
+    /// NotificationBroker) instead of the actor's own local run/Smith partition. Nil in tests and
+    /// contexts without a runtime, where the legacy local dispatch is used as a fallback.
+    private var onWakesFiredDispatch: (@Sendable ([ScheduledWake]) async -> Void)?
 
     private var maxToolCallsPerIteration: Int
     /// Maximum concurrent Security Agent evaluations to prevent overwhelming the LLM backend.
@@ -731,6 +735,12 @@ public actor AgentActor {
     /// boots with `resumingTaskID` set.
     public func setOnAutoRunTask(_ handler: @escaping @Sendable (UUID) async -> Void) {
         onAutoRunTask = handler
+    }
+
+    /// Wires fired-wake dispatch through the NotificationBroker. When set, `checkScheduledWake`
+    /// hands the whole due batch here instead of running its own run/Smith partition.
+    public func setOnWakesFiredDispatch(_ handler: @escaping @Sendable ([ScheduledWake]) async -> Void) {
+        onWakesFiredDispatch = handler
     }
 
     /// Returns true when this wake performs the `run` task action against a task. `run` is the
@@ -2884,12 +2894,53 @@ public actor AgentActor {
             await toolContext.taskStore.promoteScheduledToPending(id: taskID)
         }
 
-        // Partition wakes: every auto-run wake dispatches directly through the runtime; the rest
-        // go to Smith. The old "only when exactly ONE fires" restriction dated to the single-worker
-        // era ("restartForNewTask is single-target, they'd clobber each other"). That no longer
-        // holds — `restartForNewTask` serializes on the lifecycle queue, each call claims its own
-        // task via CAS, and the capacity gate queues any overflow instead of evicting. So two
-        // dailies firing at the same instant BOTH auto-run.
+        // Dispatch the due batch. In production the broker owns routing (`action` decides run vs
+        // Smith-delivery vs mechanical pause/interrupt); `dispatchWakesLocally` is the no-broker
+        // fallback that keeps the old auto-run/Smith partition for tests. Either way, multiple
+        // auto-runs in one batch all fire: the old "only when exactly ONE fires" restriction dated
+        // to the single-worker era ("restartForNewTask is single-target, they'd clobber each
+        // other"), but `restartForNewTask` now serializes on the lifecycle queue, each call claims
+        // its own task via CAS, and the capacity gate queues overflow instead of evicting.
+        if let onWakesFiredDispatch {
+            // Broker dispatch: hand the whole due batch to the NotificationBroker (via the runtime).
+            // Each wake becomes a structured notification whose handler runs it, delivers it to
+            // Smith, or mechanically pauses/interrupts — dispatch is decided by `action`, never prose.
+            await onWakesFiredDispatch(due)
+        } else {
+            await dispatchWakesLocally(due)
+        }
+
+        // Log to the timer-event history regardless of dispatch path so the View → Timers
+        // pane shows every fire, including the auto-run ones.
+        if let primary = due.first {
+            onWakeFired?(primary, due)
+        }
+
+        // Re-schedule any recurring wakes for their next occurrence. The new wake inherits the
+        // chain's `originalID` so the timers UI can group fires across the series.
+        for wake in due {
+            guard let recurrence = wake.recurrence,
+                  let next = recurrence.nextOccurrence(after: wake.wakeAt) else { continue }
+            let nextWake = ScheduledWake(
+                wakeAt: next,
+                instructions: wake.instructions,
+                taskID: wake.taskID,
+                recurrence: recurrence,
+                originalID: wake.originalID,
+                previousFireAt: wake.wakeAt,
+                survivesTaskTermination: wake.survivesTaskTermination,
+                action: wake.action
+            )
+            scheduledWakes.append(nextWake)
+            onWakeScheduled?(nextWake)
+        }
+        scheduledWakes.sort { $0.wakeAt < $1.wakeAt }
+    }
+
+    /// The legacy local fired-wake dispatch — used when no broker is wired (tests, and any context
+    /// without a runtime). Partitions into auto-run (driven directly) and Smith-bound (injected as
+    /// a system message). The broker path (`onWakesFiredDispatch`) supersedes this in production.
+    private func dispatchWakesLocally(_ due: [ScheduledWake]) async {
         let autoRunCandidates = due.filter(Self.wakeIsAutoRunRunTask)
         let runDirectly: [ScheduledWake]
         let smithWakes: [ScheduledWake]
@@ -2932,32 +2983,6 @@ public actor AgentActor {
             hasUnprocessedInput = true
             pushLiveContext()
         }
-
-        // Log to the timer-event history regardless of dispatch path so the View → Timers
-        // pane shows every fire, including the auto-run ones.
-        if let primary = due.first {
-            onWakeFired?(primary, due)
-        }
-
-        // Re-schedule any recurring wakes for their next occurrence. The new wake inherits the
-        // chain's `originalID` so the timers UI can group fires across the series.
-        for wake in due {
-            guard let recurrence = wake.recurrence,
-                  let next = recurrence.nextOccurrence(after: wake.wakeAt) else { continue }
-            let nextWake = ScheduledWake(
-                wakeAt: next,
-                instructions: wake.instructions,
-                taskID: wake.taskID,
-                recurrence: recurrence,
-                originalID: wake.originalID,
-                previousFireAt: wake.wakeAt,
-                survivesTaskTermination: wake.survivesTaskTermination,
-                action: wake.action
-            )
-            scheduledWakes.append(nextWake)
-            onWakeScheduled?(nextWake)
-        }
-        scheduledWakes.sort { $0.wakeAt < $1.wakeAt }
     }
 
     /// Smith-only: if the digest interval has elapsed, ask the runtime-supplied provider for a

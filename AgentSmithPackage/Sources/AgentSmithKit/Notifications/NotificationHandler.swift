@@ -11,6 +11,13 @@ public enum HandlerOutcome: Sendable, Equatable {
     case deliver(String)
 }
 
+/// Thrown by a handler when its own type's `data` is malformed — a bug or corruption, surfaced
+/// loudly (the broker records `.handlerError` and does not mark the notification delivered).
+public struct NotificationHandlerError: Error, CustomStringConvertible {
+    public let description: String
+    public init(_ description: String) { self.description = description }
+}
+
 /// The capabilities a notification handler needs from the runtime. A narrow facade so handlers
 /// depend on an interface, not on `OrchestrationRuntime` directly (the runtime conforms via an
 /// adapter). Keeps the notification subsystem free of a cycle back into orchestration.
@@ -22,6 +29,9 @@ public protocol NotificationRuntime: Sendable {
     func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async
     /// The current title of a task, for composing display/instruction text. Nil if unknown.
     func taskTitle(_ taskID: UUID) async -> String?
+    /// Post a system-role notice to the channel (used by mechanical pause/interrupt so the user
+    /// sees the action happened without an LLM turn).
+    func postSystemNotice(_ text: String, taskID: UUID?) async
 }
 
 /// Decodes a notification's `data` and either performs the runtime effect or returns the text to

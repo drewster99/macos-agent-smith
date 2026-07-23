@@ -710,6 +710,61 @@ public actor OrchestrationRuntime {
         ))
     }
 
+    // MARK: - Notification broker
+
+    /// The live notification hub. Fired wakes and inbound user messages route through it, so
+    /// dispatch is decided by structured payload (never prose) and delivery is effectively-once via
+    /// the ledger. Built once, lazily, fully registered before any notification is submitted.
+    private var notificationBroker: NotificationBroker?
+
+    /// Returns the broker, constructing and fully registering it on first call. Called only from
+    /// the serialized Smith-setup path, so there is no concurrent construction.
+    private func ensureNotificationBroker() async -> NotificationBroker {
+        if let notificationBroker { return notificationBroker }
+        let adapter = ClosureNotificationRuntime(
+            autoRunTask: { [weak self] taskID in await self?.dispatchAutoRunWake(taskID: taskID) },
+            setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) },
+            taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
+            postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
+        )
+        let broker = NotificationBroker(runtime: adapter)
+        await broker.registerHandler(type: KnownNotificationType.taskAction.rawValue, TaskActionNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.taskSummary.rawValue, TaskSummaryNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.reminder.rawValue, ReminderNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.userMessage.rawValue, UserMessageNotificationHandler())
+        await broker.registerRecipientTarget(.smith, ClosureRecipientTarget { [weak self] text, _ in
+            await self?.deliverNotificationTextToSmith(text) ?? false
+        })
+        notificationBroker = broker
+        return broker
+    }
+
+    /// Sets a task's status for a mechanical (pause/interrupt) notification action.
+    private func applyNotificationTaskStatus(_ taskID: UUID, _ status: AgentTask.Status) async {
+        await taskStore.updateStatus(id: taskID, status: status)
+    }
+
+    private func notificationTaskTitle(_ taskID: UUID) async -> String? {
+        await taskStore.task(id: taskID)?.title
+    }
+
+    private func postNotificationSystemNotice(_ text: String, taskID: UUID?) async {
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: text,
+            metadata: ["messageKind": .string("task_update")],
+            taskID: taskID
+        ))
+    }
+
+    /// Injects delivered notification text into Smith's conversation. Returns false when no Smith is
+    /// alive (the broker then leaves the notification unsettled).
+    private func deliverNotificationTextToSmith(_ text: String) async -> Bool {
+        guard let smith = supervisor.firstHandle(role: .smith)?.agent else { return false }
+        await smith.appendUserMessage(text)
+        return true
+    }
+
     /// Drains the head of `pendingScheduledRunQueue` if no task is currently in flight.
     /// Self-checking — safe to call any time the runtime suspects state may have shifted
     /// (typically from `onTaskTerminated`). Skips queue entries whose tasks are no longer
@@ -1884,6 +1939,15 @@ public actor OrchestrationRuntime {
         await smithAgent.setOnAutoRunTask { [weak self] taskID in
             guard let self else { return }
             await self.dispatchAutoRunWake(taskID: taskID)
+        }
+        // Route fired wakes through the notification broker: each becomes a structured notification
+        // dispatched by `action`, not prose. Built + fully registered here before the callback is
+        // wired, so a wake can never reach an unregistered handler.
+        let broker = await ensureNotificationBroker()
+        await smithAgent.setOnWakesFiredDispatch { wakes in
+            for wake in wakes {
+                await broker.submit(WakeNotificationFactory.notification(for: wake))
+            }
         }
         if let turnCallback = onTurnRecorded {
             await smithAgent.setOnTurnRecorded { turn in turnCallback(.smith, turn) }

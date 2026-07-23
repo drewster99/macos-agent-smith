@@ -11,6 +11,7 @@ struct NotificationBrokerTests {
         func autoRunTask(_ taskID: UUID) async {}
         func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async {}
         func taskTitle(_ taskID: UUID) async -> String? { nil }
+        func postSystemNotice(_ text: String, taskID: UUID?) async {}
     }
 
     private actor CallLog {

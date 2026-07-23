@@ -155,6 +155,12 @@ public actor NotificationBroker {
         return id
     }
 
+    /// Submit a pre-built notification (e.g. one produced from a fired wake by
+    /// `WakeNotificationFactory`, whose deterministic id makes it dedup-safe). Dedups + routes it.
+    public func submit(_ notification: AgentNotification) async {
+        await deliver(notification)
+    }
+
     /// Drain every registered pollable source and deliver what's ready. Called on a timer tick and
     /// at cold boot.
     public func tick(now: Date = Date()) async {
