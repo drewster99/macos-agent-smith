@@ -723,9 +723,17 @@ public actor OrchestrationRuntime {
         }
 
         // A free worker slot means the scheduled task can start right now, no interrupt
-        // arbitration needed — other in-flight tasks keep running beside it.
+        // arbitration needed — other in-flight tasks keep running beside it. Route it through the
+        // DURABLE queue (enqueue → persist → drain) rather than `restartForNewTask` directly, so the
+        // commitment survives a crash in the window between the notification settling `.acted` and
+        // the worker actually spawning. `drainPendingScheduledRunQueue` starts it immediately when a
+        // slot is free, and the atomic CAS in `performStartTaskWithLiveSmith` makes the enqueue-then-
+        // drain idempotent — no double-start. A crash after the persist re-drains the queue at boot
+        // (which runs independently of `autoAdvanceEnabled`), so an autoAdvance-off run isn't lost.
         guard supervisor.handles(role: .brown).count >= maxConcurrentWorkers, let blocker = inFlight else {
-            restartForNewTask(taskID: taskID)
+            pendingScheduledRunQueue.append(taskID)
+            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+            await drainPendingScheduledRunQueue()
             return
         }
 
