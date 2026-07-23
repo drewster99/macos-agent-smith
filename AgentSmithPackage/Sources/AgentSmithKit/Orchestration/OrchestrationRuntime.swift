@@ -2143,6 +2143,25 @@ public actor OrchestrationRuntime {
                 pendingScheduledRunQueue = queue
             }
         }
+
+        // Durability backstop for a scheduled RUN that fired but never durably started: its wake
+        // promotes the task to `.pending`, but the free-slot dispatch removes the durable queue
+        // entry BEFORE the worker claims `.starting`. A crash in that window leaves the task
+        // `.pending` — and with auto-advance OFF, nothing starts it. Re-enqueue any promoted-pending
+        // scheduled task (identified by a non-nil `scheduledRunAt`) not already queued, so the
+        // scheduled-run drain — which runs INDEPENDENTLY of `autoAdvanceEnabled` — picks it up.
+        let alreadyQueued = Set(pendingScheduledRunQueue)
+        let orphanedScheduledRuns = await taskStore.allTasks().filter {
+            $0.disposition == .active
+                && $0.status == .pending
+                && $0.scheduledRunAt != nil
+                && !alreadyQueued.contains($0.id)
+        }
+        if !orphanedScheduledRuns.isEmpty {
+            pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map(\.id))
+            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+        }
+
         // Belt-and-suspenders: re-arm any `.scheduled` task that doesn't yet have a wake
         // after disk replay (covers stale snapshots, first-run, etc.). Past-due `.scheduled`
         // tasks get promoted to `.pending` so the cold-launch instruction surfaces them.
