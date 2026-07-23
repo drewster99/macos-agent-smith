@@ -181,6 +181,16 @@ public actor OrchestrationRuntime {
     /// failures log to the app's logger but do not block the runtime.
     private var persistPendingScheduledRunQueue: (@Sendable ([UUID]) async -> Void)?
 
+    /// Loads the persisted notification delivery ledger from disk. Set by the app layer before
+    /// `start()`; consulted once inside `ensureNotificationBroker` to seed the broker so a wake that
+    /// already fired-and-delivered before a restart is recognized as a duplicate rather than re-fired.
+    private var loadDeliveryLedger: (@Sendable () async -> [NotificationID: DeliveryStatus])?
+
+    /// Persists the notification delivery ledger after every settle. Wired by the app layer to
+    /// `PersistenceManager.saveDeliveryLedger` and handed to the broker as its `persistLedger` hook
+    /// (single-flight coalesced there). Fire-and-forget; failures log but never block delivery.
+    private var persistDeliveryLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)?
+
     /// Inbound user messages captured while Smith could not accept them (agents stopped, or
     /// mid-startup during the "Preparing task — starting MCP servers…" window), in FIFO order.
     /// Delivered by `drainPendingUserMessages()` once Smith is running. Persisted per-session
@@ -443,6 +453,18 @@ public actor OrchestrationRuntime {
     ) {
         loadPendingScheduledRunQueue = load
         persistPendingScheduledRunQueue = persist
+    }
+
+    /// Wires the per-session persistence for the notification delivery ledger. Mirrors
+    /// `setPendingScheduledRunQueuePersistence`. Both closures should target the session-scoped
+    /// `PersistenceManager(sessionID:)`. Must be wired before `start()` so the broker (built lazily
+    /// in the Smith-setup path) is seeded from disk and its per-settle flushes land on disk.
+    public func setDeliveryLedgerPersistence(
+        load: @escaping @Sendable () async -> [NotificationID: DeliveryStatus],
+        persist: @escaping @Sendable ([NotificationID: DeliveryStatus]) async -> Void
+    ) {
+        loadDeliveryLedger = load
+        persistDeliveryLedger = persist
     }
 
     /// Wires the per-session persistence for the pending-user-message buffer. Mirrors
@@ -727,7 +749,7 @@ public actor OrchestrationRuntime {
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
             postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
         )
-        let broker = NotificationBroker(runtime: adapter)
+        let broker = NotificationBroker(runtime: adapter, persistLedger: persistDeliveryLedger)
         await broker.registerHandler(type: KnownNotificationType.taskAction.rawValue, TaskActionNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.taskSummary.rawValue, TaskSummaryNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.reminder.rawValue, ReminderNotificationHandler())
@@ -735,6 +757,12 @@ public actor OrchestrationRuntime {
         await broker.registerRecipientTarget(.smith, ClosureRecipientTarget { [weak self] text, _ in
             await self?.deliverNotificationTextToSmith(text) ?? false
         })
+        // Seed the delivered-set from disk BEFORE the dispatch callback is wired, so the very first
+        // fired wake after a restart is deduped against what already delivered. Idempotent: a wake
+        // whose id is already `.delivered` here is dropped at `deliver`'s settled-check, no re-fire.
+        if let seeded = await loadDeliveryLedger?() {
+            await broker.seedLedger(seeded)
+        }
         notificationBroker = broker
         return broker
     }

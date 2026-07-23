@@ -930,6 +930,28 @@ final class AppViewModel {
             }
         )
 
+        // Per-session persistence for the notification delivery ledger — the effectively-once floor
+        // that dedups a fired wake across an app restart (a fired-and-delivered wake whose id is on
+        // disk is recognized as a duplicate, not re-fired). Wired before the runtime starts so the
+        // broker seeds from disk and its per-settle flushes land next to the other per-session state.
+        await newRuntime.setDeliveryLedgerPersistence(
+            load: {
+                do {
+                    return try await persistence.loadDeliveryLedger()
+                } catch {
+                    logger.error("Failed to load notification delivery ledger: \(error.localizedDescription)")
+                    return [:]
+                }
+            },
+            persist: { ledger in
+                do {
+                    try await persistence.saveDeliveryLedger(ledger)
+                } catch {
+                    logger.error("Failed to persist notification delivery ledger: \(error.localizedDescription)")
+                }
+            }
+        )
+
         // Acceptance validation: built-in definitions ship IN the app (always current;
         // duplicate under a new name to customize). Migrate any registry written by the
         // old seed-to-disk mechanism, then point the runtime at the user directory.

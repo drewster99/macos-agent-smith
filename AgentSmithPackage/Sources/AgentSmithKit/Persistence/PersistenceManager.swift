@@ -417,6 +417,31 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([UUID].self, from: data)
     }
 
+    // MARK: - Notification delivery ledger (per-session)
+
+    /// Persists the notification broker's delivery ledger — the effectively-once floor that lets a
+    /// wake (or, later, an inbound message) which already fired-and-delivered be recognized as a
+    /// duplicate after an app restart instead of re-firing. Keyed on the deterministic notification
+    /// id. The broker flushes this after every settle (single-flight coalesced), so a crash loses at
+    /// most the last in-flight settle — the effectively-once residual window. Stored on disk as a
+    /// plain `{ raw-id: status }` object; `NotificationID` is a single string, so the raw form keys
+    /// a JSON object directly (no flat-array encoding).
+    public func saveDeliveryLedger(_ ledger: [NotificationID: DeliveryStatus]) throws {
+        try ensureDirectories()
+        let keyed = Dictionary(uniqueKeysWithValues: ledger.map { ($0.key.raw, $0.value) })
+        let data = try JSONEncoder().encode(keyed)
+        let url = sessionDirectory.appendingPathComponent("notification_ledger.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadDeliveryLedger() throws -> [NotificationID: DeliveryStatus] {
+        let url = sessionDirectory.appendingPathComponent("notification_ledger.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        let data = try Data(contentsOf: url)
+        let keyed = try JSONDecoder().decode([String: DeliveryStatus].self, from: data)
+        return Dictionary(uniqueKeysWithValues: keyed.map { (NotificationID(raw: $0.key), $0.value) })
+    }
+
     // MARK: - Pending user messages (per-session)
 
     /// Persists the pending inbound-user-message buffer — messages typed while Smith could not
