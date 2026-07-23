@@ -97,6 +97,11 @@ public actor NotificationBroker {
     /// Fired (best-effort) when something is enqueued for a pull recipient, so an idle recipient can
     /// wake and drain instead of waiting for its next scheduled tick.
     private var onPendingEnqueued: (@Sendable (RecipientKind) -> Void)?
+    /// Recipient kinds with a drain in flight. `drainPendingDeliveries` awaits a disk flush, leaving
+    /// the actor open; a SECOND concurrent drain for the same kind would ack the batch the first has
+    /// leased-but-not-yet-returned, silently breaking at-least-once. Today the sole caller (Smith's
+    /// single run loop) can't overlap, but this makes the public method safe by construction.
+    private var draining: Set<RecipientKind> = []
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "Notifications")
 
@@ -348,6 +353,12 @@ public actor NotificationBroker {
     /// The `pendingDelivery.contains` guard in `deliver` prevents a leased id from being re-enqueued
     /// while it's outstanding.
     public func drainPendingDeliveries(for kind: RecipientKind) async -> [QueuedDelivery] {
+        // Enforce one in-flight drain per kind (the method awaits flushes mid-body, opening the
+        // actor): a concurrent same-kind drain returns empty rather than acking the other's batch.
+        guard !draining.contains(kind) else { return [] }
+        draining.insert(kind)
+        defer { draining.remove(kind) }
+
         let now = Date()
         var acked = false
         if let previous = leased[kind], !previous.isEmpty {
