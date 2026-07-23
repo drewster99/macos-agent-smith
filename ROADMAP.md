@@ -411,6 +411,36 @@ Persisted `ScheduledWake` records predate the envelope. Decode defensively:
 - **⚠️ `replayableWakes` KEPT, not deleted** (plan step 2 said delete). It guards a duplicate class the id-keyed ledger cannot: same-`(taskID, wakeAt)`, *different*-id accumulation, plus task-liveness filtering and recurrence roll-forward at boot. The ledger dedups same-*id* re-fires; the two are complementary. Retiring `replayableWakes` would reopen the wake-resurrection storm it exists to prevent — deferred until the ledger is proven in production.
 - **⏸️ 4. `user_message` reroute DEFERRED** — the handler ships and is unit-tested, but `reportInboundUserMessage` still posts to the channel directly. Routing it through the `.smith` text target would drop its channel-log entry + rich metadata; it needs a channel-preserving delivery (follow-up). `InboundMessageSource` (the polling non-timer source) is the remaining extensibility proof.
 
+#### Push/pull refactor (2026-07-23) — scheduler / manager / consumer split
+
+The design's separation is now the live path. Three roles, cleanly split:
+
+- **`WakeScheduler`** (`Orchestration/WakeScheduler.swift`) — the SEPARATE timer driver. A
+  runtime-level actor (memoized, outlives Smith restarts) that OWNS the scheduled wakes, PERSISTS
+  them itself (`setPersistScheduledWakes` → the app's atomic writer), arms a real `Task`-based timer
+  for the next due wake, and on fire PRODUCES a notification into the broker. Recurrence rolls
+  forward catch-up-collapsed. No polling. All scheduling lives here.
+- **`NotificationBroker`** — the notification manager: delivery + persistence-until-delivery ONLY,
+  zero scheduling. Smith is a PULL recipient (`registerPullRecipient(.smith)`): a fired
+  reminder/summary is queued in a persisted outbox (`notification_pending.json`) and handed out on
+  `drainPendingDeliveries`; marked delivered on DRAIN, not enqueue. `.acted` actions (run/pause/
+  interrupt) are still handled mechanically by the runtime adapter.
+- **Smith** consumes: his run loop calls `drainQueuedNotifications` (drains his broker queue) instead
+  of the old `checkScheduledWake` poll. Nothing is pushed into Smith — the enqueue nudge
+  (`setOnPendingEnqueued` → `wakeFromIdle`) just wakes his idle loop to drain. This dissolves the
+  Smith-self-reentrancy entirely and makes reminder delivery survive Smith's momentary absence.
+
+Durability, now closed: a reminder is persisted until drained (was: lost on a false push return); a
+free-slot scheduled RUN routes through the durable `pendingScheduledRunQueue` before its
+notification settles (was: lost on a crash-in-spawn-window with auto-advance off), the CAS claim
+keeping enqueue-then-drain idempotent.
+
+**Follow-up (not yet done):** `AgentActor.checkScheduledWake` + the owned-wake methods survive ONLY
+as the no-broker fallback for isolated unit tests (production never hits them; they're marked
+legacy). Migrating `ScheduledWakeTests` et al. (~68 refs) to drive `WakeScheduler` directly, then
+deleting the dead agent code, is the clean removal pass. Also: `WakeScheduler.stop()` isn't wired to
+full runtime teardown (harmless — the armed timer holds `[weak self]`, so it no-ops on fire).
+
 ### 13. Open decisions
 
 - **Delivered-set retention** — prune by age (leaning) / `expiresAt` vs. count.
