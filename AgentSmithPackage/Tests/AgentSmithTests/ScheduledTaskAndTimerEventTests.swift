@@ -157,6 +157,23 @@ struct ScheduledTaskAndTimerEventTests {
         )
         let roundTripped = try JSONDecoder().decode(ScheduledWake.self, from: JSONEncoder().encode(reminder))
         #expect(roundTripped.action == nil, "a structured nil-action wake stays nil, no legacy inference")
+
+        // A record predating BOTH `action` and `survivesTaskTermination` must recover .run AND heal
+        // survival to true — else a recurring run's series gets cancelled when its first run ends.
+        let ancientJSON = """
+            {"id":"\(UUID().uuidString)","wakeAt":0,"instructions":"Call `run_task` on \(taskID.uuidString) to start the task \\"x\\".","taskID":"\(taskID.uuidString)","recurrence":{"interval":{"seconds":3600}}}
+            """
+        let ancient = try JSONDecoder().decode(ScheduledWake.self, from: try #require(ancientJSON.data(using: .utf8)))
+        #expect(ancient.action == .run)
+        #expect(ancient.survivesTaskTermination == true, "a migrated .run wake must survive task termination")
+
+        // An explicit persisted survives=false is respected (not overridden by the heal).
+        let explicitFalseJSON = """
+            {"id":"\(UUID().uuidString)","wakeAt":0,"instructions":"Call `run_task` on \(taskID.uuidString) to start the task \\"x\\".","taskID":"\(taskID.uuidString)","survivesTaskTermination":false}
+            """
+        let explicitFalse = try JSONDecoder().decode(ScheduledWake.self, from: try #require(explicitFalseJSON.data(using: .utf8)))
+        #expect(explicitFalse.action == .run)
+        #expect(explicitFalse.survivesTaskTermination == false, "an explicit persisted false is respected")
     }
 
     // MARK: - 3a. Wake-fire promotes linked .scheduled task
@@ -175,12 +192,14 @@ struct ScheduledTaskAndTimerEventTests {
         #expect(scheduled.status == .scheduled)
 
         let actor = AgentActorTestFactory.make(taskStore: taskStore)
+        // A RUN wake promotes the scheduled task — that's the wake whose job is to start it.
         let outcome = await actor.scheduleWake(
             wakeAt: Date().addingTimeInterval(-1),
             instructions: "Call run_task on \(scheduled.id.uuidString)",
             taskID: scheduled.id,
             replacesID: nil,
-            recurrence: nil
+            recurrence: nil,
+            action: .run
         )
         guard case .scheduled = outcome else {
             Issue.record("scheduleWake should have succeeded; got \(outcome)"); return
@@ -190,6 +209,27 @@ struct ScheduledTaskAndTimerEventTests {
 
         let after = await taskStore.task(id: scheduled.id)
         #expect(after?.status == .pending)
+    }
+
+    @Test("A non-run wake does NOT promote a still-scheduled task (no early start)")
+    func nonRunWakeDoesNotPromoteScheduledTask() async {
+        let taskStore = TaskStore()
+        let scheduled = await taskStore.addTask(
+            title: "later",
+            description: "...",
+            scheduledRunAt: Date().addingTimeInterval(3600)
+        )
+        let actor = AgentActorTestFactory.make(taskStore: taskStore)
+        // A summarize wake fires before the task's own run time — it must not promote the task,
+        // or auto-advance would start it early.
+        _ = await actor.scheduleWake(
+            wakeAt: Date().addingTimeInterval(-1),
+            instructions: "Call get_task_details for \(scheduled.id.uuidString)",
+            taskID: scheduled.id,
+            action: .summarize
+        )
+        await actor.checkScheduledWake()
+        #expect(await taskStore.task(id: scheduled.id)?.status == .scheduled, "summarize must not promote a scheduled task")
     }
 
     // MARK: - 4. TimerEvent factory captures wake metadata

@@ -67,6 +67,10 @@ public actor NotificationBroker {
     private let runtime: any NotificationRuntime
     /// Flushes the ledger snapshot to disk after each settle. Nil = in-memory only (tests).
     private let persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)?
+    /// Single-flight coalescing for `persistLedger` — see `flushLedger`. Only one write is in
+    /// flight at a time; concurrent settles set `ledgerDirty` and the flusher re-snapshots.
+    private var ledgerFlushInFlight = false
+    private var ledgerDirty = false
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "Notifications")
 
@@ -176,9 +180,13 @@ public actor NotificationBroker {
         inFlight.insert(id)
         defer { inFlight.remove(id) }
 
-        // Observers see every non-duplicate notification, whatever its fate. No delivery effect.
+        // Observers see every non-duplicate notification, whatever its fate — but NEVER gate the
+        // effectful path. Each matching sink runs in its own detached task, so a slow or stalled
+        // observer (UI, metrics, audit) cannot block the handler, hold the id in-flight, or let a
+        // notification sit until it expires. Observers are best-effort by contract.
         for (_, observer) in observers where observer.filter.matches(notification) {
-            await observer.sink(notification)
+            let sink = observer.sink
+            Task { await sink(notification) }
         }
 
         let now = Date()
@@ -205,7 +213,12 @@ public actor NotificationBroker {
                 if await target.deliver(text, for: notification) {
                     await settle(id, .delivered(now))
                 }
-                // else: leave unsettled — a later tick can retry (e.g. recipient worker not alive).
+                // A false return leaves the id UNSETTLED. Note: there is no durable pending
+                // outbox yet (that lands with the persistence phase), so nothing re-produces an
+                // unsettled notification on its own — a target that needs guaranteed delivery must
+                // durably QUEUE the work and return true (e.g. the `.taskWorker` route queues on
+                // the task for its next spawn). Returning false today means "not delivered, not
+                // queued" — the occurrence is effectively lost until its source produces it again.
             }
         } catch {
             // Malformed data for a type we own — surface loudly, do NOT mark delivered.
@@ -220,6 +233,23 @@ public actor NotificationBroker {
         case .dropped(let reason): ledger.markDropped(id, reason: reason)
         case .pending: return
         }
-        if let persistLedger { await persistLedger(ledger.snapshot()) }
+        await flushLedger()
+    }
+
+    /// Persists the ledger with a COALESCED single-flight: while one flush is awaiting the async
+    /// write, concurrent settles just mark the ledger dirty; the in-flight flush loops and
+    /// re-snapshots the CURRENT (latest) state. This prevents the reordering hazard of independent
+    /// snapshot-then-await writes — where a slow write of an OLDER snapshot could land last and
+    /// clobber a newer one on disk, resurrecting an already-delivered notification after restart.
+    /// The last write is always the newest state, applied in order.
+    private func flushLedger() async {
+        guard let persistLedger else { return }
+        guard !ledgerFlushInFlight else { ledgerDirty = true; return }
+        ledgerFlushInFlight = true
+        defer { ledgerFlushInFlight = false }
+        repeat {
+            ledgerDirty = false
+            await persistLedger(ledger.snapshot())
+        } while ledgerDirty
     }
 }

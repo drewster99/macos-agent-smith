@@ -84,6 +84,7 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         self.recurrence = try c.decodeIfPresent(Recurrence.self, forKey: .recurrence)
         self.originalID = try c.decodeIfPresent(UUID.self, forKey: .originalID) ?? id
         self.previousFireAt = try c.decodeIfPresent(Date.self, forKey: .previousFireAt)
+        let survivesWasPersisted = c.contains(.survivesTaskTermination)
         self.survivesTaskTermination = try c.decodeIfPresent(Bool.self, forKey: .survivesTaskTermination) ?? false
 
         // `structuredDispatch` is written true by every post-migration wake, so its ABSENCE means
@@ -98,7 +99,16 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
                 self.action = nil
             }
         } else {
-            self.action = Self.legacyActionFromInstructions(self.instructions)
+            let legacy = Self.legacyActionFromInstructions(self.instructions)
+            self.action = legacy
+            // A record predating BOTH fields decodes `survivesTaskTermination = false`, but a
+            // recovered `.run` wake must survive task termination (that's what run wakes do — a
+            // recurring run's series would otherwise be cancelled when its first run completes).
+            // Heal it only when the key was genuinely absent, so an explicit persisted `false`
+            // (a real, if unusual, choice) is respected.
+            if legacy == .run, !survivesWasPersisted {
+                self.survivesTaskTermination = TaskActionKind.run.survivesTaskTermination
+            }
         }
     }
 

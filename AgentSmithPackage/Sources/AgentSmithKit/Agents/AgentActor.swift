@@ -2872,13 +2872,13 @@ public actor AgentActor {
         }
         scheduledWakes.removeAll { $0.wakeAt <= now }
 
-        // Promote any `.scheduled` task referenced by a fired wake to `.pending` so the
-        // imperative ("Call run_task on <id>…") will be accepted — `run_task` rejects
-        // `.scheduled` status by design (see `AgentTask.Status.isRunnable`). Without this,
-        // the task stays in `.scheduled` after fire time and Smith reads `list_tasks`
-        // status as "still scheduled," concludes the timer hasn't fired, and waits forever.
+        // Promote a `.scheduled` task to `.pending` when its RUN wake fires so the run is
+        // accepted (`run_task` rejects `.scheduled` by design). Gate on the run action: a
+        // `summarize`/`pause`/`interrupt` wake that fires while the task is still `.scheduled`
+        // (e.g. a summary timed earlier than the task's own run time) must NOT promote it, or
+        // auto-advance would start the task before its scheduled run.
         var promotedTaskIDs: Set<UUID> = []
-        for wake in due {
+        for wake in due where Self.wakeIsAutoRunRunTask(wake) {
             guard let taskID = wake.taskID, !promotedTaskIDs.contains(taskID) else { continue }
             promotedTaskIDs.insert(taskID)
             await toolContext.taskStore.promoteScheduledToPending(id: taskID)
