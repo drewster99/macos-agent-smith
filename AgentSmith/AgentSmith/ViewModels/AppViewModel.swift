@@ -1011,6 +1011,32 @@ final class AppViewModel {
             }
         }
 
+        // The WakeScheduler owns WHEN to persist its wake list; the app supplies HOW (the atomic
+        // serial writer). Replaces the old timer-event-driven snapshot write.
+        let wakesWriter = scheduledWakesWriter
+        await newRuntime.setPersistScheduledWakes { wakes in
+            await wakesWriter.enqueue(wakes)
+        }
+
+        // Per-session durable outbox for notifications queued for Smith until he drains them.
+        await newRuntime.setPendingDeliveryPersistence(
+            load: {
+                do {
+                    return try await persistence.loadPendingDelivery()
+                } catch {
+                    logger.error("Failed to load pending notification deliveries: \(error.localizedDescription)")
+                    return []
+                }
+            },
+            persist: { items in
+                do {
+                    try await persistence.savePendingDelivery(items)
+                } catch {
+                    logger.error("Failed to persist pending notification deliveries: \(error.localizedDescription)")
+                }
+            }
+        )
+
         await newRuntime.start()
 
         // After Smith starts the active-timers list may already contain restored wakes for
@@ -1137,18 +1163,13 @@ final class AppViewModel {
         await snapshotAndPersistWakes()
     }
 
-    /// Snapshots the runtime's current wake list and writes it to disk. Also refreshes the
-    /// `activeTimers` published property so the View → Timers panel updates immediately.
-    /// Called from the `onTimerEventForChannel` callback on every schedule/fire/cancel.
+    /// Refreshes the `activeTimers` published property so the View → Timers panel updates on every
+    /// schedule/fire/cancel. Disk persistence is NOT done here anymore — the `WakeScheduler` owns
+    /// its own persistence (wired via `setPersistScheduledWakes`); this is purely the UI mirror.
     private func snapshotAndPersistWakes() async {
         guard let runtime else { return }
-        // Nil = no live Smith. A timer event racing a restart's teardown used to read the
-        // wake list as [] here and TRUNCATE the on-disk file — permanently killing
-        // recurring series before the replay filter ever saw them. Never persist a
-        // snapshot taken while no Smith exists.
         guard let wakes = await runtime.currentScheduledWakes() else { return }
         activeTimers = wakes
-        await scheduledWakesWriter.enqueue(wakes)
     }
 
     /// Sends user input (with any pending attachments) to Smith.
@@ -2297,6 +2318,30 @@ final class AppViewModel {
         let records = await shared.usageStore.records(for: taskID)
         taskCostCache[taskID] = estimatedCost(from: records)
         taskCostInFlight.remove(taskID)
+    }
+
+    /// Loads and caches costs for many tasks in a single `UsageStore` pass. Already-cached
+    /// and in-flight IDs are skipped. Used by a parent row summarizing its runs — the
+    /// per-task `loadTaskCost` would rescan the whole record set once per run.
+    func loadTaskCosts(for taskIDs: [UUID]) async {
+        let missing = Set(taskIDs.filter { taskCostCache[$0] == nil && !taskCostInFlight.contains($0) })
+        guard !missing.isEmpty else { return }
+        taskCostInFlight.formUnion(missing)
+        let grouped = await shared.usageStore.records(forAnyOf: missing)
+        for id in missing {
+            taskCostCache[id] = estimatedCost(from: grouped[id] ?? [])
+        }
+        taskCostInFlight.subtract(missing)
+    }
+
+    /// Every run spawned by `taskID`, across the active and archived buckets. The sidebar's
+    /// family grouping only nests children that share their parent's bucket, so it can't see
+    /// a template's history once `archiveStaleCompleted` moves finished runs out from under
+    /// a still-active template. Recently-deleted runs are excluded — the user took those out
+    /// of the history on purpose.
+    func childTasks(of taskID: UUID) -> [AgentTask] {
+        activeTaskList.filter { $0.parentTaskID == taskID }
+            + shared.archivedTasks.filter { $0.parentTaskID == taskID }
     }
 
     /// Estimates the total cost of a set of usage records using current pricing.

@@ -435,10 +435,31 @@ public actor OrchestrationRuntime {
     }
 
     /// Wires the disk-replay loader. Called once by the app layer after constructing the
-    /// runtime; the closure is invoked on every `start()` to seed the new Smith with
+    /// runtime; the closure is invoked at cold boot to seed the `WakeScheduler` with
     /// surviving wakes.
     public func setLoadPersistedWakes(_ handler: @escaping @Sendable () async -> [ScheduledWake]) {
         loadPersistedWakes = handler
+    }
+
+    /// The `WakeScheduler` calls this to persist its wake list on every change (schedule / cancel /
+    /// fire). The scheduler OWNS when to persist; the app supplies how (its atomic writer). Wired
+    /// before `start()`.
+    private var persistScheduledWakes: (@Sendable ([ScheduledWake]) async -> Void)?
+    public func setPersistScheduledWakes(_ handler: @escaping @Sendable ([ScheduledWake]) async -> Void) {
+        persistScheduledWakes = handler
+    }
+
+    /// Per-session persistence for the broker's pending-delivery queue (the durable outbox of
+    /// notifications queued for Smith until he drains them). Load seeds the broker at boot; persist
+    /// is handed to the broker as its flush hook. Wired before `start()`.
+    private var loadPendingDelivery: (@Sendable () async -> [QueuedDelivery])?
+    private var persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)?
+    public func setPendingDeliveryPersistence(
+        load: @escaping @Sendable () async -> [QueuedDelivery],
+        persist: @escaping @Sendable ([QueuedDelivery]) async -> Void
+    ) {
+        loadPendingDelivery = load
+        persistPendingDelivery = persist
     }
 
 
@@ -666,20 +687,17 @@ public actor OrchestrationRuntime {
     /// killed recurring series before the replay filter ever saw them (fresh-Opus review
     /// finding).
     public func currentScheduledWakes() async -> [ScheduledWake]? {
-        guard let smith else { return nil }
-        return await smith.listScheduledWakes()
+        await wakeScheduler?.listScheduledWakes()
     }
 
     public func cancelScheduledWake(id: UUID) async -> Bool {
-        await smith?.cancelWake(id: id) ?? false
+        await wakeScheduler?.cancelWake(id: id) ?? false
     }
 
-    /// Replays a previously-persisted set of wakes onto Smith's actor. Called by the app
-    /// layer at cold-launch *before* `start()` so any wake that elapsed while the app was
-    /// quit fires on the next loop iteration. Replacing rather than merging is intentional:
-    /// after this call the actor's wake list IS the persisted snapshot.
+    /// Replays a previously-persisted set of wakes into the `WakeScheduler`. Replacing rather than
+    /// merging is intentional: after this call the scheduler's wake list IS the persisted snapshot.
     public func restoreScheduledWakes(_ wakes: [ScheduledWake]) async {
-        await smith?.restoreScheduledWakes(wakes)
+        await ensureWakeScheduler().restore(wakes)
     }
 
     /// Routes an auto-run wake fire: start now if a worker slot is free, otherwise queue (never
@@ -739,8 +757,15 @@ public actor OrchestrationRuntime {
     /// the ledger. Built once, lazily, fully registered before any notification is submitted.
     private var notificationBroker: NotificationBroker?
 
+    /// The timer-notification scheduler — owns scheduled wakes, persists them, and fires them into
+    /// the broker. Runtime-level (NOT per-spawn) so it outlives Smith restarts; the tool context and
+    /// the boot restore both reach it through `ensureWakeScheduler`.
+    private var wakeScheduler: WakeScheduler?
+
     /// Returns the broker, constructing and fully registering it on first call. Called only from
-    /// the serialized Smith-setup path, so there is no concurrent construction.
+    /// the serialized Smith-setup path, so there is no concurrent construction. Smith is a PULL
+    /// recipient: a `.deliver` for him is queued (persisted) until his run loop drains it — nothing
+    /// is pushed into Smith, so there is no reentrancy and a momentary absence loses nothing.
     private func ensureNotificationBroker() async -> NotificationBroker {
         if let notificationBroker { return notificationBroker }
         let adapter = ClosureNotificationRuntime(
@@ -749,22 +774,56 @@ public actor OrchestrationRuntime {
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
             postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
         )
-        let broker = NotificationBroker(runtime: adapter, persistLedger: persistDeliveryLedger)
+        let broker = NotificationBroker(
+            runtime: adapter,
+            persistLedger: persistDeliveryLedger,
+            persistPendingDelivery: persistPendingDelivery
+        )
         await broker.registerHandler(type: KnownNotificationType.taskAction.rawValue, TaskActionNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.taskSummary.rawValue, TaskSummaryNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.reminder.rawValue, ReminderNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.userMessage.rawValue, UserMessageNotificationHandler())
-        await broker.registerRecipientTarget(.smith, ClosureRecipientTarget { [weak self] text, _ in
-            await self?.deliverNotificationTextToSmith(text) ?? false
-        })
-        // Seed the delivered-set from disk BEFORE the dispatch callback is wired, so the very first
-        // fired wake after a restart is deduped against what already delivered. Idempotent: a wake
-        // whose id is already `.delivered` here is dropped at `deliver`'s settled-check, no re-fire.
+        await broker.registerPullRecipient(.smith)
+        await broker.setOnPendingEnqueued { [weak self] kind in
+            guard kind == .smith else { return }
+            Task { await self?.wakeSmithFromIdle() }
+        }
+        // Seed the delivered-set AND the pending-delivery outbox from disk BEFORE anything can fire,
+        // so a re-fire after restart is deduped and an undrained reminder is handed out on the next
+        // drain instead of lost.
         if let seeded = await loadDeliveryLedger?() {
             await broker.seedLedger(seeded)
         }
+        if let pending = await loadPendingDelivery?() {
+            await broker.seedPendingDeliveries(pending)
+        }
         notificationBroker = broker
         return broker
+    }
+
+    private func ensureWakeScheduler() -> WakeScheduler {
+        if let wakeScheduler { return wakeScheduler }
+        let scheduler = WakeScheduler()
+        wakeScheduler = scheduler
+        return scheduler
+    }
+
+    /// Wakes Smith's idle run loop so it drains a freshly-queued notification immediately.
+    private func wakeSmithFromIdle() async {
+        await supervisor.firstHandle(role: .smith)?.agent.wakeFromIdle()
+    }
+
+    /// Promotes a `.scheduled` task to `.pending` — the `WakeScheduler`'s promotion hook, invoked
+    /// the instant a RUN wake fires so the auto-run path (which rejects `.scheduled`) accepts it.
+    private func promoteScheduledTaskForWake(_ taskID: UUID) async {
+        await taskStore.promoteScheduledToPending(id: taskID)
+    }
+
+    /// Records a timer lifecycle event into the history log and surfaces it to the app (transcript
+    /// row + UI refresh). The `WakeScheduler`'s timer callbacks route here.
+    private func recordTimerEvent(_ event: TimerEvent) async {
+        await timerEventLog.record(event)
+        await onTimerEventForChannel?(event)
     }
 
     /// Sets a task's status for a mechanical (pause/interrupt) notification action. Refuses to
@@ -787,14 +846,6 @@ public actor OrchestrationRuntime {
             metadata: ["messageKind": .string("task_update")],
             taskID: taskID
         ))
-    }
-
-    /// Injects delivered notification text into Smith's conversation. Returns false when no Smith is
-    /// alive (the broker then leaves the notification unsettled).
-    private func deliverNotificationTextToSmith(_ text: String) async -> Bool {
-        guard let smith = supervisor.firstHandle(role: .smith)?.agent else { return false }
-        await smith.appendUserMessage(text)
-        return true
     }
 
     /// Drains the head of `pendingScheduledRunQueue` if no task is currently in flight.
@@ -1237,9 +1288,9 @@ public actor OrchestrationRuntime {
     }
 
     private func rearmScheduledTaskWakes(excluding excluded: UUID?) async {
-        guard let smithAgent = smith else { return }
+        guard let scheduler = wakeScheduler else { return }
         let existingTaskIDs: Set<UUID> = Set(
-            await smithAgent.listScheduledWakes().compactMap { $0.taskID }
+            await scheduler.listScheduledWakes().compactMap { $0.taskID }
         )
         let now = Date()
         let scheduled = await taskStore.allTasks().filter {
@@ -1250,7 +1301,7 @@ public actor OrchestrationRuntime {
             if fireAt > now {
                 if existingTaskIDs.contains(task.id) { continue }
                 let imperative = TaskActionKind.run.imperativeText(for: task, extra: nil)
-                _ = await smithAgent.scheduleWake(
+                _ = await scheduler.scheduleWake(
                     wakeAt: fireAt,
                     instructions: imperative,
                     taskID: task.id,
@@ -1860,8 +1911,8 @@ public actor OrchestrationRuntime {
         }
 
         let id = UUID()
-        let followUpScheduler = FollowUpScheduler()
-        let context = makeToolContext(agentID: id, role: .smith, followUpScheduler: followUpScheduler, currentResumingTaskID: resumingTaskID)
+        let wakeScheduler = ensureWakeScheduler()
+        let context = makeToolContext(agentID: id, role: .smith, wakeScheduler: wakeScheduler, currentResumingTaskID: resumingTaskID)
 
         // Smith only wakes for: private messages (user/Brown/Security Agent→Smith), system termination notices.
         // Public Brown messages, tool_request/tool execution messages, and security review notices
@@ -1925,7 +1976,6 @@ public actor OrchestrationRuntime {
             tools: SmithBehavior.tools(),
             toolContext: context
         )
-        await followUpScheduler.set(agent: smithAgent)
         await smithAgent.setUsageStore(usageStore)
         await smithAgent.setSessionID(currentSessionID)
 
@@ -1957,29 +2007,23 @@ public actor OrchestrationRuntime {
             stopLogger.warning("No Security Agent provider — Smith's open-world (egress) tool calls will run WITHOUT security review.")
         }
 
-        // Auto-run wake fires bypass Smith and drive `restartForNewTask` directly. This
-        // is what "scheduled task → run at fire time" was always meant to be: fully
-        // mechanical, no LLM in the loop. Smith learns about the new run when its fresh
-        // process boots with `resumingTaskID` set (auto-spawned Brown, briefing pre-seeded).
-        //
-        // Gated on "nothing in flight": if a task is currently running or awaiting
-        // Smith's review, we do NOT yank it. The wake's task was already promoted to
-        // `.pending` by `AgentActor.checkScheduledWake`; it sits in the queue and the
-        // runtime's normal auto-advance (after the current task finishes via
-        // `review_work(accepted: true)`) picks it up. We post a system banner so the user
-        // sees that the schedule fired but was deferred.
-        await smithAgent.setOnAutoRunTask { [weak self] taskID in
-            guard let self else { return }
-            await self.dispatchAutoRunWake(taskID: taskID)
-        }
-        // Route fired wakes through the notification broker: each becomes a structured notification
-        // dispatched by `action`, not prose. Built + fully registered here before the callback is
-        // wired, so a wake can never reach an unregistered handler.
+        // The notification broker (delivery + persistence-until-delivery) and the WakeScheduler
+        // (timer-driven production) are the live scheduling path. The scheduler fires wakes into the
+        // broker by structured `action` — run → mechanical `dispatchAutoRunWake`; reminder/summary →
+        // queued for Smith. Smith no longer owns or polls wakes; his run loop DRAINS whatever the
+        // broker has queued for him. Wiring the scheduler AFTER the broker exists (both memoized, so
+        // this is idempotent across restarts).
         let broker = await ensureNotificationBroker()
-        await smithAgent.setOnWakesFiredDispatch { wakes in
-            for wake in wakes {
-                await broker.submit(WakeNotificationFactory.notification(for: wake))
-            }
+        await wakeScheduler.setBroker(broker)
+        await wakeScheduler.setPromotion { [weak self] taskID in
+            await self?.promoteScheduledTaskForWake(taskID)
+        }
+        if let persistWakes = persistScheduledWakes {
+            await wakeScheduler.setPersistence(persistWakes)
+        }
+        await smithAgent.setDrainNotifications { [weak broker] in
+            guard let broker else { return [] }
+            return await broker.drainPendingDeliveries(for: .smith).map(\.text)
         }
         if let turnCallback = onTurnRecorded {
             await smithAgent.setOnTurnRecorded { turn in turnCallback(.smith, turn) }
@@ -2005,7 +2049,7 @@ public actor OrchestrationRuntime {
         // drain that follows IS gated on `autoAdvanceEnabled` and only runs when the
         // scheduled drain didn't claim the slot — that's the auto-advance step Smith's
         // prompt promises after `review_work(accepted: true)`.
-        let scheduler = followUpScheduler
+        let scheduler = wakeScheduler
         await taskStore.setOnTaskTerminated { [weak self] taskID in
             // Fire-and-forget Task to stay synchronous from TaskStore's view.
             // Both calls are non-throwing today; if either ever gains a `throws`
@@ -2024,31 +2068,17 @@ public actor OrchestrationRuntime {
             }
         }
 
-        // Wire timer lifecycle callbacks from Smith's actor into the runtime's event log so
-        // the timers UI / history view can render scheduled / fired / cancelled rows.
-        let eventLog = timerEventLog
-        let timerSurfaceContext = onTimerEventForChannel
-        await smithAgent.setTimerCallbacks(
-            onScheduled: { wake in
-                Task {
-                    let event = TimerEvent.scheduled(from: wake)
-                    await eventLog.record(event)
-                    await timerSurfaceContext?(event)
-                }
+        // Wire timer lifecycle callbacks from the WakeScheduler into the runtime's event log so the
+        // timers UI / history view can render scheduled / fired / cancelled rows.
+        await wakeScheduler.setTimerCallbacks(
+            onScheduled: { [weak self] wake in
+                Task { await self?.recordTimerEvent(TimerEvent.scheduled(from: wake)) }
             },
-            onFired: { primary, all in
-                Task {
-                    let event = TimerEvent.fired(primary: primary, batchSize: all.count)
-                    await eventLog.record(event)
-                    await timerSurfaceContext?(event)
-                }
+            onFired: { [weak self] primary, all in
+                Task { await self?.recordTimerEvent(TimerEvent.fired(primary: primary, batchSize: all.count)) }
             },
-            onCancelled: { wake, cause in
-                Task {
-                    let event = TimerEvent.cancelled(wake: wake, cause: cause)
-                    await eventLog.record(event)
-                    await timerSurfaceContext?(event)
-                }
+            onCancelled: { [weak self] wake, cause in
+                Task { await self?.recordTimerEvent(TimerEvent.cancelled(wake: wake, cause: cause)) }
             }
         )
 
@@ -2066,25 +2096,20 @@ public actor OrchestrationRuntime {
             Task { await self?.handleInboundUserMessagesIncorporated(channelMessageIDs) }
         }
 
-        // Replay persisted wakes onto the freshly-built Smith. Runs on every `start()` —
-        // cold launch AND `restartForNewTask` — so wakes survive run_task restarts in
-        // addition to app quit. The disk file is kept current via `onTimerEventForChannel`.
-        // Without this, every `restartForNewTask` silently dropped the previous Smith's
-        // in-memory wake list, so a second-or-later scheduled task simply never fired.
+        // Restore persisted wakes into the WakeScheduler — ONLY at cold boot (first `start()`). The
+        // scheduler is runtime-level and outlives `restartForNewTask`, so a warm restart reuses its
+        // live, current wake list; re-loading disk then would risk resurrecting a wake the live list
+        // already fired-and-removed. `hasBeenRestored()` distinguishes cold from warm.
         //
-        // The replay is FILTERED: the disk snapshot can lag the in-memory list (the
-        // persist runs via a MainActor hop that races the restart's teardown), so a wake
-        // that already fired can come back from disk and fire again on the fresh Smith —
-        // which restarts, replays, and fires it again, forever. That resurrection loop
-        // produced 31 full runtime generations in 8 seconds on 2026-07-08.
-        if let loader = loadPersistedWakes {
-            let wakes = await loader()
-            if !wakes.isEmpty {
-                let replayable = await replayableWakes(from: wakes, resumingTaskID: resumingTaskID)
-                if !replayable.isEmpty {
-                    await smithAgent.restoreScheduledWakes(replayable)
-                }
-            }
+        // The cold-boot replay is FILTERED: the disk snapshot can lag the in-memory list, so a wake
+        // that already fired can come back from disk. `replayableWakes` drops those (the resurrection
+        // loop it guards against produced 31 runtime generations in 8 seconds on 2026-07-08), and
+        // `WakeScheduler`'s catch-up-collapsing roll-forward stops a stale recurring wake from
+        // re-firing every tick.
+        if await !wakeScheduler.hasBeenRestored() {
+            let wakes = (await loadPersistedWakes?()) ?? []
+            let replayable = wakes.isEmpty ? [] : await replayableWakes(from: wakes, resumingTaskID: resumingTaskID)
+            await wakeScheduler.restore(replayable)
         }
 
         // Re-seed the pending-scheduled-run queue from disk so wakes that fired and were
@@ -3518,7 +3543,7 @@ public actor OrchestrationRuntime {
     func makeToolContext(
         agentID: UUID,
         role: AgentRole,
-        followUpScheduler: FollowUpScheduler? = nil,
+        wakeScheduler: WakeScheduler? = nil,
         currentResumingTaskID: UUID? = nil,
         filesReadInSession: FileReadTracker? = nil,
         executionTracker: ToolExecutionTracker? = nil,
@@ -3598,9 +3623,9 @@ public actor OrchestrationRuntime {
                 guard let self else { return }
                 Task { await self.notifyToolExecutionStateChange(role: role, toolName: toolName, started: started) }
             },
-            scheduleWake: { [followUpScheduler] request in
-                guard let followUpScheduler else { return .error("Scheduler not available.") }
-                return await followUpScheduler.scheduleWake(
+            scheduleWake: { [wakeScheduler] request in
+                guard let wakeScheduler else { return .error("Scheduler not available.") }
+                return await wakeScheduler.scheduleWake(
                     wakeAt: request.wakeAt,
                     instructions: request.instructions,
                     taskID: request.taskID,
@@ -3610,13 +3635,13 @@ public actor OrchestrationRuntime {
                     action: request.action
                 )
             },
-            listScheduledWakes: { [followUpScheduler] in
-                guard let followUpScheduler else { return [] }
-                return await followUpScheduler.listScheduledWakes()
+            listScheduledWakes: { [wakeScheduler] in
+                guard let wakeScheduler else { return [] }
+                return await wakeScheduler.listScheduledWakes()
             },
-            cancelScheduledWake: { [followUpScheduler] id in
-                guard let followUpScheduler else { return false }
-                return await followUpScheduler.cancelWake(id: id)
+            cancelScheduledWake: { [wakeScheduler] id in
+                guard let wakeScheduler else { return false }
+                return await wakeScheduler.cancelWake(id: id)
             },
             reportInboundUserMessage: { [weak self] report in
                 guard let self else { return .failure("Runtime is unavailable.") }

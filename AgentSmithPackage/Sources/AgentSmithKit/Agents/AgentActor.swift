@@ -317,6 +317,12 @@ public actor AgentActor {
     /// contexts without a runtime, where the legacy local dispatch is used as a fallback.
     private var onWakesFiredDispatch: (@Sendable ([ScheduledWake]) async -> Void)?
 
+    /// Smith-only: pulls notifications the broker has queued for this agent (reminders, summaries,
+    /// external messages), returning their delivery text. Drained once per run-loop iteration — Smith
+    /// no longer polls scheduled wakes; the `WakeScheduler` fires them into the broker, which holds
+    /// them here until Smith drains. Nil in agents/tests without a broker.
+    private var drainNotifications: (@Sendable () async -> [String])?
+
     private var maxToolCallsPerIteration: Int
     /// Maximum concurrent Security Agent evaluations to prevent overwhelming the LLM backend.
     private static let maxConcurrentEvaluations = 8
@@ -741,6 +747,18 @@ public actor AgentActor {
     /// hands the whole due batch here instead of running its own run/Smith partition.
     public func setOnWakesFiredDispatch(_ handler: @escaping @Sendable ([ScheduledWake]) async -> Void) {
         onWakesFiredDispatch = handler
+    }
+
+    /// Smith-only: wires the notification-drain source (the broker's pending queue for this agent).
+    /// Once set, the run loop drains queued notifications each iteration instead of polling wakes.
+    public func setDrainNotifications(_ handler: @escaping @Sendable () async -> [String]) {
+        drainNotifications = handler
+    }
+
+    /// Wakes the agent from an idle sleep so it can drain freshly-queued notifications immediately
+    /// rather than at its next scheduled tick. Called by the broker's enqueue nudge.
+    public func wakeFromIdle() {
+        interruptIdleSleep()
     }
 
     /// Returns true when this wake performs the `run` task action against a task. `run` is the
@@ -1212,7 +1230,7 @@ public actor AgentActor {
             }
 
             drainPendingMessages()
-            await checkScheduledWake()
+            await drainQueuedNotifications()
             checkBrownSilenceNudge()
             await checkSmithDigest()
             await pruneHistoryIfNeeded()
@@ -2854,7 +2872,31 @@ public actor AgentActor {
         return max(0, messageDebounceInterval - Date().timeIntervalSince(last))
     }
 
+    /// Smith-only: pulls whatever the broker has queued for this agent and injects each notification
+    /// as a user-role message, flagging unprocessed input so the loop handles them this iteration.
+    /// This is pure CONSUMPTION — the `WakeScheduler` owns scheduling and the broker owns delivery +
+    /// durability. When no broker-backed drain is wired (Brown, isolated unit tests) it falls back to
+    /// the legacy owned-wake poll, so those contexts keep working without a broker.
+    private func drainQueuedNotifications() async {
+        guard let drainNotifications else {
+            await checkScheduledWake()   // legacy fallback: no broker → poll this actor's own wakes
+            return
+        }
+        let texts = await drainNotifications()
+        guard !texts.isEmpty else { return }
+        for text in texts {
+            conversationHistory.append(.user(text))
+        }
+        hasUnprocessedInput = true
+        pushLiveContext()
+    }
+
     /// Fires every scheduled wake whose deadline has arrived.
+    ///
+    /// LEGACY: no longer the production path. Live scheduling moved to `WakeScheduler`, which fires
+    /// wakes into the `NotificationBroker`; Smith consumes via `drainQueuedNotifications`. Retained
+    /// as the no-broker fallback (and for the wake unit tests that drive it directly) until those
+    /// tests are migrated to the scheduler.
     ///
     /// Wakes are partitioned into two groups:
     ///   - **auto-run wakes** (the wake's imperative was rendered by `TaskActionKind.run`

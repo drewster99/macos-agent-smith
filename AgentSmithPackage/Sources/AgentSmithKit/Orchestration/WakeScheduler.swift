@@ -105,6 +105,10 @@ actor WakeScheduler {
 
     func listScheduledWakes() -> [ScheduledWake] { wakes }
 
+    /// Whether `restore` has run. The runtime restores from disk only at cold boot; a warm restart
+    /// (which reuses this live scheduler) checks this to avoid re-loading stale disk state.
+    func hasBeenRestored() -> Bool { hasRestored }
+
     @discardableResult
     func cancelWake(id: UUID) async -> Bool {
         guard let removed = wakes.first(where: { $0.id == id }) else { return false }
