@@ -156,7 +156,10 @@ public actor OrchestrationRuntime {
     /// `schedule_task_action` against an in-flight `.pending` task) on every restart —
     /// not just on cold launch. Without this, `restartForNewTask` silently drops every
     /// wake in the previous Smith's in-memory list.
-    private var loadPersistedWakes: (@Sendable () async -> [ScheduledWake])?
+    /// Returns the persisted wakes, or `nil` if the load FAILED (read/decode error). Nil must NOT be
+    /// treated as "no wakes": restoring `[]` on a failed load would set `hasRestored` and let a later
+    /// persist overwrite the still-unread on-disk file, permanently losing those reminders.
+    private var loadPersistedWakes: (@Sendable () async -> [ScheduledWake]?)?
 
 
     /// Tasks queued to run as soon as the current in-flight task finishes (or is
@@ -437,7 +440,7 @@ public actor OrchestrationRuntime {
     /// Wires the disk-replay loader. Called once by the app layer after constructing the
     /// runtime; the closure is invoked at cold boot to seed the `WakeScheduler` with
     /// surviving wakes.
-    public func setLoadPersistedWakes(_ handler: @escaping @Sendable () async -> [ScheduledWake]) {
+    public func setLoadPersistedWakes(_ handler: @escaping @Sendable () async -> [ScheduledWake]?) {
         loadPersistedWakes = handler
     }
 
@@ -834,13 +837,16 @@ public actor OrchestrationRuntime {
         await onTimerEventForChannel?(event)
     }
 
-    /// Sets a task's status for a mechanical (pause/interrupt) notification action. Refuses to
-    /// clobber a task that is missing or already terminal (`completed`/`failed`) — a scheduled
-    /// pause/interrupt that fires after the task finished is stale. Returns whether it applied.
+    /// Applies a mechanical (pause/interrupt) notification action, mirroring the manual
+    /// `AppViewModel.pauseTask`/`stopTask` path EXACTLY: first STOP the running worker
+    /// (`terminateTaskAgents`), then flip the status via a CAS that only touches an actively-working
+    /// task (`.running`/`.validating`). Without the terminate, a scheduled pause would mark the task
+    /// `.paused` while Brown kept running tools in the background. The CAS makes it a no-op when the
+    /// task isn't currently working (already finished, pending, paused) — never a clobber. Returns
+    /// whether the status flip applied.
     private func applyNotificationTaskStatus(_ taskID: UUID, _ status: AgentTask.Status) async -> Bool {
-        guard let task = await taskStore.task(id: taskID), !task.status.isTerminal else { return false }
-        await taskStore.updateStatus(id: taskID, status: status)
-        return true
+        await terminateTaskAgents(taskID: taskID)
+        return await taskStore.updateStatus(id: taskID, to: status, ifCurrentlyIn: [.running, .validating])
     }
 
     private func notificationTaskTitle(_ taskID: UUID) async -> String? {
@@ -2115,9 +2121,16 @@ public actor OrchestrationRuntime {
         // `WakeScheduler`'s catch-up-collapsing roll-forward stops a stale recurring wake from
         // re-firing every tick.
         if await !wakeScheduler.hasBeenRestored() {
-            let wakes = (await loadPersistedWakes?()) ?? []
-            let replayable = wakes.isEmpty ? [] : await replayableWakes(from: wakes, resumingTaskID: resumingTaskID)
-            await wakeScheduler.restore(replayable)
+            // A `nil` return means the load FAILED (read/decode error), NOT "no wakes". Do NOT
+            // restore in that case: leaving `hasRestored` false preserves the on-disk file (the
+            // scheduler won't persist-overwrite it) and retries the load on the next start. A
+            // successful load of a missing/empty file returns `[]` and correctly restores empty.
+            if let loader = loadPersistedWakes, let wakes = await loader() {
+                let replayable = wakes.isEmpty ? [] : await replayableWakes(from: wakes, resumingTaskID: resumingTaskID)
+                await wakeScheduler.restore(replayable)
+            } else if loadPersistedWakes != nil {
+                stopLogger.error("Scheduled-wake load failed — NOT restoring; the on-disk file is preserved for retry on the next start.")
+            }
         }
 
         // Re-seed the pending-scheduled-run queue from disk so wakes that fired and were
@@ -2835,6 +2848,15 @@ public actor OrchestrationRuntime {
     private func performStopAll(preserveObserverCallbacks: Bool = false) async {
         // This stop is the answer to any pending stop request.
         stopRequested = false
+        // FULL teardown only (a restartForNewTask preserves callbacks and KEEPS the scheduler live):
+        // cancel the WakeScheduler's armed timer FIRST — before `endGeneration` frees the workers —
+        // so a wall-clock wake can't fire during teardown, hit `dispatchAutoRunWake` with a now-free
+        // slot, and resurrect the runtime via a cold `restartForNewTask`. The app drops the runtime
+        // right after a full stopAll and builds a fresh one on restart, so the memoized scheduler is
+        // never reused after this.
+        if !preserveObserverCallbacks {
+            await wakeScheduler?.stop()
+        }
         let entryStart = Date()
         stopLogger.notice("Runtime.stopAll entry agents=\(self.supervisor.count, privacy: .public) preserveCallbacks=\(preserveObserverCallbacks, privacy: .public)")
 

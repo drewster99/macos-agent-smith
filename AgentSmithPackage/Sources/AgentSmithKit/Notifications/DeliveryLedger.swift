@@ -31,9 +31,17 @@ public struct DeliveryLedger: Sendable {
         self.capacity = capacity
     }
 
-    /// Seed from persisted state at cold boot so a re-fire after restart is still recognized.
+    /// Seed from persisted state at cold boot so a re-fire after restart is still recognized. The
+    /// entries are inserted in age order (oldest `.delivered` timestamp first) rather than the
+    /// dictionary's per-launch-randomized iteration order, so a later `prune()` evicts the genuinely
+    /// oldest ids first. `.dropped`/`.pending` carry no timestamp and sort oldest.
     public mutating func seed(_ persisted: [NotificationID: DeliveryStatus]) {
-        for (id, status) in persisted where statuses[id] == nil {
+        func age(_ status: DeliveryStatus) -> TimeInterval {
+            if case .delivered(let date) = status { return date.timeIntervalSinceReferenceDate }
+            return -.greatestFiniteMagnitude
+        }
+        let ordered = persisted.sorted { age($0.value) < age($1.value) }
+        for (id, status) in ordered where statuses[id] == nil {
             statuses[id] = status
             order.append(id)
         }

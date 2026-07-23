@@ -25,11 +25,11 @@ public protocol NotificationRuntime: Sendable {
     /// Start (or resume) a task through the capacity-gated lifecycle path — queues at capacity,
     /// never evicts a live worker.
     func autoRunTask(_ taskID: UUID) async
-    /// Set a task's status (used by the pause / interrupt actions). Returns `false` WITHOUT
-    /// mutating when the task is already in a terminal state (`completed`/`failed`) or missing —
-    /// a scheduled pause/interrupt that fired after the task finished is stale and must not clobber
-    /// the terminal outcome. The old prose path relied on Smith's "skip if no longer appropriate"
-    /// judgment for this; the mechanical path enforces it here.
+    /// Apply a pause/interrupt action: STOP the running worker and flip the task's status, but only
+    /// if the task is actively working. Returns `false` WITHOUT effect when the task isn't currently
+    /// running/validating (already finished, pending, or paused) — a scheduled pause/interrupt must
+    /// neither clobber a terminal outcome nor leave a worker running behind a paused status. Mirrors
+    /// the manual pause/stop path exactly.
     func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool
     /// The current title of a task, for composing display/instruction text. Nil if unknown.
     func taskTitle(_ taskID: UUID) async -> String?

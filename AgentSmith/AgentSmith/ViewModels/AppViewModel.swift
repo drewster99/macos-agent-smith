@@ -1002,12 +1002,14 @@ final class AppViewModel {
             }
         }
 
-        await newRuntime.setLoadPersistedWakes {
+        await newRuntime.setLoadPersistedWakes { () async -> [ScheduledWake]? in
             do {
                 return try await persistence.loadScheduledWakes()
             } catch {
+                // nil (NOT []) signals a load failure so the runtime won't restore empty and let a
+                // later persist overwrite the still-unread file.
                 logger.error("Failed to load scheduled wakes for replay: \(error.localizedDescription)")
-                return []
+                return nil
             }
         }
 

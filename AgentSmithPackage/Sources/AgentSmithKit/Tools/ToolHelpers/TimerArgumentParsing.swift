@@ -176,11 +176,13 @@ enum TimerArgumentParsing {
         guard let value else { return nil }
         switch value {
         case .int(let v): return v
-        // `Int(v)` TRAPS on a non-finite or out-of-range Double — an LLM can supply `1e300` or NaN,
-        // so convert defensively and treat the un-representable case as "not a number" (nil).
+        // `Int(v)` TRAPS on a non-finite or out-of-range Double — an LLM can supply `1e300` or NaN.
+        // A naive `v <= Double(Int.max)` guard is NOT enough: `Double(Int.max)` rounds UP to 2^63, so
+        // the boundary value 9.223372036854776e18 passes the check yet still traps in `Int(_:)`.
+        // Truncate toward zero, then `Int(exactly:)` — nil for anything not representable.
         case .double(let v):
-            guard v.isFinite, v >= Double(Int.min), v <= Double(Int.max) else { return nil }
-            return Int(v)
+            guard v.isFinite else { return nil }
+            return Int(exactly: v.rounded(.towardZero))
         case .string(let s): return Int(s)
         default: return nil
         }

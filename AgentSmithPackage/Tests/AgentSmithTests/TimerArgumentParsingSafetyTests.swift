@@ -22,6 +22,16 @@ struct TimerArgumentParsingSafetyTests {
         guard case .invalid = result else { Issue.record("expected .invalid, got \(result)"); return }
     }
 
+    @Test("the exact Double(Int.max) boundary does not trap (2^63 rounds up and Int(_) would trap)")
+    func intMaxBoundaryDoesNotTrap() {
+        // `Double(Int.max)` == 2^63, one past Int.max — the value an LLM could supply to hit the
+        // old `v <= Double(Int.max)`-then-`Int(v)` trap.
+        for bad in [Double(Int.max), 9.223372036854776e18, -9.223372036854776e18, Double(Int.min)] {
+            let result = recurrence(["type": .string("interval"), "seconds": .double(bad)])
+            guard case .invalid = result else { Issue.record("expected .invalid for \(bad), got \(result)"); return }
+        }
+    }
+
     @Test("a NaN Double in an interval field does not trap")
     func nanDoubleDoesNotTrap() {
         let result = recurrence([

@@ -81,13 +81,15 @@ public actor NotificationBroker {
     /// outbox — persisted via `persistPendingDelivery`, so an undelivered notification survives a
     /// restart and is handed out on the next drain rather than lost.
     private var pendingDelivery: [QueuedDelivery] = []
-    private let persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)?
+    /// Durable outbox writer. Unlike the ledger's single-flight flush (whose fast-path returns
+    /// BEFORE the write lands — fine for a dedup ledger), pending-delivery is the reminder-durability
+    /// FLOOR: `SerialPersistenceWriter.flush()` parks the caller until its snapshot has actually been
+    /// written, so an enqueue is durable BEFORE the nudge fires and before the scheduler removes the
+    /// wake. Nil = in-memory only (tests).
+    private let pendingWriter: SerialPersistenceWriter<[QueuedDelivery]>?
     /// Fired (best-effort) when something is enqueued for a pull recipient, so an idle recipient can
     /// wake and drain instead of waiting for its next scheduled tick.
     private var onPendingEnqueued: (@Sendable (RecipientKind) -> Void)?
-    /// Single-flight coalescing for `persistPendingDelivery`, mirroring the ledger flusher.
-    private var pendingFlushInFlight = false
-    private var pendingDirty = false
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "Notifications")
 
@@ -100,7 +102,9 @@ public actor NotificationBroker {
         self.runtime = runtime
         self.ledger = DeliveryLedger(capacity: ledgerCapacity)
         self.persistLedger = persistLedger
-        self.persistPendingDelivery = persistPendingDelivery
+        self.pendingWriter = persistPendingDelivery.map { persist in
+            SerialPersistenceWriter(label: "notification.pending", write: { snapshot in await persist(snapshot) })
+        }
     }
 
     // MARK: - Registration
@@ -328,16 +332,14 @@ public actor NotificationBroker {
         return taken
     }
 
-    /// Coalesced single-flight persistence for the pending-delivery queue, mirroring `flushLedger`
-    /// so a slow write of an older snapshot can't clobber a newer one on disk.
+    /// Durably persists the CURRENT pending-delivery queue and does not return until that snapshot
+    /// (or a later one that supersedes it) has been written. The `SerialPersistenceWriter` coalesces
+    /// bursts and preserves write order like the ledger flusher, but — critically — its `flush()`
+    /// waits on a sequence watermark, so a caller can't proceed (nudge / remove the source wake)
+    /// before its enqueue is on disk.
     private func flushPendingDelivery() async {
-        guard let persistPendingDelivery else { return }
-        guard !pendingFlushInFlight else { pendingDirty = true; return }
-        pendingFlushInFlight = true
-        defer { pendingFlushInFlight = false }
-        repeat {
-            pendingDirty = false
-            await persistPendingDelivery(pendingDelivery)
-        } while pendingDirty
+        guard let pendingWriter else { return }
+        await pendingWriter.enqueue(pendingDelivery)
+        await pendingWriter.flush()
     }
 }

@@ -34,12 +34,13 @@ public struct TaskActionNotificationHandler: NotificationHandler {
             let targetStatus: AgentTask.Status = (action == .pause) ? .paused : .interrupted
             let verb = (action == .pause) ? "paused" : "stopped"
             let title = await runtime.taskTitle(taskID) ?? rawTaskID
-            // `setTaskStatus` refuses to clobber a task that already finished — a scheduled
-            // pause/stop that fires late is stale, so report it as skipped rather than lying.
+            // `setTaskStatus` stops the worker and flips status only if the task is actively
+            // working; it's a no-op otherwise (already finished, pending, or paused), so report a
+            // skip rather than lying about having paused/stopped it.
             if await runtime.setTaskStatus(taskID, to: targetStatus) {
                 await runtime.postSystemNotice("Scheduled action: \(verb) \"\(title)\".", taskID: taskID)
             } else {
-                await runtime.postSystemNotice("Scheduled \(action == .pause ? "pause" : "stop") skipped — \"\(title)\" already finished.", taskID: taskID)
+                await runtime.postSystemNotice("Scheduled \(action == .pause ? "pause" : "stop") skipped — \"\(title)\" is not currently running.", taskID: taskID)
             }
         case .summarize:
             // Summarize is a `task_summary` notification, not `task_action` — reaching here is a
