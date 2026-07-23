@@ -13,6 +13,7 @@ import Foundation
 actor WakeScheduler {
     private var wakes: [ScheduledWake] = []
     private var hasRestored = false
+    private var stopped = false
     private var timerTask: Task<Void, Never>?
 
     private var broker: NotificationBroker?
@@ -62,6 +63,7 @@ actor WakeScheduler {
     /// Cancels the armed timer. Called on runtime teardown so a pending `Task.sleep` doesn't fire
     /// against a stopped runtime.
     func stop() {
+        stopped = true
         timerTask?.cancel()
         timerTask = nil
     }
@@ -156,6 +158,10 @@ actor WakeScheduler {
     /// yields ONE future occurrence, not a per-period storm), persist, re-arm. Internal so tests can
     /// drive it deterministically without waiting on the armed timer.
     func fireDue() async {
+        // A full-teardown `stop()` may land here — either firing this call outright or resuming a
+        // call suspended at `broker.submit` below — so bail if stopped, so a wall-clock wake can't
+        // post a run notification into a runtime being torn down (and resurrect it).
+        guard !stopped else { return }
         let now = Date()
         let due = wakes.filter { $0.wakeAt <= now }
         guard !due.isEmpty else { armTimer(); return }
@@ -171,8 +177,10 @@ actor WakeScheduler {
         }
 
         // Produce a structured notification per fired wake. The broker decides its fate by the
-        // wake's `action` (run → mechanical; reminder/summary → queued for Smith to drain).
+        // wake's `action` (run → mechanical; reminder/summary → queued for Smith to drain). Re-check
+        // `stopped` after each suspension: a teardown that lands mid-batch must stop posting.
         for wake in due {
+            guard !stopped else { return }
             await broker?.submit(WakeNotificationFactory.notification(for: wake))
         }
 
