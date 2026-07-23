@@ -154,9 +154,6 @@ public actor AgentActor {
     /// the debounce window. Cleared once we commit to an LLM call. Stays false during
     /// an active tool loop so tool results are processed without unnecessary delay.
     private var debouncingForMessages = false
-    /// All scheduled wakes for this agent. Each carries an id, time, reason, and optional task
-    /// association. Sorted ascending by `wakeAt`. The earliest wake bounds the next idle sleep.
-    private var scheduledWakes: [ScheduledWake] = []
 
     /// The currently sleeping idle task. Cancelling it wakes the agent early.
     private var idleSleepTask: Task<Void, Never>?
@@ -295,27 +292,6 @@ public actor AgentActor {
     /// orchestration runtime after Smith is constructed; nil = digest disabled. Argument is the
     /// since-cutoff. Returns nil to suppress this fire (no fresh activity).
     private var smithDigestProvider: (@Sendable (Date) async -> String?)?
-
-    /// Timer-lifecycle callbacks. The runtime wires these so the timers UI / event log can
-    /// observe scheduling without poking actor internals. See `setTimerCallbacks(onScheduled:onFired:onCancelled:)`.
-    private var onWakeScheduled: (@Sendable (ScheduledWake) -> Void)?
-    /// Fires once per `checkScheduledWake` batch with the *primary* wake (first in the batch)
-    /// and the full set of due wakes — keeping the batch grouped so the event log can show a
-    /// single fire per LLM turn instead of N rows.
-    private var onWakeFired: (@Sendable (ScheduledWake, [ScheduledWake]) -> Void)?
-    private var onWakeCancelled: (@Sendable (ScheduledWake, WakeCancellationCause) -> Void)?
-    /// Hook the runtime wires to auto-execute `run_task` for a fired wake without going
-    /// through Smith's LLM. Eliminates the dependency on the model to follow the
-    /// `[System: A timer has fired]` imperative — weak local models (e.g. gemma3:27b)
-    /// were asking the user for confirmation instead of executing. The wake is
-    /// considered an "auto-run" wake when its imperative was rendered by
-    /// `TaskActionKind.run.imperativeText` AND it carries a `taskID`. Other actions
-    /// (pause/stop/summarize) still flow through Smith for now.
-    private var onAutoRunTask: (@Sendable (UUID) async -> Void)?
-    /// When set, fired wakes are dispatched through this (the runtime posts each to the
-    /// NotificationBroker) instead of the actor's own local run/Smith partition. Nil in tests and
-    /// contexts without a runtime, where the legacy local dispatch is used as a fallback.
-    private var onWakesFiredDispatch: (@Sendable ([ScheduledWake]) async -> Void)?
 
     /// Smith-only: pulls notifications the broker has queued for this agent (reminders, summaries,
     /// external messages), returning their delivery text. Drained once per run-loop iteration — Smith
@@ -632,121 +608,10 @@ public actor AgentActor {
         onActiveToolNamesChanged = handler
     }
 
-    /// Replaces the actor's scheduled-wake list with the supplied set. Used by the runtime at
-    /// cold-launch to replay wakes persisted from a prior process. Bypasses the
-    /// `onWakeScheduled` callback so the timer-event log isn't double-stamped (the original
-    /// `.scheduled` events are already persisted in the timer history). Wakes with `wakeAt`
-    /// in the past relative to `now` are kept as-is — `checkScheduledWake()` on the next
-    /// loop iteration will fire them, which is the correct recovery behavior for a wake that
-    /// elapsed while the app was quit.
-    public func restoreScheduledWakes(_ wakes: [ScheduledWake]) {
-        scheduledWakes = wakes.sorted { $0.wakeAt < $1.wakeAt }
-        interruptIdleSleep()
-    }
-
-    /// Schedules a wake. Returns `.scheduled(wake)` on success, or `.error(...)` for
-    /// validation failures. If `replacesID` is supplied, that wake is cancelled before
-    /// scheduling the new one. Multiple wakes can share a wake time without conflict —
-    /// callers that genuinely want a single replacement should pass `replacesID`.
-    func scheduleWake(
-        wakeAt: Date,
-        instructions: String,
-        taskID: UUID? = nil,
-        replacesID: UUID? = nil,
-        recurrence: Recurrence? = nil,
-        originalID: UUID? = nil,
-        previousFireAt: Date? = nil,
-        survivesTaskTermination: Bool = false,
-        action: TaskActionKind? = nil
-    ) -> ScheduleWakeOutcome {
-        let trimmedInstructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedInstructions.isEmpty else {
-            return .error("instructions must not be empty — describe what the agent should do when the wake fires.")
-        }
-
-        if let replacesID, let replacedWake = scheduledWakes.first(where: { $0.id == replacesID }) {
-            scheduledWakes.removeAll { $0.id == replacesID }
-            onWakeCancelled?(replacedWake, .replaced)
-        }
-
-        let wake = ScheduledWake(
-            wakeAt: wakeAt,
-            instructions: trimmedInstructions,
-            taskID: taskID,
-            recurrence: recurrence,
-            originalID: originalID,
-            previousFireAt: previousFireAt,
-            survivesTaskTermination: survivesTaskTermination,
-            action: action
-        )
-        scheduledWakes.append(wake)
-        scheduledWakes.sort { $0.wakeAt < $1.wakeAt }
-        interruptIdleSleep()
-        onWakeScheduled?(wake)
-        return .scheduled(wake)
-    }
-
-    /// Returns all currently-scheduled wakes for this agent, sorted ascending by `wakeAt`.
-    public func listScheduledWakes() -> [ScheduledWake] {
-        scheduledWakes
-    }
-
-    /// Cancels a single wake by id. Returns true if it existed and was removed.
-    @discardableResult
-    public func cancelWake(id: UUID) -> Bool {
-        guard let removed = scheduledWakes.first(where: { $0.id == id }) else { return false }
-        scheduledWakes.removeAll { $0.id == id }
-        onWakeCancelled?(removed, .userRequest)
-        return true
-    }
-
-    /// Cancels wakes associated with the given task whose `survivesTaskTermination` is false.
-    /// Returns the ids of cancelled wakes. Wakes flagged to survive — currently `run` and
-    /// `summarize` action wakes — are deliberately retained so the user can queue multiple
-    /// future runs against the same task without the first run's completion wiping the
-    /// queue.
-    @discardableResult
-    public func cancelWakesForTask(_ taskID: UUID) -> [UUID] {
-        let cancelled = scheduledWakes.filter { $0.taskID == taskID && !$0.survivesTaskTermination }
-        scheduledWakes.removeAll { $0.taskID == taskID && !$0.survivesTaskTermination }
-        for wake in cancelled {
-            onWakeCancelled?(wake, .taskTerminated)
-        }
-        return cancelled.map { $0.id }
-    }
-
     /// Smith-only: registers the closure used to assemble periodic Brown-activity digests.
     /// Idempotent — replaces any prior provider.
     public func setSmithDigestProvider(_ provider: @escaping @Sendable (Date) async -> String?) {
         smithDigestProvider = provider
-    }
-
-    /// Registers timer-lifecycle callbacks fired from the actor when wakes are scheduled,
-    /// fired, or cancelled. Used by `OrchestrationRuntime` to populate the timer-event log
-    /// without leaking actor internals into the UI.
-    public func setTimerCallbacks(
-        onScheduled: (@Sendable (ScheduledWake) -> Void)? = nil,
-        onFired: (@Sendable (ScheduledWake, [ScheduledWake]) -> Void)? = nil,
-        onCancelled: (@Sendable (ScheduledWake, WakeCancellationCause) -> Void)? = nil
-    ) {
-        onWakeScheduled = onScheduled
-        onWakeFired = onFired
-        onWakeCancelled = onCancelled
-    }
-
-    /// Wires the runtime's auto-run handler. When a wake fires whose imperative matches
-    /// the `TaskActionKind.run` shape, `checkScheduledWake` calls this directly instead
-    /// of injecting the imperative into Smith's conversation. The runtime then drives
-    /// `restartForNewTask`; Smith finds out about the new run when its fresh process
-    /// boots with `resumingTaskID` set.
-    public func setOnAutoRunTask(_ handler: @escaping @Sendable (UUID) async -> Void) {
-        onAutoRunTask = handler
-    }
-
-    /// Wires fired-wake dispatch through the NotificationBroker. When set, `checkScheduledWake`
-    /// hands the whole due batch here instead of running its own run/Smith partition.
-    public func setOnWakesFiredDispatch(_ handler: @escaping @Sendable ([ScheduledWake]) async -> Void) {
-        onWakesFiredDispatch = handler
     }
 
     /// Smith-only: wires the notification-drain source (the broker's pending queue for this agent).
@@ -759,15 +624,6 @@ public actor AgentActor {
     /// rather than at its next scheduled tick. Called by the broker's enqueue nudge.
     public func wakeFromIdle() {
         interruptIdleSleep()
-    }
-
-    /// Returns true when this wake performs the `run` task action against a task. `run` is the
-    /// only action whose execution is fully mechanical (no LLM judgment), so the runtime drives it
-    /// directly. Reads the wake's STRUCTURED `action` — never its `instructions`, which are display
-    /// prose. (Legacy wakes with no persisted action recover `.run` from their prose once, at
-    /// decode; see `ScheduledWake.legacyActionFromInstructions`.)
-    static func wakeIsAutoRunRunTask(_ wake: ScheduledWake) -> Bool {
-        wake.action == .run && wake.taskID != nil
     }
 
     /// Starts the agent's run loop.
@@ -885,10 +741,7 @@ public actor AgentActor {
         onTurnRecorded = nil
         onContextChanged = nil
         smithDigestProvider = nil
-        onWakeScheduled = nil
-        onWakeFired = nil
-        onWakeCancelled = nil
-        onAutoRunTask = nil
+        drainNotifications = nil
     }
 
     /// Resets the conversation to `[system prompt]` plus an optional orientation turn —
@@ -2835,17 +2688,12 @@ public actor AgentActor {
         idleSleepTask?.cancel()
     }
 
-    /// Sleeps for up to `maxDuration` seconds, or until interrupted by a new message
-    /// or the earliest scheduled wake (whichever comes first).
+    /// Sleeps for up to `maxDuration` seconds, or until interrupted by a new message or a
+    /// broker notification nudge (`wakeFromIdle`), whichever comes first. The agent no longer owns
+    /// scheduled wakes — the `WakeScheduler` fires them into the broker, which nudges an idle Smith
+    /// to drain — so there is no wake-time clamp here anymore.
     private func idleWait(maxDuration: TimeInterval? = nil) async {
         var duration = maxDuration ?? pollInterval
-        // Skip the wake-clamp during task review: elapsed wakes are held in the queue,
-        // so a wake whose `wakeAt` is in the past would otherwise tight-loop us at 0.1s
-        // intervals doing no useful work.
-        if let earliest = scheduledWakes.first, !awaitingTaskReview {
-            let untilWake = max(0, earliest.wakeAt.timeIntervalSinceNow)
-            duration = min(duration, untilWake)
-        }
         if configuration.role == .smith, smithDigestProvider != nil, let last = lastSmithDigestAt {
             let untilDigest = max(0, Self.smithDigestIntervalSeconds - Date().timeIntervalSince(last))
             duration = min(duration, untilDigest)
@@ -2875,13 +2723,9 @@ public actor AgentActor {
     /// Smith-only: pulls whatever the broker has queued for this agent and injects each notification
     /// as a user-role message, flagging unprocessed input so the loop handles them this iteration.
     /// This is pure CONSUMPTION — the `WakeScheduler` owns scheduling and the broker owns delivery +
-    /// durability. When no broker-backed drain is wired (Brown, isolated unit tests) it falls back to
-    /// the legacy owned-wake poll, so those contexts keep working without a broker.
+    /// durability. A no-op for agents without a drain source wired (Brown).
     private func drainQueuedNotifications() async {
-        guard let drainNotifications else {
-            await checkScheduledWake()   // legacy fallback: no broker → poll this actor's own wakes
-            return
-        }
+        guard let drainNotifications else { return }
         let texts = await drainNotifications()
         guard !texts.isEmpty else { return }
         for text in texts {
@@ -2889,146 +2733,6 @@ public actor AgentActor {
         }
         hasUnprocessedInput = true
         pushLiveContext()
-    }
-
-    /// Fires every scheduled wake whose deadline has arrived.
-    ///
-    /// LEGACY: no longer the production path. Live scheduling moved to `WakeScheduler`, which fires
-    /// wakes into the `NotificationBroker`; Smith consumes via `drainQueuedNotifications`. Retained
-    /// as the no-broker fallback (and for the wake unit tests that drive it directly) until those
-    /// tests are migrated to the scheduler.
-    ///
-    /// Wakes are partitioned into two groups:
-    ///   - **auto-run wakes** (the wake's imperative was rendered by `TaskActionKind.run`
-    ///     and it carries a `taskID`): the runtime executes `restartForNewTask` directly
-    ///     via `onAutoRunTask`. Smith never sees the imperative — it learns about the new
-    ///     run when its fresh process boots with `resumingTaskID` set. This is by design:
-    ///     scheduling a task to run at time T is fully mechanical, so no LLM judgment is
-    ///     needed and weak local models (gemma3:27b et al.) can't fail to execute by
-    ///     asking for confirmation.
-    ///   - **smith-driven wakes** (everything else — pause, stop, summarize, plus any
-    ///     auto-run wake that fires alongside another auto-run in the same batch
-    ///     since `restartForNewTask` is single-target): injected as a combined `[System: ...]`
-    ///     user-role marker so Smith can address them in order.
-    ///
-    /// During `awaitingTaskReview`, elapsed wakes are held in the queue rather than dropped.
-    /// They fire on the next loop iteration after review completes.
-    func checkScheduledWake() async {
-        let now = Date()
-        let due = scheduledWakes.filter { $0.wakeAt <= now }
-        guard !due.isEmpty else { return }
-        guard !awaitingTaskReview else {
-            // Hold elapsed wakes through review — they fire on the next loop iteration
-            // after `drainPendingMessages` flips `awaitingTaskReview` back to false.
-            return
-        }
-        scheduledWakes.removeAll { $0.wakeAt <= now }
-
-        // Promote a `.scheduled` task to `.pending` when its RUN wake fires so the run is
-        // accepted (`run_task` rejects `.scheduled` by design). Gate on the run action: a
-        // `summarize`/`pause`/`interrupt` wake that fires while the task is still `.scheduled`
-        // (e.g. a summary timed earlier than the task's own run time) must NOT promote it, or
-        // auto-advance would start the task before its scheduled run.
-        var promotedTaskIDs: Set<UUID> = []
-        for wake in due where Self.wakeIsAutoRunRunTask(wake) {
-            guard let taskID = wake.taskID, !promotedTaskIDs.contains(taskID) else { continue }
-            promotedTaskIDs.insert(taskID)
-            await toolContext.taskStore.promoteScheduledToPending(id: taskID)
-        }
-
-        // Dispatch the due batch. In production the broker owns routing (`action` decides run vs
-        // Smith-delivery vs mechanical pause/interrupt); `dispatchWakesLocally` is the no-broker
-        // fallback that keeps the old auto-run/Smith partition for tests. Either way, multiple
-        // auto-runs in one batch all fire: the old "only when exactly ONE fires" restriction dated
-        // to the single-worker era ("restartForNewTask is single-target, they'd clobber each
-        // other"), but `restartForNewTask` now serializes on the lifecycle queue, each call claims
-        // its own task via CAS, and the capacity gate queues overflow instead of evicting.
-        if let onWakesFiredDispatch {
-            // Broker dispatch: hand the whole due batch to the NotificationBroker (via the runtime).
-            // Each wake becomes a structured notification whose handler runs it, delivers it to
-            // Smith, or mechanically pauses/interrupts — dispatch is decided by `action`, never prose.
-            await onWakesFiredDispatch(due)
-        } else {
-            await dispatchWakesLocally(due)
-        }
-
-        // Log to the timer-event history regardless of dispatch path so the View → Timers
-        // pane shows every fire, including the auto-run ones.
-        if let primary = due.first {
-            onWakeFired?(primary, due)
-        }
-
-        // Re-schedule any recurring wakes for their next occurrence. The new wake inherits the
-        // chain's `originalID` so the timers UI can group fires across the series. `notBefore: now`
-        // collapses catch-up: a wake restored with a long-stale `wakeAt` (app was offline) schedules
-        // its successor in the FUTURE instead of another still-past occurrence that would re-fire
-        // every tick until caught up — a restart storm the ledger can't dedup (each caught-up
-        // occurrence gets a fresh id).
-        for wake in due {
-            guard let recurrence = wake.recurrence,
-                  let next = recurrence.nextOccurrence(after: wake.wakeAt, notBefore: now) else { continue }
-            let nextWake = ScheduledWake(
-                wakeAt: next,
-                instructions: wake.instructions,
-                taskID: wake.taskID,
-                recurrence: recurrence,
-                originalID: wake.originalID,
-                previousFireAt: wake.wakeAt,
-                survivesTaskTermination: wake.survivesTaskTermination,
-                action: wake.action
-            )
-            scheduledWakes.append(nextWake)
-            onWakeScheduled?(nextWake)
-        }
-        scheduledWakes.sort { $0.wakeAt < $1.wakeAt }
-    }
-
-    /// The legacy local fired-wake dispatch — used when no broker is wired (tests, and any context
-    /// without a runtime). Partitions into auto-run (driven directly) and Smith-bound (injected as
-    /// a system message). The broker path (`onWakesFiredDispatch`) supersedes this in production.
-    private func dispatchWakesLocally(_ due: [ScheduledWake]) async {
-        let autoRunCandidates = due.filter(Self.wakeIsAutoRunRunTask)
-        let runDirectly: [ScheduledWake]
-        let smithWakes: [ScheduledWake]
-        if onAutoRunTask != nil {
-            let autoRunIDs = Set(autoRunCandidates.map(\.id))
-            runDirectly = autoRunCandidates
-            smithWakes = due.filter { !autoRunIDs.contains($0.id) }
-        } else {
-            runDirectly = []
-            smithWakes = due
-        }
-
-        for wake in runDirectly {
-            if let taskID = wake.taskID {
-                await onAutoRunTask?(taskID)
-            }
-        }
-
-        // Inject the system message ONLY for wakes Smith still has to interpret. If
-        // every fired wake was auto-run, we skip the LLM round-trip entirely.
-        if !smithWakes.isEmpty {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm:ss"
-            let lines = smithWakes.map { wake -> String in
-                let timeStr = formatter.string(from: wake.wakeAt)
-                let taskFragment = wake.taskID.map { " (linked task: \($0.uuidString))" } ?? ""
-                return "  • [\(timeStr)] \(wake.instructions)\(taskFragment)"
-            }
-            let header = smithWakes.count == 1
-                ? "[System: A timer has fired. You must immediately perform the following actions.]"
-                : "[System: \(smithWakes.count) timers have fired. You must immediately perform the following actions.]"
-            conversationHistory.append(.user("""
-                \(header)
-
-                You must:
-                \(lines.joined(separator: "\n"))
-
-                Execute each instruction in order. If a step has already been done or is no longer appropriate (the user changed plans, the task was already started, etc.), skip that step and move on to the next. Do NOT schedule a new timer unless the user explicitly asked you to follow up again.
-                """))
-            hasUnprocessedInput = true
-            pushLiveContext()
-        }
     }
 
     /// Smith-only: if the digest interval has elapsed, ask the runtime-supplied provider for a

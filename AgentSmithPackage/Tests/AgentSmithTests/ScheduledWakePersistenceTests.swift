@@ -26,67 +26,30 @@ struct ScheduledWakePersistenceTests {
         #expect(decoded == original)
     }
 
-    @Test("restoreScheduledWakes replaces the actor's list with a sorted copy")
+    @Test("restore replaces the scheduler's list with a sorted copy")
     func restoreSortsAndReplaces() async {
-        let actor = makeActor()
-        // Seed two wakes via the public API so we know the actor sees something to replace.
-        _ = await actor.scheduleWake(wakeAt: Date().addingTimeInterval(60), instructions: "old-1", taskID: nil, replacesID: nil)
-        _ = await actor.scheduleWake(wakeAt: Date().addingTimeInterval(120), instructions: "old-2", taskID: nil, replacesID: nil)
+        let scheduler = WakeScheduler()
+        _ = await scheduler.scheduleWake(wakeAt: Date().addingTimeInterval(60), instructions: "old-1")
+        _ = await scheduler.scheduleWake(wakeAt: Date().addingTimeInterval(120), instructions: "old-2")
 
         let now = Date()
-        let restored: [ScheduledWake] = [
+        await scheduler.restore([
             ScheduledWake(wakeAt: now.addingTimeInterval(300), instructions: "later"),
             ScheduledWake(wakeAt: now.addingTimeInterval(30),  instructions: "soon")
-        ]
-        await actor.restoreScheduledWakes(restored)
-        let listed = await actor.listScheduledWakes()
+        ])
+        let listed = await scheduler.listScheduledWakes()
         #expect(listed.count == 2)
         #expect(listed.first?.instructions == "soon")
         #expect(listed.last?.instructions == "later")
     }
 
-    @Test("restoreScheduledWakes keeps already-elapsed wakes so the run loop fires them")
+    @Test("restore keeps already-elapsed wakes so the armed timer fires them (catch-up)")
     func keepsElapsedWakes() async {
-        let actor = makeActor()
-        let elapsed = ScheduledWake(
-            wakeAt: Date().addingTimeInterval(-3600),
-            instructions: "should-fire-on-next-loop"
-        )
-        await actor.restoreScheduledWakes([elapsed])
-        let listed = await actor.listScheduledWakes()
+        let scheduler = WakeScheduler()
+        let elapsed = ScheduledWake(wakeAt: Date().addingTimeInterval(-3600), instructions: "should-fire-on-catch-up")
+        await scheduler.restore([elapsed])
+        let listed = await scheduler.listScheduledWakes()
         #expect(listed.count == 1)
-        #expect(listed.first?.instructions == "should-fire-on-next-loop")
-    }
-
-    private func makeActor() -> AgentActor {
-        let provider = MockLLMProvider(responses: [])
-        let channel = MessageChannel()
-        let taskStore = TaskStore()
-        let memoryStore = MemoryStore(engine: SemanticSearchEngine())
-        let config = AgentConfiguration(
-            role: .smith,
-            llmConfig: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model"),
-            systemPrompt: "test prompt"
-        )
-        let context = ToolContext(
-            agentID: UUID(),
-            agentRole: .smith,
-            channel: channel,
-            taskStore: taskStore,
-            spawnBrown: { nil },
-            terminateAgent: { _, _ in false },
-            abort: { _, _ in },
-            agentRoleForID: { _ in nil },
-            memoryStore: memoryStore,
-            setToolExecutionStatus: { _, _ in },
-            hasToolSucceeded: { _ in false },
-            hasToolFailed: { _ in false }
-        )
-        return AgentActor(
-            configuration: config,
-            provider: provider,
-            tools: [],
-            toolContext: context
-        )
+        #expect(listed.first?.instructions == "should-fire-on-catch-up")
     }
 }

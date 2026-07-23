@@ -42,6 +42,12 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
     /// task action) and for a wake persisted before this field existed whose prose isn't run-shaped.
     public var action: TaskActionKind?
 
+    /// Whether this wake performs the `run` task action against a task — the only action whose
+    /// execution is fully mechanical (no LLM judgment), so the runtime drives it directly. Reads the
+    /// STRUCTURED `action`, never the `instructions` prose. (Legacy wakes with no persisted action
+    /// recover `.run` from their prose once, at decode; see `legacyActionFromInstructions`.)
+    public var isAutoRunRunTask: Bool { action == .run && taskID != nil }
+
     public init(
         id: UUID = UUID(),
         wakeAt: Date,

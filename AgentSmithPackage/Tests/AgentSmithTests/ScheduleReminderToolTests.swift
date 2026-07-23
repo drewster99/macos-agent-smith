@@ -66,7 +66,7 @@ struct ScheduleReminderToolTests {
         )
 
         let wake = try #require(await recorder.wakes.first)
-        #expect(!AgentActor.wakeIsAutoRunRunTask(wake))
+        #expect(!wake.isAutoRunRunTask)
     }
 
     @Test("Recurrence is accepted and carried through")

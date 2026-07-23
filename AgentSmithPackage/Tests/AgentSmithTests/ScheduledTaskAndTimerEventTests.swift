@@ -67,19 +67,13 @@ struct ScheduledTaskAndTimerEventTests {
 
     @Test("a recurring wake re-schedules itself once it elapses")
     func recurringWakeReschedules() async {
-        let actor = AgentActorTestFactory.make()
+        let scheduler = WakeScheduler()
         let now = Date()
-        // Schedule a recurrence whose next occurrence is well in the future. Then advance
-        // the wake's fire time backward to "already elapsed" by manipulating it via
-        // replacesID — because we can't time-travel inside the actor, we set wakeAt very
-        // close to now and rely on the actor's check timing in the production runtime.
         let firstTime = now.addingTimeInterval(0.5)
         let recurrence = Recurrence.daily(at: TimeOfDay(hour: 9, minute: 0))
-        let outcome = await actor.scheduleWake(
+        let outcome = await scheduler.scheduleWake(
             wakeAt: firstTime,
             instructions: "Recurring fire test",
-            taskID: nil,
-            replacesID: nil,
             recurrence: recurrence
         )
         guard case .scheduled(let firstWake) = outcome else {
@@ -98,13 +92,13 @@ struct ScheduledTaskAndTimerEventTests {
     /// `run` (with a taskID) is the only action the runtime drives directly; everything else flows
     /// through Smith. These fixtures deliberately DECOUPLE the prose from the action so the test
     /// can't pass by accident of the instruction text.
-    @Test("wakeIsAutoRunRunTask reads the structured action, not the prose")
+    @Test("isAutoRunRunTask reads the structured action, not the prose")
     func autoRunDiscriminator() {
         let taskID = UUID()
 
         // action == .run with a taskID → auto-run, even with junk instructions.
         let runWake = ScheduledWake(wakeAt: Date(), instructions: "anything at all", taskID: taskID, action: .run)
-        #expect(AgentActor.wakeIsAutoRunRunTask(runWake) == true)
+        #expect(runWake.isAutoRunRunTask == true)
 
         // action != .run → NOT auto-run, even if the prose is run-shaped. This is the case the old
         // prose match got wrong.
@@ -114,17 +108,17 @@ struct ScheduledTaskAndTimerEventTests {
             taskID: taskID,
             action: .summarize
         )
-        #expect(AgentActor.wakeIsAutoRunRunTask(summarizeWithRunProse) == false)
+        #expect(summarizeWithRunProse.isAutoRunRunTask == false)
 
         let pauseWake = ScheduledWake(wakeAt: Date(), instructions: "p", taskID: taskID, action: .pause)
-        #expect(AgentActor.wakeIsAutoRunRunTask(pauseWake) == false)
+        #expect(pauseWake.isAutoRunRunTask == false)
 
         let interruptWake = ScheduledWake(wakeAt: Date(), instructions: "i", taskID: taskID, action: .interrupt)
-        #expect(AgentActor.wakeIsAutoRunRunTask(interruptWake) == false)
+        #expect(interruptWake.isAutoRunRunTask == false)
 
         // action == .run but no taskID → nothing to run against.
         let runNoTask = ScheduledWake(wakeAt: Date(), instructions: "r", taskID: nil, action: .run)
-        #expect(AgentActor.wakeIsAutoRunRunTask(runNoTask) == false)
+        #expect(runNoTask.isAutoRunRunTask == false)
 
         // A bare reminder (action nil) is never auto-run, even with run-shaped prose.
         let reminderWithRunProse = ScheduledWake(
@@ -133,7 +127,7 @@ struct ScheduledTaskAndTimerEventTests {
             taskID: nil,
             action: nil
         )
-        #expect(AgentActor.wakeIsAutoRunRunTask(reminderWithRunProse) == false)
+        #expect(reminderWithRunProse.isAutoRunRunTask == false)
     }
 
     @Test("A legacy wake with no persisted action recovers .run from run-shaped prose, once, at decode")
@@ -191,21 +185,19 @@ struct ScheduledTaskAndTimerEventTests {
         )
         #expect(scheduled.status == .scheduled)
 
-        let actor = AgentActorTestFactory.make(taskStore: taskStore)
+        let scheduler = WakeScheduler()
+        await scheduler.setPromotion { await taskStore.promoteScheduledToPending(id: $0) }
         // A RUN wake promotes the scheduled task — that's the wake whose job is to start it.
-        let outcome = await actor.scheduleWake(
-            wakeAt: Date().addingTimeInterval(-1),
-            instructions: "Call run_task on \(scheduled.id.uuidString)",
-            taskID: scheduled.id,
-            replacesID: nil,
-            recurrence: nil,
-            action: .run
-        )
-        guard case .scheduled = outcome else {
-            Issue.record("scheduleWake should have succeeded; got \(outcome)"); return
-        }
+        await scheduler.restore([
+            ScheduledWake(
+                wakeAt: Date().addingTimeInterval(-1),
+                instructions: "Call run_task on \(scheduled.id.uuidString)",
+                taskID: scheduled.id,
+                action: .run
+            )
+        ])
 
-        await actor.checkScheduledWake()
+        await scheduler.fireDue()
 
         let after = await taskStore.task(id: scheduled.id)
         #expect(after?.status == .pending)
@@ -219,16 +211,19 @@ struct ScheduledTaskAndTimerEventTests {
             description: "...",
             scheduledRunAt: Date().addingTimeInterval(3600)
         )
-        let actor = AgentActorTestFactory.make(taskStore: taskStore)
+        let scheduler = WakeScheduler()
+        await scheduler.setPromotion { await taskStore.promoteScheduledToPending(id: $0) }
         // A summarize wake fires before the task's own run time — it must not promote the task,
         // or auto-advance would start it early.
-        _ = await actor.scheduleWake(
-            wakeAt: Date().addingTimeInterval(-1),
-            instructions: "Call get_task_details for \(scheduled.id.uuidString)",
-            taskID: scheduled.id,
-            action: .summarize
-        )
-        await actor.checkScheduledWake()
+        await scheduler.restore([
+            ScheduledWake(
+                wakeAt: Date().addingTimeInterval(-1),
+                instructions: "Call get_task_details for \(scheduled.id.uuidString)",
+                taskID: scheduled.id,
+                action: .summarize
+            )
+        ])
+        await scheduler.fireDue()
         #expect(await taskStore.task(id: scheduled.id)?.status == .scheduled, "summarize must not promote a scheduled task")
     }
 

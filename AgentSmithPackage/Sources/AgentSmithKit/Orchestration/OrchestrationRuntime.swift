@@ -1197,7 +1197,7 @@ public actor OrchestrationRuntime {
         var kept: [ScheduledWake] = []
         var droppedCount = 0
         for wake in wakes {
-            if AgentActor.wakeIsAutoRunRunTask(wake), let taskID = wake.taskID {
+            if wake.isAutoRunRunTask, let taskID = wake.taskID {
                 guard let task = tasksByID[taskID], task.disposition == .active else { droppedCount += 1; continue }
                 var candidate = wake
                 // Only a PAST-DUE wake can be "already handled": for the resuming task it
