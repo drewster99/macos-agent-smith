@@ -1277,6 +1277,11 @@ public actor OrchestrationRuntime {
             let ratio = (elapsed / interval).rounded(.down)
             let steps = (ratio.isFinite && ratio < Double(Int.max - 1)) ? max(1, Int(ratio) + 1) : 1
             let fireAt = wake.wakeAt.addingTimeInterval(TimeInterval(steps) * interval)
+            // If the computed occurrence still isn't in the future, the `wakeAt` is absurd/corrupt
+            // (so far past that the step count overflowed and clamped to 1). DROP the series rather
+            // than reschedule a still-past wake that would re-fire every tick — a storm. The calendar
+            // path below already returns nil in this case via its bounded loop.
+            guard fireAt > now else { return nil }
             return ScheduledWake(
                 wakeAt: fireAt,
                 instructions: wake.instructions,

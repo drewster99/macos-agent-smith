@@ -69,6 +69,17 @@ struct RecurrenceTests {
         #expect(next == Self.date(2026, 4, 26, 9, 0))
     }
 
+    @Test("an absurdly-stale wakeAt yields nil (series ends) — no trap, no still-past storm")
+    func absurdStaleYieldsNil() {
+        // A `wakeAt` so far in the past that (gap / period) overflows Int's range: the guard clamps
+        // steps to 1, which would leave the occurrence STILL in the past. That must return nil (end
+        // the series) rather than a still-past date that re-fires every tick.
+        let recurrence = Recurrence.interval(seconds: 60)
+        let absurdPast = Date(timeIntervalSinceReferenceDate: -1e300)
+        let now = Date(timeIntervalSinceReferenceDate: 0)
+        #expect(recurrence.nextOccurrence(after: absurdPast, notBefore: now) == nil)
+    }
+
     @Test("on-time fire is unchanged — catch-up variant matches the plain next occurrence")
     func onTimeFireMatchesPlain() {
         let recurrence = Recurrence.interval(seconds: 3600)

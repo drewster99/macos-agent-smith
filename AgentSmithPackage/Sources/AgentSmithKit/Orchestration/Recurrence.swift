@@ -78,7 +78,12 @@ public enum Recurrence: Sendable, Codable, Equatable {
                 // never reaches that, but guard it so LLM-authored/absurd wakeAt data can't crash.
                 periods = (ratio.isFinite && ratio < Double(Int.max - 1)) ? Int(ratio) + 1 : 1
             }
-            return after.addingTimeInterval(period * Double(periods))
+            let result = after.addingTimeInterval(period * Double(periods))
+            // Only a strictly-future occurrence is valid. When the gap is so absurd that the step
+            // count overflowed and clamped to 1 (corrupt/hand-edited `wakeAt`), `result` is still in
+            // the past — return nil to END the series rather than schedule a wake that re-fires every
+            // tick (a storm). For all real gaps `result` is always > notBefore.
+            return result > notBefore ? result : nil
         }
 
         // Calendar recurrences: step forward until strictly past `notBefore`. Bounded so a
@@ -89,7 +94,9 @@ public enum Recurrence: Sendable, Codable, Equatable {
             candidate = nextOccurrence(after: current, calendar: calendar)
             steps += 1
         }
-        return candidate
+        // If the bounded loop ran out before reaching the future (absurd/degenerate recurrence), the
+        // candidate is still <= notBefore — end the series rather than reschedule a still-past wake.
+        return candidate.flatMap { $0 > notBefore ? $0 : nil }
     }
 
     /// Finds the next real calendar date matching the requested day/time.
