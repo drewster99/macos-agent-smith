@@ -37,17 +37,43 @@ struct NotificationPullDeliveryTests {
         let n = reminder("a")
         await broker.submit(n)
 
-        // Not settled yet — it's pending until drained.
+        // Not settled — pending until the acking drain.
         #expect(await broker.deliveryStatus(n.id) == .pending)
 
-        let drained = await broker.drainPendingDeliveries(for: .smith)
-        #expect(drained.map(\.text) == ["hello"])
-        if case .delivered = await broker.deliveryStatus(n.id) {} else { Issue.record("expected delivered after drain") }
+        // Drain 1 LEASES: returns it, but it stays pending (in the outbox) for at-least-once.
+        let d1 = await broker.drainPendingDeliveries(for: .smith)
+        #expect(d1.map(\.text) == ["hello"])
+        #expect(await broker.deliveryStatus(n.id) == .pending, "leased, not yet acked")
 
-        // A second drain is empty; a re-submit is deduped (already delivered).
-        #expect(await broker.drainPendingDeliveries(for: .smith).isEmpty)
+        // Drain 2 ACKs: the prior lease is now delivered + removed; no new batch.
+        let d2 = await broker.drainPendingDeliveries(for: .smith)
+        #expect(d2.isEmpty)
+        if case .delivered = await broker.deliveryStatus(n.id) {} else { Issue.record("expected delivered after ack") }
+
+        // A re-submit after delivery is deduped.
         await broker.submit(n)
         #expect(await broker.drainPendingDeliveries(for: .smith).isEmpty)
+    }
+
+    @Test("at-least-once: a leased-but-unacked drain re-delivers after a restart (never lost)")
+    func atLeastOnceAcrossRestart() async {
+        let disk = PendingDisk()
+        let broker1 = NotificationBroker(runtime: NoopRuntime(), persistPendingDelivery: { await disk.write($0) })
+        await broker1.registerHandler(type: "reminder", DeliverHandler(text: "important"))
+        await broker1.registerPullRecipient(.smith)
+        await broker1.submit(reminder("once"))
+
+        // Drain 1 leases + returns it — but there is NO second drain (simulating a kill right after
+        // the recipient consumed it), so it is never acked/removed from the outbox.
+        #expect(await broker1.drainPendingDeliveries(for: .smith).count == 1)
+        #expect(await disk.snapshot.count == 1, "still in the durable outbox — not acked")
+
+        // Restart: a fresh broker seeded from disk re-delivers it rather than losing it.
+        let broker2 = NotificationBroker(runtime: NoopRuntime(), persistPendingDelivery: { await disk.write($0) })
+        await broker2.registerHandler(type: "reminder", DeliverHandler(text: "important"))
+        await broker2.registerPullRecipient(.smith)
+        await broker2.seedPendingDeliveries(await disk.read())
+        #expect(await broker2.drainPendingDeliveries(for: .smith).map(\.text) == ["important"], "re-delivered, never lost")
     }
 
     @Test("a queued-but-undrained notification is not re-enqueued on re-post")

@@ -81,6 +81,13 @@ public actor NotificationBroker {
     /// outbox — persisted via `persistPendingDelivery`, so an undelivered notification survives a
     /// restart and is handed out on the next drain rather than lost.
     private var pendingDelivery: [QueuedDelivery] = []
+    /// Per-recipient LEASE: ids handed out on the recipient's LAST drain but not yet acked. They stay
+    /// in `pendingDelivery` (durable) until the recipient's NEXT drain confirms it came back around
+    /// and consumed them — the ack. This is what makes pull delivery at-LEAST-once: a crash after a
+    /// drain but before the acking next-drain leaves the items in the outbox, so a restart re-delivers
+    /// them (never a lost reminder). In-memory only: on restart the lease is empty and the still-
+    /// present outbox items are re-delivered, which is exactly the intended recovery.
+    private var leased: [RecipientKind: Set<NotificationID>] = [:]
     /// Durable outbox writer. Unlike the ledger's single-flight flush (whose fast-path returns
     /// BEFORE the write lands — fine for a dedup ledger), pending-delivery is the reminder-durability
     /// FLOOR: `SerialPersistenceWriter.flush()` parks the caller until its snapshot has actually been
@@ -316,20 +323,40 @@ public actor NotificationBroker {
 
     // MARK: - Pull delivery (persistence until delivery)
 
-    /// Hands the calling recipient every notification queued for it, marks each `.delivered`, and
-    /// removes them from the durable pending queue. The recipient (Smith's run loop) appends each
-    /// `text` to its conversation. Marking delivered on drain — not on enqueue — is what makes this
-    /// effectively-once across a restart: a crash before the drain persists leaves the items queued
-    /// for a retry drain; a crash after leaves them delivered and deduped.
+    /// Hands the recipient its queued notifications with AT-LEAST-ONCE durability, via lease/ack:
+    ///
+    ///   1. ACK the previous lease — the ids handed out on the LAST drain. The recipient has come
+    ///      back around to this drain, so it consumed them: remove from the durable outbox and mark
+    ///      them `.delivered`. This is the acknowledgement.
+    ///   2. LEASE and return the current batch — hand it to the recipient but KEEP it in the outbox
+    ///      until the NEXT drain acks it.
+    ///
+    /// So a crash after a drain but before the acking next-drain leaves the batch in the persisted
+    /// outbox → a restart re-delivers it (never a lost reminder). The cost is at-least-once: a kill
+    /// between the recipient processing a batch and its next drain can re-deliver that batch once.
+    /// The `pendingDelivery.contains` guard in `deliver` prevents a leased id from being re-enqueued
+    /// while it's outstanding.
     public func drainPendingDeliveries(for kind: RecipientKind) async -> [QueuedDelivery] {
-        let taken = pendingDelivery.filter { $0.notification.recipient.kind == kind }
-        guard !taken.isEmpty else { return [] }
-        pendingDelivery.removeAll { $0.notification.recipient.kind == kind }
         let now = Date()
-        for item in taken { ledger.markDelivered(item.notification.id, at: now) }
-        await flushPendingDelivery()
-        await flushLedger()
-        return taken
+        var acked = false
+        if let previous = leased[kind], !previous.isEmpty {
+            pendingDelivery.removeAll { previous.contains($0.notification.id) }
+            for id in previous { ledger.markDelivered(id, at: now) }
+            leased[kind] = nil
+            acked = true
+        }
+
+        let batch = pendingDelivery.filter { $0.notification.recipient.kind == kind }
+        if !batch.isEmpty {
+            leased[kind] = Set(batch.map(\.notification.id))
+        }
+        // Persist only when the ack actually removed items — the lease itself is in-memory (a
+        // restart re-delivers, which is the point).
+        if acked {
+            await flushPendingDelivery()
+            await flushLedger()
+        }
+        return batch
     }
 
     /// Durably persists the CURRENT pending-delivery queue and does not return until that snapshot
