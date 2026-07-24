@@ -105,6 +105,8 @@ struct SpendingDashboardView: View {
     @State private var ledgerSearch: String = ""
     @State private var sortColumn: LedgerColumn = .cost
     @State private var sortAscending: Bool = false
+    /// Throttle guard for the live-refresh: true while a coalesced reload is pending.
+    @State private var liveReloadScheduled: Bool = false
     /// Snapshot of pricing data, captured on load so the aggregator closure doesn't
     /// need to cross actor boundaries.
     @State private var pricingSnapshot: [String: ModelPricing] = [:]
@@ -199,7 +201,19 @@ struct SpendingDashboardView: View {
         // so reload then — a run that completes while this window is open now shows up without a
         // manual refresh.
         .onChange(of: shared.costBoardSnapshot.asOf) {
-            Task { await loadRecords() }
+            // `asOf` ticks on EVERY usage insert (once per LLM turn across all agents), so a
+            // naive reload-per-tick would re-read + re-aggregate the whole store many times a
+            // second during active runs. Coalesce to at most one SILENT reload per 1.5s: the
+            // first tick schedules a trailing reload; ticks inside that window are dropped.
+            DispatchQueue.main.async {
+                guard !liveReloadScheduled else { return }
+                liveReloadScheduled = true
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    liveReloadScheduled = false
+                    await loadRecords(silent: true)
+                }
+            }
         }
         .refreshable {
             await loadRecords()
@@ -248,8 +262,10 @@ struct SpendingDashboardView: View {
         }
     }
 
-    private func loadRecords() async {
-        isLoading = true
+    /// Loads all usage records and recomputes derived state. `silent` skips the loading overlay,
+    /// used by the throttled live-refresh so it doesn't flash a spinner on every insert burst.
+    private func loadRecords(silent: Bool = false) async {
+        if !silent { isLoading = true }
         allRecords = await shared.usageStore.allRecords()
         // Snapshot pricing keyed by "providerID/modelID" so the aggregator closure
         // doesn't need to cross the main-actor boundary at query time.
