@@ -19,9 +19,11 @@ struct TaskCostDetailSheet: View {
     let taskSummary: TaskSummaryEntry?
     let records: [UsageRecord]
     let allRecordsSummary: UsageSummary
-    /// Number of distinct tasks in the parent dashboard's filtered time range,
-    /// used to compute "vs average task cost" comparison.
+    /// Number of distinct tasks in the parent dashboard's filtered time range (for the popover text).
     let taskCountInRange: Int
+    /// Average TASK cost in range (total task cost / task count) — computed by the dashboard from
+    /// task rows only, so Orchestration/unattributed cost doesn't inflate it. 0 hides "vs Average".
+    let averageTaskCostUSD: Double
     let aggregator: UsageAggregator
     let providerNames: [String: String]
 
@@ -99,10 +101,11 @@ struct TaskCostDetailSheet: View {
                     }
                 }
 
-                // Comparison to average task cost across the time range
-                if allRecordsSummary.callCount > 0 && taskCountInRange > 0 {
-                    let avgTaskCost = allRecordsSummary.totalCostUSD / Double(taskCountInRange)
-                    if avgTaskCost > 0 {
+                // Comparison to the average TASK cost across the time range (task rows only;
+                // Orchestration/unattributed cost is excluded so the average isn't inflated).
+                if averageTaskCostUSD > 0 {
+                    let avgTaskCost = averageTaskCostUSD
+                    do {
                         let ratio = summary.totalCostUSD / avgTaskCost
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             headerStat(
@@ -245,18 +248,23 @@ struct TaskCostDetailSheet: View {
     /// Every DISTINCT model configuration that produced a record for this task, in first-seen
     /// order, with the roles that used it and its call count. Grouping is imperative, so it lives
     /// outside the `@ViewBuilder` body.
-    private func configRows() -> [(config: ModelConfiguration, roles: [AgentRole], calls: Int)] {
-        var order: [UUID] = []
-        var byID: [UUID: (config: ModelConfiguration, roles: Set<AgentRole>, calls: Int)] = [:]
+    private func configRows() -> [(key: String, config: ModelConfiguration, roles: [AgentRole], calls: Int)] {
+        // Group by CONTENT (provider/model + temperature + max output + context), not the config's
+        // UUID: a config edited in place keeps its id, so id-grouping would fold pre- and post-edit
+        // settings into one row showing whichever was seen first. Content grouping shows each
+        // distinct setting as its own row and also merges identical settings across roles.
+        var order: [String] = []
+        var byKey: [String: (config: ModelConfiguration, roles: Set<AgentRole>, calls: Int)] = [:]
         for record in records {
             guard let c = record.configuration else { continue }
-            if byID[c.id] == nil { byID[c.id] = (c, [], 0); order.append(c.id) }
-            byID[c.id]?.roles.insert(record.agentRole)
-            byID[c.id]?.calls += 1
+            let key = "\(c.providerID)/\(c.model)|t=\(c.temperature.map { String(format: "%.2f", $0) } ?? "d")|max=\(c.maxTokens)|ctx=\(c.contextWindowSize)"
+            if byKey[key] == nil { byKey[key] = (c, [], 0); order.append(key) }
+            byKey[key]?.roles.insert(record.agentRole)
+            byKey[key]?.calls += 1
         }
-        return order.compactMap { id in
-            guard let entry = byID[id] else { return nil }
-            return (entry.config, entry.roles.sorted { $0.rawValue < $1.rawValue }, entry.calls)
+        return order.compactMap { key in
+            guard let entry = byKey[key] else { return nil }
+            return (key, entry.config, entry.roles.sorted { $0.rawValue < $1.rawValue }, entry.calls)
         }
     }
 
@@ -277,7 +285,7 @@ struct TaskCostDetailSheet: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                     Divider().padding(.vertical, 2)
-                    ForEach(rows, id: \.config.id) { row in
+                    ForEach(rows, id: \.key) { row in
                         HStack(spacing: 0) {
                             Text(row.config.model)
                                 .lineLimit(1).truncationMode(.middle)

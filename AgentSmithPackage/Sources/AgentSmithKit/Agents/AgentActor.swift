@@ -2639,10 +2639,13 @@ public actor AgentActor {
         for call in response.toolCalls {
             if call.name == "create_task" {
                 if let preCreateTaskIDs {
-                    let created = await toolContext.taskStore.allTasks()
-                        .filter { !preCreateTaskIDs.contains($0.id) }
-                        .sorted { $0.createdAt < $1.createdAt }
-                    if let first = created.first { return first.id }
+                    let created = await toolContext.taskStore.allTasks().filter { !preCreateTaskIDs.contains($0.id) }
+                    // Attribute ONLY when exactly one task appeared this turn. `allTasks()` bookends
+                    // an `await handleResponse`, during which the runtime (auto-advance clone, a
+                    // wake, a second create_task) could add another task — so >1 new task means the
+                    // diff is ambiguous and we must not guess. 0 or >1 → fall through (next tool, or
+                    // Orchestration). This keeps a rare race from mis-billing to another agent's task.
+                    if created.count == 1 { return created[0].id }
                 }
                 continue
             }

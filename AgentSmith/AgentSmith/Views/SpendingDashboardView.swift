@@ -208,7 +208,9 @@ struct SpendingDashboardView: View {
             DispatchQueue.main.async {
                 guard !liveReloadScheduled else { return }
                 liveReloadScheduled = true
-                Task {
+                // @MainActor so the flag reset and the @State writes in loadRecords stay on the
+                // main actor (a bare Task would be non-isolated → off-main @State mutation).
+                Task { @MainActor in
                     try? await Task.sleep(for: .seconds(1.5))
                     liveReloadScheduled = false
                     await loadRecords(silent: true)
@@ -228,7 +230,10 @@ struct SpendingDashboardView: View {
             }
         }
         .sheet(item: $costDetail) { detail in
-            let taskCount = aggregator.byTask(filteredRecords).keys.compactMap({ $0 }).count
+            // Task count and average TASK cost come from the pre-computed ledger rows (task rows
+            // only), so Orchestration/unattributed cost never inflates the average.
+            let taskCount = max(1, ledgerRows.count)
+            let avgTaskCost = ledgerRows.isEmpty ? 0 : ledgerRows.reduce(0) { $0 + $1.cost } / Double(ledgerRows.count)
             switch detail {
             case .task(let taskID):
                 // The dashboard doesn't hold live AgentTask objects (those live per-session).
@@ -242,11 +247,13 @@ struct SpendingDashboardView: View {
                     taskSummary: summaryEntry,
                     records: filteredRecords.filter { $0.taskID == taskID },
                     allRecordsSummary: currentSummary,
-                    taskCountInRange: max(1, taskCount),
+                    taskCountInRange: taskCount,
+                    averageTaskCostUSD: avgTaskCost,
                     aggregator: aggregator,
                     providerNames: providerNames
                 )
             case .orchestration:
+                // Orchestration is not a task, so "vs Average" (a per-task comparison) is hidden (0).
                 TaskCostDetailSheet(
                     taskID: nil,
                     titleOverride: "Orchestration",
@@ -254,7 +261,8 @@ struct SpendingDashboardView: View {
                     taskSummary: nil,
                     records: filteredRecords.filter { $0.taskID == nil },
                     allRecordsSummary: currentSummary,
-                    taskCountInRange: max(1, taskCount),
+                    taskCountInRange: taskCount,
+                    averageTaskCostUSD: 0,
                     aggregator: aggregator,
                     providerNames: providerNames
                 )
@@ -788,18 +796,19 @@ struct SpendingDashboardView: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(AppColors.secondaryBackground))
     }
 
-    /// Smith's cost that isn't attributable to any single task — turns spent orchestrating
-    /// with no task-targeting tool call (idling, planning, replying, deciding what to run).
-    /// Rendered as its own card ABOVE Tasks, clickable for a drill-down. Empty → nothing shown.
+    /// Cost not attributed to any single task: mostly Smith's orchestration turns (planning,
+    /// replying, deciding what to run), plus non-task-specific helper calls (e.g. the summarizer's
+    /// memory reconciliation and web-content extraction). Its own card ABOVE Tasks, clickable for a
+    /// drill-down. Empty → nothing shown.
     @ViewBuilder
     private func orchestrationLedger() -> some View {
         if let planningSummary = orchestrationSummary {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Orchestration").font(AppFonts.sectionHeader)
-                Text("Smith's turns not tied to a specific task — planning, replying, deciding what to run.")
+                Text("Cost not tied to a specific task — Smith's orchestration turns (planning, replying, deciding what to run) plus non-task helper calls.")
                     .font(.caption).foregroundStyle(.secondary)
 
-                ledgerHeader()
+                ledgerHeader(sortable: false)
                 Divider()
 
                 Button(action: { costDetail = .orchestration }, label: {
@@ -815,26 +824,34 @@ struct SpendingDashboardView: View {
         }
     }
 
-    /// Clickable column header: click to sort by that column, click the active one again to
-    /// reverse. The active column is bold and shows a direction arrow.
-    private func ledgerHeader() -> some View {
+    /// Column header. When `sortable`, each column is a button: click to sort by it, click the
+    /// active one again to reverse (active column bold + direction arrow). The Orchestration
+    /// section passes `sortable: false` — it's a single row, so a sort control there would
+    /// confusingly reorder the Tasks table below it instead.
+    private func ledgerHeader(sortable: Bool = true) -> some View {
         HStack(spacing: 0) {
             ForEach(LedgerColumn.allCases, id: \.self) { col in
-                Button(action: { toggleSort(col) }, label: {
-                    HStack(spacing: 2) {
-                        if col != .title { Spacer(minLength: 0) }
-                        Text(col.header).lineLimit(1)
-                        if sortColumn == col {
-                            Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
-                                .font(.caption2).imageScale(.small)
-                        }
-                        if col == .title { Spacer(minLength: 0) }
+                let isActive = sortable && sortColumn == col
+                let label = HStack(spacing: 2) {
+                    if col != .title { Spacer(minLength: 0) }
+                    Text(col.header).lineLimit(1)
+                    if isActive {
+                        Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
+                            .font(.caption2).imageScale(.small)
                     }
-                    .contentShape(Rectangle())
-                })
-                .buttonStyle(.plain)
-                .font(.caption.weight(sortColumn == col ? .bold : .semibold))
-                .foregroundStyle(sortColumn == col ? Color.primary : Color.secondary)
+                    if col == .title { Spacer(minLength: 0) }
+                }
+                .contentShape(Rectangle())
+                .font(.caption.weight(isActive ? .bold : .semibold))
+                .foregroundStyle(isActive ? Color.primary : Color.secondary)
+
+                Group {
+                    if sortable {
+                        Button(action: { toggleSort(col) }, label: { label }).buttonStyle(.plain)
+                    } else {
+                        label
+                    }
+                }
                 .modifier(LedgerCellFrame(width: col.width, leading: col == .title))
             }
         }

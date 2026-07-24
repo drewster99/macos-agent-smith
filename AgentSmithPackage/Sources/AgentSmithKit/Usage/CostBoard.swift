@@ -250,12 +250,17 @@ public actor CostBoard {
         // point would clobber this increment. This relies on `costOf` being
         // synchronous (it is) so the cost is computed without yielding the actor.
         let cost = costOf(record)
-        guard cost > 0 else { return }
+        // Bump `asOf` and republish on EVERY insert, not only cost-bearing ones — observers
+        // (e.g. the spending dashboard's live refresh) key off `asOf` to know a record landed,
+        // and a task run entirely on a free/unpriced model (cost 0) must still trigger them.
+        // Totals only move for priced records.
         var s = snapshot
-        if s.todayInterval.contains(record.timestamp) { s.todayCurrent += cost }
-        if s.weekInterval.contains(record.timestamp) { s.weekCurrent += cost }
-        if s.monthInterval.contains(record.timestamp) { s.monthCurrent += cost }
-        if s.yearInterval.contains(record.timestamp) { s.yearCurrent += cost }
+        if cost > 0 {
+            if s.todayInterval.contains(record.timestamp) { s.todayCurrent += cost }
+            if s.weekInterval.contains(record.timestamp) { s.weekCurrent += cost }
+            if s.monthInterval.contains(record.timestamp) { s.monthCurrent += cost }
+            if s.yearInterval.contains(record.timestamp) { s.yearCurrent += cost }
+        }
         s.asOf = clock()
         snapshot = s
         await publish()
