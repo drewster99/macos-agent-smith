@@ -437,6 +437,4 @@ private extension AgentTask.Status {
         default: return .secondary
         }
     }
-
-    var displayName: String { rawValue }
 }
