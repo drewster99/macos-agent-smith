@@ -21,10 +21,10 @@ struct ModelMetadataInspectorWindow: View {
 
     var body: some View {
         HSplitView {
-            modelListColumn
+            modelListColumn()
                 .frame(minWidth: 300, idealWidth: 340)
                 .frame(maxHeight: .infinity)
-            detailColumn
+            detailColumn()
                 .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
         }
         // Without greedy frames the HSplitView collapses to its children's intrinsic height and
@@ -46,7 +46,7 @@ struct ModelMetadataInspectorWindow: View {
 
     // MARK: - Left: provider + model list + probe controls
 
-    private var modelListColumn: some View {
+    private func modelListColumn() -> some View {
         VStack(spacing: 0) {
             Picker("Provider", selection: $selectedProviderID) {
                 ForEach(kit.providers, id: \.id) { provider in
@@ -71,7 +71,7 @@ struct ModelMetadataInspectorWindow: View {
                 }
             }
 
-            probeControls
+            probeControls()
         }
     }
 
@@ -117,7 +117,7 @@ struct ModelMetadataInspectorWindow: View {
         }
     }
 
-    private var probeControls: some View {
+    private func probeControls() -> some View {
         HStack {
             Button {
                 startProbe(modelIDs: Array(selectedModelIDs))
@@ -150,7 +150,7 @@ struct ModelMetadataInspectorWindow: View {
     // MARK: - Right: composition detail
 
     @ViewBuilder
-    private var detailColumn: some View {
+    private func detailColumn() -> some View {
         if selectedModelIDs.count == 1, let modelID = selectedModelIDs.first {
             ModelCompositionDetailView(
                 shared: shared,
@@ -185,8 +185,8 @@ struct ModelCompositionDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                header
-                probeEvidenceSection
+                header()
+                probeEvidenceSection()
                 if let composition = kit.metadataCompositions[compositionKey] {
                     disagreementsSection(composition)
                     fieldsSection(composition)
@@ -209,7 +209,7 @@ struct ModelCompositionDetailView: View {
         }
     }
 
-    private var header: some View {
+    private func header() -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(modelID).font(.title3.bold()).textSelection(.enabled)
             Text(providerID).font(.caption).foregroundStyle(.secondary)
@@ -219,7 +219,7 @@ struct ModelCompositionDetailView: View {
     // MARK: Probe evidence (record-only facts live here, not in the merge)
 
     @ViewBuilder
-    private var probeEvidenceSection: some View {
+    private func probeEvidenceSection() -> some View {
         let provider = kit.providers.first { $0.id == providerID }
         let records = provider.map { kit.probeRecords(provider: $0, modelID: modelID) }
 

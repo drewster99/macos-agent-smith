@@ -230,7 +230,7 @@ struct CapabilitiesEditorSheet: View {
                     Divider().padding(.vertical, 4)
 
                     sectionHeader("Status & Identity")
-                    displayNameRow
+                    displayNameRow()
                     ForEach(Self.statusDescriptors) { descriptor in
                         statusRow(descriptor)
                     }
@@ -322,7 +322,7 @@ struct CapabilitiesEditorSheet: View {
         }
     }
 
-    private var displayNameRow: some View {
+    private func displayNameRow() -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Display name").font(.headline)

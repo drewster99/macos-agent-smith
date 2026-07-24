@@ -22,14 +22,31 @@ public struct ManageStepsTool: AgentTool {
         (pending, paused, interrupted, scheduled, failed, or awaiting review). \
         \
         Actions: `add` (one `text` or several `texts`, appended in order), `update` (reword a \
-        step: `step_id` + `text`), `set_status` (`step_id` + `status`; skipping or removing \
-        REQUIRES a `note`), `delete` (`step_id` + `note` — tombstones the step; it stays on the \
-        record for validators but leaves your active list), `reorder` (`step_ids`: every active \
-        step id, in the new order), and `list` (show the current list with ids). \
+        step: `step_id` + `text`), `set_status` (`step_id` + `status` — the reversible states \
+        pending/in_progress/completed/skipped; `skipped` REQUIRES a `note`), `delete` (`step_id` \
+        + `note` — removes a step from the active list while leaving it on the record for \
+        validators), `move` (reposition ONE step: `step_id` plus exactly one of \
+        `before_step_id`, `after_step_id`, or `position`), `reorder` (`step_ids`: every active \
+        step id, in the new order — prefer `move` unless you are genuinely rewriting the whole \
+        sequence), and `list` (show the current list with ids). \
         Every action returns the full, numbered, current list. \
         \
         Honesty matters: validators see every skipped/removed step and its note. Quietly \
         dropping planned work is the fastest way to get your submission rejected.
+        """
+
+    /// Appended for the orchestrator only. Brown never sees `purge` in its description OR its
+    /// schema: a capability the worker must not have is best not advertised to it, and the
+    /// runtime check in `execute` is then a backstop rather than the only line of defence.
+    private static let purgeAddendum = """
+
+
+        `purge` (`step_id`) is yours alone: it HARD-deletes a step — no tombstone, no note, no \
+        trace. It works only on a plan nobody has run or judged yet (a template, or a task that \
+        has never started and has no validation history); anywhere else it is refused. Use it to \
+        shape a draft or template plan — to tidy a step you worded badly, or drop one that never \
+        belonged. Never reach for it to make a real run's record look tidier; `delete` is the \
+        honest verb for that, and the record it leaves is the point.
         """
 
     public let parameters: [String: AnyCodable] = [
@@ -37,7 +54,7 @@ public struct ManageStepsTool: AgentTool {
         "properties": .dictionary([
             "action": .dictionary([
                 "type": .string("string"),
-                "enum": .array([.string("add"), .string("update"), .string("set_status"), .string("delete"), .string("reorder"), .string("list")]),
+                "enum": .array(Self.actionNames(includePurge: false).map { .string($0) }),
                 "description": .string("The step-list operation to perform.")
             ]),
             "task_id": .dictionary([
@@ -55,21 +72,33 @@ public struct ManageStepsTool: AgentTool {
             ]),
             "step_id": .dictionary([
                 "type": .string("string"),
-                "description": .string("For `update`/`set_status`/`delete`: the step's UUID (shown by `list` and in every response).")
+                "description": .string("For `update`/`set_status`/`delete`/`purge`/`move`: the step's UUID (shown by `list` and in every response).")
             ]),
             "step_ids": .dictionary([
                 "type": .string("array"),
                 "items": .dictionary(["type": .string("string")]),
                 "description": .string("For `reorder`: EVERY active step's UUID, exactly once, in the new order.")
             ]),
+            "before_step_id": .dictionary([
+                "type": .string("string"),
+                "description": .string("For `move`: place the moved step immediately BEFORE this active step's UUID.")
+            ]),
+            "after_step_id": .dictionary([
+                "type": .string("string"),
+                "description": .string("For `move`: place the moved step immediately AFTER this active step's UUID.")
+            ]),
+            "position": .dictionary([
+                "type": .string("integer"),
+                "description": .string("For `move`: the 1-based slot among the active steps to move this step into, matching the numbering shown by `list`. 1 makes it first.")
+            ]),
             "status": .dictionary([
                 "type": .string("string"),
-                "enum": .array([.string("pending"), .string("in_progress"), .string("completed"), .string("skipped"), .string("removed")]),
-                "description": .string("For `set_status`: the new status. `skipped` and `removed` require `note`.")
+                "enum": .array([.string("pending"), .string("in_progress"), .string("completed"), .string("skipped")]),
+                "description": .string("For `set_status`: the new status. `skipped` requires `note`. To remove a step use the `delete` action — removal is permanent and is not a status.")
             ]),
             "note": .dictionary([
                 "type": .string("string"),
-                "description": .string("Why a step was skipped, removed, or deleted. Required for those; validators read it.")
+                "description": .string("Why a step was skipped or deleted. Required for both; validators read it.")
             ])
         ]),
         "required": .array([.string("action")])
@@ -79,6 +108,32 @@ public struct ManageStepsTool: AgentTool {
 
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
         context.agentRole == .brown || context.agentRole == .smith
+    }
+
+    public func description(for role: AgentRole) -> String {
+        role == .smith ? toolDescription + Self.purgeAddendum : toolDescription
+    }
+
+    public func parameters(for role: AgentRole) -> [String: AnyCodable] {
+        guard role == .smith else { return parameters }
+        var withPurge = parameters
+        guard case .dictionary(var properties) = withPurge["properties"],
+              case .dictionary(var actionSchema) = properties["action"] else {
+            return parameters
+        }
+        actionSchema["enum"] = .array(Self.actionNames(includePurge: true).map { .string($0) })
+        properties["action"] = .dictionary(actionSchema)
+        withPurge["properties"] = .dictionary(properties)
+        return withPurge
+    }
+
+    /// Single source for the action vocabulary, so the schema Brown sees and the schema Smith
+    /// sees can't drift apart except in the one intended way.
+    private static func actionNames(includePurge: Bool) -> [String] {
+        var names = ["add", "update", "set_status", "delete"]
+        if includePurge { names.append("purge") }
+        names.append(contentsOf: ["move", "reorder", "list"])
+        return names
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
@@ -153,7 +208,7 @@ public struct ManageStepsTool: AgentTool {
                 return .failure("`set_status` requires `step_id` (a UUID from `list`).")
             }
             guard case .string(let statusRaw) = arguments["status"], let status = Self.stepStatus(from: statusRaw) else {
-                return .failure("`set_status` requires `status`: pending | in_progress | completed | skipped | removed.")
+                return .failure("`set_status` requires `status`: pending | in_progress | completed | skipped. To remove a step, use the `delete` action.")
             }
             var note: String?
             if case .string(let n) = arguments["note"], !n.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -176,6 +231,34 @@ public struct ManageStepsTool: AgentTool {
             }
             return .success("Step deleted (tombstoned).\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
 
+        case "purge":
+            // Worker-proof by construction: Brown reaches this switch with `author == .worker`,
+            // and the honest-record contract it works under is exactly what purge bypasses.
+            guard context.agentRole == .smith else {
+                return .failure("`purge` is not available to you — it hard-deletes a step with no record. Use `delete` to remove a step from your active list; the tombstone and your note stay on the record for validators.")
+            }
+            guard let stepID = Self.stepID(from: arguments) else {
+                return .failure("`purge` requires `step_id` (a UUID from `list`).")
+            }
+            if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .purge(stepID: stepID)) {
+                return .failure(error)
+            }
+            return .success("Step purged (hard-deleted, no record kept).\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
+
+        case "move":
+            guard let stepID = Self.stepID(from: arguments) else {
+                return .failure("`move` requires `step_id` (a UUID from `list`).")
+            }
+            switch Self.destination(from: arguments) {
+            case .failure(let message):
+                return .failure(message)
+            case .success(let destination):
+                if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .move(stepID: stepID, destination: destination)) {
+                    return .failure(error)
+                }
+                return .success("Step moved.\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
+            }
+
         case "reorder":
             guard case .array(let raw) = arguments["step_ids"] else {
                 return .failure("`reorder` requires `step_ids`: an array of every active step's UUID, in the new order.")
@@ -193,7 +276,7 @@ public struct ManageStepsTool: AgentTool {
             return .success("Steps reordered.\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
 
         default:
-            return .failure("Unknown action '\(action)'. Use add | update | set_status | delete | reorder | list.")
+            return .failure("Unknown action '\(action)'. Use add | update | set_status | delete | move | reorder | list\(context.agentRole == .smith ? " | purge" : "").")
         }
     }
 
@@ -204,15 +287,60 @@ public struct ManageStepsTool: AgentTool {
         return UUID(uuidString: raw)
     }
 
+    private enum DestinationParse {
+        case success(TaskStepDestination)
+        case failure(String)
+    }
+
+    /// Parses `move`'s destination. Exactly one of the three forms must be supplied — accepting
+    /// two would make the call's meaning depend on an argument precedence the model can't see.
+    private static func destination(from arguments: [String: AnyCodable]) -> DestinationParse {
+        var found: [TaskStepDestination] = []
+        var malformed: [String] = []
+        if case .string(let raw) = arguments["before_step_id"] {
+            if let anchorID = UUID(uuidString: raw) {
+                found.append(.before(stepID: anchorID))
+            } else {
+                malformed.append("`before_step_id` must be a step UUID from `list` (got \"\(raw)\").")
+            }
+        }
+        if case .string(let raw) = arguments["after_step_id"] {
+            if let anchorID = UUID(uuidString: raw) {
+                found.append(.after(stepID: anchorID))
+            } else {
+                malformed.append("`after_step_id` must be a step UUID from `list` (got \"\(raw)\").")
+            }
+        }
+        if let position = arguments["position"] {
+            switch position {
+            case .int(let value): found.append(.position(value))
+            case .double(let value): found.append(.position(Int(value)))
+            case .string(let raw):
+                if let value = Int(raw) {
+                    found.append(.position(value))
+                } else {
+                    malformed.append("`position` must be a whole number (got \"\(raw)\").")
+                }
+            default: malformed.append("`position` must be a whole number.")
+            }
+        }
+        if let problem = malformed.first { return .failure(problem) }
+        switch found.count {
+        case 1: return .success(found[0])
+        case 0: return .failure("`move` requires exactly one destination: `before_step_id`, `after_step_id`, or `position`.")
+        default: return .failure("`move` takes exactly one destination — you supplied \(found.count). Pick one of `before_step_id`, `after_step_id`, or `position`.")
+        }
+    }
+
     /// The tool-facing status vocabulary is snake_case; `TaskStep.Status` raw values are
     /// camelCase (persistence format). Mapped explicitly so neither can drift silently.
+    /// `removed` is intentionally absent — tombstoning goes through the `delete` action.
     private static func stepStatus(from raw: String) -> TaskStep.Status? {
         switch raw {
         case "pending": return .pending
         case "in_progress": return .inProgress
         case "completed": return .completed
         case "skipped": return .skipped
-        case "removed": return .removed
         default: return nil
         }
     }

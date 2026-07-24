@@ -319,7 +319,11 @@ public actor TaskStore {
                 \(details)
                 """)
         }
-        let clonedSteps = template.steps.map { step in
+        // Tombstones belong to the TEMPLATE's authoring history, not to the run. Mapping the
+        // whole array (which is what this used to do) reset every `.removed` step to `.pending`
+        // and shipped it to the instance as live work the author had already deleted. A fresh
+        // run gets the active plan and an empty removal record of its own.
+        let clonedSteps = template.steps.filter(\.isActive).map { step in
             TaskStep(text: step.text, status: .pending, note: nil, origin: step.origin)
         }
         let clonedCriteria = template.acceptanceCriteria.map { criterion in
@@ -328,9 +332,7 @@ public actor TaskStore {
                 validationPrompt: criterion.validationPrompt,
                 inputEnumeratorPrompt: criterion.inputEnumeratorPrompt,
                 waivable: criterion.waivable,
-                origin: criterion.origin,
-                validator: criterion.validator,
-                prepare: criterion.prepare
+                origin: criterion.origin
             )
         }
         let instanceTitle: String
@@ -541,6 +543,10 @@ public actor TaskStore {
         task.completedAt = nil
         task.status = .pending
         task.disposition = .active
+        // A retry is a fresh attempt at the whole plan, so the plan starts unstarted. Without
+        // this the retry's worker inherits a fully-checked list from the run that FAILED and
+        // reads it as "already done."
+        resetActiveStepsForFreshAttempt(&task)
         // A fresh attempt against a discarded result gets a fresh ledger: counters reset (so a
         // stall-failed task doesn't insta-fail its first rejection) AND the sticky ACCEPTs are
         // dropped, so every criterion is re-judged against the NEW result rather than inheriting
@@ -561,9 +567,12 @@ public actor TaskStore {
     /// Reopens a completed task so it can be re-run via `run_task` without creating a
     /// duplicate. Clears `result`, `commentary`, and `completedAt`; flips status back to
     /// `.pending`. Returns false if the task is missing or not in `.completed` state.
-    /// Distinct from `resetFailedTask` only by which terminal status it accepts —
-    /// callers ask the question they want answered ("reopen completed" vs. "retry failed")
-    /// rather than passing a status enum.
+    ///
+    /// Deliberately does NOT reset the step statuses, which is where it parts company with
+    /// `resetFailedTask`. Reopening means the work landed but something was incomplete,
+    /// broken, or needs more information — the completed steps really were completed, and
+    /// the worker should see that rather than redo the lot. A user who wants a genuinely
+    /// clean run uses "Run Again" (a brand-new task) or a template instance.
     @discardableResult
     public func reopenCompletedTask(id: UUID) -> Bool {
         guard var task = tasks[id], task.status == .completed else { return false }
@@ -741,9 +750,7 @@ public actor TaskStore {
             if let previous = previousByID[criterion.id] {
                 if previous.validationPrompt != criterion.validationPrompt
                     || previous.inputEnumeratorPrompt != criterion.inputEnumeratorPrompt
-                    || previous.waivable != criterion.waivable
-                    || previous.validator != criterion.validator
-                    || previous.prepare != criterion.prepare {
+                    || previous.waivable != criterion.waivable {
                     changedIDs.insert(criterion.id)
                 }
             } else {
@@ -780,6 +787,10 @@ public actor TaskStore {
 
     /// Replaces the task's step list wholesale — used by Smith's initial seeding at
     /// creation. Worker mutations go through `applyStepAction`.
+    ///
+    /// Callers editing an EXISTING plan must pass the tombstones back through, not drop
+    /// them: this writes exactly what it is given, so an "active steps only" array silently
+    /// erases the append-only record validators are promised.
     public func setSteps(id: UUID, steps: [TaskStep]) {
         guard var task = tasks[id] else { return }
         task.steps = steps
@@ -788,10 +799,21 @@ public actor TaskStore {
         onChange?()
     }
 
+    /// Returns the active steps to unstarted for a fresh attempt: status back to `.pending`,
+    /// skip note cleared. Tombstones are left tombstoned — a removed step was judged
+    /// unnecessary, and reviving it re-adds work the plan already dropped.
+    private func resetActiveStepsForFreshAttempt(_ task: inout AgentTask) {
+        for index in task.steps.indices where task.steps[index].isActive {
+            task.steps[index].status = .pending
+            task.steps[index].note = nil
+        }
+    }
+
     /// One mutation of the step list (from Brown on its own task, or Smith on an inactive
-    /// task's plan). Removal is a TOMBSTONE (status `.removed`, note required) — the
-    /// underlying record is append-only so the validator always sees what was skipped or
-    /// removed and why. Returns a human-readable error, or nil on success.
+    /// task's plan). Removal is a TOMBSTONE (status `.removed`, note required) and `.delete`
+    /// is its ONLY producer — the underlying record is append-only so the validator always
+    /// sees what was skipped or removed and why. Returns a human-readable error, or nil on
+    /// success.
     @discardableResult
     public func applyStepAction(taskID: UUID, action: TaskStepAction) -> String? {
         guard var task = tasks[taskID] else { return "Task not found." }
@@ -803,10 +825,16 @@ public actor TaskStore {
             guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be edited." }
             task.steps[index].text = newText
         case .setStatus(let stepID, let status, let note):
+            // `delete` is the single source of tombstoning. Letting `setStatus` write `.removed`
+            // too meant two code paths for one irreversible mutation, and advertised removal as
+            // just another interchangeable status when it is in fact terminal.
+            guard status != .removed else {
+                return "Use the `delete` action to remove a step. `set_status` covers only the reversible states: pending, in_progress, completed, skipped."
+            }
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
             guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be changed." }
-            if (status == .skipped || status == .removed) && (note ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
-                return "Skipping or removing a step requires a note explaining why."
+            if status == .skipped && (note ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
+                return "Skipping a step requires a note explaining why."
             }
             task.steps[index].status = status
             if let note { task.steps[index].note = note }
@@ -816,6 +844,50 @@ public actor TaskStore {
             guard !note.trimmingCharacters(in: .whitespaces).isEmpty else { return "Deleting a step requires a note explaining why." }
             task.steps[index].status = .removed
             task.steps[index].note = note
+        case .purge(let stepID):
+            // Enforced here as well as at the tool layer: this is the one step mutation that
+            // leaves no trace, so the guard belongs at the point of mutation, not only at the
+            // point of authorization.
+            guard task.isStepPlanPurgeable else {
+                return "Task \"\(task.title)\" has already been run or validated — its step record can't be hard-deleted. Use `delete` to tombstone the step instead."
+            }
+            guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
+            task.steps.remove(at: index)
+        case .move(let stepID, let destination):
+            var active = task.steps.filter(\.isActive)
+            guard let from = active.firstIndex(where: { $0.id == stepID }) else {
+                guard task.steps.contains(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
+                return "Step \(stepID) was removed and cannot be moved."
+            }
+            // Resolve the destination against the list WITHOUT the moved step, so "before X" and
+            // "after X" mean the same thing whether the step is travelling up or down.
+            let moved = active.remove(at: from)
+            let insertionIndex: Int
+            switch destination {
+            case .before(let anchorID):
+                guard let anchor = active.firstIndex(where: { $0.id == anchorID }) else {
+                    return anchorID == stepID
+                        ? "`before_step_id` must name a different step than `step_id`."
+                        : "No active step with id \(anchorID) to move before. Call `list` to see the current ids."
+                }
+                insertionIndex = anchor
+            case .after(let anchorID):
+                guard let anchor = active.firstIndex(where: { $0.id == anchorID }) else {
+                    return anchorID == stepID
+                        ? "`after_step_id` must name a different step than `step_id`."
+                        : "No active step with id \(anchorID) to move after. Call `list` to see the current ids."
+                }
+                insertionIndex = anchor + 1
+            case .position(let oneBased):
+                // 1-based to match the numbering the worker sees; the upper bound is the count
+                // INCLUDING the moved step, so "move to position <count>" means "make it last".
+                guard oneBased >= 1 && oneBased <= active.count + 1 else {
+                    return "`position` must be between 1 and \(active.count + 1) (1-based, among the \(active.count + 1) active step(s))."
+                }
+                insertionIndex = oneBased - 1
+            }
+            active.insert(moved, at: insertionIndex)
+            task.steps = active + task.steps.filter { !$0.isActive }
         case .reorder(let orderedActiveIDs):
             let active = task.steps.filter(\.isActive)
             let activeIDs = Set(active.map(\.id))
@@ -895,8 +967,6 @@ public actor TaskStore {
             guard let judged = judgedByID[record.criterionID], let current = currentByID[record.criterionID] else { return false }
             return current.validationPrompt == judged.validationPrompt
                 && current.inputEnumeratorPrompt == judged.inputEnumeratorPrompt
-                && current.validator == judged.validator
-                && current.prepare == judged.prepare
                 && current.waivable == judged.waivable
         }
         guard !fresh.isEmpty else { return [] }
@@ -907,18 +977,6 @@ public actor TaskStore {
         tasks[id] = task
         onChange?()
         return fresh
-    }
-
-    /// Pins a definition body on the task at first use — later registry edits apply to
-    /// future tasks, never to rounds already in flight. No-op if already pinned.
-    public func pinValidatorDefinition(id: UUID, definition: EvaluatorDefinition) {
-        guard var task = tasks[id] else { return }
-        var validation = task.validation ?? TaskValidationState()
-        guard validation.pinnedDefinitions[definition.name] == nil else { return }
-        validation.pinnedDefinitions[definition.name] = definition
-        task.validation = validation
-        tasks[id] = task
-        onChange?()
     }
 
     /// Materializes the implicit default criterion for a criterion-less task at first
@@ -948,6 +1006,39 @@ public actor TaskStore {
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
+    }
+
+    /// Parks a task that cannot be validated for a CONFIGURATION reason. CAS-guarded on
+    /// `.validating` like every other validation exit, so a pause/stop that landed after the
+    /// coordinator's snapshot is never overwritten. Returns true if the task was parked.
+    @discardableResult
+    public func blockValidation(id: UUID, reason: String) -> Bool {
+        guard var task = tasks[id], task.status == .validating else { return false }
+        task.validationBlockedReason = reason
+        task.status = .awaitingReview
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+        return true
+    }
+
+    /// Releases every task parked by `blockValidation` back to `.validating`. Called when the
+    /// missing configuration appears (a validator model is assigned); the caller re-enqueues
+    /// the returned ids. Tasks the user has since paused, stopped, or failed are left alone —
+    /// only ones still sitting in the parked state are released.
+    @discardableResult
+    public func releaseValidationBlockedTasks() -> [UUID] {
+        var released: [UUID] = []
+        for (id, task) in tasks where task.validationBlockedReason != nil && task.status == .awaitingReview {
+            var updated = task
+            updated.validationBlockedReason = nil
+            updated.status = .validating
+            updated.updatedAt = Date()
+            tasks[id] = updated
+            released.append(id)
+        }
+        if !released.isEmpty { onChange?() }
+        return released
     }
 
     /// Stores a result (and optional commentary) on a task.

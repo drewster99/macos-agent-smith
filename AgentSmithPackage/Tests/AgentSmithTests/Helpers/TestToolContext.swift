@@ -61,7 +61,6 @@ enum TestToolContext {
         stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
         taskEvidenceDirectory: URL? = nil,
-        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
         reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .success("reported") },
         scheduleWake: @escaping @Sendable (WakeRequest) async -> ScheduleWakeOutcome = { _ in .error("Scheduling not configured in test.") }
     ) -> ToolContext {
@@ -76,7 +75,6 @@ enum TestToolContext {
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
-            loadEvaluatorRegistry: loadEvaluatorRegistry,
             scheduleWake: scheduleWake,
             reportInboundUserMessage: reportInboundUserMessage,
             memoryStore: memoryStore,

@@ -127,8 +127,6 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                 updated.waivable = entry.waivable
                 updated.validationPrompt = entry.validationPrompt
                 updated.inputEnumeratorPrompt = entry.inputEnumeratorPrompt
-                updated.validator = nil
-                updated.prepare = nil
                 return updated
             }
             return AcceptanceCriterion(name: entry.name, validationPrompt: entry.validationPrompt, inputEnumeratorPrompt: entry.inputEnumeratorPrompt, waivable: entry.waivable, origin: .smith)

@@ -8,10 +8,9 @@ import AgentSmithKit
 /// security monitor gates each tool call, the validator judges the finished work, and the
 /// summarizer records the outcome.
 ///
-/// Not every role is an `AgentRole`: the validator has no `AgentRole` case (it runs on a
-/// dedicated model slot, falling back to the summarizer). `agentRole` is nil for it, which
-/// the confirm step uses to route its config to `validatorAssignment` instead of
-/// `agentAssignments`.
+/// Every one of these maps to an `AgentRole`, the validator included — it is an ordinary
+/// model-assignment slot, not a special case, and there is no fallback to another role's
+/// model if it goes unassigned.
 enum OnboardingRole: String, CaseIterable, Identifiable {
     case smith
     case brown
@@ -21,14 +20,15 @@ enum OnboardingRole: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// The `AgentRole` this maps to, or nil for the validator (which has no `AgentRole`).
-    var agentRole: AgentRole? {
+    /// The `AgentRole` this maps to. Every onboarding role now has one — the validator used
+    /// to be the exception, routed to a separate assignment field.
+    var agentRole: AgentRole {
         switch self {
         case .smith: return .smith
         case .brown: return .brown
         case .securityAgent: return .securityAgent
         case .summarizer: return .summarizer
-        case .validator: return nil
+        case .validator: return .validator
         }
     }
 

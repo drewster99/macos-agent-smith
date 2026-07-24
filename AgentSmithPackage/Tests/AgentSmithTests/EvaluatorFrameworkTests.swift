@@ -21,7 +21,6 @@ private func makeDefinition(
         kind: .validator,
         systemPrompt: systemPrompt,
         outputGrammar: grammar,
-        modelSlot: .smith,
         toolNames: tools,
         maxTurns: maxTurns
     )
@@ -345,54 +344,5 @@ struct EvaluationRunnerLoopTests {
             return
         }
         #expect(why.contains("turns"))
-    }
-}
-
-// MARK: - Registry
-
-@Suite("EvaluatorRegistry")
-struct EvaluatorRegistryTests {
-
-    @Test("Loads valid definitions, surfaces malformed ones as failures")
-    func loadsAndSurfacesFailures() throws {
-        let dir = TempDir()
-        defer { dir.cleanup() }
-
-        let valid = makeDefinition()
-        try JSONEncoder().encode(valid).write(to: URL(fileURLWithPath: dir.path).appendingPathComponent("valid.json"))
-        try dir.write("{ not json", to: "broken.json")
-        try dir.write("ignored", to: "notes.txt")
-
-        let registry = EvaluatorRegistry.load(from: URL(fileURLWithPath: dir.path))
-        #expect(registry.definition(named: "test-validator") != nil)
-        #expect(registry.failures.count == 1)
-        #expect(registry.failures.first?.fileName == "broken.json")
-        // Built-ins (the default validator) load alongside user files.
-        let userValidators = registry.definitions(ofKind: .validator).filter { !EvaluatorDefaults.builtInNames.contains($0.name) }
-        #expect(userValidators.count == 1)
-        #expect(registry.definitions(ofKind: .scoper).isEmpty)
-    }
-
-    @Test("Duplicate names are rejected deterministically")
-    func duplicateNamesRejected() throws {
-        let dir = TempDir()
-        defer { dir.cleanup() }
-        let definition = makeDefinition()
-        let data = try JSONEncoder().encode(definition)
-        try data.write(to: URL(fileURLWithPath: dir.path).appendingPathComponent("a.json"))
-        try data.write(to: URL(fileURLWithPath: dir.path).appendingPathComponent("b.json"))
-
-        let registry = EvaluatorRegistry.load(from: URL(fileURLWithPath: dir.path))
-        #expect(registry.definitions.count == 1 + EvaluatorDefaults.builtInDefinitions.count)
-        #expect(registry.failures.first?.fileName == "b.json")
-        #expect(registry.failures.first?.problem.contains("duplicate") == true)
-    }
-
-    @Test("A missing directory yields just the built-ins, not an error")
-    func missingDirectoryIsEmpty() {
-        let registry = EvaluatorRegistry.load(from: URL(fileURLWithPath: "/tmp/does-not-exist-\(UUID())"))
-        #expect(registry.definitions.count == EvaluatorDefaults.builtInDefinitions.count)
-        #expect(registry.definition(named: "default") != nil)
-        #expect(registry.failures.isEmpty)
     }
 }

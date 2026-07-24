@@ -137,8 +137,7 @@ final class SessionManager {
                 agentMessageDebounceIntervals: template.agentMessageDebounceIntervals,
                 toolsEnabled: template.toolsEnabled,
                 autoRunNextTask: template.autoRunNextTask,
-                autoRunInterruptedTasks: template.autoRunInterruptedTasks,
-                validatorAssignment: template.validatorAssignment
+                autoRunInterruptedTasks: template.autoRunInterruptedTasks
             )
             let pm = PersistenceManager(sessionID: session.id)
             do {

@@ -235,8 +235,16 @@ struct SmithContextManagementTests {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
         return OrchestrationRuntime(
-            providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
-            configurations: [.smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")],
+            // Security Agent is mandatory: `start()` refuses without one rather than running
+            // Smith's open-world tools unreviewed.
+            providers: [
+                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")])
+            ],
+            configurations: [
+                .smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model"),
+                .securityAgent: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+            ],
             providerAPITypes: [:],
             agentTuning: [:],
             semanticSearchEngine: SemanticSearchEngine(),
@@ -394,8 +402,14 @@ struct RuntimeLifecycleSerializationTests {
         // A real Smith on a canned-response mock provider (the mock repeats its last
         // response when exhausted, so the run loop can tick safely until stopped).
         let runtime = makeRuntime(
-            providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
-            configurations: [.smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")]
+            providers: [
+                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")])
+            ],
+            configurations: [
+                .smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model"),
+                .securityAgent: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+            ]
         )
         await runtime.start()
         let liveIDs = await runtime.activeAgentIDs()
@@ -414,5 +428,20 @@ struct RuntimeLifecycleSerializationTests {
             let registered = await runtime.isAgentRegistered(smithID)
             #expect(!registered, "the liveness lease must read false after stopAll")
         }
+    }
+
+    @Test("Start refuses without a Security Agent rather than running Smith's egress unreviewed")
+    func startRefusesWithoutSecurityAgent() async {
+        let runtime = makeRuntime(
+            providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
+            configurations: [.smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")]
+        )
+        await runtime.start()
+
+        #expect(await runtime.activeAgentIDs().isEmpty, "no agent may exist after a refused start")
+        #expect(await runtime.agentIDForRole(.smith) == nil)
+        // A refused start must not leave a live generation behind — otherwise the runtime reads
+        // as "running" and a later tool-driven spawnBrown registers a worker into it.
+        #expect(await runtime.currentSessionID == nil)
     }
 }

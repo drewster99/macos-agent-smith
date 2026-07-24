@@ -218,12 +218,6 @@ final class AppViewModel {
     var agentAssignments: [AgentRole: UUID] = [:] {
         didSet { persistSessionStateAsync(); scheduleProviderRefresh() }
     }
-    /// Per-session: the `ModelConfiguration.id` the acceptance-validator runs on. Held
-    /// separately from `agentAssignments` because the validator has no `AgentRole` case.
-    /// Nil means validation falls back to the Summarizer's model (historical behavior).
-    var validatorAssignment: UUID? = nil {
-        didSet { persistSessionStateAsync(); scheduleProviderRefresh() }
-    }
     /// Per-session tool allowlist. Missing/true = enabled. Currently no UI; data model only.
     var toolsEnabled: [String: Bool] = [:] {
         didSet { persistSessionStateAsync() }
@@ -377,7 +371,6 @@ final class AppViewModel {
                 toolsEnabled = state.toolsEnabled
                 autoRunNextTask = state.autoRunNextTask
                 autoRunInterruptedTasks = state.autoRunInterruptedTasks
-                validatorAssignment = state.validatorAssignment
             } else {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
                 // No per-session state — fall back to the shared default assignments (from
@@ -396,10 +389,6 @@ final class AppViewModel {
                 agentAssignments[role] = nil
                 logger.notice("Cleared stale assignment in session \(self.session.name, privacy: .public) for \(role.rawValue, privacy: .public) → \(configID, privacy: .public)")
             }
-        }
-        if let validatorConfigID = validatorAssignment, !validConfigIDs.contains(validatorConfigID) {
-            validatorAssignment = nil
-            logger.notice("Cleared stale validator assignment in session \(self.session.name, privacy: .public) → \(validatorConfigID, privacy: .public)")
         }
 
         // Auto-heal missing required-role assignments. Prefer a config whose
@@ -967,22 +956,9 @@ final class AppViewModel {
             }
         )
 
-        // Acceptance validation: built-in definitions ship IN the app (always current;
-        // duplicate under a new name to customize). Migrate any registry written by the
-        // old seed-to-disk mechanism, then point the runtime at the user directory.
-        // Definitions hot-load per validation round.
-        let evaluatorsDirectory = persistence.evaluatorsDirectory
-        EvaluatorDefaults.migrateLegacySeededBuiltIns(in: evaluatorsDirectory)
-        await newRuntime.setEvaluatorConfiguration(directory: evaluatorsDirectory)
-
         // Root for per-task persistent evidence directories (worker/validator evidence artifacts
         // live under <session>/tasks/<taskID>/evidence, out of the user's project tree).
         await newRuntime.setTaskWorkspaceRoot(persistence.sessionWorkspaceDirectory)
-
-        // Dedicated validator-slot model (from onboarding / Settings). When unset — or if its
-        // provider fails to build — the runtime falls back to the Summarizer's model, which is
-        // where acceptance validation has always run.
-        await pushValidatorModel(to: newRuntime)
 
         // Per-session persistence for the pending-user-message buffer (messages typed while
         // Smith was stopped / starting). Wired before the runtime starts so enqueues persist
@@ -1567,31 +1543,9 @@ final class AppViewModel {
                 documentsByRole[role] = resolved.documents
             }
         }
-        await pushValidatorModel(to: runtime)
         guard !providers.isEmpty else { return }
         await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes, supportsVisionByRole: visionByRole, supportsDocumentsByRole: documentsByRole)
         logger.info("Refreshed LLM providers for roles: \(providers.keys.map(\.displayName).sorted().joined(separator: ", "), privacy: .public)")
-    }
-
-    /// Builds this session's dedicated validator-slot model from `validatorAssignment` and pushes
-    /// it to the runtime, or clears the slot (falling back to the Summarizer's model) when no
-    /// dedicated validator is assigned or its provider can't be built. Used at start and on a
-    /// live model-assignment change.
-    private func pushValidatorModel(to runtime: OrchestrationRuntime) async {
-        guard let validatorConfigID = validatorAssignment,
-              let validatorConfig = shared.llmKit.configurations.first(where: { $0.id == validatorConfigID }) else {
-            await runtime.setValidatorModel(provider: nil, configuration: nil, apiType: nil)
-            return
-        }
-        do {
-            let provider = try shared.llmKit.makeProvider(for: validatorConfigID)
-            let apiType = shared.llmKit.providers.first(where: { $0.id == validatorConfig.providerID })?.apiType
-            let resolved = resolveInjectionCapabilities(providerID: validatorConfig.providerID, modelID: validatorConfig.modelID, roleLabel: "Validator")
-            await runtime.setValidatorModel(provider: provider, configuration: validatorConfig, apiType: apiType, supportsVision: resolved.vision, supportsDocuments: resolved.documents)
-        } catch {
-            logger.error("Failed to build validator provider (\(error.localizedDescription, privacy: .public)); validation falls back to the Summarizer model")
-            await runtime.setValidatorModel(provider: nil, configuration: nil, apiType: nil)
-        }
     }
 
     /// Sets (or clears, with `enabled == nil`) a per-task user tool override from the task-detail UI.
@@ -1905,8 +1859,7 @@ final class AppViewModel {
             agentMessageDebounceIntervals: agentMessageDebounceIntervals,
             toolsEnabled: toolsEnabled,
             autoRunNextTask: autoRunNextTask,
-            autoRunInterruptedTasks: autoRunInterruptedTasks,
-            validatorAssignment: validatorAssignment
+            autoRunInterruptedTasks: autoRunInterruptedTasks
         )
         logger.notice("flushPersistence: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(finalState.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(finalState.autoRunInterruptedTasks, privacy: .public)")
         await sessionStateWriter.enqueue(finalState)
@@ -2251,8 +2204,7 @@ final class AppViewModel {
             agentMessageDebounceIntervals: agentMessageDebounceIntervals,
             toolsEnabled: toolsEnabled,
             autoRunNextTask: autoRunNextTask,
-            autoRunInterruptedTasks: autoRunInterruptedTasks,
-            validatorAssignment: validatorAssignment
+            autoRunInterruptedTasks: autoRunInterruptedTasks
         )
         logger.notice("persistSessionStateAsync: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(state.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(state.autoRunInterruptedTasks, privacy: .public) caller=\(callerFunction, privacy: .public)@\(callerFile, privacy: .public):\(callerLine, privacy: .public)")
         let writer = sessionStateWriter

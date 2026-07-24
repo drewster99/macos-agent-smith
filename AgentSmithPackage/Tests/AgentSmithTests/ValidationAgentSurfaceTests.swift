@@ -8,17 +8,6 @@ import Testing
 @Suite("Validation agent surface")
 struct ValidationAgentSurfaceTests {
 
-    /// A TempDir-backed registry with the shipped default seeded, exposed the way
-    /// production wires it (a fresh load per call).
-    private func makeSeededRegistryLoader() -> @Sendable () async -> EvaluatorRegistry? {
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("agent-smith-surface-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        // Built-ins (incl. default) come from the app itself now; the
-        // directory only needs to exist for user-authored additions.
-        return { EvaluatorRegistry.load(from: directory) }
-    }
-
     // MARK: - manage_steps
 
     @Test("manage_steps: add, set_status, and the tombstone rules")
@@ -53,9 +42,17 @@ struct ValidationAgentSurfaceTests {
         )
         #expect(!skippedNoNote.succeeded)
 
+        // `set_status` no longer accepts `removed` — the tool must point at `delete` instead.
+        let removedViaStatus = try await tool.execute(
+            arguments: ["action": .string("set_status"), "step_id": .string(steps[1].id.uuidString), "status": .string("removed"), "note": .string("superseded by first")],
+            context: context
+        )
+        #expect(!removedViaStatus.succeeded)
+        #expect(removedViaStatus.output.contains("delete"))
+
         // Removal with a note tombstones: hidden from the active list, immutable after.
         let removed = try await tool.execute(
-            arguments: ["action": .string("set_status"), "step_id": .string(steps[1].id.uuidString), "status": .string("removed"), "note": .string("superseded by first")],
+            arguments: ["action": .string("delete"), "step_id": .string(steps[1].id.uuidString), "note": .string("superseded by first")],
             context: context
         )
         #expect(removed.succeeded)
@@ -103,6 +100,72 @@ struct ValidationAgentSurfaceTests {
         let steps = await taskStore.task(id: task.id)?.steps ?? []
         #expect(steps.count == 2)
         #expect(steps.allSatisfy { $0.origin == .smith }, "Smith-added steps are authored by Smith, not the worker")
+    }
+
+    @Test("purge is Smith-only and absent from the worker's schema and description")
+    func purgeIsOrchestratorOnly() async throws {
+        let tool = ManageStepsTool()
+
+        func actionEnum(for role: AgentRole) -> [String] {
+            guard case .dictionary(let properties)? = tool.parameters(for: role)["properties"],
+                  case .dictionary(let action)? = properties["action"],
+                  case .array(let values)? = action["enum"] else { return [] }
+            return values.compactMap { if case .string(let s) = $0 { return s }; return nil }
+        }
+        #expect(actionEnum(for: .smith).contains("purge"))
+        #expect(!actionEnum(for: .brown).contains("purge"), "the worker must not be offered a traceless delete")
+        #expect(tool.description(for: .smith).contains("purge"))
+        #expect(!tool.description(for: .brown).contains("purge"))
+
+        // Even if the worker guesses the action name, the runtime refuses it.
+        let taskStore = TaskStore()
+        let agentID = UUID()
+        let task = await taskStore.addTask(title: "t", description: "d")
+        await taskStore.assignAgent(taskID: task.id, agentID: agentID)
+        await taskStore.setSteps(id: task.id, steps: [TaskStep(text: "a", origin: .smith)])
+        let stepID = await taskStore.task(id: task.id)!.steps[0].id
+
+        let brownAttempt = try await tool.execute(
+            arguments: ["action": .string("purge"), "step_id": .string(stepID.uuidString)],
+            context: TestToolContext.make(agentID: agentID, agentRole: .brown, taskStore: taskStore)
+        )
+        #expect(!brownAttempt.succeeded)
+        #expect(brownAttempt.output.contains("delete"), "the refusal should point the worker at the honest verb")
+        #expect(await taskStore.task(id: task.id)?.steps.count == 1)
+    }
+
+    @Test("manage_steps (Smith): purge hard-deletes on an unrun plan, and is refused once the task has history")
+    func purgeGating() async throws {
+        let tool = ManageStepsTool()
+
+        // A template: always purgeable — its steps are pure authoring.
+        let templateStore = TaskStore()
+        let template = await templateStore.addTask(title: "tpl", description: "d", isTemplate: true)
+        await templateStore.setSteps(id: template.id, steps: ["a", "b"].map { TaskStep(text: $0, origin: .smith) })
+        let templateStepID = await templateStore.task(id: template.id)!.steps[0].id
+        let purged = try await tool.execute(
+            arguments: ["action": .string("purge"), "task_id": .string(template.id.uuidString), "step_id": .string(templateStepID.uuidString)],
+            context: TestToolContext.make(agentRole: .smith, taskStore: templateStore)
+        )
+        #expect(purged.succeeded)
+        let templateSteps = await templateStore.task(id: template.id)!.steps
+        #expect(templateSteps.map(\.text) == ["b"], "purge leaves no row at all — not even a tombstone")
+
+        // A task that has already run: refused, and the plan is untouched.
+        let ranStore = TaskStore()
+        let ran = await ranStore.addTask(title: "t", description: "d")
+        await ranStore.setSteps(id: ran.id, steps: ["a", "b"].map { TaskStep(text: $0, origin: .smith) })
+        await ranStore.updateStatus(id: ran.id, status: .running)
+        await ranStore.updateStatus(id: ran.id, status: .failed)
+        #expect(await ranStore.task(id: ran.id)?.startedAt != nil, "precondition: the task recorded a start")
+        let ranStepID = await ranStore.task(id: ran.id)!.steps[0].id
+        let refused = try await tool.execute(
+            arguments: ["action": .string("purge"), "task_id": .string(ran.id.uuidString), "step_id": .string(ranStepID.uuidString)],
+            context: TestToolContext.make(agentRole: .smith, taskStore: ranStore)
+        )
+        #expect(!refused.succeeded)
+        #expect(refused.output.contains("delete"))
+        #expect(await ranStore.task(id: ran.id)?.steps.count == 2)
     }
 
     @Test("manage_steps (Smith): requires task_id — it has no task of its own")
@@ -166,8 +229,7 @@ struct ValidationAgentSurfaceTests {
         let context = TestToolContext.make(
             agentRole: .smith,
             channel: channel,
-            taskStore: taskStore,
-            loadEvaluatorRegistry: makeSeededRegistryLoader()
+            taskStore: taskStore
         )
         let result = try await SetAcceptanceCriteriaTool().execute(
             arguments: [
@@ -198,8 +260,7 @@ struct ValidationAgentSurfaceTests {
         let taskStore = TaskStore()
         let context = TestToolContext.make(
             agentRole: .smith,
-            taskStore: taskStore,
-            loadEvaluatorRegistry: makeSeededRegistryLoader()
+            taskStore: taskStore
         )
         let tool = SetAcceptanceCriteriaTool()
 
@@ -232,8 +293,7 @@ struct ValidationAgentSurfaceTests {
         let task = await taskStore.addTask(title: "t", description: "d")
         let context = TestToolContext.make(
             agentRole: .smith,
-            taskStore: taskStore,
-            loadEvaluatorRegistry: makeSeededRegistryLoader()
+            taskStore: taskStore
         )
         let result = try await SetAcceptanceCriteriaTool().execute(
             arguments: [
@@ -268,7 +328,7 @@ struct ValidationAgentSurfaceTests {
     func taskScopedPromptsOnCriterion() async throws {
         let taskStore = TaskStore()
         let task = await taskStore.addTask(title: "t", description: "d")
-        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore, loadEvaluatorRegistry: makeSeededRegistryLoader())
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
         let result = try await SetAcceptanceCriteriaTool().execute(
             arguments: [
                 "task_id": .string(task.id.uuidString),
@@ -288,7 +348,7 @@ struct ValidationAgentSurfaceTests {
         #expect(criterion?.name == "French summary")
         #expect(criterion?.validationPrompt.contains("preserves") == true)
         #expect(criterion?.inputEnumeratorPrompt?.contains("JSON array") == true)
-        #expect(criterion?.validator == nil)
+        #expect(criterion?.usesDefaultValidator == false, "an authored prompt means a custom validator, not the default")
     }
 
     @Test("create_task accepts the task-scoped prompt contract")
@@ -370,14 +430,6 @@ struct ValidationAgentSurfaceTests {
         let posted = await channel.allMessages()
         #expect(posted.contains { if case .string("validation_override") = $0.metadata?["messageKind"] { return true }; return false },
                 "the override must be visible in the channel, never a silent completion")
-    }
-
-    @Test("Smith exposes task-scoped prompts and no validator registry tools")
-    func smithValidatorSurface() {
-        let names = Set(SmithBehavior.tools().map(\.name))
-        #expect(names.contains("set_acceptance_criteria"))
-        #expect(!names.contains("define_validator"))
-        #expect(!names.contains("list_validators"))
     }
 
     @Test("get_task_details includes validation prompts and scheduling metadata, not summary")

@@ -22,17 +22,20 @@ struct Phase2LongLivedSmithTests {
             .appendingPathComponent("agent-smith-phase2-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        // Security Agent is present unconditionally: `start()` refuses without one, so omitting it
+        // would fail the whole runtime rather than the Brown spawn that `includeBrown: false`
+        // exists to exercise.
         var providers: [AgentRole: any LLMProvider] = [
-            .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])
+            .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+            .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")])
         ]
         var configurations: [AgentRole: ModelConfiguration] = [
-            .smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+            .smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model"),
+            .securityAgent: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         ]
         if includeBrown {
             providers[.brown] = MockLLMProvider(responses: [LLMResponse(text: "Working.")])
-            providers[.securityAgent] = MockLLMProvider(responses: [LLMResponse(text: "SAFE")])
             configurations[.brown] = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
-            configurations[.securityAgent] = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         }
         return OrchestrationRuntime(
             providers: providers,

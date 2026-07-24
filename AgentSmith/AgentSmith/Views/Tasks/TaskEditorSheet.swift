@@ -41,6 +41,11 @@ struct TaskEditorSheet: View {
     @State private var inputs: [InputRow]
     @State private var criteria: [CriterionRow]
     @State private var steps: [StepRow]
+    /// Tombstoned steps carried through untouched. They are not shown here — this sheet authors
+    /// the active seed plan — but they MUST be written back on save, because `setTaskSteps`
+    /// replaces the step array wholesale and an active-only array erases the append-only record
+    /// that acceptance validators are promised.
+    @State private var preservedTombstones: [TaskStep]
     @State private var localError: String?
 
     struct InputRow: Identifiable {
@@ -79,13 +84,33 @@ struct TaskEditorSheet: View {
         }
     }
 
+    /// One editable ACTIVE step. Text is the only thing this sheet edits, but the row carries
+    /// the rest of the step so `save()` can write it back untouched — rebuilding steps from
+    /// text alone silently reset every status to `.pending`, dropped skip notes, and rewrote
+    /// Brown's and Smith's authorship to `.user`.
     struct StepRow: Identifiable {
         let id: UUID
         var text: String
+        let status: TaskStep.Status
+        let note: String?
+        let origin: TaskAuthorship
 
-        init(id: UUID = UUID(), text: String = "") {
+        init(id: UUID = UUID(), text: String = "", status: TaskStep.Status = .pending, note: String? = nil, origin: TaskAuthorship = .user) {
             self.id = id
             self.text = text
+            self.status = status
+            self.note = note
+            self.origin = origin
+        }
+
+        init(step: TaskStep) {
+            self.init(id: step.id, text: step.text, status: step.status, note: step.note, origin: step.origin)
+        }
+
+        func built() -> TaskStep? {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return TaskStep(id: id, text: trimmed, status: status, note: note, origin: origin)
         }
     }
 
@@ -102,6 +127,7 @@ struct TaskEditorSheet: View {
             _inputs = State(initialValue: [])
             _criteria = State(initialValue: [])
             _steps = State(initialValue: [])
+            _preservedTombstones = State(initialValue: [])
         case .edit(let task):
             _title = State(initialValue: task.title)
             _description = State(initialValue: task.description)
@@ -119,7 +145,8 @@ struct TaskEditorSheet: View {
                     waivable: $0.waivable
                 )
             })
-            _steps = State(initialValue: task.steps.filter(\.isActive).map { StepRow(id: $0.id, text: $0.text) })
+            _steps = State(initialValue: task.steps.filter(\.isActive).map(StepRow.init(step:)))
+            _preservedTombstones = State(initialValue: task.steps.filter { !$0.isActive })
         }
     }
 
@@ -366,11 +393,9 @@ struct TaskEditorSheet: View {
                 origin: .user
             )
         }
-        let builtSteps = steps.compactMap { row -> TaskStep? in
-            let text = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            return TaskStep(id: row.id, text: text, origin: .user)
-        }
+        // Tombstones go back on the end, matching the ordering convention `applyStepAction`'s
+        // reorder/move use: active steps in plan order, then the removal record.
+        let builtSteps = steps.compactMap { $0.built() } + preservedTombstones
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else {

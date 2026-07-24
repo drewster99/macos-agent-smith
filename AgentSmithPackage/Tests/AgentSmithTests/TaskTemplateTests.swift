@@ -52,6 +52,32 @@ struct TaskTemplateTests {
         #expect(templateAfter?.result == "old result")
     }
 
+    @Test("A template's tombstoned steps are dropped from the instance, not resurrected as live work")
+    func cloneDropsTombstonedSteps() async {
+        let store = TaskStore()
+        let template = await store.addTask(title: "Nightly report", description: "d", isTemplate: true)
+        await store.setSteps(id: template.id, steps: [
+            TaskStep(text: "gather data", origin: .smith),
+            TaskStep(text: "call the old API", origin: .smith),
+            TaskStep(text: "write report", origin: .smith)
+        ])
+        let doomedID = await store.task(id: template.id)!.steps[1].id
+        #expect(await store.applyStepAction(taskID: template.id, action: .delete(stepID: doomedID, note: "API retired")) == nil)
+
+        let instance = await store.cloneTemplateInstance(templateID: template.id)
+        guard let instance else { Issue.record("clone returned nil"); return }
+
+        #expect(instance.steps.map(\.text) == ["gather data", "write report"])
+        #expect(instance.steps.allSatisfy { $0.status == .pending })
+        #expect(instance.steps.allSatisfy { $0.isActive }, "a deleted step must not come back as live work")
+        #expect(instance.steps.allSatisfy { $0.note == nil })
+
+        // The template keeps its own removal record.
+        let templateAfter = await store.task(id: template.id)
+        #expect(templateAfter?.steps.count == 3)
+        #expect(templateAfter?.steps[1].status == .removed)
+    }
+
     @Test("Toggling a terminal task into a template preserves the prior run as a child")
     func toggleTerminalTaskNormalizes() async {
         let store = TaskStore()

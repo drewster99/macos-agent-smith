@@ -220,10 +220,6 @@ public struct ToolContext: Sendable {
     /// Hands a just-submitted task to the acceptance-validation system. Called by
     /// `task_complete` after setting the result and the `.validating` status.
     public let beginTaskValidation: @Sendable (UUID) async -> Void
-    /// A fresh snapshot of the evaluator registry (hot-loaded from disk), or nil when no
-    /// registry directory is configured. Smith's criteria/validator tools use this as
-    /// their selection surface. Defaults to nil for contexts built outside the runtime.
-    public let loadEvaluatorRegistry: @Sendable () async -> EvaluatorRegistry?
     /// How many tasks may run concurrently (each with its own worker). Task-starting
     /// tools compare in-progress task counts against this. Defaults to 1 for contexts
     /// built outside the runtime.
@@ -361,7 +357,6 @@ public struct ToolContext: Sendable {
         agentIDForRole: @escaping @Sendable (AgentRole) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
         beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
-        loadEvaluatorRegistry: @escaping @Sendable () async -> EvaluatorRegistry? = { nil },
         workerCapacity: @escaping @Sendable () async -> Int = { 1 },
         isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
@@ -422,7 +417,6 @@ public struct ToolContext: Sendable {
         self.agentIDForRole = agentIDForRole
         self.onSelfTerminate = onSelfTerminate
         self.beginTaskValidation = beginTaskValidation
-        self.loadEvaluatorRegistry = loadEvaluatorRegistry
         self.workerCapacity = workerCapacity
         self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange

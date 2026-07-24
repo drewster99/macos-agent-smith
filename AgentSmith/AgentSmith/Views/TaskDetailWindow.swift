@@ -46,7 +46,6 @@ struct TaskDetailWindow: View {
 
     /// Editing model for one acceptance criterion. Criterion identity is preserved
     /// through edits; the store resets sticky verdicts only when the validation contract changes.
-    /// Legacy validator/prepare fields are preserved unless the prompt fields are edited.
     private struct EditableCriterion: Identifiable {
         let id: UUID
         var name: String
@@ -54,10 +53,6 @@ struct TaskDetailWindow: View {
         var inputEnumeratorPrompt: String
         var waivable: Bool
         let origin: TaskAuthorship
-        let originalValidator: AcceptanceCriterion.Validator?
-        let originalPrepare: String?
-        let originalValidationPrompt: String
-        let originalInputEnumeratorPrompt: String
 
         init(criterion: AcceptanceCriterion) {
             id = criterion.id
@@ -66,10 +61,6 @@ struct TaskDetailWindow: View {
             inputEnumeratorPrompt = criterion.inputEnumeratorPrompt ?? ""
             waivable = criterion.waivable
             origin = criterion.origin
-            originalValidator = criterion.validator
-            originalPrepare = criterion.prepare
-            originalValidationPrompt = criterion.validationPrompt
-            originalInputEnumeratorPrompt = criterion.inputEnumeratorPrompt ?? ""
         }
 
         init() {
@@ -79,10 +70,6 @@ struct TaskDetailWindow: View {
             inputEnumeratorPrompt = ""
             waivable = false
             origin = .user
-            originalValidator = nil
-            originalPrepare = nil
-            originalValidationPrompt = ""
-            originalInputEnumeratorPrompt = ""
         }
 
         func built() -> AcceptanceCriterion? {
@@ -90,17 +77,13 @@ struct TaskDetailWindow: View {
             let trimmedValidationPrompt = validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedName.isEmpty, !trimmedValidationPrompt.isEmpty else { return nil }
             let trimmedEnumeratorPrompt = inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            let preservesLegacyDefinition = trimmedValidationPrompt == originalValidationPrompt
-                && trimmedEnumeratorPrompt == originalInputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             return AcceptanceCriterion(
                 id: id,
                 name: trimmedName,
                 validationPrompt: trimmedValidationPrompt,
                 inputEnumeratorPrompt: trimmedEnumeratorPrompt.isEmpty ? nil : trimmedEnumeratorPrompt,
                 waivable: waivable,
-                origin: origin,
-                validator: preservesLegacyDefinition ? originalValidator : nil,
-                prepare: preservesLegacyDefinition ? originalPrepare : nil
+                origin: origin
             )
         }
     }
@@ -876,11 +859,15 @@ struct TaskDetailWindow: View {
     private func criterionExpandedDetail(_ criterion: AcceptanceCriterion, task: AgentTask) -> some View {
         let records = (task.validation?.verdictRecords ?? []).filter { $0.criterionID == criterion.id }
         VStack(alignment: .leading, spacing: 6) {
-            debugTextBox(title: "Validation prompt", text: criterion.validationPrompt)
+            // A default-validated criterion has no authored prompt (it's empty); its stance is
+            // the shipped default, shown by the "Validator prompt" disclosure below.
+            if !criterion.usesDefaultValidator {
+                debugTextBox(title: "Validation prompt", text: criterion.validationPrompt)
+            }
             if let inputEnumeratorPrompt = criterion.inputEnumeratorPrompt {
                 debugTextBox(title: "Input enumerator prompt", text: inputEnumeratorPrompt)
             }
-            if let pinned = Self.pinnedDefinition(for: criterion, in: task) {
+            if let pinned = Self.resolvedValidator(for: criterion) {
                 Button {
                     if expandedValidatorPromptIDs.contains(criterion.id) {
                         expandedValidatorPromptIDs.remove(criterion.id)
@@ -1006,24 +993,25 @@ struct TaskDetailWindow: View {
         var parts: [String] = []
         if criterion.waivable { parts.append("waivable") }
         if criterion.inputEnumeratorPrompt != nil { parts.append("enumerated inputs") }
-        // Legacy persisted tasks may still show their historical registry qualifier.
-        switch criterion.validator {
-        case .registry(let name): parts.append("validator: \(name)")
-        case .inline(let definition): parts.append("validator: \(definition.name) (inline)")
-        case nil: break
-        }
-        if let prepare = criterion.prepare { parts.append("legacy prepare: \(prepare)") }
+        if criterion.usesDefaultValidator { parts.append("default validator") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    private static func pinnedDefinition(for criterion: AcceptanceCriterion, in task: AgentTask) -> EvaluatorDefinition? {
-        switch criterion.validator {
-        case .inline(let definition):
-            return definition
-        case .registry(let name):
-            return task.validation?.pinnedDefinitions[name]
-        case nil:
-            return task.validation?.pinnedDefinitions[EvaluatorDefaults.defaultDefinition.name]
+    /// The validator definition a criterion resolves to, for display. Mirrors the coordinator's
+    /// `resolveValidator`: the shipped default when the criterion has no authored prompt, else a
+    /// task-scoped custom one built from that prompt. Re-derived (not stored) — validators are
+    /// deterministic from the criterion.
+    private static func resolvedValidator(for criterion: AcceptanceCriterion) -> EvaluatorDefinition? {
+        guard !criterion.usesDefaultValidator else { return EvaluatorDefaults.defaultDefinition }
+        let name = "criterion-\(criterion.id.uuidString.lowercased())-validator"
+        switch EvaluatorDefaults.makeCustomDefinition(
+            name: name,
+            description: "Task-scoped acceptance validator",
+            kind: .validator,
+            authoredPrompt: criterion.validationPrompt
+        ) {
+        case .success(let definition): return definition
+        case .failure: return nil
         }
     }
 

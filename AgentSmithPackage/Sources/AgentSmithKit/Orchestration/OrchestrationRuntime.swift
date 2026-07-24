@@ -326,31 +326,15 @@ public actor OrchestrationRuntime {
 
     // MARK: - Validation configuration (Phase: acceptance validation)
 
-    /// Where the user-owned evaluator registry lives. Set by the app layer at startup
-    /// (after seeding shipped defaults). Nil = validation unconfigured → escalates
-    /// visibly, never silently passes.
-    var evaluatorsDirectory: URL?
     /// The session directory, wired from the app's `PersistenceManager`. Used as the root for
     /// per-task persistent evidence directories (`<root>/tasks/<taskID>/evidence`). When nil,
     /// tasks still get an ephemeral temp dir but no persistent evidence dir.
     var taskWorkspaceRoot: URL?
-    /// Dedicated validator-slot model, once the app configures one. When unset, definitions
-    /// using `.validator` fall back to the Summarizer's model — the historical validation
-    /// behavior — so existing installs and non-onboarded sessions keep validating unchanged.
-    var validatorProvider: (any LLMProvider)?
-    var validatorConfiguration: ModelConfiguration?
-    /// The API type of the dedicated validator provider, so `.validator` runs get the same
-    /// provider-specific request handling the role dictionaries carry for other slots.
-    var validatorProviderAPIType: ProviderAPIType?
-    /// Whether the dedicated validator model can process images. Nil when no dedicated validator
-    /// is configured (then `.validator` runs inherit the Summarizer's vision capability).
-    var validatorSupportsVision: Bool?
-    /// Whether the dedicated validator model can process documents. Nil → inherit the Summarizer's.
-    var validatorSupportsDocuments: Bool?
     /// Shared Security Agent evaluator for acceptance validators' read-only evidence calls. The
     /// evaluator auto-approves them (no LLM), so this is a central choke point we can tighten
-    /// later — not a gate that blocks validation today. Created at `start()` when a Security Agent
-    /// provider exists; when absent, validators execute their reads directly (unchanged).
+    /// later — not a gate that blocks validation today. Always created at `start()`: a missing
+    /// Security Agent provider now fails the start outright, so the nil case means "never
+    /// started", not "started without security review".
     var validationSecurityEvaluator: SecurityEvaluator?
     /// Convergence rule for the worker↔validator loop: this many CONSECUTIVE rejection
     /// rounds that settle NOTHING new fail the task. The name is deliberately literal —
@@ -365,11 +349,6 @@ public actor OrchestrationRuntime {
     /// EvaluationRunner's LLM loop checks `Task.isCancelled` and bails, so the validator
     /// stops promptly instead of burning tokens against a task the user just halted.
     var validationTasks: [UUID: Task<Void, Never>] = [:]
-
-    /// App-layer wiring for the validation system.
-    public func setEvaluatorConfiguration(directory: URL) {
-        evaluatorsDirectory = directory
-    }
 
     // MARK: - Worker pool configuration
 
@@ -1475,6 +1454,24 @@ public actor OrchestrationRuntime {
         // user may just have fixed).
         scopingFailureStreak = 0
         lastScopingFailureAt = nil
+        // A validator model arriving is the one thing that unsticks tasks parked by
+        // `blockValidationForMissingValidatorModel`. Nothing else can — not Smith, not the
+        // user — so this is the release point.
+        if llmProviders[.validator] != nil, llmConfigs[.validator] != nil {
+            releaseTasksBlockedOnValidatorModel()
+        }
+    }
+
+    /// Returns every task parked on a missing validator model to `.validating` and re-enqueues
+    /// it. Safe to call whenever a validator model is present; a no-op when nothing is parked.
+    func releaseTasksBlockedOnValidatorModel() {
+        Task { [weak self] in
+            guard let self else { return }
+            let released = await self.taskStore.releaseValidationBlockedTasks()
+            for taskID in released {
+                await self.startTaskValidation(taskID: taskID)
+            }
+        }
     }
 
     /// Updates the global tool-security configuration (user Settings). Applied to each Brown at its
@@ -1941,6 +1938,22 @@ public actor OrchestrationRuntime {
             return
         }
 
+        // Smith is unscoped and holds the user's memories plus file-read, so its open-world tools
+        // are the softest exfiltration surface in the system — they are gated by a Security Agent
+        // evaluator built below. Refusing to start without one is the point: the alternative
+        // (previously a warning, then carry on) started Smith with its egress reviewed by nobody,
+        // which is the failure mode the gate exists to prevent and the one least likely to be
+        // noticed. `spawnBrown` already refuses for the same reason.
+        guard let securityAgentProvider = llmProviders[.securityAgent] else {
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "No Security Agent provider configured — cannot start. Smith's open-world tool calls must be security-reviewed, so the system will not run without a Security Agent model assigned.",
+                metadata: ["isError": .bool(true)]
+            ))
+            await abandonFailedStart()
+            return
+        }
+
         let id = UUID()
         let wakeScheduler = ensureWakeScheduler()
         let context = makeToolContext(agentID: id, role: .smith, wakeScheduler: wakeScheduler, currentResumingTaskID: resumingTaskID)
@@ -2010,32 +2023,25 @@ public actor OrchestrationRuntime {
         await smithAgent.setUsageStore(usageStore)
         await smithAgent.setSessionID(currentSessionID)
 
-        // Egress filter: Smith is unscoped and holds the user's memories + file-read, so its
-        // open-world tools (web_fetch / web_search / instant_answer) are the softest exfiltration
-        // surface in the system. Give Smith its own Security Agent evaluator and gate ONLY those
-        // open-world calls through it — local read-only and messaging tools stay un-reviewed. Without
-        // a Security Agent provider we can't gate, so Smith's egress runs unreviewed (logged), the
-        // pre-existing behavior.
-        if let securityAgentProvider = llmProviders[.securityAgent] {
-            let smithEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
-            if let evalCallback = onEvaluationRecorded {
-                await smithEvaluator.setOnEvaluationRecorded(evalCallback)
-            }
-            if let turnCallback = onTurnRecorded {
-                await smithEvaluator.setOnTurnRecorded { turn in turnCallback(.securityAgent, turn) }
-            }
-            await smithAgent.setSecurityEvaluator(smithEvaluator)
-            await smithAgent.setEvaluatesOpenWorldToolsOnly(true)
+        // Egress filter: gate Smith's open-world calls (web_fetch / web_search / instant_answer)
+        // through its own Security Agent evaluator — local read-only and messaging tools stay
+        // un-reviewed. The provider is guaranteed present; start refuses without it.
+        let smithEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
+        if let evalCallback = onEvaluationRecorded {
+            await smithEvaluator.setOnEvaluationRecorded(evalCallback)
+        }
+        if let turnCallback = onTurnRecorded {
+            await smithEvaluator.setOnTurnRecorded { turn in turnCallback(.securityAgent, turn) }
+        }
+        await smithAgent.setSecurityEvaluator(smithEvaluator)
+        await smithAgent.setEvaluatesOpenWorldToolsOnly(true)
 
-            // A shared evaluator for acceptance validators' read-only evidence calls (auto-approved,
-            // so it's a choke point, not a blocker). Separate instance from Smith's so their
-            // recent-request histories don't cross-contaminate.
-            validationSecurityEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
-            if let evalCallback = onEvaluationRecorded {
-                await validationSecurityEvaluator?.setOnEvaluationRecorded(evalCallback)
-            }
-        } else {
-            stopLogger.warning("No Security Agent provider — Smith's open-world (egress) tool calls will run WITHOUT security review.")
+        // A shared evaluator for acceptance validators' read-only evidence calls (auto-approved,
+        // so it's a choke point, not a blocker). Separate instance from Smith's so their
+        // recent-request histories don't cross-contaminate.
+        validationSecurityEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
+        if let evalCallback = onEvaluationRecorded {
+            await validationSecurityEvaluator?.setOnEvaluationRecorded(evalCallback)
         }
 
         // The notification broker (delivery + persistence-until-delivery) and the WakeScheduler
@@ -3538,22 +3544,6 @@ public actor OrchestrationRuntime {
         taskWorkspaceRoot = url
     }
 
-    /// Wires the dedicated validator-slot model. Pass all three nil to clear the slot and let
-    /// `.validator` definitions fall back to the Summarizer's model. Call before `start()`.
-    public func setValidatorModel(
-        provider: (any LLMProvider)?,
-        configuration: ModelConfiguration?,
-        apiType: ProviderAPIType?,
-        supportsVision: Bool? = nil,
-        supportsDocuments: Bool? = nil
-    ) {
-        validatorProvider = provider
-        validatorConfiguration = configuration
-        validatorProviderAPIType = apiType
-        validatorSupportsVision = supportsVision
-        validatorSupportsDocuments = supportsDocuments
-    }
-
     /// The workspace (temp + evidence directories) for a task.
     func taskWorkspace(for taskID: UUID) -> TaskWorkspace {
         TaskWorkspace(taskID: taskID, workspaceRoot: taskWorkspaceRoot)
@@ -3668,10 +3658,6 @@ public actor OrchestrationRuntime {
             },
             beginTaskValidation: { [weak self] taskID in
                 await self?.startTaskValidation(taskID: taskID)
-            },
-            loadEvaluatorRegistry: { [weak self] in
-                guard let directory = await self?.evaluatorsDirectory else { return nil }
-                return EvaluatorRegistry.load(from: directory)
             },
             workerCapacity: { [weak self] in
                 await self?.maxConcurrentWorkers ?? 1

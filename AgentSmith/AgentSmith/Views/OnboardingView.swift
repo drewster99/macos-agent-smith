@@ -345,7 +345,6 @@ struct OnboardingView: View {
         guard allRolesResolved else { return }
         let profile = selectedProfile
         var newAssignments: [AgentRole: UUID] = [:]
-        var validatorConfigID: UUID?
 
         for role in OnboardingRole.allCases {
             guard let modelID = roleSelections[role] else { continue }
@@ -359,16 +358,11 @@ struct OnboardingView: View {
                 maxContextTokens: role.maxContextTokens
             )
             shared.llmKit.addConfiguration(config)
-            if let agentRole = role.agentRole {
-                newAssignments[agentRole] = config.id
-            } else {
-                validatorConfigID = config.id
-            }
+            newAssignments[role.agentRole] = config.id
         }
 
         commitNickname()
         viewModel.agentAssignments = newAssignments
-        viewModel.validatorAssignment = validatorConfigID
         shared.markOnboardingComplete()
         onComplete()
     }

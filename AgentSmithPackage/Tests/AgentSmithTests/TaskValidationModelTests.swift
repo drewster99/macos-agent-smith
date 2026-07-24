@@ -39,21 +39,21 @@ struct TaskValidationModelTests {
         #expect(decoded.validation == nil)
     }
 
-    @Test("Criteria with inline and registry validators round-trip")
+    @Test("Criteria round-trip, and an empty validationPrompt marks the default-validated criterion")
     func criteriaRoundTrip() throws {
-        let inline = EvaluatorDefinition(
-            name: "inline-check", description: "d", kind: .validator,
-            systemPrompt: "judge",
-            outputGrammar: .verdictLine(allowed: [.init(token: "ACCEPT", requiresReason: false)]),
-            modelSlot: .summarizer
-        )
         var task = AgentTask(title: "t", description: "d")
         task.acceptanceCriteria = [
-            AcceptanceCriterion(name: "tests pass", origin: .user, validator: .registry("default")),
-            AcceptanceCriterion(name: "a11y ok", waivable: true, origin: .smith, validator: .inline(inline))
+            // Custom (prompt-authored).
+            AcceptanceCriterion(name: "tests pass", validationPrompt: "Verify the tests pass.", origin: .user),
+            // The implicit default-validated shape: empty prompt.
+            AcceptanceCriterion(name: "overall acceptance", validationPrompt: "", origin: .system),
+            AcceptanceCriterion(name: "a11y ok", waivable: true, origin: .smith)
         ]
         let decoded = try JSONDecoder().decode(AgentTask.self, from: JSONEncoder().encode(task))
         #expect(decoded.acceptanceCriteria == task.acceptanceCriteria)
+        #expect(decoded.acceptanceCriteria[0].usesDefaultValidator == false)
+        #expect(decoded.acceptanceCriteria[1].usesDefaultValidator == true, "empty prompt → the shipped default judges it")
+        #expect(decoded.acceptanceCriteria[2].usesDefaultValidator == false, "prompt defaults to the name, so it's custom")
     }
 
     @Test("Criteria persist the task-scoped prompt contract and migrate legacy text")
@@ -84,6 +84,8 @@ struct TaskValidationModelTests {
         #expect(legacy.validationPrompt == "Legacy criterion")
         #expect(legacy.inputEnumeratorPrompt == nil)
 
+        // A legacy criterion carrying the removed `validator`/`prepare` keys still decodes —
+        // the keys are ignored, not honored — and re-encodes WITHOUT them.
         let legacyDynamicJSON = """
         {
           "id": "\(UUID().uuidString)",
@@ -97,13 +99,10 @@ struct TaskValidationModelTests {
         let legacyDynamic = try JSONDecoder().decode(AcceptanceCriterion.self, from: Data(legacyDynamicJSON.utf8))
         #expect(legacyDynamic.name == "Legacy dynamic criterion")
         #expect(legacyDynamic.validationPrompt == "Legacy dynamic criterion")
-        #expect(legacyDynamic.validator == .registry("legacy-validator"))
-        #expect(legacyDynamic.prepare == "legacy-prepare")
 
         let reencoded = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyDynamic)) as? [String: Any])
-        let reencodedValidator = try #require(reencoded["validator"] as? [String: Any])
-        #expect(reencodedValidator["registry"] as? String == "legacy-validator")
-        #expect(reencoded["prepare"] as? String == "legacy-prepare")
+        #expect(reencoded["validator"] == nil, "the removed field is not re-encoded")
+        #expect(reencoded["prepare"] == nil, "the removed field is not re-encoded")
 
         let blankEnumerator = AcceptanceCriterion(
             name: "One check",
@@ -121,20 +120,103 @@ struct TaskValidationModelTests {
         await store.setSteps(id: task.id, steps: [TaskStep(text: "review code", origin: .smith)])
         let stepID = await store.task(id: task.id)!.steps[0].id
 
+        // `set_status` cannot tombstone — `delete` is the single producer of `.removed`.
+        let viaStatus = await store.applyStepAction(taskID: task.id, action: .setStatus(stepID: stepID, status: .removed, note: "superseded by issue list"))
+        #expect(viaStatus != nil)
+        #expect(await store.task(id: task.id)!.steps[0].status == .pending)
+
         // Removal without a note is refused.
-        let refused = await store.applyStepAction(taskID: task.id, action: .setStatus(stepID: stepID, status: .removed, note: "  "))
+        let refused = await store.applyStepAction(taskID: task.id, action: .delete(stepID: stepID, note: "  "))
         #expect(refused != nil)
 
         // Removal with a note tombstones — still present, inactive.
-        let removed = await store.applyStepAction(taskID: task.id, action: .setStatus(stepID: stepID, status: .removed, note: "superseded by issue list"))
+        let removed = await store.applyStepAction(taskID: task.id, action: .delete(stepID: stepID, note: "superseded by issue list"))
         #expect(removed == nil)
         let afterRemoval = await store.task(id: task.id)!.steps[0]
         #expect(afterRemoval.status == .removed)
         #expect(afterRemoval.isActive == false)
+        #expect(afterRemoval.note == "superseded by issue list")
 
         // A tombstoned step is immutable.
         let editRefused = await store.applyStepAction(taskID: task.id, action: .update(stepID: stepID, newText: "rewrite history"))
         #expect(editRefused != nil)
+        let restatusRefused = await store.applyStepAction(taskID: task.id, action: .setStatus(stepID: stepID, status: .pending, note: nil))
+        #expect(restatusRefused != nil)
+    }
+
+    @Test("move repositions one step without restating the list; tombstones stay parked at the end")
+    func moveRepositionsOneStep() async {
+        let store = TaskStore()
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setSteps(id: task.id, steps: ["a", "b", "c", "d"].map { TaskStep(text: $0, origin: .smith) })
+        let ids = await store.task(id: task.id)!.steps.map(\.id)
+        func activeTexts() async -> [String] {
+            await store.task(id: task.id)!.steps.filter(\.isActive).map(\.text)
+        }
+
+        // Tombstone one so the move logic has to skip it.
+        #expect(await store.applyStepAction(taskID: task.id, action: .delete(stepID: ids[2], note: "not needed")) == nil)
+        #expect(await activeTexts() == ["a", "b", "d"])
+
+        // Moving down: "before"/"after" resolve against the list WITHOUT the moved step, so
+        // "a after d" means last, not second-to-last.
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[0], destination: .after(stepID: ids[3]))) == nil)
+        #expect(await activeTexts() == ["b", "d", "a"])
+
+        // Moving up.
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[0], destination: .before(stepID: ids[1]))) == nil)
+        #expect(await activeTexts() == ["a", "b", "d"])
+
+        // 1-based positions match the numbering the worker is shown.
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[3], destination: .position(1))) == nil)
+        #expect(await activeTexts() == ["d", "a", "b"])
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[3], destination: .position(3))) == nil)
+        #expect(await activeTexts() == ["a", "b", "d"])
+
+        // The tombstone survives every move and stays off the active list.
+        let all = await store.task(id: task.id)!.steps
+        #expect(all.count == 4)
+        #expect(all.last?.status == .removed)
+
+        // Out-of-range and unknown-anchor moves are refused, not clamped.
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[0], destination: .position(0))) != nil)
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[0], destination: .position(4))) != nil)
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[0], destination: .after(stepID: ids[2]))) != nil, "a tombstone is not a valid anchor")
+        #expect(await store.applyStepAction(taskID: task.id, action: .move(stepID: ids[2], destination: .position(1))) != nil, "a tombstone cannot be moved")
+        #expect(await activeTexts() == ["a", "b", "d"], "a refused move leaves the list untouched")
+    }
+
+    @Test("Retrying a failed task restarts the plan; reopening a completed one keeps it")
+    func retryResetsPlanButReopenKeepsIt() async {
+        func makeTask(finalStatus: AgentTask.Status) async -> (TaskStore, UUID, [UUID]) {
+            let store = TaskStore()
+            let task = await store.addTask(title: "t", description: "d")
+            await store.setSteps(id: task.id, steps: ["a", "b", "c"].map { TaskStep(text: $0, origin: .smith) })
+            let ids = await store.task(id: task.id)!.steps.map(\.id)
+            _ = await store.applyStepAction(taskID: task.id, action: .setStatus(stepID: ids[0], status: .completed, note: nil))
+            _ = await store.applyStepAction(taskID: task.id, action: .setStatus(stepID: ids[1], status: .skipped, note: "blocked"))
+            _ = await store.applyStepAction(taskID: task.id, action: .delete(stepID: ids[2], note: "not needed"))
+            await store.setResult(id: task.id, result: "r", commentary: nil, attachments: [])
+            await store.updateStatus(id: task.id, status: finalStatus)
+            return (store, task.id, ids)
+        }
+
+        let (failedStore, failedID, _) = await makeTask(finalStatus: .failed)
+        #expect(await failedStore.resetFailedTask(id: failedID))
+        let retried = await failedStore.task(id: failedID)!.steps
+        #expect(retried[0].status == .pending, "a retry re-runs the whole plan, so nothing starts out done")
+        #expect(retried[1].status == .pending)
+        #expect(retried[1].note == nil, "the stale skip reason must not survive into the new attempt")
+        #expect(retried[2].status == .removed, "a deleted step stays deleted — a retry is not a resurrection")
+        #expect(retried[2].note == "not needed")
+
+        let (completedStore, completedID, _) = await makeTask(finalStatus: .completed)
+        #expect(await completedStore.reopenCompletedTask(id: completedID))
+        let reopened = await completedStore.task(id: completedID)!.steps
+        #expect(reopened[0].status == .completed, "reopening means 'finish the remainder', not 'start over'")
+        #expect(reopened[1].status == .skipped)
+        #expect(reopened[1].note == "blocked")
+        #expect(reopened[2].status == .removed)
     }
 
     @Test("Sticky accepts: settled criteria survive rounds; editing validation instructions resets them")

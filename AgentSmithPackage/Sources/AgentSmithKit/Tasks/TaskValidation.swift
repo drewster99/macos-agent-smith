@@ -24,39 +24,6 @@ public enum TaskAuthorship: String, Codable, Sendable {
 /// One item of a task's acceptance contract. Judged by an evaluator at `.validating`;
 /// the array lives on the task itself — the task is the source of truth.
 public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
-    /// Legacy persisted validator selection. New criteria carry their task-scoped
-    /// instructions directly in `validationPrompt`.
-    public enum Validator: Codable, Sendable, Equatable {
-        case registry(String)
-        case inline(EvaluatorDefinition)
-
-        private enum CodingKeys: String, CodingKey {
-            case registry, inline
-        }
-
-        public init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            if let name = try c.decodeIfPresent(String.self, forKey: .registry) {
-                self = .registry(name)
-            } else if let definition = try c.decodeIfPresent(EvaluatorDefinition.self, forKey: .inline) {
-                self = .inline(definition)
-            } else {
-                throw DecodingError.dataCorrupted(DecodingError.Context(
-                    codingPath: decoder.codingPath,
-                    debugDescription: "criterion validator needs 'registry' or 'inline'"
-                ))
-            }
-        }
-
-        public func encode(to encoder: Encoder) throws {
-            var c = encoder.container(keyedBy: CodingKeys.self)
-            switch self {
-            case .registry(let name): try c.encode(name, forKey: .registry)
-            case .inline(let definition): try c.encode(definition, forKey: .inline)
-            }
-        }
-    }
-
     public let id: UUID
     /// Short user-facing label. It is never used as an LLM instruction.
     public var name: String
@@ -83,10 +50,17 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
     /// escalates; it never silently passes or fails the work).
     public var waivable: Bool
     public var origin: TaskAuthorship
-    /// Legacy persisted validator selection, retained only so existing tasks decode.
-    public var validator: Validator?
-    /// Legacy persisted input-enumerator name, retained only so existing tasks decode.
-    public var prepare: String?
+
+    /// Which validator judges this criterion, keyed entirely on whether it carries an
+    /// authored prompt. An EMPTY `validationPrompt` means "judge with the shipped default
+    /// validator's general acceptance stance" (the only criterion built that way is the
+    /// implicit one materialized for a criterion-less task). A NON-empty prompt means "judge
+    /// by this prompt" — a task-scoped custom validator. `set_acceptance_criteria` requires a
+    /// non-empty prompt, so user/Smith criteria are always custom; only the system's implicit
+    /// criterion is default-judged.
+    public var usesDefaultValidator: Bool {
+        validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     public init(
         id: UUID = UUID(),
@@ -94,9 +68,7 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
         validationPrompt: String? = nil,
         inputEnumeratorPrompt: String? = nil,
         waivable: Bool = false,
-        origin: TaskAuthorship,
-        validator: Validator? = nil,
-        prepare: String? = nil
+        origin: TaskAuthorship
     ) {
         self.id = id
         self.name = name
@@ -104,12 +76,13 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
         self.inputEnumeratorPrompt = inputEnumeratorPrompt
         self.waivable = waivable
         self.origin = origin
-        self.validator = validator
-        self.prepare = prepare
     }
 
+    // `text` (legacy display key) and `validator`/`prepare` (the removed on-disk registry
+    // selection) are decoded-away, not read: extra keys in older task JSON are ignored, so
+    // those tasks still load — they just resolve to the prompt-or-default convention above.
     private enum CodingKeys: String, CodingKey {
-        case id, name, text, validationPrompt, inputEnumeratorPrompt, waivable, origin, validator, prepare
+        case id, name, text, validationPrompt, inputEnumeratorPrompt, waivable, origin
     }
 
     public init(from decoder: Decoder) throws {
@@ -121,8 +94,6 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
         inputEnumeratorPrompt = try container.decodeIfPresent(String.self, forKey: .inputEnumeratorPrompt)
         waivable = try container.decodeIfPresent(Bool.self, forKey: .waivable) ?? false
         origin = try container.decode(TaskAuthorship.self, forKey: .origin)
-        validator = try container.decodeIfPresent(Validator.self, forKey: .validator)
-        prepare = try container.decodeIfPresent(String.self, forKey: .prepare)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -133,8 +104,6 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
         try container.encodeIfPresent(inputEnumeratorPrompt, forKey: .inputEnumeratorPrompt)
         try container.encode(waivable, forKey: .waivable)
         try container.encode(origin, forKey: .origin)
-        try container.encodeIfPresent(validator, forKey: .validator)
-        try container.encodeIfPresent(prepare, forKey: .prepare)
     }
 }
 
@@ -282,25 +251,44 @@ public enum TaskStepAction: Sendable {
     /// Smith seeds/edits a task's plan) — the same authorship recorded for seeded steps.
     case add(text: String, origin: TaskAuthorship)
     case update(stepID: UUID, newText: String)
+    /// Moves a step between the REVERSIBLE statuses. `.removed` is rejected here on purpose:
+    /// tombstoning is irreversible and terminal, unlike the four states this covers, so it gets
+    /// its own verb (`delete`) rather than hiding as a one-way trapdoor in a status setter.
     case setStatus(stepID: UUID, status: TaskStep.Status, note: String?)
-    /// Tombstones a step (equivalent to `setStatus(.removed)`), exposed as its own verb because
-    /// "delete this step" is more discoverable than knowing `removed` is a status. Requires a note.
+    /// Tombstones a step — the SOLE producer of `.removed`. Requires a note; the step leaves the
+    /// active list but stays on the record for validators.
     case delete(stepID: UUID, note: String)
+    /// HARD-deletes a step: the row is gone, no tombstone, no record. Authoring only — the
+    /// caller must have established that the task has no validation history (see
+    /// `AgentTask.isStepPlanPurgeable`), because on a task that has been judged this would
+    /// destroy evidence rather than tidy a draft. Tombstoning (`delete`) is what a worker
+    /// gets; purging is for shaping a plan that has not yet been run against.
+    case purge(stepID: UUID)
+    /// Repositions ONE active step. Cheap and race-tolerant: unlike `reorder` it doesn't require
+    /// the caller to restate the whole list, so a concurrently-added step can't invalidate it.
+    case move(stepID: UUID, destination: TaskStepDestination)
     /// Reorders the ACTIVE steps to match `orderedActiveIDs` (which must be exactly the current
     /// active step ids, in the desired order). Removed tombstones keep their record but are not
-    /// reorderable. This is the missing capability that forced a worker with a different plan to
-    /// append a whole second list instead of rearranging the seeded one.
+    /// reorderable. Prefer `move` for single-step adjustments.
     case reorder(orderedActiveIDs: [UUID])
 }
 
-/// The task's validation ledger: round counter, the append-only verdict audit, and the
-/// definitions PINNED (full body, not just hash) at first use so later registry edits
-/// apply to future tasks only. Stored on the task — idempotent, restartable validation
-/// reconstructs everything it needs from here.
+/// Where a moved step should land, expressed relative to the ACTIVE step list.
+public enum TaskStepDestination: Sendable, Equatable {
+    case before(stepID: UUID)
+    case after(stepID: UUID)
+    /// 1-based index among the active steps, matching the numbering the worker sees.
+    case position(Int)
+}
+
+/// The task's validation ledger: round counter and the append-only verdict audit. Stored
+/// on the task — idempotent, restartable validation reconstructs everything it needs from
+/// here (each round re-resolves its validators from the criteria, which are cheap and
+/// deterministic: the shipped default, an inline definition, or a custom one built from the
+/// criterion's own prompt).
 public struct TaskValidationState: Codable, Sendable, Equatable {
     public var round: Int
     public var verdictRecords: [CriterionVerdictRecord]
-    public var pinnedDefinitions: [String: EvaluatorDefinition]
     /// Consecutive rejection rounds in which NOTHING newly settled. This — not the
     /// absolute round count — is the convergence test: 50 criteria may take many rounds
     /// while progressing, but three straight rounds with zero new acceptances means the
@@ -308,10 +296,9 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
     /// Smith). Optional so records written before the field decode unchanged.
     public var consecutiveStallRounds: Int?
 
-    public init(round: Int = 0, verdictRecords: [CriterionVerdictRecord] = [], pinnedDefinitions: [String: EvaluatorDefinition] = [:], consecutiveStallRounds: Int? = nil) {
+    public init(round: Int = 0, verdictRecords: [CriterionVerdictRecord] = [], consecutiveStallRounds: Int? = nil) {
         self.round = round
         self.verdictRecords = verdictRecords
-        self.pinnedDefinitions = pinnedDefinitions
         self.consecutiveStallRounds = consecutiveStallRounds
     }
 

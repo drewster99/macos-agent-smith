@@ -10,30 +10,37 @@ import SemanticSearch
 @Suite("Task validation coordinator", .serialized)
 struct TaskValidationCoordinatorTests {
 
-    /// Runtime whose summarizer mock (the default model slot) answers each
-    /// validation call with the next `verdictScript` entry, repeating the last when
-    /// exhausted. Smith/Brown/Security mocks are present so worker respawn paths work.
-    private func makeRuntime(verdictScript: [String]) -> (OrchestrationRuntime, URL) {
+    /// Runtime whose VALIDATOR mock answers each validation call with the next
+    /// `verdictScript` entry, repeating the last when exhausted. Smith/Brown/Security mocks are
+    /// present so worker respawn paths work. The validator slot must be populated: it has no
+    /// fallback to another role's model, and an empty slot parks the task instead of judging it
+    /// (`validationBlocksWithoutAValidatorModel` covers that path deliberately).
+    private func makeRuntime(verdictScript: [String], includeValidator: Bool = true) -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-validation-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
-        let evaluatorsDirectory = tmpRoot.appendingPathComponent("evaluators", isDirectory: true)
 
         let testConfiguration = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+        var providers: [AgentRole: any LLMProvider] = [
+            .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+            .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
+            .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
+            .summarizer: MockLLMProvider(responses: [LLMResponse(text: "Summarized.")])
+        ]
+        var configurations: [AgentRole: ModelConfiguration] = [
+            .smith: testConfiguration,
+            .brown: testConfiguration,
+            .securityAgent: testConfiguration,
+            .summarizer: testConfiguration
+        ]
+        if includeValidator {
+            providers[.validator] = MockLLMProvider(responses: verdictScript.map { LLMResponse(text: $0) })
+            configurations[.validator] = testConfiguration
+        }
         let runtime = OrchestrationRuntime(
-            providers: [
-                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
-                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
-                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
-                .summarizer: MockLLMProvider(responses: verdictScript.map { LLMResponse(text: $0) })
-            ],
-            configurations: [
-                .smith: testConfiguration,
-                .brown: testConfiguration,
-                .securityAgent: testConfiguration,
-                .summarizer: testConfiguration
-            ],
+            providers: providers,
+            configurations: configurations,
             providerAPITypes: [:],
             agentTuning: [:],
             semanticSearchEngine: SemanticSearchEngine(),
@@ -42,7 +49,7 @@ struct TaskValidationCoordinatorTests {
             autoRunInterruptedTasks: false,
             memoryStore: nil
         )
-        return (runtime, evaluatorsDirectory)
+        return runtime
     }
 
     /// Creates a task in `.validating` with a submitted result, as `task_complete`
@@ -81,10 +88,9 @@ struct TaskValidationCoordinatorTests {
         return await store.task(id: taskID)?.status
     }
 
-    @Test("All criteria accepted → task completes; the implicit criterion is materialized and its definition pinned")
+    @Test("All criteria accepted → task completes; the implicit default criterion is materialized")
     func acceptanceCompletesCriterionlessTask() async {
-        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
         let task = await makeSubmittedTask(on: runtime)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -95,7 +101,7 @@ struct TaskValidationCoordinatorTests {
         #expect(final?.acceptanceCriteria.count == 1, "the implicit default criterion must be materialized")
         #expect(final?.acceptanceCriteria.first?.origin == .system)
         #expect(final?.validation?.verdictRecords.count == 1)
-        #expect(final?.validation?.pinnedDefinitions["default"] != nil, "the definition body must be pinned to the task")
+        #expect(final?.validation?.verdictRecords.first?.validatorName == "default", "the shipped default judged it")
 
         // The debugging transcript persists with the verdict: the rendered input the
         // validator saw and its raw output.
@@ -109,12 +115,11 @@ struct TaskValidationCoordinatorTests {
         // Round 1 judges A and B concurrently against a shared mock, so WHICH gets the
         // REJECT is racy — all assertions are order-agnostic. Round 2 re-judges only
         // the rejected one and accepts it.
-        let (runtime, directory) = makeRuntime(verdictScript: [
+        let runtime = makeRuntime(verdictScript: [
             "ACCEPT",
             "REJECT: the log file was never written",
             "ACCEPT"
         ])
-        await runtime.setEvaluatorConfiguration(directory: directory)
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
         await runtime.start()
         let criteria = [
@@ -149,8 +154,7 @@ struct TaskValidationCoordinatorTests {
     func errorsEscalate() async {
         // Unparseable responses exhaust the runner's parse retries → ERROR, retried once
         // by the coordinator, then escalation.
-        let (runtime, directory) = makeRuntime(verdictScript: ["I cannot decide, sorry!"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
+        let runtime = makeRuntime(verdictScript: ["I cannot decide, sorry!"])
         let task = await makeSubmittedTask(on: runtime)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -160,8 +164,7 @@ struct TaskValidationCoordinatorTests {
 
     @Test("A WAIVE against a non-waivable criterion escalates as an error")
     func waiveOnNonWaivableEscalates() async {
-        let (runtime, directory) = makeRuntime(verdictScript: ["WAIVE: does not apply here"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
+        let runtime = makeRuntime(verdictScript: ["WAIVE: does not apply here"])
         let criteria = [AcceptanceCriterion(name: "must always hold", waivable: false, origin: .user)]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
@@ -172,8 +175,7 @@ struct TaskValidationCoordinatorTests {
 
     @Test("A waivable criterion accepts a WAIVE and settles")
     func waivableWaives() async {
-        let (runtime, directory) = makeRuntime(verdictScript: ["WAIVE: this task has no UI to screenshot"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
+        let runtime = makeRuntime(verdictScript: ["WAIVE: this task has no UI to screenshot"])
         let criteria = [AcceptanceCriterion(name: "screenshots attached", waivable: true, origin: .smith)]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
@@ -182,30 +184,18 @@ struct TaskValidationCoordinatorTests {
         #expect(status == .completed)
     }
 
-    @Test("Unconfigured validation escalates visibly instead of passing silently")
-    func unconfiguredEscalates() async {
-        let (runtime, _) = makeRuntime(verdictScript: ["ACCEPT"])
-        // Deliberately NOT calling setEvaluatorConfiguration.
-        let task = await makeSubmittedTask(on: runtime)
-
-        await runtime.startTaskValidation(taskID: task.id)
-        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
-        #expect(status == .awaitingReview)
-    }
-
     @Test("Three no-progress rejection rounds FAIL the task (never Smith); a counter reset restores validation for a retry")
     func stalledValidationFailsAndResetRestoresValidation() async {
         // One criterion rejected three straight rounds with nothing newly settled →
         // the task FAILS. After the counter reset (run_task's failed-task auto-reset /
         // review_work's reject path), a resubmission must get judged again rather than
         // insta-failing on the stale stall counter.
-        let (runtime, directory) = makeRuntime(verdictScript: [
+        let runtime = makeRuntime(verdictScript: [
             "REJECT: round 1 miss",
             "REJECT: round 2 miss",
             "REJECT: round 3 miss",
             "ACCEPT"
         ])
-        await runtime.setEvaluatorConfiguration(directory: directory)
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
         // Drive the non-convergence path with a budget of 3 rather than scripting a full shipped
         // budget's worth of identical rejection rounds. What's under test is the stall RULE —
@@ -244,78 +234,9 @@ struct TaskValidationCoordinatorTests {
 
         await runtime.stopAll()
     }
-
-    // MARK: - Built-in registry model + legacy migration
-
-    @Test("Built-ins load from the app (always current); files shadowing them are visible failures")
-    func builtInsAlwaysCurrent() throws {
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("agent-smith-builtin-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-
-        // Empty (even nonexistent) directory → built-ins present.
-        let registry = EvaluatorRegistry.load(from: directory)
-        #expect(registry.definition(named: "default")?.contentHash == EvaluatorDefaults.defaultDefinition.contentHash)
-
-        // A user file under a built-in name never shadows — it fails visibly.
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let shadowing = Self.defaultVariant(systemPrompt: "trying to shadow the built-in")
-        let encoder = JSONEncoder()
-        try encoder.encode(shadowing).write(to: directory.appendingPathComponent("default.json"), options: .atomic)
-        let reloaded = EvaluatorRegistry.load(from: directory)
-        #expect(reloaded.definition(named: "default")?.contentHash == EvaluatorDefaults.defaultDefinition.contentHash, "the built-in wins")
-        #expect(reloaded.failures.contains { $0.problem.contains("built-in") }, "the shadow attempt is a visible failure")
-    }
-
-    @Test("Legacy migration deletes pristine seeded copies and preserves user edits as -custom")
-    func legacySeededMigration() throws {
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("agent-smith-migration-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let legacyFile = directory.appendingPathComponent("default.json")
-        let encoder = JSONEncoder()
-
-        // A pristine legacy shipped copy is deleted — the built-in supplies it now.
-        let pristine = Self.defaultVariant(systemPrompt: "old shipped prompt")
-        try encoder.encode(pristine).write(to: legacyFile, options: .atomic)
-        EvaluatorDefaults.migrateLegacySeededBuiltIns(in: directory, legacyHashes: [pristine.contentHash])
-        #expect(!FileManager.default.fileExists(atPath: legacyFile.path))
-
-        // A user-EDITED copy is renamed to -custom (nothing the user wrote is lost).
-        let edited = Self.defaultVariant(systemPrompt: "the user's customized prompt")
-        try encoder.encode(edited).write(to: legacyFile, options: .atomic)
-        EvaluatorDefaults.migrateLegacySeededBuiltIns(in: directory, legacyHashes: [])
-        #expect(!FileManager.default.fileExists(atPath: legacyFile.path), "the shadowing name is vacated")
-
-        let registry = EvaluatorRegistry.load(from: directory)
-        let custom = registry.definition(named: "default-custom")
-        #expect(custom?.systemPrompt == "the user's customized prompt", "the edit survives under the -custom name")
-        #expect(registry.definition(named: "default")?.contentHash == EvaluatorDefaults.defaultDefinition.contentHash)
-        #expect(registry.failures.isEmpty)
-    }
-
-    /// The shipped default with only the system prompt swapped (fields are immutable).
-    private static func defaultVariant(systemPrompt: String) -> EvaluatorDefinition {
-        let base = EvaluatorDefaults.defaultDefinition
-        return EvaluatorDefinition(
-            name: base.name,
-            description: base.description,
-            kind: base.kind,
-            systemPrompt: systemPrompt,
-            outputGrammar: base.outputGrammar,
-            modelSlot: base.modelSlot,
-            toolNames: base.toolNames,
-            maxTurns: base.maxTurns,
-            timeoutSeconds: base.timeoutSeconds,
-            maxOutputTokens: base.maxOutputTokens
-        )
-    }
-
     @Test("The default validator tells the validator what tools the worker had")
     func validatorSeesWorkerTools() async {
-        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
         let task = await makeSubmittedTask(on: runtime)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -329,8 +250,7 @@ struct TaskValidationCoordinatorTests {
 
     @Test("A missing worker scope errors and escalates — never a fabricated toolset")
     func validatorErrorsWhenWorkerScopeMissing() async {
-        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
         let task = await makeSubmittedTask(on: runtime)
         // Simulate the should-never-happen invariant violation: a task reaching validation with no
         // scoped set. The validator must NOT invent one (which historically injected `bash` and
@@ -384,34 +304,13 @@ struct TaskValidationCoordinatorTests {
 
     // MARK: - Dynamic (prepare/map) criteria
 
-    /// Installs a minimal prepare-kind definition into the test registry.
-    private func installPrepareDefinition(named name: String, in directory: URL) throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let definition = EvaluatorDefinition(
-            name: name,
-            description: "Emits the items to judge for a dynamic criterion (test double).",
-            kind: .prepare,
-            systemPrompt: "Emit a JSON array of items for the criterion.",
-            outputGrammar: .jsonArray,
-            modelSlot: .summarizer,
-            toolNames: [],
-            maxTurns: 3,
-            timeoutSeconds: 60,
-            maxOutputTokens: 1000
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(definition).write(to: directory.appendingPathComponent("\(name).json"), options: .atomic)
-    }
-
     @Test("A dynamic criterion maps prepare items through the per-item validator; all pass → completed")
     func dynamicCriterionAllItemsPass() async throws {
-        let (runtime, directory) = makeRuntime(verdictScript: [
+        let runtime = makeRuntime(verdictScript: [
             #"["alpha", "beta"]"#,
             "ACCEPT",
             "ACCEPT"
         ])
-        await runtime.setEvaluatorConfiguration(directory: directory)
         let criteria = [AcceptanceCriterion(
             name: "Every item is valid",
             validationPrompt: "Check the supplied item has its required header.",
@@ -431,13 +330,16 @@ struct TaskValidationCoordinatorTests {
 
     @Test("A dynamic criterion with an empty prepare result waives (when waivable) → completes")
     func dynamicCriterionEmptyItemsAccepts() async throws {
-        let (runtime, directory) = makeRuntime(verdictScript: ["[]"])
-        try installPrepareDefinition(named: "list-items", in: directory)
-        await runtime.setEvaluatorConfiguration(directory: directory)
+        let runtime = makeRuntime(verdictScript: ["[]"])
         // Empty enumeration is honored as a pass only when the criterion is WAIVABLE — a misfiring
         // or hallucinated-empty prepare on a NON-waivable criterion escalates instead of silently
         // passing an unexamined requirement (see judgeDynamicCriterion's empty-items gate).
-        let criteria = [AcceptanceCriterion(name: "every item is valid", waivable: true, origin: .user, prepare: "list-items")]
+        let criteria = [AcceptanceCriterion(
+            name: "every item is valid",
+            inputEnumeratorPrompt: "Return the items to validate as a JSON array of strings.",
+            waivable: true,
+            origin: .user
+        )]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -447,16 +349,18 @@ struct TaskValidationCoordinatorTests {
 
     @Test("A rejected item returns the task to the worker with the per-item reason")
     func dynamicCriterionItemRejectionPunchLists() async throws {
-        let (runtime, directory) = makeRuntime(verdictScript: [
+        let runtime = makeRuntime(verdictScript: [
             #"["alpha", "beta"]"#,
             "ACCEPT",
             "REJECT: beta is missing its header"
         ])
-        try installPrepareDefinition(named: "list-items", in: directory)
-        await runtime.setEvaluatorConfiguration(directory: directory)
         await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
         await runtime.start()
-        let criteria = [AcceptanceCriterion(name: "every item is valid", origin: .user, prepare: "list-items")]
+        let criteria = [AcceptanceCriterion(
+            name: "every item is valid",
+            inputEnumeratorPrompt: "Return the items to validate as a JSON array of strings.",
+            origin: .user
+        )]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -479,32 +383,48 @@ struct TaskValidationCoordinatorTests {
         await runtime.stopAll()
     }
 
-    @Test("A dynamic criterion naming a missing prepare function escalates")
-    func dynamicCriterionMissingPrepareEscalates() async throws {
-        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(name: "c", origin: .user, prepare: "does-not-exist")]
-        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
+    @Test("With no validator model the task parks unresolvably, and assigning one releases it")
+    func validationBlocksWithoutAValidatorModel() async throws {
+        // No validator slot at all: there is no fallback, so validation must not proceed.
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"], includeValidator: false)
+        let task = await makeSubmittedTask(on: runtime)
 
         await runtime.startTaskValidation(taskID: task.id)
-        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
-        #expect(status == .awaitingReview)
+        let blocked = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(blocked == .awaitingReview)
+
+        let parked = await runtime.taskStore.task(id: task.id)
+        #expect(parked?.validationBlockedReason != nil, "the park must be marked, not look like an ordinary review")
+        #expect(parked?.result == "The thing was done.", "the submission is untouched — it was never judged")
+        #expect(parked?.validation?.verdictRecords.isEmpty != false, "nothing may be recorded as judged")
+
+        // Not Smith's to resolve: review_work refuses it outright.
+        let review = try await ReviewWorkTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "accepted": .bool(true), "feedback": .string("looks fine")],
+            context: TestToolContext.make(agentRole: .smith, taskStore: await runtime.taskStore)
+        )
+        #expect(!review.succeeded)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "a refused review changes nothing")
+
+        // Assigning a validator model is the only thing that unsticks it.
+        await runtime.setProviders(
+            providers: [.validator: MockLLMProvider(responses: [LLMResponse(text: "ACCEPT")])],
+            configurations: [.validator: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")],
+            apiTypes: [:]
+        )
+        let released = await waitForStatusChange(on: runtime, taskID: task.id, away: .awaitingReview)
+        #expect(released == .completed, "the parked task resumes validating on its own once configured")
+        #expect(await runtime.taskStore.task(id: task.id)?.validationBlockedReason == nil)
     }
 
-    @Test("An inline Smith-authored validator judges its criterion end to end")
-    func inlineValidatorJudgesEndToEnd() async throws {
-        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
-        guard case .success(let inline) = EvaluatorDefaults.makeCustomDefinition(
-            name: "french-check",
-            description: "Checks the result is in French.",
-            kind: .validator,
-            authoredPrompt: "Verify the submitted result is written in French."
-        ) else {
-            Issue.record("factory refused a valid definition")
-            return
-        }
-        let criteria = [AcceptanceCriterion(name: "the summary is in French", origin: .smith, validator: .inline(inline))]
+    @Test("A Smith-authored prompt criterion is judged by a task-scoped custom validator, end to end")
+    func customPromptCriterionJudgesEndToEnd() async throws {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let criteria = [AcceptanceCriterion(
+            name: "the summary is in French",
+            validationPrompt: "Verify the submitted result is written in French.",
+            origin: .smith
+        )]
         let task = await makeSubmittedTask(on: runtime, criteria: criteria)
 
         await runtime.startTaskValidation(taskID: task.id)
@@ -512,19 +432,10 @@ struct TaskValidationCoordinatorTests {
         #expect(status == .completed)
 
         let record = await runtime.taskStore.task(id: task.id)?.validation?.verdictRecords.first
-        #expect(record?.validatorName == "french-check")
-        #expect(record?.renderedInput?.contains("The thing was done.") == true, "the inline validator saw the standard slots")
-    }
-
-    @Test("A criterion naming a missing registry validator escalates")
-    func missingValidatorEscalates() async {
-        let (runtime, directory) = makeRuntime(verdictScript: ["ACCEPT"])
-        await runtime.setEvaluatorConfiguration(directory: directory)
-        let criteria = [AcceptanceCriterion(name: "c", origin: .user, validator: .registry("does-not-exist"))]
-        let task = await makeSubmittedTask(on: runtime, criteria: criteria)
-
-        await runtime.startTaskValidation(taskID: task.id)
-        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
-        #expect(status == .awaitingReview)
+        // A custom validator is named for its criterion (not the shipped "default").
+        #expect(record?.validatorName.hasPrefix("criterion-") == true)
+        #expect(record?.validatorName.hasSuffix("-validator") == true)
+        #expect(record?.validatorName != "default")
+        #expect(record?.renderedInput?.contains("The thing was done.") == true, "the custom validator saw the standard slots")
     }
 }

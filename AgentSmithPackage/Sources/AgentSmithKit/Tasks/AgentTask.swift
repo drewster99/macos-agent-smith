@@ -109,6 +109,30 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// Holds the formatted blocker + what's needed, for Smith's context and the UI.
     public var helpRequest: String?
 
+    /// Non-nil when validation could not run for a CONFIGURATION reason (today: no model is
+    /// assigned to `AgentRole.validator`). Like `helpRequest` the task parks in
+    /// `.awaitingReview`, but this one is nobody's to resolve — `review_work` refuses it,
+    /// because a human-free "accept" here would be exactly the unjudged pass the validation
+    /// system exists to prevent. Cleared automatically when a validator model is assigned,
+    /// which returns the task to `.validating` and re-enqueues it.
+    public var validationBlockedReason: String?
+
+    /// Whether a step may be HARD-deleted from this task's plan (`manage_steps` `purge`),
+    /// as opposed to tombstoned. True only while the plan is still a draft nobody has worked
+    /// or judged against: purging elsewhere would destroy real history rather than tidy an
+    /// unrun plan.
+    ///
+    /// Templates are always purgeable — a template is a launcher that never runs itself, so
+    /// its steps are pure authoring and its tombstones are clutter that every clone has to
+    /// filter out. (`setTemplate` normalizes a promoted task via `normalizeTemplateLauncher`,
+    /// clearing `startedAt` and `validation`, so this arm is belt-and-braces rather than a
+    /// carve-out.) Every other task must have neither started nor been validated —
+    /// `validation == nil` alone is not enough, because a task with no acceptance criteria
+    /// can run to completion and still never open a validation ledger.
+    public var isStepPlanPurgeable: Bool {
+        isTemplate || (startedAt == nil && validation == nil)
+    }
+
     /// A single progress update recorded on a task.
     public struct TaskUpdate: Codable, Sendable, Equatable {
         public var date: Date
@@ -294,6 +318,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         approvedTools: [String]? = nil,
         userToolOverrides: [String: Bool]? = nil,
         helpRequest: String? = nil,
+        validationBlockedReason: String? = nil,
         acceptanceCriteria: [AcceptanceCriterion] = [],
         steps: [TaskStep] = [],
         validation: TaskValidationState? = nil,
@@ -329,6 +354,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.approvedTools = approvedTools
         self.userToolOverrides = userToolOverrides
         self.helpRequest = helpRequest
+        self.validationBlockedReason = validationBlockedReason
         self.acceptanceCriteria = acceptanceCriteria
         self.steps = steps
         self.validation = validation
@@ -342,7 +368,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues
     }
 
     public init(from decoder: Decoder) throws {
@@ -373,6 +399,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         approvedTools = try c.decodeIfPresent([String].self, forKey: .approvedTools)
         userToolOverrides = try c.decodeIfPresent([String: Bool].self, forKey: .userToolOverrides)
         helpRequest = try c.decodeIfPresent(String.self, forKey: .helpRequest)
+        validationBlockedReason = try c.decodeIfPresent(String.self, forKey: .validationBlockedReason)
         acceptanceCriteria = try c.decodeIfPresent([AcceptanceCriterion].self, forKey: .acceptanceCriteria) ?? []
         steps = try c.decodeIfPresent([TaskStep].self, forKey: .steps) ?? []
         validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
@@ -421,6 +448,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(approvedTools, forKey: .approvedTools)
         try c.encodeIfPresent(userToolOverrides, forKey: .userToolOverrides)
         try c.encodeIfPresent(helpRequest, forKey: .helpRequest)
+        try c.encodeIfPresent(validationBlockedReason, forKey: .validationBlockedReason)
         if !acceptanceCriteria.isEmpty {
             try c.encode(acceptanceCriteria, forKey: .acceptanceCriteria)
         }

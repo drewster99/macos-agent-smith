@@ -71,6 +71,7 @@ struct InspectorView: View {
                     RoleAgentCard(viewModel: viewModel, role: .smith, roleMessages: smithMessages)
                     RoleAgentCard(viewModel: viewModel, role: .brown, roleMessages: brownMessages)
                     RoleAgentCard(viewModel: viewModel, role: .securityAgent, roleMessages: securityAgentMessages)
+                    ValidatorAgentCard(viewModel: viewModel)
                     SummarizerAgentCard(viewModel: viewModel, summarizerMessages: summarizerMessages)
                 }
             }
@@ -388,6 +389,9 @@ private struct AgentCard: View {
         case .brown: return "Agent Brown"
         case .securityAgent: return "Security Agent"
         case .summarizer: return "Summarizer"
+        // Not reachable today — validators are per-criterion evaluations, not long-lived
+        // agents, so no inspector panel is ever opened on this role.
+        case .validator: return role.displayName
         }
     }
 

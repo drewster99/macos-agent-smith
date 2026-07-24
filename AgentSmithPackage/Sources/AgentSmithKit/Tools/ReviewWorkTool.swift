@@ -79,6 +79,18 @@ struct ReviewWorkTool: AgentTool {
                 """)
         }
 
+        // Parked on missing validator configuration. Not yours to resolve: accepting would be
+        // the unjudged pass the whole validation system exists to prevent, and rejecting would
+        // bounce Brown for a fault that isn't its work.
+        guard task.validationBlockedReason == nil else {
+            return .failure("""
+                Task '\(task.title)' is parked on a configuration problem, not awaiting your judgment: \
+                \(task.validationBlockedReason ?? ""). \
+                It is not reviewable — do not accept or reject it. Tell the user what needs configuring; \
+                the task resumes validating by itself once it is.
+                """)
+        }
+
         guard task.status == .awaitingReview else {
             return .failure("""
                 Task '\(task.title)' is not awaiting review (current status: \(task.status.rawValue)). \

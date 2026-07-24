@@ -62,7 +62,11 @@ extension AgentTask {
                 : ""
             var block = "**Criterion \(index + 1)**\(suffix)\(verdict)\n\(criterion.text)"
             if includePrompts {
-                block += "\nValidation prompt:\n\(criterion.validationPrompt)"
+                // A default-validated criterion carries no authored prompt (empty); its stance is
+                // the shipped default, so there's nothing to print here.
+                if !criterion.usesDefaultValidator {
+                    block += "\nValidation prompt:\n\(criterion.validationPrompt)"
+                }
                 if let inputEnumeratorPrompt = criterion.inputEnumeratorPrompt, !inputEnumeratorPrompt.isEmpty {
                     block += "\nInput enumerator prompt:\n\(inputEnumeratorPrompt)"
                 }

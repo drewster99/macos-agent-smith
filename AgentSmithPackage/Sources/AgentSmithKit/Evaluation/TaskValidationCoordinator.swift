@@ -19,13 +19,13 @@ private let validationLogger = Logger(subsystem: "com.agentsmith", category: "Ta
 /// runtime state (actor extensions can't host stored statics referencing Self).
 public enum EvaluatorDefaults {
 
-    /// The shipped default validator — Smith's old review, distilled into a function.
-    /// Criterion-less tasks get exactly one materialized criterion judged by this.
-    /// Ships with the read-only evidence quartet and the Summarizer's model (a required
-    /// role, so validation works out of the box; point it at a dedicated validator slot
-    /// by editing the JSON once one is configured). The system prompt here is the JUDGING
-    /// stance only — the input-format description, the criterion, and the response-format
-    /// contract are supplied by `composeValidatorSystemPrompt` at judge time.
+    /// The shipped default validator — Smith's old review, distilled into a function, and
+    /// the ONLY built-in. A criterion resolves to this when it names no validator of its own
+    /// (see `resolveValidator`), and a criterion-less task gets exactly one materialized
+    /// criterion judged by it. Runs on the model assigned to `AgentRole.validator` like all
+    /// validation. The system prompt here is the JUDGING stance only — the input-format
+    /// description, the criterion, and the response-format contract are supplied by
+    /// `composeValidatorSystemPrompt` at judge time.
     public static let defaultDefinition = EvaluatorDefinition(
         name: "default",
         description: "General-purpose acceptance check: is the task, as described, genuinely and completely satisfied by the submitted result? Used when a criterion doesn't name a more specific validator.",
@@ -61,7 +61,6 @@ public enum EvaluatorDefaults {
             .init(token: "REJECT", requiresReason: true),
             .init(token: "WAIVE", requiresReason: true)
         ]),
-        modelSlot: .validator,
         toolNames: EvaluatorDefaults.validatorEvidenceToolNames,
         maxTurns: 10,
         timeoutSeconds: 300,
@@ -116,7 +115,6 @@ public enum EvaluatorDefaults {
             kind: kind,
             systemPrompt: trimmedPrompt,
             outputGrammar: grammar,
-            modelSlot: .validator,
             toolNames: validatorEvidenceToolNames,
             maxTurns: 10,
             timeoutSeconds: 300,
@@ -124,56 +122,6 @@ public enum EvaluatorDefaults {
         ))
     }
 
-    /// The definitions the app itself provides. NOT stored in the user's registry
-    /// directory and NOT editable — the app always supplies the current version.
-    public static var builtInDefinitions: [EvaluatorDefinition] {
-        [defaultDefinition]
-    }
-
-    /// Names reserved by built-ins — user registry files with these names are load
-    /// failures (they would shadow an always-current definition).
-    public static var builtInNames: Set<String> {
-        Set(builtInDefinitions.map(\.name))
-    }
-
-    /// Content hashes of every revision the OLD disk-seeding mechanism ever wrote.
-    /// Used solely to migrate legacy registries: a file matching one of these is a
-    /// pristine shipped copy (delete it — the built-in supplies it now); anything else
-    /// under a built-in name is a user edit (preserved by renaming to `<name>-custom`).
-    public static let legacyShippedContentHashes: Set<String> = [
-        "f3fbf8a16403fce2",  // 2026-07-09 initial revision (pre worker_tools)
-        "800f30b972f29840"   // 2026-07-09 worker_tools revision (pre worker_activity, pre built-in model)
-    ]
-
-    /// One-time migration of registries written by the old seed-to-disk mechanism.
-    /// Pristine shipped copies are deleted (the built-in supplies them, always
-    /// current); user-EDITED copies are preserved as `<name>-custom` so nothing the
-    /// user wrote is ever lost — they just stop shadowing the built-in. Undecodable
-    /// files are left alone; the registry surfaces those as visible load failures.
-    public static func migrateLegacySeededBuiltIns(in directory: URL, legacyHashes: Set<String> = legacyShippedContentHashes) {
-        let fileManager = FileManager.default
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        for builtIn in builtInDefinitions {
-            let legacyFile = directory.appendingPathComponent("\(builtIn.name).json")
-            guard fileManager.fileExists(atPath: legacyFile.path),
-                  let data = try? Data(contentsOf: legacyFile),
-                  let existing = try? JSONDecoder().decode(EvaluatorDefinition.self, from: data) else { continue }
-            if legacyHashes.contains(existing.contentHash) || existing.contentHash == builtIn.contentHash {
-                try? fileManager.removeItem(at: legacyFile)
-                continue
-            }
-            // User-edited: preserve under a non-shadowing name.
-            let customized = existing.renamed(to: "\(builtIn.name)-custom")
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            if let customizedData = try? encoder.encode(customized) {
-                let customFile = directory.appendingPathComponent("\(customized.name).json")
-                guard !fileManager.fileExists(atPath: customFile.path) else { continue }
-                try? customizedData.write(to: customFile, options: .atomic)
-                try? fileManager.removeItem(at: legacyFile)
-            }
-        }
-    }
 }
 
 extension OrchestrationRuntime {
@@ -218,19 +166,23 @@ extension OrchestrationRuntime {
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard var task = await taskStore.task(id: taskID), task.status == .validating else { return }
 
-        guard let directory = evaluatorsDirectory else {
-            await escalateValidation(taskID: taskID, reason: "Validation is not configured (no evaluator registry directory). The submitted result needs manual review.")
+        // No validator model, no validation. Park the task rather than letting each criterion
+        // error its way into an escalation Smith would then be asked to resolve: this is a
+        // configuration problem, and the only honest fix is configuration.
+        guard llmProviders[.validator] != nil, llmConfigs[.validator] != nil else {
+            await blockValidationForMissingValidatorModel(taskID: taskID)
             return
         }
-        let registry = EvaluatorRegistry.load(from: directory)
 
-        // Criterion-less task: materialize the implicit default criterion so the
-        // contract is visible like any other.
+        // Criterion-less task: materialize the implicit default criterion so the contract is
+        // visible like any other. Its EMPTY validationPrompt is the signal to judge with the
+        // shipped default validator's stance rather than treating its descriptive name as a
+        // custom prompt (see `AcceptanceCriterion.usesDefaultValidator`).
         if task.acceptanceCriteria.isEmpty {
             await taskStore.materializeImplicitCriterion(id: taskID, criterion: AcceptanceCriterion(
                 name: "The task, as described, has been completed correctly and completely, and the submitted result actually delivers it.",
-                origin: .system,
-                validator: .registry(EvaluatorDefaults.defaultDefinition.name)
+                validationPrompt: "",
+                origin: .system
             ))
             task = await taskStore.task(id: taskID) ?? task
         }
@@ -266,7 +218,7 @@ extension OrchestrationRuntime {
             await withTaskGroup(of: CriterionVerdictRecord?.self) { group in
                 for criterion in wave {
                     group.addTask { [weak self] in
-                        await self?.judgeCriterion(criterion, task: taskSnapshot, registry: registry, round: round)
+                        await self?.judgeCriterion(criterion, task: taskSnapshot, round: round)
                     }
                 }
                 for await record in group {
@@ -380,13 +332,12 @@ extension OrchestrationRuntime {
     private func judgeCriterion(
         _ criterion: AcceptanceCriterion,
         task: AgentTask,
-        registry: EvaluatorRegistry,
         round: Int
     ) async -> CriterionVerdictRecord {
-        if criterion.effectiveInputEnumeratorPrompt != nil || criterion.prepare != nil {
-            return await judgeDynamicCriterion(criterion, task: task, registry: registry, round: round)
+        if criterion.effectiveInputEnumeratorPrompt != nil {
+            return await judgeDynamicCriterion(criterion, task: task, round: round)
         }
-        let resolution = await resolveValidator(for: criterion, taskID: task.id, registry: registry)
+        let resolution = resolveValidator(for: criterion)
         let definition: EvaluatorDefinition
         switch resolution {
         case .success(let resolved):
@@ -448,7 +399,6 @@ extension OrchestrationRuntime {
     private func judgeDynamicCriterion(
         _ criterion: AcceptanceCriterion,
         task: AgentTask,
-        registry: EvaluatorRegistry,
         round: Int
     ) async -> CriterionVerdictRecord {
         // The accumulated debug log: the prepare exchange, then each item's exchange,
@@ -460,7 +410,7 @@ extension OrchestrationRuntime {
             CriterionVerdictRecord(
                 criterionID: criterion.id,
                 verdict: verdict,
-                validatorName: validator?.name ?? (criterion.prepare ?? "-"),
+                validatorName: validator?.name ?? "-",
                 validatorHash: validator?.contentHash ?? "-",
                 round: round,
                 renderedInput: Self.capDebugText(prepareRenderedInput, limit: Self.maxPersistedInputChars),
@@ -468,7 +418,10 @@ extension OrchestrationRuntime {
             )
         }
 
-        // Resolve the prepare definition (pinned-body-first, like validators).
+        // The prepare enumerator is built on the fly from the criterion's own prompt. The
+        // legacy `prepare` field named a registry definition; with the registry gone, a
+        // criterion carrying only that (and no `inputEnumeratorPrompt`) can't be enumerated and
+        // errors visibly — the honest outcome for a reference nothing can resolve.
         let prepareName = "criterion-\(criterion.id.uuidString.lowercased())-input-enumerator"
         let prepareDefinition: EvaluatorDefinition
         if let prompt = criterion.effectiveInputEnumeratorPrompt {
@@ -476,13 +429,6 @@ extension OrchestrationRuntime {
             case .success(let definition): prepareDefinition = definition
             case .failure(let problem): return record(.error(message: problem.message))
             }
-        } else if let legacyPrepareName = criterion.prepare,
-                  let pinned = (await taskStore.task(id: task.id))?.validation?.pinnedDefinitions[legacyPrepareName] {
-            prepareDefinition = pinned
-        } else if let legacyPrepareName = criterion.prepare,
-                  let loaded = registry.definition(named: legacyPrepareName), loaded.kind == .prepare {
-            await taskStore.pinValidatorDefinition(id: task.id, definition: loaded)
-            prepareDefinition = loaded
         } else {
             return record(.error(message: "input enumerator is unavailable"))
         }
@@ -520,7 +466,7 @@ extension OrchestrationRuntime {
             return record(.error(message: "prepare '\(prepareName)' enumerated no items for a non-waivable criterion — cannot confirm the requirement"), validator: prepareDefinition)
         }
 
-        let resolution = await resolveValidator(for: criterion, taskID: task.id, registry: registry)
+        let resolution = resolveValidator(for: criterion)
         let perItemDefinition: EvaluatorDefinition
         switch resolution {
         case .success(let resolved):
@@ -574,52 +520,26 @@ extension OrchestrationRuntime {
         case failure(String)
     }
 
-    /// Resolves a criterion's validator: inline definitions are capability-capped to the
-    /// evidence quartet; registry names resolve pinned-body-first (edits apply to future
-    /// tasks); anything missing or invalid fails VISIBLY (no fallback chains).
-    private func resolveValidator(
-        for criterion: AcceptanceCriterion,
-        taskID: UUID,
-        registry: EvaluatorRegistry
-    ) async -> ValidatorResolution {
-        if criterion.validator == nil, !criterion.validationPrompt.isEmpty {
-            let name = "criterion-\(criterion.id.uuidString.lowercased())-validator"
-            switch EvaluatorDefaults.makeCustomDefinition(
-                name: name,
-                description: "Task-scoped acceptance validator",
-                kind: .validator,
-                authoredPrompt: criterion.validationPrompt
-            ) {
-            case .success(let definition): return .success(definition)
-            case .failure(let problem): return .failure(problem.message)
-            }
+    /// Resolves a criterion's validator, VISIBLY (no fallback chains). Exactly two outcomes,
+    /// keyed on whether the criterion carries an authored prompt:
+    ///   - empty `validationPrompt` → the shipped default validator (the criterion-less task's
+    ///     implicit criterion; see `AcceptanceCriterion.usesDefaultValidator`).
+    ///   - non-empty prompt → a task-scoped custom validator built from that prompt. This is the
+    ///     only route Smith can reach — `set_acceptance_criteria` requires a prompt and never
+    ///     names a stored validator.
+    private func resolveValidator(for criterion: AcceptanceCriterion) -> ValidatorResolution {
+        guard !criterion.usesDefaultValidator else {
+            return .success(EvaluatorDefaults.defaultDefinition)
         }
-        switch criterion.validator {
-        case .inline(let definition):
-            let problems = definition.validationProblems()
-            guard problems.isEmpty else {
-                return .failure("inline validator '\(definition.name)' is invalid: \(problems.joined(separator: "; "))")
-            }
-            let disallowed = Set(definition.toolNames).subtracting(EvaluatorDefaults.validatorEvidenceToolNames)
-            guard disallowed.isEmpty else {
-                return .failure("inline validator '\(definition.name)' requests tools beyond the read-only evidence set (\(disallowed.sorted().joined(separator: ", "))) — persist it to the registry with user approval instead")
-            }
-            return .success(definition)
-        case .registry, .none:
-            let effectiveName: String
-            if case .registry(let named) = criterion.validator {
-                effectiveName = named
-            } else {
-                effectiveName = EvaluatorDefaults.defaultDefinition.name
-            }
-            if let pinned = (await taskStore.task(id: taskID))?.validation?.pinnedDefinitions[effectiveName] {
-                return .success(pinned)
-            }
-            guard let definition = registry.definition(named: effectiveName), definition.kind == .validator else {
-                return .failure("validator '\(effectiveName)' not found in the registry (or is not kind=validator) — validation skipped, manual review needed")
-            }
-            await taskStore.pinValidatorDefinition(id: taskID, definition: definition)
-            return .success(definition)
+        let name = "criterion-\(criterion.id.uuidString.lowercased())-validator"
+        switch EvaluatorDefaults.makeCustomDefinition(
+            name: name,
+            description: "Task-scoped acceptance validator",
+            kind: .validator,
+            authoredPrompt: criterion.validationPrompt
+        ) {
+        case .success(let definition): return .success(definition)
+        case .failure(let problem): return .failure(problem.message)
         }
     }
 
@@ -638,12 +558,11 @@ extension OrchestrationRuntime {
         task: AgentTask,
         extraSlots: [String: String] = [:]
     ) async -> (outcome: EvaluationRunner.Outcome, transcript: EvaluationRunner.Transcript) {
-        guard let resolved = providerForModelSlot(definition.modelSlot) else {
-            return (.error("no model configured for slot '\(definition.modelSlot.rawValue)'"), EvaluationRunner.Transcript())
+        guard let resolved = validatorModel() else {
+            return (.error("no model is assigned to the Validator role"), EvaluationRunner.Transcript())
         }
         let provider = resolved.provider
         let config = resolved.config
-        let usageRole = resolved.usageRole
         let providerTypeRawValue = resolved.providerTypeRaw
         let validatorSupportsVision = resolved.supportsVision
         let validatorSupportsDocuments = resolved.supportsDocuments
@@ -701,7 +620,7 @@ extension OrchestrationRuntime {
         let stagingBuffer = StagedAttachmentBuffer()
         let evaluationContext = makeToolContext(
             agentID: UUID(),
-            role: .securityAgent,
+            role: .validator,
             attachmentStageOverride: { attachments, _ in await stagingBuffer.stage(attachments) }
         )
         let sessionID = currentSessionID
@@ -745,7 +664,7 @@ extension OrchestrationRuntime {
                     taskID: gateTaskID,
                     taskDescription: gateTaskDescription,
                     siblingCalls: nil,
-                    agentRoleName: "Acceptance validator",
+                    agentRoleName: AgentRole.validator.displayName,
                     readOnlyAutoApproveEligible: true,
                     toolCallID: call.id
                 )
@@ -779,7 +698,7 @@ extension OrchestrationRuntime {
                 await UsageRecorder.record(
                     response: response,
                     context: LLMCallContext(
-                        agentRole: usageRole,
+                        agentRole: .validator,
                         taskID: task.id,
                         modelID: config.model,
                         providerType: providerTypeRawValue,
@@ -833,7 +752,7 @@ extension OrchestrationRuntime {
         var prompt: String
         if definition.kind == .prepare, let inputEnumeratorPrompt = criterion.effectiveInputEnumeratorPrompt {
             prompt = inputEnumeratorPrompt
-        } else if definition.kind == .validator, criterion.validator == nil {
+        } else if definition.kind == .validator, !criterion.usesDefaultValidator {
             prompt = criterion.validationPrompt
         } else {
             prompt = definition.systemPrompt
@@ -865,9 +784,9 @@ extension OrchestrationRuntime {
             // A non-waivable criterion never mentions WAIVE at all — offering a verdict the
             // system would only convert to an error just invites wasted escalations.
             let verdictFormat = criterion.waivable ? "ACCEPT / REJECT / WAIVE" : "ACCEPT / REJECT"
-            let validationInstructions = criterion.validator == nil
-                ? "Follow the authored validation instructions at the start of this system message. The criterion name shown to the user is display-only and is not an instruction."
-                : criterion.text
+            let validationInstructions = criterion.usesDefaultValidator
+                ? criterion.text
+                : "Follow the authored validation instructions at the start of this system message. The criterion name shown to the user is display-only and is not an instruction."
             prompt += """
 
 
@@ -955,29 +874,19 @@ extension OrchestrationRuntime {
         return warning + "\n" + digest
     }
 
-    /// V1 model references are role slots only. `.validator` resolves to a dedicated provider
-    /// once the app configures one, and otherwise falls back to the Summarizer's model (where
-    /// acceptance validation has always run). `.smith`/`.summarizer` return nil only if that
-    /// role itself was never configured.
-    private func providerForModelSlot(_ slot: EvaluatorDefinition.ModelSlot) -> (provider: any LLMProvider, config: ModelConfiguration, usageRole: AgentRole, providerTypeRaw: String, supportsVision: Bool, supportsDocuments: Bool)? {
-        switch slot {
-        case .smith:
-            guard let provider = llmProviders[.smith], let config = llmConfigs[.smith] else { return nil }
-            return (provider, config, .smith, providerAPITypes[.smith]?.rawValue ?? "", supportsVisionByRole[.smith] ?? true, supportsDocumentsByRole[.smith] ?? false)
-        case .summarizer:
-            guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? false)
-        case .validator:
-            // Attributed to .summarizer for usage until AgentRole gains a validator case (the
-            // decode shims are in; the dictionary-key migration is deliberately staged).
-            if let provider = validatorProvider, let config = validatorConfiguration {
-                return (provider, config, .summarizer, validatorProviderAPIType?.rawValue ?? "", validatorSupportsVision ?? (supportsVisionByRole[.summarizer] ?? true), validatorSupportsDocuments ?? (supportsDocumentsByRole[.summarizer] ?? false))
-            }
-            // No dedicated validator model configured: fall back to the Summarizer's model,
-            // which is where acceptance validation has always run.
-            guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else { return nil }
-            return (provider, config, .summarizer, providerAPITypes[.summarizer]?.rawValue ?? "", supportsVisionByRole[.summarizer] ?? true, supportsDocumentsByRole[.summarizer] ?? false)
-        }
+    /// The model acceptance validation runs on. Nil when no model is assigned to
+    /// `AgentRole.validator` — validation then parks the task rather than borrowing another
+    /// role's model, because a validator silently judging on a model nobody chose for judging
+    /// is exactly the invisible substitution that makes a passing verdict untrustworthy.
+    private func validatorModel() -> (provider: any LLMProvider, config: ModelConfiguration, providerTypeRaw: String, supportsVision: Bool, supportsDocuments: Bool)? {
+        guard let provider = llmProviders[.validator], let config = llmConfigs[.validator] else { return nil }
+        return (
+            provider,
+            config,
+            providerAPITypes[.validator]?.rawValue ?? "",
+            supportsVisionByRole[.validator] ?? true,
+            supportsDocumentsByRole[.validator] ?? false
+        )
     }
 
     static func evidenceTools(named names: [String]) -> [any AgentTool] {
@@ -1228,6 +1137,41 @@ extension OrchestrationRuntime {
     /// or validation isn't configured. The task parks in `.awaitingReview` — Smith's
     /// review_work becomes the resolution tool — and both Smith and the user are
     /// actively notified. Escalation must never be silent.
+    /// Parks a submitted task because no model is assigned to `AgentRole.validator`. Unlike
+    /// `escalateValidation` this is NOT handed to Smith — `review_work` refuses a blocked task,
+    /// so it sits until a validator model exists. Assigning one releases it (`setProviders` →
+    /// `releaseValidationBlockedTasks`).
+    private func blockValidationForMissingValidatorModel(taskID: UUID) async {
+        let reason = "No model is assigned to the Validator role, so acceptance validation cannot run. Assign one in the Agents inspector; this task resumes validating automatically."
+        guard await taskStore.blockValidation(id: taskID, reason: reason) else { return }
+        guard let task = await taskStore.task(id: taskID) else { return }
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "\"\(task.title)\" is waiting on validator configuration: \(reason)",
+            metadata: [
+                "messageKind": .string("validation_blocked"),
+                "taskID": .string(taskID.uuidString),
+                "isWarning": .bool(true)
+            ]
+        ))
+        // Same reasoning as the escalation notice: without this the worker never learns why it
+        // went quiet and will re-reason about the last round or call request_help into a parked
+        // task. The public banner's messageKind is filtered out of the worker's feed.
+        if let workerID = task.assigneeIDs.first(where: { supervisor.role(of: $0) == .brown }) {
+            await channel.post(ChannelMessage(
+                sender: .system,
+                recipientID: workerID,
+                recipient: .agent(.brown),
+                content: """
+                    [Your submission is PARKED: \(reason)] Your work is not rejected and nothing is \
+                    wrong with it. Do NOT resubmit, rework anything, or call request_help — STOP and \
+                    wait. Validation resumes on its own once the configuration is fixed.
+                    """,
+                metadata: ["messageKind": .string("validation_blocked_worker_notice")]
+            ))
+        }
+    }
+
     private func escalateValidation(taskID: UUID, reason: String) async {
         // CAS: only escalate if still validating — never overwrite a pause/stop that landed
         // after the coordinator's status snapshot.
@@ -1271,16 +1215,6 @@ extension OrchestrationRuntime {
                 verdicts in the task's updates, then call `review_work` to accept it or send it back with \
                 feedback. Tell the user briefly that this task needs attention.]
                 """)
-        }
-    }
-}
-
-private extension AcceptanceCriterion {
-    var validatorDisplayName: String {
-        switch validator {
-        case .registry(let name): return name
-        case .inline(let definition): return definition.name
-        case .none: return EvaluatorDefaults.defaultDefinition.name
         }
     }
 }

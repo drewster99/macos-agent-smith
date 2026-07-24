@@ -19,6 +19,9 @@ struct AgentInspectorWindow: View {
         case .brown: return "Agent Brown"
         case .securityAgent: return "Security Agent"
         case .summarizer: return "Summarizer"
+        // Not reachable today — validators are per-criterion evaluations, not long-lived
+        // agents, so no inspector panel is ever opened on this role.
+        case .validator: return role.displayName
         }
     }
 

@@ -29,7 +29,9 @@ struct ForwardCompatibleDecodingTests {
 
     @Test("Unknown agent role decodes to the harmless fallback")
     func unknownRoleFallsBack() throws {
-        let decoded = try JSONDecoder().decode(AgentRole.self, from: Data("\"validator\"".utf8))
+        // Deliberately a rawValue no build has ever shipped. This used to read "validator",
+        // which stopped being a useful probe the moment `.validator` became a real case.
+        let decoded = try JSONDecoder().decode(AgentRole.self, from: Data("\"archivist\"".utf8))
         #expect(decoded == AgentRole.decodingFallback)
     }
 

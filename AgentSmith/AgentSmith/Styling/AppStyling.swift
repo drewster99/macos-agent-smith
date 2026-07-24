@@ -173,9 +173,12 @@ enum AppColors {
         case .agent(.brown): return brownAgent
         case .agent(.securityAgent): return securityAgent
         case .agent(.summarizer): return summarizerAgent
+        // Both spellings land on the same tint: `.validator` is the sender used by the
+        // validation coordinator's own posts, `.agent(.validator)` by anything stamped with
+        // the role (e.g. an evidence tool's channel message).
+        case .agent(.validator), .validator: return validatorAgent
         case .user: return userMessage
         case .system: return systemMessage
-        case .validator: return validatorAgent
         }
     }
 

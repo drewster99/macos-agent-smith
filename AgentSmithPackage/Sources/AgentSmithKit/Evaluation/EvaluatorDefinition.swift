@@ -6,12 +6,16 @@ import Foundation
 /// per-call tool approver, and the tool scoper are all the same shape — a specific
 /// system prompt, a structured input, a constrained output grammar, optional tool
 /// rounds, and a single parsed result. `EvaluatorDefinition` captures everything that
-/// makes one such function DISTINCT as data, hot-loadable from
-/// `AppSupport/AgentSmith/evaluators/*.json` with no rebuild. What it deliberately does
-/// NOT capture is the live payload (task fields, tool params, candidate lists) — that is
-/// runtime state, assembled by typed call sites (e.g. the validation coordinator, which
-/// builds the criterion into the system prompt and the evidence as a JSON object) and
-/// run through `EvaluationRunner`.
+/// makes one such function DISTINCT as data. What it deliberately does NOT capture is the
+/// live payload (task fields, tool params, candidate lists) — that is runtime state,
+/// assembled by typed call sites (e.g. the validation coordinator, which builds the
+/// criterion into the system prompt and the evidence as a JSON object) and run through
+/// `EvaluationRunner`.
+///
+/// Acceptance validators come from exactly two places (see `resolveValidator`): the shipped
+/// `EvaluatorDefaults.defaultDefinition`, or a task-scoped one built from a criterion's own
+/// prompt via `EvaluatorDefaults.makeCustomDefinition`. There is no on-disk registry — the
+/// JSON-loading mechanism that once let users drop definition files was removed as unused.
 public struct EvaluatorDefinition: Codable, Sendable, Equatable {
 
     /// What role this function plays. Smith's selection surface only exposes
@@ -47,16 +51,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         case jsonArray
     }
 
-    /// Which configured model runs this function. V1 deliberately restricts references
-    /// to ROLE SLOTS (no arbitrary provider/model IDs — that needs runtime provider
-    /// construction and Keychain plumbing; a "smart validator" simply points at the
-    /// `smith` slot). Raw values match the configuration dictionary keys.
-    public enum ModelSlot: String, Codable, Sendable {
-        case validator
-        case summarizer
-        case smith
-    }
-
     /// Stable identifier and registry key (kebab-case by convention, e.g.
     /// "default").
     public let name: String
@@ -66,7 +60,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
     public let kind: Kind
     public let systemPrompt: String
     public let outputGrammar: OutputGrammar
-    public let modelSlot: ModelSlot
     /// Names of tools the function may call during its tool rounds. The read-only
     /// evidence quartet (file_read, directory_listing, grep, glob) is the capped set an
     /// inline/Smith-authored definition may use; anything beyond it requires user
@@ -84,7 +77,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         kind: Kind,
         systemPrompt: String,
         outputGrammar: OutputGrammar,
-        modelSlot: ModelSlot,
         toolNames: [String] = [],
         maxTurns: Int = 8,
         timeoutSeconds: TimeInterval = 300,
@@ -95,28 +87,10 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         self.kind = kind
         self.systemPrompt = systemPrompt
         self.outputGrammar = outputGrammar
-        self.modelSlot = modelSlot
         self.toolNames = toolNames
         self.maxTurns = maxTurns
         self.timeoutSeconds = timeoutSeconds
         self.maxOutputTokens = maxOutputTokens
-    }
-
-    /// A copy under a different name — used when migrating a user-edited copy of a
-    /// built-in definition out of the built-in's (reserved) name.
-    public func renamed(to newName: String) -> EvaluatorDefinition {
-        EvaluatorDefinition(
-            name: newName,
-            description: description,
-            kind: kind,
-            systemPrompt: systemPrompt,
-            outputGrammar: outputGrammar,
-            modelSlot: modelSlot,
-            toolNames: toolNames,
-            maxTurns: maxTurns,
-            timeoutSeconds: timeoutSeconds,
-            maxOutputTokens: maxOutputTokens
-        )
     }
 
     /// Load-time validation: a malformed definition must fail when installed, not
@@ -152,7 +126,7 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case name, description, kind, systemPrompt
-        case outputGrammar, modelSlot, toolNames, maxTurns, timeoutSeconds, maxOutputTokens
+        case outputGrammar, toolNames, maxTurns, timeoutSeconds, maxOutputTokens
     }
 
     private enum GrammarCodingKeys: String, CodingKey {
@@ -165,7 +139,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         description = try c.decode(String.self, forKey: .description)
         kind = try c.decode(Kind.self, forKey: .kind)
         systemPrompt = try c.decode(String.self, forKey: .systemPrompt)
-        modelSlot = try c.decode(ModelSlot.self, forKey: .modelSlot)
         toolNames = try c.decodeIfPresent([String].self, forKey: .toolNames) ?? []
         maxTurns = try c.decodeIfPresent(Int.self, forKey: .maxTurns) ?? 8
         timeoutSeconds = try c.decodeIfPresent(TimeInterval.self, forKey: .timeoutSeconds) ?? 300
@@ -192,7 +165,6 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
         try c.encode(description, forKey: .description)
         try c.encode(kind, forKey: .kind)
         try c.encode(systemPrompt, forKey: .systemPrompt)
-        try c.encode(modelSlot, forKey: .modelSlot)
         try c.encode(toolNames, forKey: .toolNames)
         try c.encode(maxTurns, forKey: .maxTurns)
         try c.encode(timeoutSeconds, forKey: .timeoutSeconds)
@@ -212,7 +184,7 @@ public struct EvaluatorDefinition: Codable, Sendable, Equatable {
     /// validation meant.
     public var contentHash: String {
         let payload = [
-            name, description, kind.rawValue, systemPrompt, modelSlot.rawValue,
+            name, description, kind.rawValue, systemPrompt,
             toolNames.joined(separator: ","),
             String(maxTurns), String(timeoutSeconds), String(maxOutputTokens),
             grammarDescription

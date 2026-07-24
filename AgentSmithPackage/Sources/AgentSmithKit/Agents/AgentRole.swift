@@ -7,13 +7,21 @@ public enum AgentRole: String, Codable, Sendable, CaseIterable, CodingKeyReprese
     case brown
     case securityAgent
     case summarizer
+    /// The acceptance-validation judge. Unlike the four above it is not a long-lived
+    /// `AgentActor` — a validator exists only for the duration of one criterion's evaluation
+    /// — but it is an ordinary configurable slot in every other respect: its own model
+    /// assignment, its own usage attribution, its own channel provenance, and its own
+    /// `ToolContext` for the read-only evidence tools. There is NO fallback to another
+    /// role's model; an unassigned validator blocks validation rather than quietly running
+    /// on someone else's model.
+    case validator
 
     /// Forward-compatibility fallback: a role rawValue this build doesn't know (written by
-    /// a NEWER build — e.g. a future `validator` case) must degrade to a harmless
-    /// attribution rather than failing the decode of an entire persisted array
-    /// (usage_records.json holds tens of thousands of records; one unknown role must not
-    /// brick them all on downgrade). `.summarizer` is the least-harmful bucket: it is
-    /// never interactive and never drives orchestration decisions.
+    /// a NEWER build) must degrade to a harmless attribution rather than failing the decode
+    /// of an entire persisted array (usage_records.json holds tens of thousands of records;
+    /// one unknown role must not brick them all on downgrade). `.summarizer` is the
+    /// least-harmful bucket: it is never interactive and never drives orchestration
+    /// decisions. Note this covers role-as-VALUE only; see the dictionary-KEY note below.
     public static let decodingFallback: AgentRole = .summarizer
 
     public init(from decoder: Decoder) throws {
@@ -23,10 +31,11 @@ public enum AgentRole: String, Codable, Sendable, CaseIterable, CodingKeyReprese
 
     // NOTE: dictionary-KEY decoding (`[AgentRole: V]`) bypasses `init(from:)` via
     // CodingKeyRepresentable and deliberately gets NO fallback: remapping an unknown key
-    // would land it on an existing case and OVERWRITE that case's value (e.g. a future
-    // "validator" config clobbering the summarizer's). When a new case is introduced,
-    // role-keyed persistence sites must migrate to `[String: V]` decoding that skips
-    // unknown keys explicitly.
+    // would land it on an existing case and OVERWRITE that case's value. So a role-keyed
+    // blob written by a build that knows a role is not decodable by one that doesn't.
+    // That's accepted — this app has no shipped older builds to stay compatible with — but
+    // it does mean adding a case is a one-way door for on-disk `[AgentRole: V]` state.
+    // `SessionState.init(from:)` carries the one migration this has needed so far.
 
     /// Thread-safe storage for the user's preferred nickname.
     private static let _userNickname = Mutex("")
@@ -37,7 +46,12 @@ public enum AgentRole: String, Codable, Sendable, CaseIterable, CodingKeyReprese
         set { _userNickname.withLock { $0 = newValue } }
     }
 
-    /// Roles that must be configured for the system to start.
+    /// Roles that must be configured for the system to START. `.validator` is deliberately
+    /// absent — not because it's optional, but because its absence should block the thing it
+    /// is responsible for rather than the whole app. An unassigned validator parks each
+    /// submitted task in `.awaitingReview` with `AgentTask.validationBlockedReason` set, where
+    /// not even Smith can resolve it; assigning a validator model unblocks them. Failing that
+    /// way keeps a misconfiguration from silently approving work.
     public static let requiredRoles: [AgentRole] = [.smith, .brown, .securityAgent, .summarizer]
 
     /// Human-readable name for display.
@@ -47,6 +61,7 @@ public enum AgentRole: String, Codable, Sendable, CaseIterable, CodingKeyReprese
         case .brown: return "Brown"
         case .securityAgent: return "Security Agent"
         case .summarizer: return "Summarizer"
+        case .validator: return "Validator"
         }
     }
 
