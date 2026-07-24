@@ -26,6 +26,7 @@ struct TaskCostDetailSheet: View {
     let providerNames: [String: String]
 
     @Environment(\.dismiss) private var dismiss
+    @State private var showingVsAvgInfo = false
 
     private var summary: UsageSummary {
         aggregator.summarize(records, scopeLabel: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown")
@@ -103,11 +104,25 @@ struct TaskCostDetailSheet: View {
                     let avgTaskCost = allRecordsSummary.totalCostUSD / Double(taskCountInRange)
                     if avgTaskCost > 0 {
                         let ratio = summary.totalCostUSD / avgTaskCost
-                        headerStat(
-                            label: "vs Average",
-                            value: String(format: "%.1fx", ratio),
-                            color: ratio > 2 ? .red : ratio > 1 ? .orange : .green
-                        )
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            headerStat(
+                                label: "vs Average",
+                                value: String(format: "%.1fx", ratio),
+                                color: ratio > 2 ? .red : ratio > 1 ? .orange : .green
+                            )
+                            Button(action: { showingVsAvgInfo = true }, label: {
+                                Image(systemName: "info.circle").font(.caption2).foregroundStyle(.tertiary)
+                            })
+                            .buttonStyle(.plain)
+                            .popover(isPresented: $showingVsAvgInfo, arrowEdge: .bottom) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("vs Average").font(.headline)
+                                    Text("This task's TOTAL cost (\(formatCost(summary.totalCostUSD))) divided by the average total cost of a task in the selected range — \(formatCost(avgTaskCost)) across \(taskCountInRange) task\(taskCountInRange == 1 ? "" : "s"). So \(String(format: "%.1f", ratio))× means this task cost \(String(format: "%.1f", ratio)) times the average task.")
+                                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                }
+                                .padding(12).frame(width: 340)
+                            }
+                        }
                     }
                 }
             }
@@ -227,20 +242,60 @@ struct TaskCostDetailSheet: View {
 
     // MARK: - Configuration
 
-    @ViewBuilder
+    /// Every DISTINCT model configuration that produced a record for this task, in first-seen
+    /// order, with the roles that used it and its call count. Grouping is imperative, so it lives
+    /// outside the `@ViewBuilder` body.
+    private func configRows() -> [(config: ModelConfiguration, roles: [AgentRole], calls: Int)] {
+        var order: [UUID] = []
+        var byID: [UUID: (config: ModelConfiguration, roles: Set<AgentRole>, calls: Int)] = [:]
+        for record in records {
+            guard let c = record.configuration else { continue }
+            if byID[c.id] == nil { byID[c.id] = (c, [], 0); order.append(c.id) }
+            byID[c.id]?.roles.insert(record.agentRole)
+            byID[c.id]?.calls += 1
+        }
+        return order.compactMap { id in
+            guard let entry = byID[id] else { return nil }
+            return (entry.config, entry.roles.sorted { $0.rawValue < $1.rawValue }, entry.calls)
+        }
+    }
 
+    @ViewBuilder
     private func configurationSection() -> some View {
-        let configs = Set(records.compactMap { $0.configuration?.id })
-        let configRecords = records.compactMap(\.configuration)
-        if let primaryConfig = configRecords.first {
-            card(title: "Configuration") {
-                HStack(spacing: 24) {
-                    miniStat(label: "Model", value: primaryConfig.model)
-                    miniStat(label: "Temperature", value: primaryConfig.temperature.map { String(format: "%.1f", $0) } ?? "default")
-                    miniStat(label: "Max Output", value: formatTokenCount(primaryConfig.maxTokens))
-                    miniStat(label: "Context Window", value: formatTokenCount(primaryConfig.contextWindowSize))
-                    if configs.count > 1 {
-                        miniStat(label: "Configs Used", value: "\(configs.count)", color: .orange)
+        let rows = configRows()
+        if !rows.isEmpty {
+            card(title: rows.count == 1 ? "Configuration" : "Configurations (\(rows.count))") {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 0) {
+                        Text("Model").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Roles").frame(width: 210, alignment: .leading)
+                        Text("Temp").frame(width: 56, alignment: .trailing)
+                        Text("Max Out").frame(width: 70, alignment: .trailing)
+                        Text("Context").frame(width: 70, alignment: .trailing)
+                        Text("Calls").frame(width: 54, alignment: .trailing)
+                    }
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    Divider().padding(.vertical, 2)
+                    ForEach(rows, id: \.config.id) { row in
+                        HStack(spacing: 0) {
+                            Text(row.config.model)
+                                .lineLimit(1).truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(row.roles.map(\.displayName).joined(separator: ", "))
+                                .lineLimit(1).foregroundStyle(.secondary)
+                                .frame(width: 210, alignment: .leading)
+                            Text(row.config.temperature.map { String(format: "%.1f", $0) } ?? "—")
+                                .monospacedDigit().frame(width: 56, alignment: .trailing)
+                            Text(formatTokenCount(row.config.maxTokens))
+                                .monospacedDigit().frame(width: 70, alignment: .trailing)
+                            Text(formatTokenCount(row.config.contextWindowSize))
+                                .monospacedDigit().frame(width: 70, alignment: .trailing)
+                            Text("\(row.calls)")
+                                .monospacedDigit().frame(width: 54, alignment: .trailing)
+                        }
+                        .font(.caption)
+                        .padding(.vertical, 2)
                     }
                 }
             }

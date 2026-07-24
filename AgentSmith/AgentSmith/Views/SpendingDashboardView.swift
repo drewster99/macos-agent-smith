@@ -825,7 +825,8 @@ struct SpendingDashboardView: View {
                         if col != .title { Spacer(minLength: 0) }
                         Text(col.header).lineLimit(1)
                         if sortColumn == col {
-                            Image(systemName: sortAscending ? "chevron.up" : "chevron.down").font(.system(size: 8))
+                            Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
+                                .font(.caption2).imageScale(.small)
                         }
                         if col == .title { Spacer(minLength: 0) }
                     }

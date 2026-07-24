@@ -841,7 +841,9 @@ private struct TaskRow: View {
         case .active:
             ScheduledRunsIndicator(task: task, density: density, viewModel: viewModel)
         case .archived, .recentlyDeleted:
-            Text(compactTaskTimestamp(task.updatedAt))
+            // START of the run (when it began), not last-modified — matches the spending
+            // dashboard's Started column. Falls back to creation for a task that never ran.
+            Text(compactTaskTimestamp(task.startedAt ?? task.createdAt))
                 .font(.caption2)
                 .foregroundStyle(.quaternary)
         }
@@ -1062,7 +1064,7 @@ private struct TaskRow: View {
                     ScheduledRunsIndicator(task: task, density: density, viewModel: viewModel)
                 }
             case .archived:
-                Text(taskTimestamp(task.updatedAt))
+                Text(taskTimestamp(task.startedAt ?? task.createdAt))
                     .font(.caption2)
                     .foregroundStyle(.quaternary)
                     .fixedSize()
@@ -1155,7 +1157,7 @@ private struct ScheduledRunsIndicator: View {
                 ScheduledRunsPopover(task: task, wakes: pendingWakes, viewModel: viewModel)
             }
         } else {
-            Text(density == .compact ? compactTaskTimestamp(task.updatedAt) : taskTimestamp(task.updatedAt))
+            Text(density == .compact ? compactTaskTimestamp(task.startedAt ?? task.createdAt) : taskTimestamp(task.startedAt ?? task.createdAt))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize()

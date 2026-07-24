@@ -23,6 +23,7 @@ public struct UsageAggregator: Sendable {
         guard !records.isEmpty else { return .empty(scopeLabel: scopeLabel) }
 
         var totalInputTokens = 0
+        var totalUncachedInputTokens = 0
         var totalOutputTokens = 0
         var totalCacheReadTokens = 0
         var totalCacheWriteTokens = 0
@@ -52,6 +53,12 @@ public struct UsageAggregator: Sendable {
             totalOutputTokens += record.outputTokens
             totalCacheReadTokens += record.cacheReadTokens
             totalCacheWriteTokens += record.cacheWriteTokens
+            // Accumulate uncached tokens PER RECORD (same basis the input cost uses below), not
+            // from an aggregate `Σinput − Σcache` clamp. On heterogeneous/older records the
+            // aggregate could clamp to 0 while per-record cost was nonzero, so the token count
+            // and the input cost disagreed. Clamped ≥ 0 per record keeps them consistent.
+            let uncachedInput = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
+            totalUncachedInputTokens += uncachedInput
             totalLatencyMs += record.latencyMs
             totalToolCalls += record.toolCallCount ?? 0
             totalToolExecutionMs += record.totalToolExecutionMs ?? 0
@@ -68,7 +75,6 @@ public struct UsageAggregator: Sendable {
             // split into four accumulators.
             if let pricing = pricingLookup(record.providerID, record.modelID) {
                 let rates = pricing.effectiveRates(totalInputTokens: record.inputTokens)
-                let uncachedInput = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
                 let iCost = Double(uncachedInput) * (rates.input ?? 0)
                 let oCost = Double(record.outputTokens) * (rates.output ?? 0)
                 let crCost = Double(record.cacheReadTokens) * (rates.cacheRead ?? 0)
@@ -93,8 +99,6 @@ public struct UsageAggregator: Sendable {
             }
         }
 
-        let totalUncached = max(0, totalInputTokens - totalCacheReadTokens - totalCacheWriteTokens)
-
         return UsageSummary(
             scopeLabel: scopeLabel,
             callCount: records.count,
@@ -102,7 +106,7 @@ public struct UsageAggregator: Sendable {
             firstTimestamp: firstTimestamp,
             lastTimestamp: lastTimestamp,
             totalInputTokens: totalInputTokens,
-            totalUncachedInputTokens: totalUncached,
+            totalUncachedInputTokens: totalUncachedInputTokens,
             totalOutputTokens: totalOutputTokens,
             totalCacheReadTokens: totalCacheReadTokens,
             totalCacheWriteTokens: totalCacheWriteTokens,
