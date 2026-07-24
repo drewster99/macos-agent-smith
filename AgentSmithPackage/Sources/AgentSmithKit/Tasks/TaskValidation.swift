@@ -274,11 +274,13 @@ public extension CriterionVerdictRecord.Verdict {
     }
 }
 
-/// One worker mutation of a task's step list, dispatched through
-/// `TaskStore.applyStepAction`. Removal and skipping demand a note — the validator
-/// reads it.
+/// One mutation of a task's step list, dispatched through `TaskStore.applyStepAction`.
+/// Issued by the worker (Brown) on its own task, or by the orchestrator (Smith) on a task
+/// with no active worker. Removal and skipping demand a note — the validator reads it.
 public enum TaskStepAction: Sendable {
-    case add(text: String)
+    /// `origin` records who authored the step (`.worker` when Brown adds it, `.smith` when
+    /// Smith seeds/edits a task's plan) — the same authorship recorded for seeded steps.
+    case add(text: String, origin: TaskAuthorship)
     case update(stepID: UUID, newText: String)
     case setStatus(stepID: UUID, status: TaskStep.Status, note: String?)
     /// Tombstones a step (equivalent to `setStatus(.removed)`), exposed as its own verb because

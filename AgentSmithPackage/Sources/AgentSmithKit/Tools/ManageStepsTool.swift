@@ -1,9 +1,11 @@
 import Foundation
 
-/// Brown's step-list management: the worker-owned plan that acceptance validators read
-/// alongside the result. Steps churn freely while work proceeds, but the record is
-/// append-only underneath — skipping or removing a step requires a note, and removal is
-/// a tombstone (hidden from the active list, permanently visible to validators).
+/// Step-list management for the task plan that acceptance validators read alongside the
+/// result. Brown edits its OWN task's list as work proceeds; Smith edits a specific task's
+/// plan (via `task_id`) when no worker is active — e.g. adjusting a premade or template
+/// task's steps before it runs. Steps churn freely, but the record is append-only
+/// underneath — skipping or removing a step requires a note, and removal is a tombstone
+/// (hidden from the active list, permanently visible to validators).
 public struct ManageStepsTool: AgentTool {
     public let name = "manage_steps"
     public let toolDescription = """
@@ -13,6 +15,11 @@ public struct ManageStepsTool: AgentTool {
         will do them. If a plan was seeded for you, it is YOURS — refine THIS list \
         (update / set_status / reorder / delete). Do NOT start a second parallel plan; a \
         duplicated, half-checked list is a direct path to rejection. \
+        \
+        Targeting: the worker (Brown) always edits its OWN task — omit `task_id`. The orchestrator \
+        (Smith) edits a specific task's plan by passing `task_id` (e.g. to adjust a premade or \
+        template task's steps before a worker runs), and only while that task has no active worker \
+        (pending, paused, interrupted, scheduled, failed, or awaiting review). \
         \
         Actions: `add` (one `text` or several `texts`, appended in order), `update` (reword a \
         step: `step_id` + `text`), `set_status` (`step_id` + `status`; skipping or removing \
@@ -32,6 +39,10 @@ public struct ManageStepsTool: AgentTool {
                 "type": .string("string"),
                 "enum": .array([.string("add"), .string("update"), .string("set_status"), .string("delete"), .string("reorder"), .string("list")]),
                 "description": .string("The step-list operation to perform.")
+            ]),
+            "task_id": .dictionary([
+                "type": .string("string"),
+                "description": .string("Smith only: the UUID of the task whose step list to edit. The worker omits this and always edits its own assigned task.")
             ]),
             "text": .dictionary([
                 "type": .string("string"),
@@ -67,12 +78,36 @@ public struct ManageStepsTool: AgentTool {
     public init() {}
 
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .brown
+        context.agentRole == .brown || context.agentRole == .smith
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
-        guard let task = await context.taskStore.taskForAgent(agentID: context.agentID) else {
-            return .failure("No active task assigned to you.")
+        // Brown edits its own assigned task and authors steps as the worker. Smith names a task by
+        // `task_id`, may only touch it when no worker/validator is active (the same predicate the
+        // UI uses to gate step editing), and authors steps as the orchestrator.
+        let task: AgentTask
+        let author: TaskAuthorship
+        switch context.agentRole {
+        case .brown:
+            guard let bound = await context.taskStore.taskForAgent(agentID: context.agentID) else {
+                return .failure("No active task assigned to you.")
+            }
+            task = bound
+            author = .worker
+        case .smith:
+            guard case .string(let raw) = arguments["task_id"], let taskID = UUID(uuidString: raw) else {
+                return .failure("`task_id` is required — the UUID of the task whose step list to edit (find it with `list_tasks` or `get_task_details`). The worker omits this and edits its own task; you must name the task.")
+            }
+            guard let resolved = await context.taskStore.task(id: taskID) else {
+                return .failure("No active task found with id \(taskID).")
+            }
+            guard resolved.status.isValidationContractEditable else {
+                return .failure("Task \"\(resolved.title)\" is \(resolved.status.rawValue) — its step list can't be edited while a worker or validator is active. Steps are editable when the task is pending, paused, interrupted, scheduled, failed, or awaiting review.")
+            }
+            task = resolved
+            author = .smith
+        default:
+            return .failure("manage_steps is not available to this agent.")
         }
         guard case .string(let action) = arguments["action"] else {
             return .failure("Missing required argument 'action' (add | update | set_status | delete | reorder | list).")
@@ -95,7 +130,7 @@ public struct ManageStepsTool: AgentTool {
                 return .failure("`add` requires `text` or a non-empty `texts` array.")
             }
             for text in newTexts {
-                if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .add(text: text)) {
+                if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .add(text: text, origin: author)) {
                     return .failure(error)
                 }
             }

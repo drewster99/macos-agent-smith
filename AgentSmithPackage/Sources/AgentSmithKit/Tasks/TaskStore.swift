@@ -25,8 +25,33 @@ public actor TaskStore {
     /// purpose as `durablyPersistInactiveNow`, for the restore direction (global → active).
     private var durablyPersistActiveNow: (@Sendable ([AgentTask]) async -> Bool)?
 
+    /// Whether the automatic stale-completed sweep is enabled. Off until the app layer pushes the
+    /// user's Settings value via `setAutoArchivePolicy`. This gate is consulted ONLY by the
+    /// automatic triggers (via `autoArchiveStaleCompletedIfEnabled`); the underlying
+    /// `archiveStaleCompleted(olderThan:)` mechanism stays callable directly regardless.
+    private var autoArchiveEnabled = false
+    /// Age a completed task must exceed before the automatic sweep archives it. Only consulted when
+    /// `autoArchiveEnabled`. Defaults to the historical four-hour cutoff.
+    private var autoArchiveInterval: TimeInterval = 4 * 3600
+
     public init(inactiveStore: InactiveTaskStore? = nil) {
         self.inactiveStore = inactiveStore
+    }
+
+    /// Pushes the user's auto-archive Settings into the store — the single source of the effective
+    /// policy the automatic triggers consult. Called at session start and live on a Settings change.
+    /// `interval` is taken as given; its range is validated at the UI boundary (the Settings
+    /// Stepper enforces 1–168 hours).
+    public func setAutoArchivePolicy(enabled: Bool, interval: TimeInterval) {
+        autoArchiveEnabled = enabled
+        autoArchiveInterval = interval
+    }
+
+    /// Gated entry point for the automatic triggers (task creation, app launch). No-op unless the
+    /// user has enabled auto-archive; otherwise sweeps at the configured cutoff.
+    public func autoArchiveStaleCompletedIfEnabled() async {
+        guard autoArchiveEnabled else { return }
+        await archiveStaleCompleted(olderThan: autoArchiveInterval)
     }
 
     /// Registers a callback fired whenever tasks change.
@@ -344,7 +369,8 @@ public actor TaskStore {
         return .success(instance)
     }
 
-    /// Adds a new task and returns it. Also archives any completed tasks older than 4 hours.
+    /// Adds a new task and returns it. When auto-archive is enabled (Settings), also sweeps any
+    /// completed tasks older than the configured cutoff out to the Archived bucket first.
     /// When `scheduledRunAt` is non-nil and in the future the new task is created with status
     /// `.scheduled` so the auto-runner skips it; the runtime should pair the call with a
     /// matching wake bound to the new task's id.
@@ -357,7 +383,7 @@ public actor TaskStore {
         isTemplate: Bool = false,
         templateInputDefinitions: [TemplateInputDefinition] = []
     ) async -> AgentTask {
-        await archiveStaleCompleted()
+        await autoArchiveStaleCompletedIfEnabled()
         let definitions = isTemplate ? templateInputDefinitions : []
         let initialStatus: AgentTask.Status = (scheduledRunAt.map { $0 > Date() } ?? false) ? .scheduled : .pending
         let task = AgentTask(
@@ -388,9 +414,10 @@ public actor TaskStore {
     }
 
     /// Archives all active completed tasks whose `updatedAt` is older than `interval` seconds,
-    /// moving them out to the global inactive store. Called automatically on task creation and
-    /// on app startup. `updatedAt` is intentionally not bumped, so the original completion time
-    /// drives the archive sort order.
+    /// moving them out to the global inactive store. This is the pure mechanism, unconditional on
+    /// the user's auto-archive Setting — the automatic triggers reach it via the gated
+    /// `autoArchiveStaleCompletedIfEnabled`. `updatedAt` is intentionally not bumped, so the
+    /// original completion time drives the archive sort order.
     public func archiveStaleCompleted(olderThan interval: TimeInterval = 4 * 3600) async {
         let cutoff = Date().addingTimeInterval(-interval)
         let stale = tasks.values.filter {
@@ -761,16 +788,16 @@ public actor TaskStore {
         onChange?()
     }
 
-    /// One worker mutation of the step list. Removal is a TOMBSTONE (status `.removed`,
-    /// note required) — the underlying record is append-only so the validator always
-    /// sees what was skipped or removed and why. Returns a human-readable error, or nil
-    /// on success.
+    /// One mutation of the step list (from Brown on its own task, or Smith on an inactive
+    /// task's plan). Removal is a TOMBSTONE (status `.removed`, note required) — the
+    /// underlying record is append-only so the validator always sees what was skipped or
+    /// removed and why. Returns a human-readable error, or nil on success.
     @discardableResult
     public func applyStepAction(taskID: UUID, action: TaskStepAction) -> String? {
         guard var task = tasks[taskID] else { return "Task not found." }
         switch action {
-        case .add(let text):
-            task.steps.append(TaskStep(text: text, origin: .worker))
+        case .add(let text, let origin):
+            task.steps.append(TaskStep(text: text, origin: origin))
         case .update(let stepID, let newText):
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
             guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be edited." }

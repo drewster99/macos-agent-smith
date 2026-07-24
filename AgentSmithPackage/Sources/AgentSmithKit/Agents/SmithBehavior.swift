@@ -13,6 +13,7 @@ enum SmithBehavior {
             EditTaskTool(),
             SetTemplateInputsTool(),
             SetAcceptanceCriteriaTool(),
+            ManageStepsTool(),
             RunTaskTool(),
             UpdateTaskTool(),
             AmendTaskTool(),
@@ -165,13 +166,18 @@ enum SmithBehavior {
         - Template tasks may also define `template_instance_title_template`, such as `Localize {{target_app}}`, so each cloned instance title names the concrete target.
 
         ### `edit_task(task_id, title?, description?, is_template?, template_inputs?, template_instance_title_template?, tool_overrides?)`
-        Edit an existing task's definition while it is not actively running. Use this for title fixes, full description replacement, converting a task into/out of a template, replacing template inputs, setting the cloned-instance title template, or setting per-task worker tool overrides (`"auto"`, `"on"`, `"off"`). Use `set_acceptance_criteria` for criteria and let Brown own the step list once a task starts.
+        Edit an existing task's definition while it is not actively running. Use this for title fixes, full description replacement, converting a task into/out of a template, replacing template inputs, setting the cloned-instance title template, or setting per-task worker tool overrides (`"auto"`, `"on"`, `"off"`). Use `set_acceptance_criteria` for criteria and `manage_steps` for the step list. While a task is running, Brown owns its step list — leave it alone.
 
         ### `set_template_inputs(task_id, template_inputs)`
         Set (REPLACE) a TEMPLATE task's string-only input definitions after creation. Each input is `{name, description, required?}`. Non-template tasks cannot define template inputs. Pass the COMPLETE list each time; pass `[]` to clear all template inputs.
 
         ### `set_acceptance_criteria(task_id, criteria)`
         Set (REPLACE) a task's acceptance criteria after creation. Each criterion is `{name, validation_prompt, input_enumerator_prompt?, waivable?}`. Unchanged names retain identity, but changing either prompt causes fresh judgment. Pass the COMPLETE list each time.
+
+        ### `manage_steps(task_id, action, ...)`
+        Edit a task's step list — the ordered plan the worker follows and the validators read. ALWAYS pass `task_id` (unlike Brown, you have no task of your own). Use it to shape a task's plan before it runs — most often adjusting the seeded steps of a premade or template task. Actions: `add` (`text` or `texts`), `update` (`step_id` + `text`), `set_status` (`step_id` + `status`; `skipped`/`removed` need a `note`), `delete` (`step_id` + `note`), `reorder` (`step_ids` = every active id in the new order), `list`.
+        - Only editable when the task has NO active worker (pending, paused, interrupted, scheduled, failed, awaiting review). Once a task is running or validating, Brown owns its steps — leave them alone.
+        - Removing/skipping a step tombstones it: the record stays visible to validators with your note. Don't quietly drop planned work.
 
         ### `run_task(task_id, instructions, input_values?)`
         Start an existing pending, paused, interrupted, failed, or completed task. Restarts with a clean context, auto-spawns Brown+Security Agent.

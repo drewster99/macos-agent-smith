@@ -73,11 +73,84 @@ struct ValidationAgentSurfaceTests {
         #expect(steps[1].note == "superseded by first")
     }
 
-    @Test("manage_steps is Brown-only")
+    @Test("manage_steps is available to Brown and Smith, not the silent roles")
     func manageStepsAvailability() {
         let tool = ManageStepsTool()
         #expect(tool.isAvailable(in: ToolAvailabilityContext(agentRole: .brown)))
-        #expect(!tool.isAvailable(in: ToolAvailabilityContext(agentRole: .smith)))
+        #expect(tool.isAvailable(in: ToolAvailabilityContext(agentRole: .smith)))
+        #expect(!tool.isAvailable(in: ToolAvailabilityContext(agentRole: .securityAgent)))
+        #expect(!tool.isAvailable(in: ToolAvailabilityContext(agentRole: .summarizer)))
+    }
+
+    @Test("manage_steps (Smith): edits a task's plan by task_id and authors steps as Smith")
+    func manageStepsSmithEditsByTaskID() async throws {
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "template", description: "d")
+        // Smith is not assigned to the task — it names it explicitly.
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+        let tool = ManageStepsTool()
+
+        let added = try await tool.execute(
+            arguments: [
+                "action": .string("add"),
+                "task_id": .string(task.id.uuidString),
+                "texts": .array([.string("clone the repo"), .string("run the build")])
+            ],
+            context: context
+        )
+        #expect(added.succeeded)
+
+        let steps = await taskStore.task(id: task.id)?.steps ?? []
+        #expect(steps.count == 2)
+        #expect(steps.allSatisfy { $0.origin == .smith }, "Smith-added steps are authored by Smith, not the worker")
+    }
+
+    @Test("manage_steps (Smith): requires task_id — it has no task of its own")
+    func manageStepsSmithRequiresTaskID() async throws {
+        let taskStore = TaskStore()
+        _ = await taskStore.addTask(title: "t", description: "d")
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+
+        let result = try await ManageStepsTool().execute(
+            arguments: ["action": .string("add"), "text": .string("orphan step")],
+            context: context
+        )
+        #expect(!result.succeeded)
+        #expect(result.output.contains("task_id"))
+    }
+
+    @Test("manage_steps (Smith): refuses a task with a live worker (running)")
+    func manageStepsSmithBlockedWhileRunning() async throws {
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "t", description: "d")
+        await taskStore.updateStatus(id: task.id, status: .running)
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+
+        let result = try await ManageStepsTool().execute(
+            arguments: [
+                "action": .string("add"),
+                "task_id": .string(task.id.uuidString),
+                "text": .string("meddling with a running task")
+            ],
+            context: context
+        )
+        #expect(!result.succeeded)
+        #expect((await taskStore.task(id: task.id)?.steps ?? []).isEmpty, "no step was added to the running task")
+    }
+
+    @Test("manage_steps (Smith): unknown task_id fails cleanly")
+    func manageStepsSmithUnknownTask() async throws {
+        let taskStore = TaskStore()
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+
+        let result = try await ManageStepsTool().execute(
+            arguments: [
+                "action": .string("list"),
+                "task_id": .string(UUID().uuidString)
+            ],
+            context: context
+        )
+        #expect(!result.succeeded)
     }
 
     // MARK: - set_acceptance_criteria

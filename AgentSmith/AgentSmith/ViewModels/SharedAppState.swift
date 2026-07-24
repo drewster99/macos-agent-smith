@@ -107,6 +107,42 @@ final class SharedAppState {
         for observer in workerCapacityObservers.values { observer() }
     }
 
+    /// When true, completed tasks whose completion is older than `autoArchiveCutoffHours` are
+    /// automatically moved to the Archived bucket. The sweep runs at app launch and whenever a
+    /// task is created — it is not a background timer. Default OFF: the user opts in. Pushed to
+    /// each session's TaskStore at start and live on change.
+    var autoArchiveCompletedEnabled: Bool = SharedAppState.boolDefault(key: "autoArchiveCompletedEnabled", default: false) {
+        didSet {
+            UserDefaults.standard.set(autoArchiveCompletedEnabled, forKey: "autoArchiveCompletedEnabled")
+            notifyAutoArchivePolicyChanged()
+        }
+    }
+
+    /// Age, in whole hours, a completed task must exceed before the auto-archive sweep moves it to
+    /// Archived. 1–168 (one hour … one week); default 4. Only consulted when
+    /// `autoArchiveCompletedEnabled` is true. Stored in hours here (the user-facing unit); the
+    /// engine works in seconds and converts at the boundary.
+    var autoArchiveCutoffHours: Int = SharedAppState.intDefault(key: "autoArchiveCutoffHours", default: 4) {
+        didSet {
+            UserDefaults.standard.set(autoArchiveCutoffHours, forKey: "autoArchiveCutoffHours")
+            notifyAutoArchivePolicyChanged()
+        }
+    }
+
+    /// Per-session observers for auto-archive policy changes (same shape as the worker-capacity
+    /// observers): each session's view model pushes the new enabled/cutoff values to its TaskStore
+    /// so a Settings change applies without a restart.
+    private var autoArchivePolicyObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerAutoArchivePolicyObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        autoArchivePolicyObservers[id] = observer
+    }
+    func unregisterAutoArchivePolicyObserver(_ id: UUID) {
+        autoArchivePolicyObservers.removeValue(forKey: id)
+    }
+    private func notifyAutoArchivePolicyChanged() {
+        for observer in autoArchivePolicyObservers.values { observer() }
+    }
+
     /// How many task columns the top-of-window overlay bar shows before overflowing
     /// into the junk drawer (1–8; default 4).
     var taskOverlayColumns: Int = SharedAppState.intDefault(key: "taskOverlayColumns", default: 4) {

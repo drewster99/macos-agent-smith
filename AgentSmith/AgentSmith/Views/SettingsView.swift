@@ -121,6 +121,17 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Toggle("Auto-archive completed tasks", isOn: $shared.autoArchiveCompletedEnabled)
+
+            Stepper(value: $shared.autoArchiveCutoffHours, in: 1...168) {
+                Text("Archive completed tasks after: \(shared.autoArchiveCutoffHours) \(shared.autoArchiveCutoffHours == 1 ? "hour" : "hours")")
+            }
+            .disabled(!shared.autoArchiveCompletedEnabled)
+
+            Text("When enabled, completed tasks older than this are moved to the Archived bucket automatically. The sweep runs at launch and whenever a new task is created — not on a background timer. Failed tasks are never auto-archived. Off by default; applies immediately to active sessions.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Stepper(value: $shared.taskOverlayColumns, in: 1...8) {
                 Text("Task overlay columns: \(shared.taskOverlayColumns)")
             }

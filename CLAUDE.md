@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Agent Smith is a macOS app (Swift 6 / SwiftUI, macOS 15+) that orchestrates a small fixed cast of LLM-driven agents working together on user-supplied tasks. The roles are not abstract — they are baked into `AgentRole` and the codebase assumes all four exist:
 
 - **Smith** — orchestrator. Talks to the user, creates tasks (with acceptance criteria), spawns/supervises Brown, and resolves validation escalations. Never does work itself, and does NOT review routine submissions — the acceptance-validation system does (see below).
-- **Brown** — single worker spawned per task. Holds the bash/file/process tools and owns the task's step list (`manage_steps`).
+- **Brown** — single worker spawned per task. Holds the bash/file/process tools and owns the task's step list (`manage_steps`) while it runs. Smith also has `manage_steps` (with `task_id`) to shape a task's plan when no worker is active — e.g. adjusting a premade/template task's seeded steps; it's gated by `Status.isValidationContractEditable`, the same predicate the UI uses, so Smith can never edit steps out from under a running Brown or an in-flight validator. Steps authored by Smith carry `.smith` origin; Brown's carry `.worker`.
 - **Security Agent** — silent security gatekeeper that runs alongside Brown. Returns plain-text `SAFE/WARN/UNSAFE/ABORT` verdicts on Brown's tool calls (text-based, *not* tool calls — see `SecurityAgentBehavior.swift` and `SecurityEvaluator.swift`).
 - **Summarizer** — summarizes completed/failed tasks (`TaskSummarizer`).
 
@@ -108,7 +108,7 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
 ## Conventions specific to this repo
 
 - All actor state mutation must happen inside the actor; UI observers run via the `@Sendable` callbacks listed above. Don't add `MainActor` reach-ins from inside actors.
-- Smith's prompt explicitly forbids it from answering the user — every request becomes a task assigned to Brown. Don't add tools that let Smith do work directly.
+- Smith's prompt explicitly forbids it from answering the user — every request becomes a task assigned to Brown. Don't add tools that let Smith do the *work* directly (bash/file/process execution). Orchestration-side authoring of a task's contract is Smith's job, not "work": Smith owns acceptance criteria (`set_acceptance_criteria`) and can edit the step plan (`manage_steps` with `task_id`) on tasks that have no active worker — this is deliberate, not a violation of the no-work rule.
 - Security Agent uses **text-based verdicts** (`SAFE/WARN/UNSAFE/ABORT`), not tool calls. This is deliberate (see memory/roadmap). Don't "improve" it by giving Security Agent tool-call evaluation.
 - Debug/recovery/sanitize utilities should be manually triggered (CLI/menu), never wired into normal startup or hot paths.
 - `__PUBLIC_REPO` (an empty file at the repo root) marks this as a public repo. Don't commit secrets, internal hostnames, or customer data.

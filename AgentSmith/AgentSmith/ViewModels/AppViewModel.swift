@@ -724,6 +724,14 @@ final class AppViewModel {
             let capacity = self.shared.maxSimultaneousTasks
             Task { await self.runtime?.setWorkerCapacity(capacity) }
         }
+        // Auto-archive policy: push Settings changes to this session's store immediately (no
+        // restart). The next task creation (or the next launch) then sweeps at the new cutoff.
+        shared.registerAutoArchivePolicyObserver(session.id) { [weak self] in
+            guard let self else { return }
+            let enabled = self.shared.autoArchiveCompletedEnabled
+            let interval = TimeInterval(self.shared.autoArchiveCutoffHours) * 3600
+            Task { await self.taskStore?.setAutoArchivePolicy(enabled: enabled, interval: interval) }
+        }
         // Rebuild + push this session's LLM providers when an assigned model config changes, so a
         // model swap takes effect on the next task without a session restart.
         shared.registerModelAssignmentObserver(session.id) { [weak self] in
@@ -845,7 +853,14 @@ final class AppViewModel {
             }
         }
 
-        await liveTaskStore.archiveStaleCompleted()
+        // Auto-archive policy ("Auto-archive completed tasks" in Settings): push it into the store
+        // BEFORE the launch sweep so the first sweep honors the user's choice, then run the gated
+        // sweep. Cutoff is stored in hours (the user-facing unit); the store works in seconds.
+        await liveTaskStore.setAutoArchivePolicy(
+            enabled: shared.autoArchiveCompletedEnabled,
+            interval: TimeInterval(shared.autoArchiveCutoffHours) * 3600
+        )
+        await liveTaskStore.autoArchiveStaleCompletedIfEnabled()
 
         await newRuntime.setOnTurnRecorded { [weak self] role, turn in
             Task { @MainActor [weak self] in
