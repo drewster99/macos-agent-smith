@@ -460,12 +460,13 @@ public struct ToolContext: Sendable {
     /// is in scope so that every ChannelMessage carries full provenance.
     public func post(_ message: ChannelMessage) async {
         var stamped = message
-        if stamped.taskID == nil {
-            if agentRole == .smith {
-                stamped.taskID = await taskStore.currentActiveTask()?.id
-            } else {
-                stamped.taskID = await taskStore.taskForAgent(agentID: agentID)?.id
-            }
+        // Brown is bound to one task, so its messages carry that task's id. Smith is not — and
+        // with several tasks running concurrently there is no single "current" task to attribute
+        // a Smith message to, so Smith's channel messages are left un-task-stamped (nothing
+        // consumes ChannelMessage.taskID for grouping; it's provenance only). This is why
+        // `TaskStore.currentActiveTask()` was retired.
+        if stamped.taskID == nil, agentRole != .smith {
+            stamped.taskID = await taskStore.taskForAgent(agentID: agentID)?.id
         }
         if stamped.providerID == nil {
             stamped.providerID = currentConfiguration?.providerID

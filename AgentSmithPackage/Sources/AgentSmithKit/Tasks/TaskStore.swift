@@ -642,18 +642,6 @@ public actor TaskStore {
         return modified
     }
 
-    /// Returns the currently active running or awaiting-review task, if any.
-    ///
-    /// Used by Smith (who orchestrates tasks but is never in a task's `assigneeIDs`)
-    /// to determine which task it's currently working in service of. When multiple
-    /// tasks are active simultaneously (rare), returns the most recently started —
-    /// consistent with the startup migration's `windows.last(where:)` preference.
-    public func currentActiveTask() -> AgentTask? {
-        tasks.values
-            .filter { $0.disposition == .active && ($0.status == .starting || $0.status == .running || $0.status == .awaitingReview) }
-            .max(by: { ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast) })
-    }
-
     /// Returns the oldest actionable task assigned to the given agent.
     ///
     /// Tasks are sorted by `createdAt` ascending so the result is deterministic
