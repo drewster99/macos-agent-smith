@@ -671,7 +671,7 @@ struct SpendingDashboardView: View {
     private func ledgerHeader() -> some View {
         HStack(spacing: 0) {
             Text("Task").frame(maxWidth: .infinity, alignment: .leading)
-            Text("Started").frame(width: 96, alignment: .trailing)
+            Text("Started").frame(width: 100, alignment: .trailing)
             Text("Cost").frame(width: 80, alignment: .trailing)
             Text("Calls").frame(width: 60, alignment: .trailing)
             Text("Tokens").frame(width: 80, alignment: .trailing)
@@ -690,9 +690,9 @@ struct SpendingDashboardView: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text(formatStarted(summary.firstTimestamp))
-                .font(.caption.monospacedDigit())
+                .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .frame(width: 96, alignment: .trailing)
+                .frame(width: 100, alignment: .trailing)
             Text(formatCost(summary.totalCostUSD))
                 .font(.caption.monospacedDigit())
                 .frame(width: 80, alignment: .trailing)
@@ -737,14 +737,20 @@ struct SpendingDashboardView: View {
         return String(format: "$%.2f", cost)
     }
 
-    /// The run's start (earliest record). Time-only for today, else short date — enough to
-    /// tell same-name template runs apart without widening the column much.
+    /// The run's start (earliest record) as a FIXED-WIDTH `M/dd  h:mmam` string so the column's
+    /// columns line up under a monospaced font: month space-padded, day zero-padded, hour
+    /// space-padded, 12-hour with lowercase am/pm. Year is omitted for compactness (runs are
+    /// disambiguated by day + time). E.g. " 7/21  9:42am", "12/03  1:15pm".
     private func formatStarted(_ date: Date?) -> String {
-        guard let date else { return "—" }
-        if Calendar.current.isDateInToday(date) {
-            return date.formatted(.dateTime.hour().minute())
-        }
-        return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        guard let date else { return "" }
+        let c = Calendar.current.dateComponents([.month, .day, .hour, .minute], from: date)
+        let month = c.month ?? 1
+        let day = c.day ?? 1
+        let rawHour = c.hour ?? 0
+        var hour12 = rawHour % 12
+        if hour12 == 0 { hour12 = 12 }
+        let ampm = rawHour < 12 ? "am" : "pm"
+        return String(format: "%2d/%02d %2d:%02d%@", month, day, hour12, c.minute ?? 0, ampm)
     }
 
     private func formatTokenCount(_ count: Int) -> String {

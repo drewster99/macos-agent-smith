@@ -125,7 +125,11 @@ struct TaskCostDetailSheet: View {
             // By Agent Role
             card(title: "Cost by Agent") {
                 let byAgent = aggregator.byAgent(records)
-                    .sorted { $0.value.totalCostUSD > $1.value.totalCostUSD }
+                    .sorted {
+                        $0.value.totalCostUSD != $1.value.totalCostUSD
+                            ? $0.value.totalCostUSD > $1.value.totalCostUSD
+                            : $0.key.rawValue < $1.key.rawValue
+                    }
                 ForEach(byAgent, id: \.key) { role, agentSummary in
                     costRow(
                         name: role.displayName,
@@ -189,8 +193,11 @@ struct TaskCostDetailSheet: View {
 
     private func toolUsageSection() -> some View {
         card(title: "Tool Usage") {
+            // Deterministic order: by count desc, then tool name asc to break ties. Without the
+            // tie-breaker, equal-count tools came out in the dictionary's (randomized) iteration
+            // order and visibly reshuffled on every re-render.
             let toolCounts = toolFrequency(records)
-                .sorted { $0.value > $1.value }
+                .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
             if toolCounts.isEmpty {
                 Text("No tool call data")
                     .font(.caption)
@@ -277,7 +284,7 @@ struct TaskCostDetailSheet: View {
                     agentRole: record.agentRole,
                     inputTokensFormatted: formatTokenCount(record.inputTokens),
                     outputTokensFormatted: formatTokenCount(record.outputTokens),
-                    costFormatted: formatCost(computeTurnCost(record)),
+                    costFormatted: formatTurnCost(computeTurnCost(record)),
                     latencyFormatted: formatLatency(record.latencyMs),
                     toolNames: (record.toolCallNames ?? []).joined(separator: ", ")
                 )
@@ -352,6 +359,11 @@ struct TaskCostDetailSheet: View {
     private func formatCost(_ cost: Double) -> String {
         if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
         return String(format: "$%.2f", cost)
+    }
+    /// Per-turn cost — always 3 decimals so the (monospaced) column's decimal points line up
+    /// and sub-penny turns stay legible. Turn-by-turn only; summary/breakdown rows use `formatCost`.
+    private func formatTurnCost(_ cost: Double) -> String {
+        String(format: "$%.3f", cost)
     }
     private func formatTokenCount(_ count: Int) -> String {
         if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
