@@ -39,6 +39,72 @@ struct SpendingDashboardView: View {
             }
         }
     }
+
+    // MARK: Task ledger (pre-computed rows)
+
+    /// One task's row in the Tasks ledger, computed ONCE per data/range change into `ledgerRows`
+    /// (not in the view body) so scrolling a large list doesn't re-aggregate per frame. Carries
+    /// every displayed and derived value, including the right-hand calculated columns.
+    struct TaskLedgerRow: Identifiable {
+        let id: String
+        let taskID: UUID
+        let title: String
+        let summary: UsageSummary
+
+        var started: Date? { summary.firstTimestamp }
+        var cost: Double { summary.totalCostUSD }
+        var calls: Int { summary.callCount }
+        var tokens: Int { summary.totalInputTokens + summary.totalOutputTokens }
+        var latencyMs: Int { summary.totalLatencyMs }
+        var tools: Int { summary.totalToolCalls }
+        var costPerCall: Double { calls > 0 ? cost / Double(calls) : 0 }
+        var costPerMTok: Double { tokens > 0 ? cost * 1_000_000 / Double(tokens) : 0 }
+        var msPerKTok: Double { tokens > 0 ? Double(latencyMs) * 1_000 / Double(tokens) : 0 }
+        var costPerTool: Double { tools > 0 ? cost / Double(tools) : 0 }
+    }
+
+    /// Columns in the Tasks ledger, in display order. `title` is the flexible leading column;
+    /// the rest are fixed-width and right-aligned.
+    enum LedgerColumn: String, CaseIterable {
+        case title, started, cost, calls, tokens, latency, tools
+        case costPerCall, costPerMTok, msPerKTok, costPerTool
+
+        var header: String {
+            switch self {
+            case .title: return "Task"
+            case .started: return "Started"
+            case .cost: return "Cost"
+            case .calls: return "Calls"
+            case .tokens: return "Tokens"
+            case .latency: return "Latency"
+            case .tools: return "Tools"
+            case .costPerCall: return "$/call"
+            case .costPerMTok: return "$/Mtok"
+            case .msPerKTok: return "ms/Ktok"
+            case .costPerTool: return "$/tool"
+            }
+        }
+        var width: CGFloat? {
+            switch self {
+            case .title: return nil          // flexible
+            case .started: return 100
+            case .cost: return 66
+            case .calls: return 52
+            case .tokens: return 66
+            case .latency: return 62
+            case .tools: return 46
+            case .costPerCall, .costPerMTok, .msPerKTok, .costPerTool: return 66
+            }
+        }
+        /// Default sort direction when this column is first selected (descending for magnitudes).
+        var defaultAscending: Bool { self == .title }
+    }
+
+    @State private var ledgerRows: [TaskLedgerRow] = []
+    @State private var orchestrationSummary: UsageSummary?
+    @State private var ledgerSearch: String = ""
+    @State private var sortColumn: LedgerColumn = .cost
+    @State private var sortAscending: Bool = false
     /// Snapshot of pricing data, captured on load so the aggregator closure doesn't
     /// need to cross actor boundaries.
     @State private var pricingSnapshot: [String: ModelPricing] = [:]
@@ -120,7 +186,7 @@ struct SpendingDashboardView: View {
             }
             .padding(20)
         }
-        .frame(minWidth: 700, minHeight: 500)
+        .frame(minWidth: 1000, minHeight: 500)
         .background(AppColors.background)
         .task {
             await loadRecords()
@@ -224,6 +290,77 @@ struct SpendingDashboardView: View {
         let agg = aggregator
         currentSummary = agg.summarize(filteredRecords, scopeLabel: selectedRange.rawValue)
         priorSummary = agg.summarize(priorRecords, scopeLabel: "Prior \(selectedRange.rawValue)")
+
+        // Pre-compute the ledger rows ONCE here (the expensive per-task aggregation) so the
+        // Tasks section only sorts/filters a small array in its body — no re-aggregation while
+        // scrolling. `nil` is the Orchestration bucket, kept separate.
+        let grouped = agg.byTask(filteredRecords)
+        orchestrationSummary = grouped[nil].flatMap { $0.callCount > 0 ? $0 : nil }
+        let taskLookup = Dictionary(shared.storedTaskSummaries.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+        ledgerRows = grouped.compactMap { key, value in
+            guard let key else { return nil }
+            let title = taskLookup[key] ?? "Task \(key.uuidString.prefix(8))"
+            return TaskLedgerRow(id: key.uuidString, taskID: key, title: title, summary: value)
+        }
+    }
+
+    /// The ledger rows after applying the search filter and the current sort. Cheap — sorts a
+    /// pre-built array, no aggregation. `title` sorts case-insensitively; every other column by
+    /// its numeric value, with title as a stable tie-breaker.
+    private var sortedFilteredRows: [TaskLedgerRow] {
+        let needle = ledgerSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        let filtered = needle.isEmpty ? ledgerRows : ledgerRows.filter { $0.title.lowercased().contains(needle) }
+        let asc = sortAscending
+        func lift(_ a: Bool) -> Bool { asc ? a : !a }
+        return filtered.sorted { l, r in
+            if sortColumn == .title {
+                let c = l.title.localizedCaseInsensitiveCompare(r.title)
+                if c != .orderedSame { return asc ? c == .orderedAscending : c == .orderedDescending }
+                return l.id < r.id
+            }
+            let lv = numericValue(l, sortColumn), rv = numericValue(r, sortColumn)
+            if lv != rv { return lift(lv < rv) }
+            return l.title.localizedCaseInsensitiveCompare(r.title) == .orderedAscending
+        }
+    }
+
+    private func numericValue(_ row: TaskLedgerRow, _ column: LedgerColumn) -> Double {
+        switch column {
+        case .title: return 0
+        case .started: return row.started?.timeIntervalSince1970 ?? 0
+        case .cost: return row.cost
+        case .calls: return Double(row.calls)
+        case .tokens: return Double(row.tokens)
+        case .latency: return Double(row.latencyMs)
+        case .tools: return Double(row.tools)
+        case .costPerCall: return row.costPerCall
+        case .costPerMTok: return row.costPerMTok
+        case .msPerKTok: return row.msPerKTok
+        case .costPerTool: return row.costPerTool
+        }
+    }
+
+    /// Click a column header to sort by it; click the active column again to reverse.
+    private func toggleSort(_ column: LedgerColumn) {
+        if sortColumn == column {
+            sortAscending.toggle()
+        } else {
+            sortColumn = column
+            sortAscending = column.defaultAscending
+        }
+    }
+
+    /// Fixed-width trailing cell for a ledger column, or a flexible leading cell for the title.
+    private struct LedgerCellFrame: ViewModifier {
+        let width: CGFloat?
+        let leading: Bool
+        func body(content: Content) -> some View {
+            if let width {
+                content.frame(width: width, alignment: .trailing)
+            } else {
+                content.frame(maxWidth: .infinity, alignment: leading ? .leading : .trailing)
+            }
+        }
     }
 
     // MARK: - Section 1: Headline Card
@@ -589,51 +726,50 @@ struct SpendingDashboardView: View {
     // MARK: - Section 4: Task Ledger
 
     private func taskLedger() -> some View {
-        // Live AgentTask objects are per-session and not threaded into the dashboard.
-        // Resolve titles from the global task-summary store; in-progress tasks without
-        // a summary yet still fall back to a truncated UUID.
-        let taskLookup: [UUID: TaskSummaryEntry] = Dictionary(
-            uniqueKeysWithValues: shared.storedTaskSummaries.map { ($0.id, $0) }
-        )
-        let grouped = aggregator.byTask(filteredRecords)
-        let byTask = grouped
-            .compactMap { k, v -> (UUID, String, UsageSummary)? in
-                guard let k else { return nil }
-                let title = taskLookup[k]?.title ?? "Task \(k.uuidString.prefix(8))"
-                return (k, title, v)
-            }
-            .sorted { $0.2.totalCostUSD > $1.2.totalCostUSD }
-
+        let rows = sortedFilteredRows
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Tasks")
-                .font(AppFonts.sectionHeader)
+            HStack {
+                Text("Tasks").font(AppFonts.sectionHeader)
+                Spacer()
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
+                    TextField("Filter tasks", text: $ledgerSearch)
+                        .textFieldStyle(.plain)
+                        .font(.caption)
+                        .frame(width: 180)
+                    if !ledgerSearch.isEmpty {
+                        Button(action: { ledgerSearch = "" }, label: { Image(systemName: "xmark.circle.fill") })
+                            .buttonStyle(.plain).font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 6).fill(AppColors.background))
+            }
 
-            if byTask.isEmpty {
-                Text("No task data in selected range")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if ledgerRows.isEmpty {
+                Text("No task data in selected range").font(.caption).foregroundStyle(.secondary)
             } else {
                 ledgerHeader()
-
                 Divider()
-
-                ForEach(byTask.prefix(50), id: \.0) { taskID, title, taskSummary in
-                    Button(action: { costDetail = .task(taskID) }, label: {
-                        taskRow(title: title, summary: taskSummary)
-                            .contentShape(Rectangle())
-                    })
-                    .buttonStyle(.plain)
-                    .background(hoveredRow == taskID.uuidString ? Color.accentColor.opacity(0.08) : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .onHover { hovering in hoveredRow = hovering ? taskID.uuidString : nil }
+                if rows.isEmpty {
+                    Text("No tasks match \u{201C}\(ledgerSearch)\u{201D}").font(.caption).foregroundStyle(.secondary).padding(.vertical, 4)
+                } else {
+                    ForEach(rows) { row in
+                        Button(action: { costDetail = .task(row.taskID) }, label: {
+                            ledgerRow(title: row.title, summary: row.summary).contentShape(Rectangle())
+                        })
+                        .buttonStyle(.plain)
+                        .background(hoveredRow == row.id ? Color.accentColor.opacity(0.08) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .onHover { hovering in hoveredRow = hovering ? row.id : nil }
+                    }
+                    Text("\(rows.count) task\(rows.count == 1 ? "" : "s")")
+                        .font(.caption2).foregroundStyle(.tertiary).padding(.top, 4)
                 }
             }
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(AppColors.secondaryBackground)
-        )
+        .background(RoundedRectangle(cornerRadius: 12).fill(AppColors.secondaryBackground))
     }
 
     /// Smith's cost that isn't attributable to any single task — turns spent orchestrating
@@ -641,21 +777,17 @@ struct SpendingDashboardView: View {
     /// Rendered as its own card ABOVE Tasks, clickable for a drill-down. Empty → nothing shown.
     @ViewBuilder
     private func orchestrationLedger() -> some View {
-        let planningSummary = aggregator.byTask(filteredRecords)[nil]
-        if let planningSummary, planningSummary.callCount > 0 {
+        if let planningSummary = orchestrationSummary {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Orchestration")
-                    .font(AppFonts.sectionHeader)
+                Text("Orchestration").font(AppFonts.sectionHeader)
                 Text("Smith's turns not tied to a specific task — planning, replying, deciding what to run.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(.secondary)
 
                 ledgerHeader()
                 Divider()
 
                 Button(action: { costDetail = .orchestration }, label: {
-                    taskRow(title: "Orchestration", summary: planningSummary)
-                        .contentShape(Rectangle())
+                    ledgerRow(title: "Orchestration", summary: planningSummary).contentShape(Rectangle())
                 })
                 .buttonStyle(.plain)
                 .background(hoveredRow == "orchestration" ? Color.accentColor.opacity(0.08) : Color.clear)
@@ -667,50 +799,65 @@ struct SpendingDashboardView: View {
         }
     }
 
-    /// Shared column header for the task/orchestration ledgers.
+    /// Clickable column header: click to sort by that column, click the active one again to
+    /// reverse. The active column is bold and shows a direction arrow.
     private func ledgerHeader() -> some View {
         HStack(spacing: 0) {
-            Text("Task").frame(maxWidth: .infinity, alignment: .leading)
-            Text("Started").frame(width: 100, alignment: .trailing)
-            Text("Cost").frame(width: 80, alignment: .trailing)
-            Text("Calls").frame(width: 60, alignment: .trailing)
-            Text("Tokens").frame(width: 80, alignment: .trailing)
-            Text("Latency").frame(width: 80, alignment: .trailing)
-            Text("Tools").frame(width: 60, alignment: .trailing)
+            ForEach(LedgerColumn.allCases, id: \.self) { col in
+                Button(action: { toggleSort(col) }, label: {
+                    HStack(spacing: 2) {
+                        if col != .title { Spacer(minLength: 0) }
+                        Text(col.header).lineLimit(1)
+                        if sortColumn == col {
+                            Image(systemName: sortAscending ? "chevron.up" : "chevron.down").font(.system(size: 8))
+                        }
+                        if col == .title { Spacer(minLength: 0) }
+                    }
+                    .contentShape(Rectangle())
+                })
+                .buttonStyle(.plain)
+                .font(.caption.weight(sortColumn == col ? .bold : .semibold))
+                .foregroundStyle(sortColumn == col ? Color.primary : Color.secondary)
+                .modifier(LedgerCellFrame(width: col.width, leading: col == .title))
+            }
         }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
         .padding(.horizontal, 8)
     }
 
-    private func taskRow(title: String, summary: UsageSummary) -> some View {
-        HStack(spacing: 0) {
-            Text(title)
-                .font(.caption)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(formatStarted(summary.firstTimestamp))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 100, alignment: .trailing)
-            Text(formatCost(summary.totalCostUSD))
-                .font(.caption.monospacedDigit())
-                .frame(width: 80, alignment: .trailing)
-            Text("\(summary.callCount)")
-                .font(.caption.monospacedDigit())
-                .frame(width: 60, alignment: .trailing)
-            Text(formatTokenCount(summary.totalInputTokens + summary.totalOutputTokens))
-                .font(.caption.monospacedDigit())
-                .frame(width: 80, alignment: .trailing)
-            Text(formatLatency(summary.totalLatencyMs))
-                .font(.caption.monospacedDigit())
-                .frame(width: 80, alignment: .trailing)
-            Text("\(summary.totalToolCalls)")
-                .font(.caption.monospacedDigit())
-                .frame(width: 60, alignment: .trailing)
+    private func ledgerRow(title: String, summary: UsageSummary) -> some View {
+        let tokens = summary.totalInputTokens + summary.totalOutputTokens
+        let calls = summary.callCount
+        let tools = summary.totalToolCalls
+        let cost = summary.totalCostUSD
+        let costPerCall = calls > 0 ? cost / Double(calls) : 0
+        let costPerMTok = tokens > 0 ? cost * 1_000_000 / Double(tokens) : 0
+        let msPerKTok = tokens > 0 ? Double(summary.totalLatencyMs) * 1_000 / Double(tokens) : 0
+        let costPerTool = tools > 0 ? cost / Double(tools) : 0
+        return HStack(spacing: 0) {
+            cell(.title) { Text(title).lineLimit(1) }
+            cell(.started) { Text(formatStarted(summary.firstTimestamp)).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+            cell(.cost) { Text(formatCost(cost)).monospacedDigit() }
+            cell(.calls) { Text("\(calls)").monospacedDigit() }
+            cell(.tokens) { Text(formatTokenCount(tokens)).monospacedDigit() }
+            cell(.latency) { Text(formatLatency(summary.totalLatencyMs)).monospacedDigit() }
+            cell(.tools) { Text("\(tools)").monospacedDigit() }
+            cell(.costPerCall) { derivedText(formatCost(costPerCall)) }
+            cell(.costPerMTok) { derivedText(formatCost(costPerMTok)) }
+            cell(.msPerKTok) { derivedText(tokens > 0 ? String(format: "%.1f", msPerKTok) : "—") }
+            cell(.costPerTool) { derivedText(tools > 0 ? formatCost(costPerTool) : "—") }
         }
+        .font(.caption)
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
+    }
+
+    @ViewBuilder
+    private func cell<Content: View>(_ column: LedgerColumn, @ViewBuilder _ content: () -> Content) -> some View {
+        content().modifier(LedgerCellFrame(width: column.width, leading: column == .title))
+    }
+
+    private func derivedText(_ s: String) -> some View {
+        Text(s).monospacedDigit().foregroundStyle(.secondary)
     }
 
     // MARK: - Helpers
