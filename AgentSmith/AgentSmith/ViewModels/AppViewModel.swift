@@ -2330,7 +2330,11 @@ final class AppViewModel {
         } else if taskCostCache[taskID] != nil {
             return
         }
-        if taskCostInFlight.contains(taskID) { return }
+        // A forced reload must not be swallowed by an in-flight reservation. The reserver is
+        // holding a snapshot taken BEFORE the event that forced us here (a task reaching a
+        // terminal state), so deferring to it would cache a knowingly stale figure and never
+        // retry. An unforced call still collapses into the reservation.
+        if !force && taskCostInFlight.contains(taskID) { return }
         taskCostInFlight.insert(taskID)
         let records = await shared.usageStore.records(for: taskID)
         taskCostCache[taskID] = estimatedCost(from: records)
@@ -2345,7 +2349,13 @@ final class AppViewModel {
         guard !missing.isEmpty else { return }
         taskCostInFlight.formUnion(missing)
         let grouped = await shared.usageStore.records(forAnyOf: missing)
-        for id in missing {
+        // This method is `@MainActor` but not atomic: the fetch above is a suspension point,
+        // and a forced single-task reload or a `clearCostCaches()` can land while we're parked.
+        // Both of those are semantically NEWER than the snapshot we're holding, so never
+        // overwrite an entry that appeared during the suspension — write only what is still
+        // absent. Same reason we discard our reservations rather than assuming we still own
+        // them: a reset may have handed them to someone else.
+        for id in missing where taskCostCache[id] == nil {
             taskCostCache[id] = estimatedCost(from: grouped[id] ?? [])
         }
         taskCostInFlight.subtract(missing)

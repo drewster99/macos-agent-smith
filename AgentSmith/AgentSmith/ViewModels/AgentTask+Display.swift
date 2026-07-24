@@ -1,6 +1,24 @@
 import Foundation
 import AgentSmithKit
 
+/// "1h 4m 12s" / "4m 12s" / "12s" — the app's one spelling of a duration. Used for a single
+/// task's elapsed time and for aggregate totals (e.g. a template's runs summed together), so
+/// the two never render the same span differently.
+func durationDisplayString(_ interval: TimeInterval) -> String {
+    let totalSeconds = Int(interval)
+    let hours = totalSeconds / 3600
+    let minutes = (totalSeconds % 3600) / 60
+    let seconds = totalSeconds % 60
+
+    if hours > 0 {
+        return "\(hours)h \(minutes)m \(seconds)s"
+    } else if minutes > 0 {
+        return "\(minutes)m \(seconds)s"
+    } else {
+        return "\(seconds)s"
+    }
+}
+
 extension AgentTask {
     /// Elapsed seconds from `startedAt` to `completedAt` (or now, if unfinished). `nil` when
     /// the task never started or the interval is negative. The single numeric source both the
@@ -15,20 +33,7 @@ extension AgentTask {
     /// task hasn't finished). `nil` when the task has never started or the interval is
     /// negative. Shared by the task detail window and the PDF exporter.
     var elapsedDisplayString: String? {
-        guard let interval = elapsedSeconds else { return nil }
-
-        let totalSeconds = Int(interval)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-
-        if hours > 0 {
-            return "\(hours)h \(minutes)m \(seconds)s"
-        } else if minutes > 0 {
-            return "\(minutes)m \(seconds)s"
-        } else {
-            return "\(seconds)s"
-        }
+        elapsedSeconds.map(durationDisplayString)
     }
 
     /// The task's spend extrapolated to an hourly rate ("$26.10/hr"), given its accrued

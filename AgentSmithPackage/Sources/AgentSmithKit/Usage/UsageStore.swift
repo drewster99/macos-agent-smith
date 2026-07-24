@@ -96,6 +96,20 @@ public actor UsageStore {
         records.filter { $0.taskID == taskID }
     }
 
+    /// Records for many tasks at once, grouped by task ID. Tasks with no records are absent
+    /// from the result. One pass over the record set instead of one full scan per task —
+    /// aggregating a recurring template's whole run history through `records(for:)` would
+    /// rescan every record once per run, which is quadratic in a long-lived install.
+    public func records(forAnyOf taskIDs: Set<UUID>) -> [UUID: [UsageRecord]] {
+        guard !taskIDs.isEmpty else { return [:] }
+        var grouped: [UUID: [UsageRecord]] = [:]
+        for record in records {
+            guard let taskID = record.taskID, taskIDs.contains(taskID) else { continue }
+            grouped[taskID, default: []].append(record)
+        }
+        return grouped
+    }
+
     /// Records within a date range.
     public func records(from start: Date, to end: Date) -> [UsageRecord] {
         records.filter { $0.timestamp >= start && $0.timestamp <= end }

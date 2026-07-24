@@ -1450,7 +1450,7 @@ struct TaskDetailWindow: View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
             GridRow {
                 metadataLabel("Status")
-                Text(task.status.rawValue.capitalized)
+                Text(task.status.displayName)
                     .foregroundStyle(TaskStatusBadge.color(for: task.status))
                     .fontWeight(.medium)
             }

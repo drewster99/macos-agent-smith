@@ -182,6 +182,24 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             self = Status(rawValue: raw) ?? .interrupted
         }
 
+        /// Human-readable name for display. Not `rawValue.capitalized`: Swift's `capitalized`
+        /// lowercases the tail of each word, turning `awaitingReview` into "Awaitingreview".
+        /// Every surface that shows a status to the user goes through this.
+        public var displayName: String {
+            switch self {
+            case .pending: return "Pending"
+            case .starting: return "Starting"
+            case .running: return "Running"
+            case .completed: return "Completed"
+            case .failed: return "Failed"
+            case .paused: return "Paused"
+            case .awaitingReview: return "Awaiting Review"
+            case .interrupted: return "Interrupted"
+            case .scheduled: return "Scheduled"
+            case .validating: return "Validating"
+            }
+        }
+
         /// Whether this status represents work that is actively running — prevents archiving or deletion.
         public var isInProgress: Bool {
             self == .starting || self == .running || self == .paused || self == .awaitingReview || self == .validating

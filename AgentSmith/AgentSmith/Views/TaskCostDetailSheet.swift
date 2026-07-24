@@ -73,7 +73,7 @@ struct TaskCostDetailSheet: View {
                     HStack(spacing: 4) {
                         Image(systemName: TaskStatusBadge.icon(for: resolvedStatus))
                             .foregroundStyle(TaskStatusBadge.color(for: resolvedStatus))
-                        Text(resolvedStatus.rawValue.capitalized)
+                        Text(resolvedStatus.displayName)
                             .font(.callout.weight(.medium))
                             .foregroundStyle(TaskStatusBadge.color(for: resolvedStatus))
                     }
