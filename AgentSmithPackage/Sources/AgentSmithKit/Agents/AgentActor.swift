@@ -1240,14 +1240,19 @@ public actor AgentActor {
 
                 // Capture task context at the moment of the LLM call, before
                 // handleResponse runs any tools that might change it (e.g. task_complete).
-                // Smith is never in a task's assigneeIDs (only Brown is), so for Smith
-                // we look up the currently active task by status instead.
-                let currentTaskAtCallTime: AgentTask?
-                if configuration.role == .smith {
-                    currentTaskAtCallTime = await toolContext.taskStore.currentActiveTask()
-                } else {
-                    currentTaskAtCallTime = await toolContext.taskStore.taskForAgent(agentID: id)
-                }
+                // Brown is bound to its own task via assigneeIDs; that's the attribution.
+                // Smith is not — its cost is attributed AFTER handleResponse to whichever task
+                // this turn's tool calls acted on (see `smithTurnTargetTaskID`), so that Smith's
+                // supervision of a specific task lands on that task rather than a status-based
+                // guess. That derivation needs the id of any task CREATED this turn, so snapshot
+                // the existing ids first — but only when the turn actually creates one.
+                let brownTaskAtCallTime = configuration.role == .smith
+                    ? nil
+                    : await toolContext.taskStore.taskForAgent(agentID: id)
+                let preCreateTaskIDs: Set<UUID>? = (configuration.role == .smith
+                    && response.toolCalls.contains { $0.name == "create_task" })
+                    ? Set(await toolContext.taskStore.allTasks().map(\.id))
+                    : nil
 
                 // Reset per-turn tool-execution accumulators. handleResponse will add to
                 // these as tools run; the UsageRecord below reads the totals.
@@ -1265,6 +1270,16 @@ public actor AgentActor {
                     handleResponseError = error
                 }
 
+                // Attribute this turn's cost. Brown → its bound task. Smith → the task its tool
+                // calls acted on this turn (nil when it did none — that's genuine orchestration
+                // overhead, bucketed separately in the spending dashboard).
+                let recordTaskID: UUID?
+                if configuration.role == .smith {
+                    recordTaskID = await smithTurnTargetTaskID(response: response, preCreateTaskIDs: preCreateTaskIDs)
+                } else {
+                    recordTaskID = brownTaskAtCallTime?.id
+                }
+
                 // Persist usage record for analytics — with tool execution stats now
                 // folded in from handleResponse.
                 if let usageStore {
@@ -1272,7 +1287,7 @@ public actor AgentActor {
                         response: response,
                         context: LLMCallContext(
                             agentRole: configuration.role,
-                            taskID: currentTaskAtCallTime?.id,
+                            taskID: recordTaskID,
                             modelID: configuration.llmConfig.model,
                             providerType: configuration.providerAPIType.rawValue,
                             providerID: configuration.llmConfig.providerID,
@@ -2604,6 +2619,42 @@ public actor AgentActor {
         "task_update", "task_complete", "request_help", "reply_to_user",
         "message_user", "message_brown"
     ]
+
+    /// Smith tools that ACT ON a specific task, identified by a `task_id` argument. A Smith turn
+    /// that calls one of these is doing work FOR that task, so its cost is attributed there — not
+    /// to a status-based guess. `create_task` is handled separately (it has no `task_id`; its
+    /// target is the task it just created). Read-only tools (`get_task_details`, `list_tasks`)
+    /// are deliberately absent: looking is orchestration, not acting on a task.
+    static let smithTaskActionTools: Set<String> = [
+        "review_work", "provide_help", "edit_task", "set_template_inputs",
+        "set_acceptance_criteria", "manage_steps", "run_task", "update_task",
+        "amend_task", "manage_task_disposition", "schedule_task_action"
+    ]
+
+    /// The task a Smith turn should be billed to: the FIRST task its tool calls acted on, in
+    /// tool-call order. `create_task` resolves to the task created this turn (`preCreateTaskIDs`
+    /// is the id set captured just before the tools ran; the sole new id is the created task).
+    /// Returns nil when the turn acted on no task — genuine orchestration overhead.
+    private func smithTurnTargetTaskID(response: LLMResponse, preCreateTaskIDs: Set<UUID>?) async -> UUID? {
+        for call in response.toolCalls {
+            if call.name == "create_task" {
+                if let preCreateTaskIDs {
+                    let created = await toolContext.taskStore.allTasks()
+                        .filter { !preCreateTaskIDs.contains($0.id) }
+                        .sorted { $0.createdAt < $1.createdAt }
+                    if let first = created.first { return first.id }
+                }
+                continue
+            }
+            guard Self.smithTaskActionTools.contains(call.name) else { continue }
+            guard let params = try? call.parsedArguments(),
+                  case .string(let raw)? = params["task_id"],
+                  let taskID = UUID(uuidString: raw) else { continue }
+            // Only attribute to a task that actually exists — a malformed/stale id is not a target.
+            if await toolContext.taskStore.taskAnyDisposition(id: taskID) != nil { return taskID }
+        }
+        return nil
+    }
 
     /// The lifecycle tools that hand control to ANOTHER actor, so the calling agent must stop
     /// after one succeeds. Every name here has to also be in `taskLifecycleTools`: only the

@@ -8,7 +8,11 @@ import SwiftLLMKit
 /// Sheet showing detailed cost and usage metrics for a single task.
 /// Opened by clicking a task row in the Spending Dashboard's task ledger.
 struct TaskCostDetailSheet: View {
-    let taskID: UUID
+    /// The task this sheet details, or nil for the Orchestration bucket (records attributed to
+    /// no task). When nil, `titleOverride` names the sheet and the id footer is hidden.
+    let taskID: UUID?
+    /// Title to show when there's no task to resolve one from (the Orchestration bucket).
+    var titleOverride: String? = nil
     let task: AgentTask?
     /// Persisted summary of a completed/failed task, used to resolve title and status
     /// when the live `AgentTask` isn't reachable from the dashboard.
@@ -24,7 +28,7 @@ struct TaskCostDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private var summary: UsageSummary {
-        aggregator.summarize(records, scopeLabel: task?.title ?? taskSummary?.title ?? "Unknown")
+        aggregator.summarize(records, scopeLabel: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown")
     }
 
     var body: some View {
@@ -37,13 +41,15 @@ struct TaskCostDetailSheet: View {
                 configurationSection()
                 turnTimelineSection()
 
-                // Task ID in the lower right corner
-                HStack {
-                    Spacer()
-                    Text(taskID.uuidString)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                        .textSelection(.enabled)
+                // Task ID in the lower right corner (omitted for the Orchestration bucket).
+                if let taskID {
+                    HStack {
+                        Spacer()
+                        Text(taskID.uuidString)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                    }
                 }
             }
             .padding(24)
@@ -62,7 +68,7 @@ struct TaskCostDetailSheet: View {
     @ViewBuilder
 
     private func headerSection() -> some View {
-        let resolvedTitle = task?.title ?? taskSummary?.title ?? "Unknown Task"
+        let resolvedTitle = titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown Task"
         let resolvedStatus: AgentTask.Status? = task?.status ?? taskSummary?.status
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {

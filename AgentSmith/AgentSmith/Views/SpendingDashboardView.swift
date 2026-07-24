@@ -22,10 +22,23 @@ struct SpendingDashboardView: View {
     @State private var allRecords: [UsageRecord] = []
     /// The date bucket currently hovered in the cost-over-time chart (nil = none).
     @State private var chartHoveredDate: Date?
-    /// Task selected for the detail sheet (nil = no sheet shown).
-    @State private var selectedTaskID: UUID?
-    /// Task row currently hovered for visual highlight.
-    @State private var hoveredTaskID: UUID?
+    /// What the cost-detail sheet is drilling into (nil = no sheet). A specific task, or the
+    /// Orchestration bucket (records not attributed to any task).
+    @State private var costDetail: CostDetail?
+    /// Row currently hovered for visual highlight (task id, or the orchestration sentinel).
+    @State private var hoveredRow: String?
+
+    /// Selection for the cost-detail drill-down sheet.
+    private enum CostDetail: Identifiable {
+        case task(UUID)
+        case orchestration
+        var id: String {
+            switch self {
+            case .task(let id): return id.uuidString
+            case .orchestration: return "orchestration"
+            }
+        }
+    }
     /// Snapshot of pricing data, captured on load so the aggregator closure doesn't
     /// need to cross actor boundaries.
     @State private var pricingSnapshot: [String: ModelPricing] = [:]
@@ -102,6 +115,7 @@ struct SpendingDashboardView: View {
                 headlineCard()
                 costOverTimeChart()
                 breakdownPanels()
+                orchestrationLedger()
                 taskLedger()
             }
             .padding(20)
@@ -112,6 +126,13 @@ struct SpendingDashboardView: View {
             await loadRecords()
         }
         .onChange(of: shared.hasLoadedPersistedState, initial: false) {
+            Task { await loadRecords() }
+        }
+        // Live refresh: `costBoardSnapshot` is the main-thread mirror of the CostBoard actor's
+        // snapshot, republished on every usage insert. Its `asOf` ticks whenever a record lands,
+        // so reload then — a run that completes while this window is open now shows up without a
+        // manual refresh.
+        .onChange(of: shared.costBoardSnapshot.asOf) {
             Task { await loadRecords() }
         }
         .refreshable {
@@ -126,22 +147,38 @@ struct SpendingDashboardView: View {
                 ProgressView("Loading usage data...")
             }
         }
-        .sheet(item: $selectedTaskID) { taskID in
+        .sheet(item: $costDetail) { detail in
             let taskCount = aggregator.byTask(filteredRecords).keys.compactMap({ $0 }).count
-            // The dashboard doesn't hold live AgentTask objects (those live per-session).
-            // Use the global task-summary store to resolve the title/status; the sheet
-            // gracefully degrades when neither is present.
-            let summaryEntry = shared.storedTaskSummaries.first(where: { $0.id == taskID })
-            TaskCostDetailSheet(
-                taskID: taskID,
-                task: nil,
-                taskSummary: summaryEntry,
-                records: filteredRecords.filter { $0.taskID == taskID },
-                allRecordsSummary: currentSummary,
-                taskCountInRange: max(1, taskCount),
-                aggregator: aggregator,
-                providerNames: providerNames
-            )
+            switch detail {
+            case .task(let taskID):
+                // The dashboard doesn't hold live AgentTask objects (those live per-session).
+                // Use the global task-summary store to resolve the title/status; the sheet
+                // gracefully degrades when neither is present.
+                let summaryEntry = shared.storedTaskSummaries.first(where: { $0.id == taskID })
+                TaskCostDetailSheet(
+                    taskID: taskID,
+                    titleOverride: nil,
+                    task: nil,
+                    taskSummary: summaryEntry,
+                    records: filteredRecords.filter { $0.taskID == taskID },
+                    allRecordsSummary: currentSummary,
+                    taskCountInRange: max(1, taskCount),
+                    aggregator: aggregator,
+                    providerNames: providerNames
+                )
+            case .orchestration:
+                TaskCostDetailSheet(
+                    taskID: nil,
+                    titleOverride: "Orchestration",
+                    task: nil,
+                    taskSummary: nil,
+                    records: filteredRecords.filter { $0.taskID == nil },
+                    allRecordsSummary: currentSummary,
+                    taskCountInRange: max(1, taskCount),
+                    aggregator: aggregator,
+                    providerNames: providerNames
+                )
+            }
         }
     }
 
@@ -559,7 +596,6 @@ struct SpendingDashboardView: View {
             uniqueKeysWithValues: shared.storedTaskSummaries.map { ($0.id, $0) }
         )
         let grouped = aggregator.byTask(filteredRecords)
-        let planningSummary = grouped[nil]
         let byTask = grouped
             .compactMap { k, v -> (UUID, String, UsageSummary)? in
                 guard let k else { return nil }
@@ -572,41 +608,24 @@ struct SpendingDashboardView: View {
             Text("Tasks")
                 .font(AppFonts.sectionHeader)
 
-            if byTask.isEmpty && planningSummary == nil {
+            if byTask.isEmpty {
                 Text("No task data in selected range")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                // Header
-                HStack(spacing: 0) {
-                    Text("Task").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Cost").frame(width: 80, alignment: .trailing)
-                    Text("Calls").frame(width: 60, alignment: .trailing)
-                    Text("Tokens").frame(width: 80, alignment: .trailing)
-                    Text("Latency").frame(width: 80, alignment: .trailing)
-                    Text("Tools").frame(width: 60, alignment: .trailing)
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
+                ledgerHeader()
 
                 Divider()
 
                 ForEach(byTask.prefix(50), id: \.0) { taskID, title, taskSummary in
-                    Button(action: { selectedTaskID = taskID }, label: {
+                    Button(action: { costDetail = .task(taskID) }, label: {
                         taskRow(title: title, summary: taskSummary)
                             .contentShape(Rectangle())
                     })
                     .buttonStyle(.plain)
-                    .background(hoveredTaskID == taskID ? Color.accentColor.opacity(0.08) : Color.clear)
+                    .background(hoveredRow == taskID.uuidString ? Color.accentColor.opacity(0.08) : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .onHover { hovering in hoveredTaskID = hovering ? taskID : nil }
-                }
-
-                // Show unattributed planning overhead (Smith calls before any task existed)
-                if let planningSummary, planningSummary.callCount > 0 {
-                    taskRow(title: "Planning overhead", summary: planningSummary)
-                        .foregroundStyle(.secondary)
+                    .onHover { hovering in hoveredRow = hovering ? taskID.uuidString : nil }
                 }
             }
         }
@@ -617,12 +636,63 @@ struct SpendingDashboardView: View {
         )
     }
 
+    /// Smith's cost that isn't attributable to any single task — turns spent orchestrating
+    /// with no task-targeting tool call (idling, planning, replying, deciding what to run).
+    /// Rendered as its own card ABOVE Tasks, clickable for a drill-down. Empty → nothing shown.
+    @ViewBuilder
+    private func orchestrationLedger() -> some View {
+        let planningSummary = aggregator.byTask(filteredRecords)[nil]
+        if let planningSummary, planningSummary.callCount > 0 {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Orchestration")
+                    .font(AppFonts.sectionHeader)
+                Text("Smith's turns not tied to a specific task — planning, replying, deciding what to run.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ledgerHeader()
+                Divider()
+
+                Button(action: { costDetail = .orchestration }, label: {
+                    taskRow(title: "Orchestration", summary: planningSummary)
+                        .contentShape(Rectangle())
+                })
+                .buttonStyle(.plain)
+                .background(hoveredRow == "orchestration" ? Color.accentColor.opacity(0.08) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .onHover { hovering in hoveredRow = hovering ? "orchestration" : nil }
+            }
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 12).fill(AppColors.secondaryBackground))
+        }
+    }
+
+    /// Shared column header for the task/orchestration ledgers.
+    private func ledgerHeader() -> some View {
+        HStack(spacing: 0) {
+            Text("Task").frame(maxWidth: .infinity, alignment: .leading)
+            Text("Started").frame(width: 96, alignment: .trailing)
+            Text("Cost").frame(width: 80, alignment: .trailing)
+            Text("Calls").frame(width: 60, alignment: .trailing)
+            Text("Tokens").frame(width: 80, alignment: .trailing)
+            Text("Latency").frame(width: 80, alignment: .trailing)
+            Text("Tools").frame(width: 60, alignment: .trailing)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+    }
+
     private func taskRow(title: String, summary: UsageSummary) -> some View {
         HStack(spacing: 0) {
             Text(title)
                 .font(.caption)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            Text(formatStarted(summary.firstTimestamp))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 96, alignment: .trailing)
             Text(formatCost(summary.totalCostUSD))
                 .font(.caption.monospacedDigit())
                 .frame(width: 80, alignment: .trailing)
@@ -665,6 +735,16 @@ struct SpendingDashboardView: View {
     private func formatCost(_ cost: Double) -> String {
         if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
         return String(format: "$%.2f", cost)
+    }
+
+    /// The run's start (earliest record). Time-only for today, else short date — enough to
+    /// tell same-name template runs apart without widening the column much.
+    private func formatStarted(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(.dateTime.hour().minute())
+        }
+        return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
     }
 
     private func formatTokenCount(_ count: Int) -> String {

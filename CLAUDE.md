@@ -114,6 +114,8 @@ LLM provider/model state is owned by `SwiftLLMKit.LLMKitManager` (`@Observable`,
 
 Every `UsageRecord` and `ChannelMessage` is stamped with `OrchestrationRuntime.currentSessionID` (a fresh UUID per `start()` call) so analytics can group by run without timestamp joins.
 
+**Usage `taskID` attribution.** A `UsageRecord`'s `taskID` decides which task a turn's cost lands on in the spending dashboard. Brown → its bound task (`taskForAgent`). The validator → the task being judged. Smith → the task **its own tool calls acted on this turn**: `AgentActor.smithTurnTargetTaskID` scans `response.toolCalls` and returns the FIRST that targets a task (`smithTaskActionTools` by `task_id` arg, or `create_task`'s freshly-created id), else `nil`. `nil` is genuine **Orchestration** overhead — Smith planning/replying/deciding with no task-targeting call — shown as its own dashboard section above Tasks. This replaced an older `currentActiveTask()` heuristic that misattributed all of Smith's work to one task when several ran concurrently. Read-only Smith tools (`get_task_details`, `list_tasks`) deliberately don't count as "acting on" a task. Blast radius is analytics only — a wrong `taskID` mis-buckets cost, it never affects task execution. The spending dashboard live-refreshes off `SharedAppState.costBoardSnapshot` (the main-thread mirror of the `CostBoard` actor's snapshot).
+
 ### The step plan (`manage_steps` / `TaskStepAction`)
 
 A task's `steps` array is the worker's ordered plan and part of what validators judge. Rules that hold everywhere:
