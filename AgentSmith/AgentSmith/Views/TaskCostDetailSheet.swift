@@ -26,6 +26,9 @@ struct TaskCostDetailSheet: View {
     let averageTaskCostUSD: Double
     let aggregator: UsageAggregator
     let providerNames: [String: String]
+    /// Opens the full Task Detail window for this task. Nil for the Orchestration bucket (no task)
+    /// or when the dashboard has no session to open it in — the id then renders as plain text.
+    var onOpenTaskDetail: ((UUID) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var showingVsAvgInfo = false
@@ -45,13 +48,27 @@ struct TaskCostDetailSheet: View {
                 turnTimelineSection()
 
                 // Task ID in the lower right corner (omitted for the Orchestration bucket).
+                // Clickable to open the full Task Detail window when the dashboard supplied an action.
                 if let taskID {
                     HStack {
                         Spacer()
-                        Text(taskID.uuidString)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                            .textSelection(.enabled)
+                        if let onOpenTaskDetail {
+                            Button(action: { onOpenTaskDetail(taskID) }, label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.up.forward.square")
+                                    Text(taskID.uuidString)
+                                }
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                            })
+                            .buttonStyle(.plain)
+                            .help("Open the full task detail window")
+                        } else {
+                            Text(taskID.uuidString)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
             }

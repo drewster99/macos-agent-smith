@@ -15,6 +15,7 @@ import SwiftLLMKit
 /// Opened via View → Spending Dashboard (⌘⇧D).
 struct SpendingDashboardView: View {
     @Bindable var shared: SharedAppState
+    @Environment(\.openWindow) private var openWindow
 
     // MARK: - State
 
@@ -250,7 +251,8 @@ struct SpendingDashboardView: View {
                     taskCountInRange: taskCount,
                     averageTaskCostUSD: avgTaskCost,
                     aggregator: aggregator,
-                    providerNames: providerNames
+                    providerNames: providerNames,
+                    onOpenTaskDetail: openTaskDetailAction()
                 )
             case .orchestration:
                 // Orchestration is not a task, so "vs Average" (a per-task comparison) is hidden (0).
@@ -267,6 +269,21 @@ struct SpendingDashboardView: View {
                     providerNames: providerNames
                 )
             }
+        }
+    }
+
+    /// The "open task detail" action for the drill-down sheet's task-id link, or nil when there's
+    /// no session to open it in. Targets the last-focused session tab: archived/deleted tasks (the
+    /// common dashboard case) resolve via the GLOBAL inactive store there regardless of session,
+    /// while a still-active task resolves only if it lives in that session.
+    private func openTaskDetailAction() -> ((UUID) -> Void)? {
+        guard let sessionID = shared.focusedSessionID else { return nil }
+        let open = openWindow
+        return { taskID in
+            AgentSmithApp.showOrOpenTaskDetail(
+                target: TaskDetailTarget(sessionID: sessionID, taskID: taskID),
+                openWindow: open
+            )
         }
     }
 
