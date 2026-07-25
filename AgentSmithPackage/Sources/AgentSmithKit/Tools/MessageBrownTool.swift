@@ -50,12 +50,11 @@ struct MessageBrownTool: AgentTool {
             throw ToolCallError.missingRequiredArgument("message")
         }
 
-        let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context)
-        if let failureMessage = resolution.failure {
-            return .failure(failureMessage)
-        }
-        let attachments = resolution.attachments
-
+        // Resolve the recipient BEFORE touching attachments. `resolveAttachments` is not a
+        // pure lookup — its `attachment_paths` branch ingests files from disk and persists
+        // them into the session's attachment store — so validating the addressing first
+        // keeps a bad `task_id` from leaving orphaned attachments behind for a message that
+        // was never sent.
         guard case .string(let taskIDString) = arguments["task_id"] else {
             throw ToolCallError.missingRequiredArgument("task_id")
         }
@@ -72,6 +71,12 @@ struct MessageBrownTool: AgentTool {
         guard let brownID = await context.workerIDForTask(taskID) else {
             return .failure("No worker is running task \"\(recipientTask.title)\" (\(taskIDString)) — its status is \(recipientTask.status.rawValue). Use `run_task` to start it, or `amend_task` to record instructions it will pick up when it next starts.")
         }
+
+        let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context)
+        if let failureMessage = resolution.failure {
+            return .failure(failureMessage)
+        }
+        let attachments = resolution.attachments
 
         // Label the recipient with its task so the UI shows WHICH worker was addressed.
         await context.post(ChannelMessage(
