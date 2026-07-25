@@ -255,7 +255,12 @@ struct PersistentClientErrorSurfaceTests {
 
     /// A 402 is out of credits, not a transient fault. The surfaced line must read as a plain
     /// billing problem — naming the cause and the remedy — rather than the generic
-    /// "error (1/50): HTTP 402: {raw json}" frame. Retry behavior is intentionally unchanged.
+    /// "error (1/50): HTTP 402: {raw json}" frame.
+    ///
+    /// It must also NOT promise a retry. `LLMRetryPolicy` classifies 402 as permanent, so the
+    /// agent stops on the first failure. Until 2026-07-25 it said "retrying in 3s" and then
+    /// ground through all 50 attempts across ~90 minutes against an empty account — the
+    /// classification existed but gated only the wording, never the retry.
     @Test("HTTP 402 surfaces as a clear out-of-credits message, not a raw error dump")
     func http402SurfacesAsOutOfCredits() async throws {
         let channel = MessageChannel()
@@ -281,9 +286,17 @@ struct PersistentClientErrorSurfaceTests {
             // The clear message replaces the generic error frame and never dumps the raw JSON body…
             #expect(!banner.content.contains("error (1/"))
             #expect(!banner.content.contains("insufficient_quota"))
-            // …but the behavior is unchanged — it still backs off and retries.
-            #expect(banner.content.contains("retrying in"))
+            // …and it must not dangle a retry promise it won't keep.
+            #expect(!banner.content.contains("retrying in"))
         }
+
+        // The agent stops rather than spending its 50-attempt budget on a billing block.
+        let stopped = await channel.allMessages().first {
+            $0.content.contains("cannot be resolved by retrying")
+        }
+        #expect(stopped != nil, "a permanent client error must stop the agent, not schedule a retry")
+        let running = await agent.running
+        #expect(running == false)
     }
 
     @Test("outOfCreditsMessage names the role and model, no terminal punctuation")
@@ -293,7 +306,7 @@ struct PersistentClientErrorSurfaceTests {
         #expect(msg.contains("magistral-medium-2509"))
         #expect(msg.contains("402"))
         #expect(msg.contains("Add funds"))
-        // The caller appends "— retrying in …", so the base line must not end with a period.
+        // The caller may append a clause, so the base line must not end with a period.
         #expect(!msg.hasSuffix("."))
     }
 }

@@ -28,6 +28,8 @@ actor TaskSummarizer {
     private let providerType: String
     /// Session ID for the current orchestration run — stamped on every UsageRecord.
     private let sessionID: UUID?
+    /// Bumps the live-activity counter while a summarization run is in flight (inspector strip).
+    private let activityTracker: LiveActivityTracker?
 
     private static let systemPrompt = """
         You are a task summarizer for an AI agent system. Given a completed or failed task's \
@@ -53,7 +55,8 @@ actor TaskSummarizer {
         usageStore: UsageStore? = nil,
         configuration: ModelConfiguration? = nil,
         providerType: String = "",
-        sessionID: UUID? = nil
+        sessionID: UUID? = nil,
+        activityTracker: LiveActivityTracker? = nil
     ) {
         self.provider = provider
         self.memoryStore = memoryStore
@@ -64,6 +67,7 @@ actor TaskSummarizer {
         self.configuration = configuration
         self.providerType = providerType
         self.sessionID = sessionID
+        self.activityTracker = activityTracker
     }
 
     /// Posts a channel message stamped with the summarizer's provider/model/config
@@ -88,20 +92,15 @@ actor TaskSummarizer {
     /// as a fire-and-forget background operation.
     @discardableResult
     public func summarizeAndEmbed(task: AgentTask) async -> String? {
+        activityTracker?.begin(.summarizerRun)
+        defer { activityTracker?.end(.summarizerRun) }
         let startTime = Date()
         var lastError: Error?
 
-        for attempt in 0...Self.maxRetries {
+        var attempt = 0
+        while true {
             if Task.isCancelled { return nil }
-            if attempt > 0 {
-                let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
-                await postToChannel(ChannelMessage(
-                    sender: .agent(.summarizer),
-                    content: "Summarization retry \(attempt)/\(Self.maxRetries) for '\(task.title)' after \(Int(delay))s",
-                    metadata: ["isWarning": .bool(true)]
-                ))
-                do { try await Task.sleep(for: .seconds(delay)) } catch { break }
-            }
+            attempt += 1
 
             do {
                 let summary = try await generateSummary(for: task)
@@ -124,7 +123,15 @@ actor TaskSummarizer {
                 return summary
             } catch {
                 lastError = error
-                guard Self.isRetryableError(error) else { break }
+                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                      attempt < LLMRetryPolicy.maxAttempts else { break }
+                let delay = LLMRetryPolicy.delay(attempt: attempt, retryAfter: retryAfter)
+                await postToChannel(ChannelMessage(
+                    sender: .agent(.summarizer),
+                    content: "Summarization retry \(attempt)/\(LLMRetryPolicy.maxAttempts) for '\(task.title)' in \(LLMRetryPolicy.formatDelay(delay))",
+                    metadata: ["isWarning": .bool(true)]
+                ))
+                guard await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
             }
         }
 
@@ -181,12 +188,10 @@ actor TaskSummarizer {
         ]
 
         var lastError: Error?
-        for attempt in 0...Self.maxRetries {
+        var attempt = 0
+        while true {
             if Task.isCancelled { return .distinct }
-            if attempt > 0 {
-                let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
-                do { try await Task.sleep(for: .seconds(delay)) } catch { break }
-            }
+            attempt += 1
 
             do {
                 let callStart = Date()
@@ -216,7 +221,9 @@ actor TaskSummarizer {
                 return Self.parseReconciliation(text)
             } catch {
                 lastError = error
-                guard Self.isRetryableError(error) else { break }
+                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                      attempt < LLMRetryPolicy.maxAttempts,
+                      await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
             }
         }
 
@@ -268,12 +275,10 @@ actor TaskSummarizer {
         ]
 
         var lastError: Error?
-        for attempt in 0...Self.maxRetries {
+        var attempt = 0
+        while true {
             if Task.isCancelled { return nil }
-            if attempt > 0 {
-                let delay = Self.retryBackoffSeconds[min(attempt - 1, Self.retryBackoffSeconds.count - 1)]
-                do { try await Task.sleep(for: .seconds(delay)) } catch { break }
-            }
+            attempt += 1
 
             do {
                 let callStart = Date()
@@ -303,7 +308,9 @@ actor TaskSummarizer {
                 return text.trimmingCharacters(in: .whitespacesAndNewlines)
             } catch {
                 lastError = error
-                guard Self.isRetryableError(error) else { break }
+                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                      attempt < LLMRetryPolicy.maxAttempts,
+                      await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
             }
         }
 

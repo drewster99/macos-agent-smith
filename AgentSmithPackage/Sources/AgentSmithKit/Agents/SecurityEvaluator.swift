@@ -188,15 +188,6 @@ actor SecurityEvaluator {
     private static let perCallEvalMaxTokensFloor = 1500
     private static let toolScopingMaxTokensFloor = 25000
 
-    /// Sleeps before scoping retry `attempt` (1-based): 0.5 s doubling per attempt, capped
-    /// at 4 s. `Task.sleep` throwing (cancellation) is intentionally swallowed — callers
-    /// re-check `Task.isCancelled` right after and bail on their own cancellation path.
-    private static func scopingRetryBackoff(attempt: Int) async {
-        let capped = min(attempt, 4)
-        let nanoseconds = UInt64(500_000_000) << (capped - 1)
-        try? await Task.sleep(nanoseconds: nanoseconds)
-    }
-
     /// Tool definition for file_read, presented to Security Agent's LLM.
     private static let fileReadToolDef: LLMToolDefinition = {
         let tool = FileReadTool()
@@ -246,6 +237,9 @@ actor SecurityEvaluator {
     private let ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))?
     /// Resolves an attachment's stable `file://` URL for its reference line.
     private let attachmentURLProvider: (@Sendable (UUID, String) -> URL?)?
+    /// Bumps the live-activity counter while an LLM-backed evaluation is in flight, feeding the
+    /// inspector's concurrency strip. Nil in tests / callers that don't wire it.
+    private let activityTracker: LiveActivityTracker?
 
     public init(
         provider: any LLMProvider,
@@ -260,6 +254,7 @@ actor SecurityEvaluator {
         supportsDocuments: Bool = false,
         ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))? = nil,
         attachmentURLProvider: (@Sendable (UUID, String) -> URL?)? = nil,
+        activityTracker: LiveActivityTracker? = nil,
         // Forgetting to wire these causes Security Agent to misclassify failed-then-retried calls as
         // duplicates (the original 394bbbc bug). `assertionFailure` surfaces the wiring
         // mistake loudly in debug/tests; a release build degrades to `false` (the neutral
@@ -286,6 +281,7 @@ actor SecurityEvaluator {
         self.supportsDocuments = supportsDocuments
         self.ingestAttachmentFile = ingestAttachmentFile
         self.attachmentURLProvider = attachmentURLProvider
+        self.activityTracker = activityTracker
         self.hasToolSucceeded = hasToolSucceeded
         self.hasToolFailed = hasToolFailed
     }
@@ -395,6 +391,11 @@ actor SecurityEvaluator {
             return disposition
         }
 
+        // Count only real LLM-backed evaluations toward the inspector's concurrency strip — the two
+        // auto-approve fast-paths above return synchronously and aren't "in flight".
+        activityTracker?.begin(.securityEvaluation)
+        defer { activityTracker?.end(.securityEvaluation) }
+
         let evalPrompt = await buildEvalPrompt(
             toolName: toolName,
             toolParams: toolParams,
@@ -446,12 +447,19 @@ actor SecurityEvaluator {
 
         let startTime = Date()
         var retryCount = 0
+        var transportFailures = 0
         var toolRounds = 0
         var lastError: Error?
-        // Two independent bounds: parse-failure retries (`maxRetries`) and evidence-gathering
-        // rounds (`maxToolRounds`). Once tool rounds are exhausted the model is offered NO tools,
+        // Three independent bounds: parse-failure retries (`maxRetries`), transport-failure
+        // retries (`LLMRetryPolicy.maxAttempts`), and evidence-gathering rounds
+        // (`maxToolRounds`). Once tool rounds are exhausted the model is offered NO tools,
         // forcing it to commit to a verdict, so a model that would loop on file_read/attach_file
         // forever can't.
+        //
+        // Parse and transport failures are counted SEPARATELY. They used to share `retryCount`,
+        // which produced "Security evaluation failed after 8 parse retries" for an outage in
+        // which nothing was ever parsed — the diagnostic pointed at the model's output format
+        // when the problem was the backend.
         while retryCount < Self.maxRetries {
             let response: LLMResponse
             let callLatencyMs: Int
@@ -475,7 +483,15 @@ actor SecurityEvaluator {
                     return disposition
                 }
                 lastError = error
-                retryCount += 1
+                // Transport failure — its own budget, and a paced retry. Retrying with no delay
+                // is why all 8 attempts landed inside a single ~20s provider outage on
+                // 2026-07-25 and the tool call was denied for want of a verdict.
+                transportFailures += 1
+                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                      transportFailures < LLMRetryPolicy.maxAttempts,
+                      await LLMRetryPolicy.sleep(attempt: transportFailures, retryAfter: retryAfter) else {
+                    break
+                }
                 continue
             }
 
@@ -629,7 +645,17 @@ actor SecurityEvaluator {
             )
         }
 
-        var fallbackMessage = "Security evaluation failed after \(retryCount) parse retries"
+        // Name the cause that actually stopped us. Transport failures and unparseable verdicts
+        // need different fixes (check the backend vs. check the model), so the message must not
+        // report one as the other.
+        var fallbackMessage: String
+        if transportFailures > 0, retryCount == 0 {
+            fallbackMessage = "Security evaluation failed after \(transportFailures) failed LLM call(s) — the model backend did not respond"
+        } else if transportFailures > 0 {
+            fallbackMessage = "Security evaluation failed after \(retryCount) unparseable response(s) and \(transportFailures) failed LLM call(s)"
+        } else {
+            fallbackMessage = "Security evaluation failed after \(retryCount) unparseable response(s)"
+        }
         if let desc = lastErrorDescription {
             fallbackMessage += "\nLast error: \(desc)"
         }
@@ -678,6 +704,7 @@ actor SecurityEvaluator {
 
         let startTime = Date()
         var retryCount = 0
+        var transportFailures = 0
         var lastError: Error?
         while retryCount < Self.maxRetries {
             let response: LLMResponse
@@ -698,13 +725,17 @@ actor SecurityEvaluator {
                     return ToolScopingResult(approvedNames: [], rawResponse: ToolScopingResult.cancelledSentinel, succeeded: false)
                 }
                 lastError = error
-                retryCount += 1
-                // Backoff before the next attempt. Without this, an unreachable backend
-                // (connection refused) burns all retries in under a second — observed as
-                // ~270 ms per full 5-retry scoping pass during the 2026-07-08 outage.
-                await Self.scopingRetryBackoff(attempt: retryCount)
-                if Task.isCancelled {
-                    return ToolScopingResult(approvedNames: [], rawResponse: ToolScopingResult.cancelledSentinel, succeeded: false)
+                // Transport failure — own budget, paced retry, and classified. The bespoke
+                // backoff this replaces had no classification, so a permanent 401 was retried
+                // as eagerly as a transient 503. The backoff itself is still essential: without
+                // one, an unreachable backend (connection refused) burned every retry in under
+                // a second — ~270 ms per full scoping pass during the 2026-07-08 outage.
+                transportFailures += 1
+                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                      transportFailures < LLMRetryPolicy.maxAttempts,
+                      await LLMRetryPolicy.sleep(attempt: transportFailures, retryAfter: retryAfter),
+                      !Task.isCancelled else {
+                    break
                 }
                 continue
             }
@@ -730,8 +761,10 @@ actor SecurityEvaluator {
 
             let responseText = response.text ?? ""
             guard let approved = Self.parseScopingResponse(responseText, candidateNames: candidateNames) else {
+                // Parse failure: re-prompt immediately, matching the per-call evaluator. The
+                // model answered — it just answered wrongly — so there is nothing to wait for.
+                // Pacing belongs on the transport leg, which now owns it.
                 retryCount += 1
-                await Self.scopingRetryBackoff(attempt: retryCount)
                 continue
             }
 

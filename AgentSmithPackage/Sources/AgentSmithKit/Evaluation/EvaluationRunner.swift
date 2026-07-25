@@ -103,20 +103,39 @@ public enum EvaluationRunner {
             }
             turns += 1
 
+            // Transport retry, per `LLMRetryPolicy` like every other LLM caller. A validator
+            // that gives up here doesn't just lose a turn — the criterion errors, and the task
+            // escalates to `.awaitingReview` for a human. That makes it the most expensive
+            // failure in the system to get wrong, and it used to give up on the FIRST error
+            // with no delay at all. The deadline check above still bounds total wall-clock, so
+            // a long-lived outage ends the evaluation on the timeout rather than by spinning.
             let response: LLMResponse
             let callStart = Date()
-            do {
-                // Models that reject a temperature override (reasoning models) are handled
-                // proactively by SwiftLLMKit's `mustNeverSendTemperatureParam` metadata — the
-                // provider omits temperature for those, so a 0 here reaches every other model
-                // and never 400s a flagged one.
-                response = try await provider.send(
-                    messages: messages,
-                    tools: toolDefinitions,
-                    overrides: LLMCallOverrides(maxOutputTokens: definition.maxOutputTokens, temperature: temperature)
-                )
-            } catch {
-                return (.error("LLM call failed: \(error.localizedDescription)"), transcript)
+            var transportAttempt = 0
+            while true {
+                transportAttempt += 1
+                do {
+                    // Models that reject a temperature override (reasoning models) are handled
+                    // proactively by SwiftLLMKit's `mustNeverSendTemperatureParam` metadata — the
+                    // provider omits temperature for those, so a 0 here reaches every other model
+                    // and never 400s a flagged one.
+                    response = try await provider.send(
+                        messages: messages,
+                        tools: toolDefinitions,
+                        overrides: LLMCallOverrides(maxOutputTokens: definition.maxOutputTokens, temperature: temperature)
+                    )
+                    break
+                } catch {
+                    guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                          transportAttempt < LLMRetryPolicy.maxAttempts,
+                          Date() <= deadline,
+                          !Task.isCancelled else {
+                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript)
+                    }
+                    guard await LLMRetryPolicy.sleep(attempt: transportAttempt, retryAfter: retryAfter) else {
+                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript)
+                    }
+                }
             }
             await onResponse?(response, Int(Date().timeIntervalSince(callStart) * 1000))
 

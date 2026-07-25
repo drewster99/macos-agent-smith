@@ -165,20 +165,20 @@ public actor AgentActor {
     /// Used to gate availability of the `reply_to_user` tool.
     private var lastDirectUserMessageAt: Date?
 
-    /// Tracks consecutive LLM errors for exponential backoff.
+    /// Tracks consecutive LLM errors for exponential backoff. Reset by any successful turn.
+    ///
+    /// Retry shape — attempt budget, backoff curve, transient/permanent classification, and
+    /// `Retry-After` handling — comes from `LLMRetryPolicy`, shared with the summarizer, the
+    /// security evaluator, tool scoping, and the validators. The per-class backoff caps this
+    /// once carried (120s transient / 1800s rate-limited) are gone: a server-directed
+    /// `Retry-After` is still honored uncapped, which is what actually paces a real rate limit,
+    /// and everything else now uses the shared 15s ceiling.
     private var consecutiveErrors = 0
-    private static let maxConsecutiveErrors = 50
-    /// Caps on the self-computed exponential backoff (used only when the server gives no
-    /// `Retry-After`), split by error class. Transient errors (5xx/408/network) recover fast, so
-    /// a short cap keeps retries responsive. A 429 rate limit is a longer outage by nature —
-    /// waiting it out at a short cap just burns calls against a wall — so it gets a much longer
-    /// cap: fewer futile attempts, while a session-length limit still recovers.
-    private static let maxTransientBackoffSeconds: Double = 120     // 2 min
-    private static let maxRateLimitBackoffSeconds: Double = 1800    // 30 min
-    /// A server-supplied `Retry-After` is always honored (see `backoff`), but one at or above
-    /// this is flagged in the transcript as unusually long so a multi-hour/day wait doesn't look
-    /// like a hang and the user can intervene.
-    private static let ridiculousRetryAfterSeconds: Double = 3600   // 1 hour
+    private static let maxConsecutiveErrors = LLMRetryPolicy.maxAttempts
+    /// A server-supplied `Retry-After` is always honored, but one at or above this is flagged
+    /// in the transcript as unusually long so a multi-hour/day wait doesn't look like a hang
+    /// and the user can intervene.
+    private static let ridiculousRetryAfterSeconds = LLMRetryPolicy.ridiculousRetryAfterSeconds
 
     /// Wall-clock seconds before the per-turn stall watchdog logs a warning and posts
     /// a system message. The watchdog itself doesn't unstick anything (per-tool timeouts
@@ -1382,15 +1382,17 @@ public actor AgentActor {
                 // the optional to a concrete LLMProviderError first so the case-match is
                 // unambiguous (matching an enum case against an optional is subtle).
                 var httpStatus: Int? = nil
-                var serverRetryAfter: TimeInterval? = nil
                 if let providerError = error as? LLMProviderError,
-                   case .httpError(let statusCode, let body, _, let retryAfter) = providerError {
+                   case .httpError(let statusCode, _, _, _) = providerError {
                     httpStatus = statusCode
-                    // Prefer the standard Retry-After header; if the provider didn't send one,
-                    // fall back to a delay stated in the body — Gemini/Google put it there as a
-                    // google.rpc.RetryInfo (`"retryDelay": "34s"`) rather than in the header.
-                    serverRetryAfter = retryAfter ?? Self.retryAfterFromErrorBody(body)
                 }
+
+                // Shared classification — the same call every other LLM caller makes. It also
+                // recovers a delay stated in the error BODY rather than the Retry-After header
+                // (Gemini/Google use a google.rpc.RetryInfo `"retryDelay": "34s"`).
+                let classification = LLMRetryPolicy.classify(error)
+                let serverRetryAfter: TimeInterval?
+                if case .transient(let retryAfter) = classification { serverRetryAfter = retryAfter } else { serverRetryAfter = nil }
 
                 // Surface persistent HTTP 4xx (config/payload problems retrying won't fix — bad
                 // API key, unsupported parameter, DeepSeek's reasoning_content replay demand) and
@@ -1401,20 +1403,15 @@ public actor AgentActor {
                 // Retry-After on ANY status (a 503/408 asking for a long wait) is surfaced on the
                 // first occurrence too, so the honored delay never reads as a silent hang. See the
                 // `serverRetryAfter` clause in `shouldSurfaceNow`.
-                let isPersistentClientError = httpStatus.map {
-                    (400..<500).contains($0) && $0 != 429 && $0 != 408
-                } ?? false
+                let isPersistentClientError = classification == .permanent
                 let isRateLimited = httpStatus == 429
 
                 // Honor a server-supplied Retry-After (e.g. on a 429) over our own guess: the
-                // server knows when its window resets. Floor at 1s so a `Retry-After: 0` can't
-                // spin a tight retry loop, and honor it with NO upper cap — a multi-hour limit
-                // means we wait multiple hours, which is the point (a suspiciously long one is
-                // flagged below). Otherwise, exponential backoff from 3s, capped by error class:
-                // rate limits get a long cap (sustained outage), everything else a short one.
-                let cap = isRateLimited ? Self.maxRateLimitBackoffSeconds : Self.maxTransientBackoffSeconds
-                let computedBackoff = min(3.0 * pow(2.0, Double(min(consecutiveErrors - 1, 10))), cap)
-                let backoff = serverRetryAfter.map { max($0, 1.0) } ?? computedBackoff
+                // server knows when its window resets. Floored at 1s so a `Retry-After: 0`
+                // can't spin a tight retry loop, and honored with NO upper cap — a multi-hour
+                // limit means we wait multiple hours, which is the point (a suspiciously long
+                // one is flagged below). Otherwise the shared exponential backoff.
+                let backoff = LLMRetryPolicy.delay(attempt: consecutiveErrors, retryAfter: serverRetryAfter)
 
                 let shouldSurfaceNow = consecutiveErrors >= 5
                     || (isPersistentClientError && consecutiveErrors == 1)
@@ -1426,15 +1423,15 @@ public actor AgentActor {
                 if shouldSurfaceNow {
                     // A 402 is out of credits / a billing block, not a transient fault. The generic
                     // "error (n/50): HTTP 402: {raw json}" frame buries the one thing the user needs
-                    // to know, so say it plainly. (Behavior is unchanged — it still backs off and
-                    // retries; only the wording is clarified.)
+                    // to know, so say it plainly.
                     var content = httpStatus == 402
                         ? Self.outOfCreditsMessage(role: configuration.role, model: configuration.llmConfig.model)
                         : "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)"
-                    // Only claim a retry when one is actually coming (the stop below fires at the
-                    // cap). State the wait both relatively and as a wall-clock time so a long wait
-                    // reads clearly, and flag a suspiciously long server-directed delay.
-                    if consecutiveErrors < Self.maxConsecutiveErrors {
+                    // Only claim a retry when one is actually coming — the stop below fires at
+                    // the cap, and immediately for a permanent error. State the wait both
+                    // relatively and as a wall-clock time so a long wait reads clearly, and flag
+                    // a suspiciously long server-directed delay.
+                    if !isPersistentClientError, consecutiveErrors < Self.maxConsecutiveErrors {
                         let retryAt = Date().addingTimeInterval(backoff)
                         content += " — retrying in \(Self.formatRetryDelay(backoff)) (at \(Self.formatRetryClock(retryAt)))"
                         if let serverRetryAfter {
@@ -1450,6 +1447,22 @@ public actor AgentActor {
                         content: content,
                         metadata: ["isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
                     ))
+                }
+
+                // A permanent failure — bad key, exhausted credits, unknown model, malformed
+                // request — cannot be retried into success. Stop now with the real reason.
+                // This classification used to be computed and then ignored for retry purposes:
+                // it gated only the log message, so an out-of-credits 402 was retried 50 times
+                // across ~90 minutes while the account sat empty. Telling the user promptly and
+                // stopping is strictly more useful than continuing to hammer a billing block.
+                if isPersistentClientError {
+                    await toolContext.post(ChannelMessage(
+                        sender: .system,
+                        content: "Agent \(configuration.role.displayName) stopped — this error cannot be resolved by retrying: \(error.localizedDescription)",
+                        metadata: ["isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                    ))
+                    isRunning = false
+                    break
                 }
 
                 if consecutiveErrors >= Self.maxConsecutiveErrors {
