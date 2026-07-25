@@ -171,6 +171,14 @@ struct TaskEditorSheet: View {
         }
         .padding(20)
         .frame(width: 680, height: 720)
+        .onAppear {
+            // A prior failed action may have left an error on the view model whose alert lives on
+            // the sidebar BEHIND this sheet; clear it so it can't surface (looking like a failure)
+            // after we close on a successful save. This sheet reports its own problems inline.
+            if viewModel.taskActionError != nil {
+                DispatchQueue.main.async { viewModel.taskActionError = nil }
+            }
+        }
     }
 
     private func header() -> some View {
@@ -228,6 +236,13 @@ struct TaskEditorSheet: View {
                         }
                         .buttonStyle(.plain)
                     }
+                }
+
+                if let problem = templateProblem {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(AppColors.verdictError)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -369,6 +384,26 @@ struct TaskEditorSheet: View {
         case .edit(let task):
             return task.status.isValidationContractEditable
         }
+    }
+
+    /// Live validation of the template inputs + instance title template, run WHILE the form is open
+    /// using the exact same checks the save path runs — so an invalid input name (wrong characters,
+    /// duplicate, missing description) or a title template referencing an unknown input is caught
+    /// inline as you type, instead of only silently blocking Create.
+    private var templateProblem: String? {
+        guard isTemplate else { return nil }
+        let built = inputs.compactMap { row -> TemplateInputDefinition? in
+            let name = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let description = row.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty || !description.isEmpty else { return nil }
+            return TemplateInputDefinition(name: name, description: description, required: row.required)
+        }
+        if let problem = TemplateInputValidation.validateDefinitions(built) { return problem }
+        let titleTemplate = instanceTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !titleTemplate.isEmpty {
+            return TemplateStringRenderer.validate(titleTemplate, allowedNames: Set(built.map(\.name)))
+        }
+        return nil
     }
 
     private func save() {
