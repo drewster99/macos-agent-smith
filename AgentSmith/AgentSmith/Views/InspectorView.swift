@@ -431,6 +431,8 @@ private struct AgentCard: View {
                         Text(inspectorDisplayName)
                             .font(.headline)
                             .foregroundStyle(hasActivity ? roleColor : .secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
 
                         Spacer()
 

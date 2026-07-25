@@ -44,7 +44,6 @@ struct AgentCardStatusBadge: View {
                         ThinkingElapsedTime(since: start, font: AppFonts.inspectorLabel)
                     }
                 }
-                .fixedSize(horizontal: true, vertical: false)
             } else if !executingTools.isEmpty {
                 HStack(spacing: 4) {
                     AgentActivitySpinner()
@@ -56,7 +55,6 @@ struct AgentCardStatusBadge: View {
                         ThinkingElapsedTime(since: start, font: AppFonts.inspectorLabel)
                     }
                 }
-                .fixedSize(horizontal: true, vertical: false)
             } else if hasActivity && isTerminated {
                 Text("Terminated")
                     .font(AppFonts.inspectorLabel)
