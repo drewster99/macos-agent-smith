@@ -756,7 +756,6 @@ final class AppViewModel {
                 self.toolExecutingByRole.removeAll()
                 self.agentToolNames.removeAll()
                 self.inspectorStore.clearAll()
-                self.clearTaskTokenCache()
                 self.runtime = nil
             }
         }
@@ -1749,7 +1748,6 @@ final class AppViewModel {
         toolExecutingByRole.removeAll()
         agentToolNames.removeAll()
         inspectorStore.clearAll()
-        clearTaskTokenCache()
         // The channel stream is cancelled + awaited inside flushPersistence() below
         // (quiesceChannelStream), so any messages still buffered in the channel are drained
         // and persisted before we tear down rather than dropped here.
@@ -2254,13 +2252,13 @@ final class AppViewModel {
     /// Total estimated cost for a task, or `nil` if it has no usage records at all.
     /// SwiftUI rows call this synchronously to render their chip.
     ///
-    /// Reads `SharedAppState.taskCosts` — the live mirror of `CostBoard`'s rollup — so a
+    /// Reads `SharedAppState.taskUsage` — the live mirror of `CostBoard`'s rollup — so a
     /// running task's figure climbs as its records land. This used to be a per-view-model
     /// cache populated by a one-shot `UsageStore` scan on row appear, which meant an
     /// in-flight task displayed whatever had accrued at that instant (nothing, for any task
     /// started after its row was already on screen) until it reached a terminal status.
     func cachedTaskCost(_ taskID: UUID) -> Double? {
-        shared.taskCosts[taskID]
+        shared.taskUsage[taskID]?.cost
     }
 
     /// Every run spawned by `taskID`, across the active and archived buckets. The sidebar's
@@ -2292,14 +2290,22 @@ final class AppViewModel {
         return total
     }
 
-    /// Returns cached total token counts (input / output / cacheRead / cacheWrite)
-    /// for a task — used by the task detail view alongside cost. Same caching
-    /// model as `cachedTaskCost(_:)`: populated by `loadTaskTokens(_:)`.
+    /// Total token counts (input / output / cacheRead / cacheWrite) for a task — used by
+    /// the task detail view alongside cost, and by the PDF exporter.
     struct TaskTokenTotals: Equatable {
         var input: Int = 0
         var output: Int = 0
         var cacheRead: Int = 0
         var cacheWrite: Int = 0
+
+        init() {}
+
+        init(_ usage: CostBoard.TaskUsage) {
+            input = usage.inputTokens
+            output = usage.outputTokens
+            cacheRead = usage.cacheReadTokens
+            cacheWrite = usage.cacheWriteTokens
+        }
 
         /// Grand total across all four buckets — used to decide whether the task has any
         /// recorded token activity worth displaying.
@@ -2321,10 +2327,8 @@ final class AppViewModel {
             return "\(nIn) in   \(nOut) out"
         }
     }
-    private var taskTokenCache: [UUID: TaskTokenTotals] = [:]
-
-    /// Sums token counts across a set of usage records. Shared by `loadTaskTokens(_:force:)`
-    /// and the PDF exporter (see `estimatedCost(from:)` for the rationale).
+    /// Sums token counts across a set of usage records. The PDF exporter's path — it
+    /// computes from its own fetch (see `buildTaskPDF`) rather than reading the live map.
     func tokenTotals(from records: [UsageRecord]) -> TaskTokenTotals {
         var totals = TaskTokenTotals()
         for r in records {
@@ -2336,31 +2340,11 @@ final class AppViewModel {
         return totals
     }
 
+    /// Total tokens for a task, or `nil` if it has no usage records at all. Reads the same
+    /// live `CostBoard` rollup as `cachedTaskCost(_:)`, so the token line and the cost chip
+    /// always describe the same set of records — and a running task's counts climb rather
+    /// than freezing at whatever had landed when its view first appeared.
     func cachedTaskTokens(_ taskID: UUID) -> TaskTokenTotals? {
-        taskTokenCache[taskID]
-    }
-
-    /// Populates `cachedTaskTokens(_:)`. Pass `force: true` to drop a stale partial
-    /// computed while the task was still running.
-    func loadTaskTokens(_ taskID: UUID, force: Bool = false) async {
-        if force {
-            taskTokenCache.removeValue(forKey: taskID)
-        } else if taskTokenCache[taskID] != nil {
-            return
-        }
-        let records = await shared.usageStore.records(for: taskID)
-        taskTokenCache[taskID] = tokenTotals(from: records)
-    }
-
-    /// Clears the per-task token cache. Called from the same reset paths that clear
-    /// `inspectorStore` (session stop, abort, clear-log) so a subsequent open of the
-    /// same task ID refetches from the `UsageStore`.
-    ///
-    /// Per-task COST is deliberately not cleared here — it no longer lives in a
-    /// view-model cache. `CostBoard` derives it from the `UsageStore`, which these
-    /// reset paths don't touch, so a stop or abort now leaves the cost chips intact
-    /// rather than blanking them until each row happened to refetch.
-    func clearTaskTokenCache() {
-        taskTokenCache.removeAll(keepingCapacity: true)
+        shared.taskUsage[taskID].map(TaskTokenTotals.init)
     }
 }

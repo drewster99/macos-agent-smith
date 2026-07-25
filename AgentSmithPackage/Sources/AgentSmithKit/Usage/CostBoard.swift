@@ -3,7 +3,7 @@ import SwiftLLMKit
 
 /// Cached, incrementally-updated rollup of estimated cost over four calendar
 /// windows (today, this week, this month, this year) and the matching prior
-/// periods.
+/// periods, plus per-task cost and token totals (`taskUsage`).
 ///
 /// Why this exists: the inspector's Cost Estimate panel needs eight cost totals
 /// at all times. Computing them on every SwiftUI redraw would run eight
@@ -84,12 +84,17 @@ public actor CostBoard {
     /// next record arrives.
     private var watcherTask: Task<Void, Never>?
 
-    /// Estimated cost per task, keyed by `UsageRecord.taskID`. Records with no task
+    /// Cost and token totals per task, keyed by `UsageRecord.taskID`. Records with no task
     /// attribution — Smith's orchestration overhead — belong to no task and are excluded.
-    /// This is the single source the task-list and task-detail cost chips read: they used
-    /// to each scan the whole `UsageStore` once on row appear and cache the result, which
-    /// froze a running task's cost at whatever had accrued the moment its row first
-    /// rendered (usually nothing).
+    /// This is the single source every per-task usage figure reads: the cost chips, the
+    /// family roll-up, and the detail window's token line. Each of those used to scan the
+    /// whole `UsageStore` once on view appear and cache the result, which froze an in-flight
+    /// task's numbers at whatever had accrued the moment its view first rendered (usually
+    /// nothing) until the task reached a terminal status.
+    ///
+    /// Cost and tokens travel together in one entry deliberately: they are derived from the
+    /// same records in the same pass, so they cannot drift apart or disagree about how much
+    /// of a running task's work has landed.
     ///
     /// Recomputed wholesale rather than incremented per insert, unlike the calendar windows
     /// above. Two things stop an insert-only feed from staying exact here: `backfillTaskID`
@@ -97,15 +102,36 @@ public actor CostBoard {
     /// new records can describe; and `UsageStore.append` adds to its array immediately while
     /// delivering to `onInsert` from a queue, so a rebuild racing a queued delivery would
     /// count the same record twice. A full grouped pass is O(records), but it runs at most
-    /// once per `taskCostsRecomputeInterval` and is self-correcting by construction.
-    private(set) public var taskCosts: [UUID: Double] = [:]
-    private var onTaskCostsUpdate: (@Sendable ([UUID: Double]) async -> Void)?
+    /// once per `taskUsageRecomputeInterval` and is self-correcting by construction.
+    private(set) public var taskUsage: [UUID: TaskUsage] = [:]
+    private var onTaskUsageUpdate: (@Sendable ([UUID: TaskUsage]) async -> Void)?
     /// The pending coalesced recompute, or `nil` when none is scheduled.
-    private var taskCostsRecomputeTask: Task<Void, Never>?
-    /// Upper bound on how often the per-task map is rebuilt and republished. A cost chip
+    private var taskUsageRecomputeTask: Task<Void, Never>?
+    /// Upper bound on how often the per-task map is rebuilt and republished. A figure
     /// arriving a beat late is invisible; re-rendering every task row on every LLM turn
     /// across every live worker is not.
-    private static let taskCostsRecomputeInterval: Duration = .milliseconds(750)
+    private static let taskUsageRecomputeInterval: Duration = .milliseconds(750)
+
+    /// One task's accumulated spend and token counts.
+    public struct TaskUsage: Sendable, Equatable {
+        public var cost: Double = 0
+        public var inputTokens: Int = 0
+        public var outputTokens: Int = 0
+        public var cacheReadTokens: Int = 0
+        public var cacheWriteTokens: Int = 0
+
+        public init() {}
+
+        /// Folds one record in. `cost` is passed rather than computed here because pricing
+        /// lives on the board, not on the totals.
+        mutating func add(_ record: UsageRecord, cost: Double) {
+            self.cost += cost
+            inputTokens += record.inputTokens
+            outputTokens += record.outputTokens
+            cacheReadTokens += record.cacheReadTokens
+            cacheWriteTokens += record.cacheWriteTokens
+        }
+    }
 
     // MARK: - Init
 
@@ -126,11 +152,11 @@ public actor CostBoard {
         await handler(snapshot)
     }
 
-    /// Registers a callback fired on every change to the per-task cost map (bootstrap and
+    /// Registers a callback fired on every change to the per-task usage map (bootstrap and
     /// each coalesced recompute). The current map is delivered immediately.
-    public func setOnTaskCostsUpdate(_ handler: @escaping @Sendable ([UUID: Double]) async -> Void) async {
-        onTaskCostsUpdate = handler
-        await handler(taskCosts)
+    public func setOnTaskUsageUpdate(_ handler: @escaping @Sendable ([UUID: TaskUsage]) async -> Void) async {
+        onTaskUsageUpdate = handler
+        await handler(taskUsage)
     }
 
     /// One-time initial scan. Builds the eight totals from the full `UsageStore`,
@@ -141,7 +167,7 @@ public actor CostBoard {
         // Populate the per-task map before the first observer paints, so a task that
         // already had spend when the app launched shows it immediately rather than at
         // the first coalesced recompute.
-        await recomputeTaskCosts()
+        await recomputeTaskUsage()
         await usageStore.setOnInsert { [weak self] record in
             guard let self else { return }
             await self.recordInserted(record)
@@ -157,7 +183,7 @@ public actor CostBoard {
                     // Convergence backstop for record changes that append nothing —
                     // `UsageStore.backfillTaskID` moves existing records onto a task
                     // without producing an insert, so nothing else would notice.
-                    await self.recomputeTaskCosts()
+                    await self.recomputeTaskUsage()
                 }
             }
         }
@@ -169,8 +195,8 @@ public actor CostBoard {
     public func stop() {
         watcherTask?.cancel()
         watcherTask = nil
-        taskCostsRecomputeTask?.cancel()
-        taskCostsRecomputeTask = nil
+        taskUsageRecomputeTask?.cancel()
+        taskUsageRecomputeTask = nil
     }
 
     /// Re-anchors any windows whose `currentInterval` no longer contains `now`. Cheap
@@ -304,7 +330,7 @@ public actor CostBoard {
         s.asOf = clock()
         snapshot = s
         await publish()
-        scheduleTaskCostsRecompute()
+        scheduleTaskUsageRecompute()
     }
 
     private func publish() async {
@@ -315,45 +341,45 @@ public actor CostBoard {
 
     /// Requests a per-task recompute, coalescing a burst of inserts into one pass.
     /// A pass already scheduled absorbs this request — that IS the coalescing.
-    private func scheduleTaskCostsRecompute() {
-        guard taskCostsRecomputeTask == nil else { return }
-        taskCostsRecomputeTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.taskCostsRecomputeInterval)
+    private func scheduleTaskUsageRecompute() {
+        guard taskUsageRecomputeTask == nil else { return }
+        taskUsageRecomputeTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.taskUsageRecomputeInterval)
             guard let self else { return }
-            await self.runScheduledTaskCostsRecompute()
+            await self.runScheduledTaskUsageRecompute()
         }
     }
 
     /// Clears the pending handle, then recomputes unless this pass was cancelled.
     /// Clearing FIRST, unconditionally, is the point: a handle left pointing at a task
-    /// that returned early would make every later `scheduleTaskCostsRecompute` a silent
-    /// no-op, and the cost chips would freeze — the exact failure this rollup exists to
+    /// that returned early would make every later `scheduleTaskUsageRecompute` a silent
+    /// no-op, and the figures would freeze — the exact failure this rollup exists to
     /// fix. Returning without recomputing is fine; never returning without clearing.
-    private func runScheduledTaskCostsRecompute() async {
-        taskCostsRecomputeTask = nil
+    private func runScheduledTaskUsageRecompute() async {
+        taskUsageRecomputeTask = nil
         guard !Task.isCancelled else { return }
-        await recomputeTaskCosts()
+        await recomputeTaskUsage()
     }
 
-    /// Rebuilds `taskCosts` from the full record set and republishes if it moved.
+    /// Rebuilds `taskUsage` from the full record set and republishes if it moved.
     /// Not `private` so tests can drive a pass without waiting out the coalescing window.
     ///
     /// The pending handle is already released by the time we get here (see
-    /// `runScheduledTaskCostsRecompute`), so a record landing while this pass is in flight
+    /// `runScheduledTaskUsageRecompute`), so a record landing while this pass is in flight
     /// — after the fetch below has taken its snapshot — schedules the next pass instead of
     /// being absorbed into this one and lost.
-    func recomputeTaskCosts() async {
+    func recomputeTaskUsage() async {
         let records = await usageStore.allRecords()
-        var totals: [UUID: Double] = [:]
+        var totals: [UUID: TaskUsage] = [:]
         for record in records {
             guard let taskID = record.taskID else { continue }
-            totals[taskID, default: 0] += costOf(record)
+            totals[taskID, default: TaskUsage()].add(record, cost: costOf(record))
         }
-        // Republish only on an actual change. Records on unpriced models move nothing,
-        // and every publish invalidates every task row observing the map.
-        guard totals != taskCosts else { return }
-        taskCosts = totals
-        await onTaskCostsUpdate?(totals)
+        // Republish only on an actual change, since every publish invalidates every view
+        // observing the map.
+        guard totals != taskUsage else { return }
+        taskUsage = totals
+        await onTaskUsageUpdate?(totals)
     }
 
     // MARK: - Cost math

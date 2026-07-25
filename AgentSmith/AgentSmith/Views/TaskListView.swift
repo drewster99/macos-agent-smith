@@ -493,18 +493,6 @@ struct TaskRowButton: View {
     }
 }
 
-/// Composite key for the task-usage `.task(id:)` modifier. Re-firing must happen
-/// when either the task ID changes (different row) or the task reaches a terminal
-/// status (`.completed` or `.failed`) — that's when the underlying records stop
-/// growing and a fresh fetch is worthwhile.
-///
-/// Cost does NOT use this. It reads `AppViewModel.cachedTaskCost(_:)`, which is live off
-/// `CostBoard`'s rollup; only token totals are still fetched per view and need a key.
-struct TaskUsageLoaderKey: Hashable {
-    let taskID: UUID
-    let isTerminal: Bool
-}
-
 /// Roll-up of every run a parent task has spawned, for the parent's summary line.
 /// `nil` when the task has no runs — an ordinary task shows no summary.
 private struct TaskFamilySummary {

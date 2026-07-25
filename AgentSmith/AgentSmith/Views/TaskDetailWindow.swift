@@ -322,15 +322,9 @@ struct TaskDetailWindow: View {
         }
         .frame(minWidth: 600, minHeight: 400)
         .navigationTitle(task.title)
-        // Lazy-load this task's token totals. The id includes whether the task is in a
-        // terminal status so the loader re-fires when a task we're watching reaches
-        // `.completed` or `.failed`. `force: true` evicts the in-progress partial cached
-        // on first appear so the final value replaces it.
-        //
-        // Cost needs no loader — `cachedTaskCost` reads `CostBoard`'s live rollup.
-        .task(id: TaskUsageLoaderKey(taskID: task.id, isTerminal: task.status.isTerminal)) {
-            await viewModel.loadTaskTokens(task.id, force: true)
-        }
+        // No usage loader: cost and tokens both come from `CostBoard`'s live rollup via
+        // `cachedTaskCost` / `cachedTaskTokens`, so they track a running task rather than
+        // needing a fetch on appear and a re-fetch when it finishes.
     }
 
     private func headerRow(_ task: AgentTask) -> some View {

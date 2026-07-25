@@ -19,6 +19,10 @@ import SwiftLLMKit
 /// - **Calendar configuration.** The shared `CostBoard.calendar` has `firstWeekday = 1`
 ///   (Sunday) and uses `.current` time zone, so the "this week" window means
 ///   Sun-Sat in the user's local zone regardless of locale defaults.
+/// - **Per-task rollup (`taskUsage`).** Cost and tokens grouped by task ID, recomputed
+///   wholesale on a coalesced tick. Must track a task while it RUNS (the figures used to
+///   freeze at whatever had accrued when the task's view first appeared), must exclude
+///   unattributed records, and must follow `UsageStore.backfillTaskID` re-attribution.
 @Suite("CostBoard")
 struct CostBoardTests {
 
@@ -193,7 +197,7 @@ struct CostBoardTests {
     // MARK: - Per-task rollup
 
     @Test("bootstrap groups existing records into per-task totals")
-    func taskCostsBootstrap() async throws {
+    func taskUsageBootstrap() async throws {
         let (store, _) = await makeStore()
         let taskA = UUID()
         let taskB = UUID()
@@ -207,60 +211,69 @@ struct CostBoardTests {
 
         let board = CostBoard(usageStore: store, pricingLookup: Self.lookup)
         await board.bootstrap()
-        let costs = await board.taskCosts
+        let usage = await board.taskUsage
 
-        #expect(costs.count == 2, "only the two attributed tasks should appear")
-        #expect(abs((costs[taskA] ?? 0) - expectedCost(input: 300, output: 300)) < 0.0001)
-        #expect(abs((costs[taskB] ?? 0) - expectedCost(input: 300, output: 300)) < 0.0001)
+        #expect(usage.count == 2, "only the two attributed tasks should appear")
+        #expect(abs((usage[taskA]?.cost ?? 0) - expectedCost(input: 300, output: 300)) < 0.0001)
+        #expect(abs((usage[taskB]?.cost ?? 0) - expectedCost(input: 300, output: 300)) < 0.0001)
+        // Tokens are grouped in the same pass as cost, from the same records.
+        #expect(usage[taskA]?.inputTokens == 300)
+        #expect(usage[taskA]?.outputTokens == 300)
+        #expect(usage[taskB]?.inputTokens == 300)
         await board.stop()
     }
 
     @Test("a record for a running task raises its total without waiting for completion")
-    func taskCostsGrowWhileRunning() async throws {
+    func taskUsageGrowsWhileRunning() async throws {
         let (store, _) = await makeStore()
         let runningTask = UUID()
         let board = CostBoard(usageStore: store, pricingLookup: Self.lookup)
         await board.bootstrap()
 
-        // The regression this guards: a task whose row rendered before it had ANY records
-        // used to display nothing until it reached a terminal status, because the cost was
-        // fetched once and cached. Nothing here marks the task finished.
-        #expect(await board.taskCosts[runningTask] == nil, "no records yet")
+        // The regression this guards: a task whose view rendered before it had ANY records
+        // used to display nothing until it reached a terminal status, because cost and
+        // tokens were each fetched once and cached. Nothing here marks the task finished.
+        #expect(await board.taskUsage[runningTask] == nil, "no records yet")
 
         await store.append(record(at: Date(), input: 1000, output: 500, taskID: runningTask))
         // Longer than the coalescing window so the scheduled recompute has run.
         try await Task.sleep(for: .milliseconds(1500))
-        let afterFirst = await board.taskCosts[runningTask] ?? 0
-        #expect(abs(afterFirst - expectedCost(input: 1000, output: 500)) < 0.0001)
+        let afterFirst = await board.taskUsage[runningTask]
+        #expect(abs((afterFirst?.cost ?? 0) - expectedCost(input: 1000, output: 500)) < 0.0001)
+        #expect(afterFirst?.inputTokens == 1000)
+        #expect(afterFirst?.outputTokens == 500)
 
         await store.append(record(at: Date(), input: 100, output: 100, taskID: runningTask))
         try await Task.sleep(for: .milliseconds(1500))
-        let afterSecond = await board.taskCosts[runningTask] ?? 0
-        #expect(abs(afterSecond - expectedCost(input: 1100, output: 600)) < 0.0001,
-                "the still-running task's total must include both records; was \(afterSecond)")
+        let afterSecond = await board.taskUsage[runningTask]
+        #expect(abs((afterSecond?.cost ?? 0) - expectedCost(input: 1100, output: 600)) < 0.0001,
+                "the still-running task's cost must include both records; was \(afterSecond?.cost ?? 0)")
+        // Tokens track the same records — they must not lag cost.
+        #expect(afterSecond?.inputTokens == 1100)
+        #expect(afterSecond?.outputTokens == 600)
         await board.stop()
     }
 
     @Test("observers are notified when per-task totals change")
-    func taskCostsPublishToObserver() async throws {
+    func taskUsagePublishesToObserver() async throws {
         let (store, _) = await makeStore()
         let taskID = UUID()
         let board = CostBoard(usageStore: store, pricingLookup: Self.lookup)
-        let inbox = TaskCostInbox()
-        await board.setOnTaskCostsUpdate { totals in await inbox.record(totals) }
+        let inbox = TaskUsageInbox()
+        await board.setOnTaskUsageUpdate { totals in await inbox.record(totals) }
         await board.bootstrap()
 
         await store.append(record(at: Date(), input: 400, output: 400, taskID: taskID))
         try await Task.sleep(for: .milliseconds(1500))
 
         let latest = await inbox.latest
-        #expect(abs((latest[taskID] ?? 0) - expectedCost(input: 400, output: 400)) < 0.0001,
+        #expect(abs((latest[taskID]?.cost ?? 0) - expectedCost(input: 400, output: 400)) < 0.0001,
                 "the observer should have received the updated map")
         await board.stop()
     }
 
     @Test("re-attributed records land on the task they were backfilled onto")
-    func taskCostsFollowBackfill() async throws {
+    func taskUsageFollowsBackfill() async throws {
         let (store, _) = await makeStore()
         let sessionID = UUID()
         let taskID = UUID()
@@ -271,22 +284,22 @@ struct CostBoardTests {
 
         let board = CostBoard(usageStore: store, pricingLookup: Self.lookup)
         await board.bootstrap()
-        #expect(await board.taskCosts.isEmpty, "unattributed records belong to no task")
+        #expect(await board.taskUsage.isEmpty, "unattributed records belong to no task")
 
         await store.backfillTaskID(taskID, forSession: sessionID)
-        await board.recomputeTaskCosts()
+        await board.recomputeTaskUsage()
 
-        let costs = await board.taskCosts
-        #expect(abs((costs[taskID] ?? 0) - expectedCost(input: 500, output: 500)) < 0.0001,
+        let costs = await board.taskUsage
+        #expect(abs((costs[taskID]?.cost ?? 0) - expectedCost(input: 500, output: 500)) < 0.0001,
                 "the backfilled records should now be charged to the task")
         await board.stop()
     }
 
-    /// Collects the maps delivered to `setOnTaskCostsUpdate`. An actor because the
+    /// Collects the maps delivered to `setOnTaskUsageUpdate`. An actor because the
     /// callback is `@Sendable` and fires off the test's task.
-    private actor TaskCostInbox {
-        private(set) var latest: [UUID: Double] = [:]
-        func record(_ totals: [UUID: Double]) { latest = totals }
+    private actor TaskUsageInbox {
+        private(set) var latest: [UUID: CostBoard.TaskUsage] = [:]
+        func record(_ totals: [UUID: CostBoard.TaskUsage]) { latest = totals }
     }
 
     @Test("calendar uses Sunday as firstWeekday and the current time zone")
