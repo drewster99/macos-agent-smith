@@ -26,8 +26,6 @@ struct SpendingDashboardView: View {
     /// What the cost-detail sheet is drilling into (nil = no sheet). A specific task, or the
     /// Orchestration bucket (records not attributed to any task).
     @State private var costDetail: CostDetail?
-    /// Row currently hovered for visual highlight (task id, or the orchestration sentinel).
-    @State private var hoveredRow: String?
 
     /// Selection for the cost-detail drill-down sheet.
     private enum CostDetail: Identifiable {
@@ -102,6 +100,10 @@ struct SpendingDashboardView: View {
     }
 
     @State private var ledgerRows: [TaskLedgerRow] = []
+    /// `ledgerRows` after search filter + current sort, precomputed into state so the ledger body
+    /// never sorts 245 rows during a view update (e.g. a hover or chart move). Refreshed by
+    /// `recomputeDisplayRows()` whenever rows, search text, or sort change.
+    @State private var displayRows: [TaskLedgerRow] = []
     @State private var orchestrationSummary: UsageSummary?
     @State private var ledgerSearch: String = ""
     @State private var sortColumn: LedgerColumn = .cost
@@ -225,6 +227,15 @@ struct SpendingDashboardView: View {
             // Project rule: defer @State mutations out of .onChange.
             DispatchQueue.main.async { recomputeDerivedState() }
         }
+        .onChange(of: ledgerSearch) {
+            DispatchQueue.main.async { recomputeDisplayRows() }
+        }
+        // Title sources (summaries + archived + deleted tasks) load asynchronously after launch.
+        // When any grows, re-resolve the ledger's titles so late names fill in without the user
+        // having to switch ranges. Keyed on the combined count — these stores only grow here.
+        .onChange(of: shared.storedTaskSummaries.count + shared.archivedTasks.count + shared.deletedTasks.count) {
+            DispatchQueue.main.async { remapLedgerTitles() }
+        }
         .overlay {
             if isLoading {
                 ProgressView("Loading usage data...")
@@ -237,14 +248,18 @@ struct SpendingDashboardView: View {
             let avgTaskCost = ledgerRows.isEmpty ? 0 : ledgerRows.reduce(0) { $0 + $1.cost } / Double(ledgerRows.count)
             switch detail {
             case .task(let taskID):
-                // The dashboard doesn't hold live AgentTask objects (those live per-session).
-                // Use the global task-summary store to resolve the title/status; the sheet
-                // gracefully degrades when neither is present.
+                // Resolve the real AgentTask from the global inactive store (archived + deleted) so
+                // the sheet gets an authoritative title AND status even for tasks that were never
+                // summarized. `titleOverride` pins the header to the ledger row's resolved title so
+                // the two always agree; the summary is still passed for a summarized, non-inactive
+                // task (e.g. one still live in a session).
+                let inactiveTask = shared.archivedTasks.first(where: { $0.id == taskID })
+                    ?? shared.deletedTasks.first(where: { $0.id == taskID })
                 let summaryEntry = shared.storedTaskSummaries.first(where: { $0.id == taskID })
                 TaskCostDetailSheet(
                     taskID: taskID,
-                    titleOverride: nil,
-                    task: nil,
+                    titleOverride: ledgerRows.first(where: { $0.taskID == taskID })?.title,
+                    task: inactiveTask,
                     taskSummary: summaryEntry,
                     records: filteredRecords.filter { $0.taskID == taskID },
                     allRecordsSummary: currentSummary,
@@ -341,12 +356,55 @@ struct SpendingDashboardView: View {
         // scrolling. `nil` is the Orchestration bucket, kept separate.
         let grouped = agg.byTask(filteredRecords)
         orchestrationSummary = grouped[nil].flatMap { $0.callCount > 0 ? $0 : nil }
-        let taskLookup = Dictionary(shared.storedTaskSummaries.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+        let taskLookup = taskTitleLookup()
         ledgerRows = grouped.compactMap { key, value in
             guard let key else { return nil }
-            let title = taskLookup[key] ?? "Task \(key.uuidString.prefix(8))"
-            return TaskLedgerRow(id: key.uuidString, taskID: key, title: title, summary: value)
+            return TaskLedgerRow(id: key.uuidString, taskID: key, title: ledgerTitle(for: key, using: taskLookup), summary: value)
         }
+        recomputeDisplayRows()
+    }
+
+    /// Task titles keyed by task id, merged from every global source that carries one. A title needs
+    /// no summary — every task already has one — so we don't depend on the (slow, async) summary
+    /// store: the inactive-task store holds the real title for archived, interrupted, failed, and
+    /// recently-deleted tasks and loads from `inactive_tasks.json` independently of the semantic
+    /// engine. Summaries are folded in first; the task's own title then wins where both exist.
+    private func taskTitleLookup() -> [UUID: String] {
+        var lookup: [UUID: String] = [:]
+        for summary in shared.storedTaskSummaries { lookup[summary.id] = summary.title }
+        for task in shared.archivedTasks { lookup[task.id] = task.title }
+        for task in shared.deletedTasks { lookup[task.id] = task.title }
+        return lookup
+    }
+
+    /// A task's display title, or a stable hex fallback for the rare task whose title is in none of
+    /// the global stores (e.g. its records outlived the task object entirely).
+    private func ledgerTitle(for taskID: UUID, using lookup: [UUID: String]) -> String {
+        lookup[taskID] ?? "Task \(taskID.uuidString.prefix(8))"
+    }
+
+    /// Re-resolves ledger titles against the current summary store WITHOUT re-aggregating, then
+    /// refreshes the display rows. Called when `storedTaskSummaries` grows after the initial load so
+    /// late-arriving names fill in on their own, instead of only when the user switches ranges.
+    private func remapLedgerTitles() {
+        guard !ledgerRows.isEmpty else { return }
+        let lookup = taskTitleLookup()
+        var changed = false
+        let updated = ledgerRows.map { row -> TaskLedgerRow in
+            let title = ledgerTitle(for: row.taskID, using: lookup)
+            guard title != row.title else { return row }
+            changed = true
+            return TaskLedgerRow(id: row.id, taskID: row.taskID, title: title, summary: row.summary)
+        }
+        guard changed else { return }
+        ledgerRows = updated
+        recomputeDisplayRows()
+    }
+
+    /// Recomputes the sorted + filtered display rows into `@State`. Cheap (one sort of the pre-built
+    /// array), but kept out of the view body so a hover or unrelated update never triggers it.
+    private func recomputeDisplayRows() {
+        displayRows = sortedFilteredRows
     }
 
     /// The ledger rows after applying the search filter and the current sort. Cheap — sorts a
@@ -393,6 +451,7 @@ struct SpendingDashboardView: View {
             sortColumn = column
             sortAscending = column.defaultAscending
         }
+        recomputeDisplayRows()
     }
 
     /// Fixed-width trailing cell for a ledger column, or a flexible leading cell for the title.
@@ -770,8 +829,26 @@ struct SpendingDashboardView: View {
 
     // MARK: - Section 4: Task Ledger
 
+    /// A tappable ledger row with LOCAL hover-highlight state. Hovering happens constantly while
+    /// scrolling a 245-row table; keeping the hover flag here means only the hovered row re-renders,
+    /// not the whole dashboard body (which would otherwise re-sort and rebuild every row per pointer
+    /// move — the cause of the choppy scroll).
+    private struct LedgerRowButton<Content: View>: View {
+        let onTap: () -> Void
+        @ViewBuilder let content: () -> Content
+        @State private var isHovered = false
+
+        var body: some View {
+            Button(action: onTap, label: { content().contentShape(Rectangle()) })
+                .buttonStyle(.plain)
+                .background(isHovered ? Color.accentColor.opacity(0.08) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .onHover { isHovered = $0 }
+        }
+    }
+
     private func taskLedger() -> some View {
-        let rows = sortedFilteredRows
+        let rows = displayRows
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Tasks").font(AppFonts.sectionHeader)
@@ -800,13 +877,9 @@ struct SpendingDashboardView: View {
                     Text("No tasks match \u{201C}\(ledgerSearch)\u{201D}").font(.caption).foregroundStyle(.secondary).padding(.vertical, 4)
                 } else {
                     ForEach(rows) { row in
-                        Button(action: { costDetail = .task(row.taskID) }, label: {
-                            ledgerRow(title: row.title, summary: row.summary).contentShape(Rectangle())
+                        LedgerRowButton(onTap: { costDetail = .task(row.taskID) }, content: {
+                            ledgerRow(title: row.title, summary: row.summary)
                         })
-                        .buttonStyle(.plain)
-                        .background(hoveredRow == row.id ? Color.accentColor.opacity(0.08) : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .onHover { hovering in hoveredRow = hovering ? row.id : nil }
                     }
                     Text("\(rows.count) task\(rows.count == 1 ? "" : "s")")
                         .font(.caption2).foregroundStyle(.tertiary).padding(.top, 4)
@@ -832,13 +905,9 @@ struct SpendingDashboardView: View {
                 ledgerHeader(sortable: false)
                 Divider()
 
-                Button(action: { costDetail = .orchestration }, label: {
-                    ledgerRow(title: "Orchestration", summary: planningSummary).contentShape(Rectangle())
+                LedgerRowButton(onTap: { costDetail = .orchestration }, content: {
+                    ledgerRow(title: "Orchestration", summary: planningSummary)
                 })
-                .buttonStyle(.plain)
-                .background(hoveredRow == "orchestration" ? Color.accentColor.opacity(0.08) : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .onHover { hovering in hoveredRow = hovering ? "orchestration" : nil }
             }
             .padding(16)
             .background(RoundedRectangle(cornerRadius: 12).fill(AppColors.secondaryBackground))
