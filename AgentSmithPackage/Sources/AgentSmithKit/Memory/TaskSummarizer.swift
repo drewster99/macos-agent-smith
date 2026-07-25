@@ -81,12 +81,9 @@ actor TaskSummarizer {
         await channel.post(stamped)
     }
 
-    private static let maxRetries = 3
-    private static let retryBackoffSeconds: [Double] = [5, 15, 45]
-
     /// Summarizes a task and saves the embedded summary to the memory store.
     ///
-    /// Retries transient HTTP errors (429, 5xx) with exponential backoff.
+    /// Retries transient failures per `LLMRetryPolicy`, shared with every other LLM caller.
     /// Returns the generated summary text on success, or `nil` if summarization failed.
     /// Errors are posted to the channel rather than thrown, since this runs
     /// as a fire-and-forget background operation.
@@ -422,20 +419,6 @@ actor TaskSummarizer {
         }
 
         return sections.joined(separator: "\n\n")
-    }
-
-    /// Returns `true` for transient HTTP errors that are worth retrying (429, 5xx).
-    private static func isRetryableError(_ error: Error) -> Bool {
-        let description = error.localizedDescription
-        // LLMProviderError.httpError includes the status code in its description.
-        // Match 429 (rate limit) and 5xx (server errors like 500, 502, 503, 529).
-        if description.hasPrefix("HTTP 429") { return true }
-        if let range = description.range(of: #"^HTTP 5\d\d"#, options: .regularExpression) {
-            return !range.isEmpty
-        }
-        // Also retry on URLSession-level network errors (timeouts, connection reset, etc.).
-        if (error as NSError).domain == NSURLErrorDomain { return true }
-        return false
     }
 
     public enum SummarizerError: Error, LocalizedError {

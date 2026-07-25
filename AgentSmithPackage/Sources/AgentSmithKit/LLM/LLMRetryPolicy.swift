@@ -127,25 +127,26 @@ public enum LLMRetryPolicy {
         }
     }
 
-    /// Extracts a retry delay stated in an error body rather than the `Retry-After` header.
-    /// Google returns `"retryDelay": "34s"` inside a google.rpc.RetryInfo; some
-    /// OpenAI-compatible backends write "please retry in 12s" into the message.
+    /// Extracts a server-requested retry delay (seconds) from an error *body* for providers that
+    /// don't use the `Retry-After` header. Handles Google/Gemini's `google.rpc.RetryInfo`
+    /// (`"retryDelay": "34s"`) and its "Please retry in 34.376s" phrasing in the message text.
+    /// The prose pattern is anchored on "please retry in" so incidental error prose that merely
+    /// mentions some other "retry in N s" (e.g. describing a background job) can't be mistaken for
+    /// a directive to this client.
     public static func retryAfterFromErrorBody(_ body: String) -> TimeInterval? {
         let patterns = [
             #""retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s""#,
             #"please retry in (\d+(?:\.\d+)?)\s*s"#
         ]
         for pattern in patterns {
-            guard let match = body.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else {
-                continue
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(body.startIndex..<body.endIndex, in: body)
+            if let match = regex.firstMatch(in: body, options: [], range: range),
+               match.numberOfRanges >= 2,
+               let captured = Range(match.range(at: 1), in: body),
+               let value = TimeInterval(body[captured]), value.isFinite, value >= 0 {
+                return value
             }
-            let fragment = String(body[match])
-            guard let numberRange = fragment.range(of: #"\d+(?:\.\d+)?"#, options: .regularExpression),
-                  let seconds = TimeInterval(fragment[numberRange]),
-                  seconds.isFinite, seconds >= 0 else {
-                continue
-            }
-            return seconds
         }
         return nil
     }
