@@ -627,6 +627,8 @@ private struct TaskRow: View {
     let viewModel: AppViewModel
     let onStartRunnableTask: (AgentTask) -> Void
 
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
         // Resolve the run list ONCE per body pass and thread it into the loader key, the loader
         // closure, and the summary. `childTasks(of:)` scans the active + archived lists, so the
@@ -1086,10 +1088,18 @@ private struct TaskRow: View {
     @ViewBuilder
     private func costChip() -> some View {
         if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
-            Text(String(format: "$%.2f", cost))
-                .font(density == .compact ? .caption2.monospacedDigit() : .caption.monospacedDigit())
-                .foregroundStyle(.orange)
-                .fixedSize()
+            // A nested plain button: clicking the money opens the standalone Task Cost window,
+            // while clicking anywhere else on the row still opens Task Detail (the outer button).
+            Button(action: {
+                AgentSmithApp.showOrOpenTaskCostDetail(taskID: task.id, openWindow: openWindow)
+            }, label: {
+                Text(String(format: "$%.2f", cost))
+                    .font(density == .compact ? .caption2.monospacedDigit() : .caption.monospacedDigit())
+                    .foregroundStyle(.orange)
+                    .fixedSize()
+            })
+            .buttonStyle(.plain)
+            .help("Show cost breakdown")
         }
     }
 

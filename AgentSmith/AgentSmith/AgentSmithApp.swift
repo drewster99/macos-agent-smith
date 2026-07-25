@@ -219,6 +219,20 @@ struct AgentSmithApp: App {
         }
         .defaultSize(width: 800, height: 700)
 
+        WindowGroup("Task Cost", for: TaskCostDetailTarget.self) { $target in
+            if let target {
+                TaskCostDetailWindow(taskID: target.taskID, shared: shared)
+                    .background(TaskCostDetailWindowTagger(target: target))
+            } else {
+                ContentUnavailableView(
+                    "Task Not Found",
+                    systemImage: "questionmark.circle",
+                    description: Text("This task's cost data is unavailable.")
+                )
+            }
+        }
+        .defaultSize(width: 1040, height: 860)
+
         Window("Memory Browser", id: "memory-browser") {
             MemoryEditorView(shared: shared)
         }
@@ -300,6 +314,29 @@ struct AgentSmithApp: App {
         }
         openWindow(value: target)
     }
+
+    /// Stable identifier for a task cost window, stamped by `TaskCostDetailWindowTagger`.
+    static func taskCostWindowIdentifier(for taskID: UUID) -> String {
+        "agent-smith-task-cost-\(taskID.uuidString)"
+    }
+
+    /// Brings an existing task cost window for `taskID` to the front, or opens a new one. Mirrors
+    /// `showOrOpenTaskDetail` so clicking the same task's money twice fronts the window instead of
+    /// stacking duplicates.
+    @MainActor
+    static func showOrOpenTaskCostDetail(
+        taskID: UUID,
+        openWindow: OpenWindowAction
+    ) {
+        let id = taskCostWindowIdentifier(for: taskID)
+        for window in NSApp.windows where window.identifier?.rawValue == id {
+            NSApp.activate(ignoringOtherApps: true)
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        openWindow(value: TaskCostDetailTarget(taskID: taskID))
+    }
 }
 
 /// Stamps the hosting NSWindow with a stable identifier derived from the task detail
@@ -335,6 +372,43 @@ private struct TaskDetailWindowTagger: NSViewRepresentable {
         func applyIdentifierIfNeeded() {
             guard let window, let target else { return }
             let id = AgentSmithApp.taskDetailWindowIdentifier(for: target)
+            if window.identifier?.rawValue != id {
+                window.identifier = NSUserInterfaceItemIdentifier(id)
+            }
+        }
+    }
+}
+
+/// Stamps the hosting NSWindow with a stable identifier derived from the task cost target, so
+/// `AgentSmithApp.showOrOpenTaskCostDetail` can find and front an existing window instead of opening
+/// a duplicate. Mirrors `TaskDetailWindowTagger`.
+private struct TaskCostDetailWindowTagger: NSViewRepresentable {
+    let target: TaskCostDetailTarget
+
+    func makeNSView(context: Context) -> NSView {
+        let view = TaggerView()
+        view.target = target
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let view = nsView as? TaggerView else { return }
+        view.target = target
+        view.applyIdentifierIfNeeded()
+    }
+
+    @MainActor
+    private final class TaggerView: NSView {
+        var target: TaskCostDetailTarget?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applyIdentifierIfNeeded()
+        }
+
+        func applyIdentifierIfNeeded() {
+            guard let window, let target else { return }
+            let id = AgentSmithApp.taskCostWindowIdentifier(for: target.taskID)
             if window.identifier?.rawValue != id {
                 window.identifier = NSUserInterfaceItemIdentifier(id)
             }
@@ -593,5 +667,11 @@ struct AgentInspectorTarget: Codable, Hashable, Sendable {
 /// Identifies a Task Detail window instance by session + task ID.
 struct TaskDetailTarget: Codable, Hashable, Sendable {
     let sessionID: UUID
+    let taskID: UUID
+}
+
+/// Identifies a Task Cost window instance by task ID. Global (no session) — the window reconstructs
+/// its data from shared state, so any surface can open it with just the task id.
+struct TaskCostDetailTarget: Codable, Hashable, Sendable {
     let taskID: UUID
 }

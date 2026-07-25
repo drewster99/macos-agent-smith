@@ -18,7 +18,6 @@ struct TaskCostDetailSheet: View {
     /// when the live `AgentTask` isn't reachable from the dashboard.
     let taskSummary: TaskSummaryEntry?
     let records: [UsageRecord]
-    let allRecordsSummary: UsageSummary
     /// Number of distinct tasks in the parent dashboard's filtered time range (for the popover text).
     let taskCountInRange: Int
     /// Average TASK cost in range (total task cost / task count) — computed by the dashboard from
@@ -29,6 +28,9 @@ struct TaskCostDetailSheet: View {
     /// Opens the full Task Detail window for this task. Nil for the Orchestration bucket (no task)
     /// or when the dashboard has no session to open it in — the id then renders as plain text.
     var onOpenTaskDetail: ((UUID) -> Void)? = nil
+    /// Whether to show the "Done" toolbar button. True when presented as a modal sheet; false when
+    /// hosted in a standalone window, which has its own close control.
+    var showsDoneButton: Bool = true
 
     @Environment(\.dismiss) private var dismiss
     @State private var showingVsAvgInfo = false
@@ -77,8 +79,10 @@ struct TaskCostDetailSheet: View {
         .frame(minWidth: 600, minHeight: 500)
         .background(AppColors.background)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }
+            if showsDoneButton {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
     }
@@ -137,7 +141,7 @@ struct TaskCostDetailSheet: View {
                             .popover(isPresented: $showingVsAvgInfo, arrowEdge: .bottom) {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("vs Average").font(.headline)
-                                    Text("This task's TOTAL cost (\(formatCost(summary.totalCostUSD))) divided by the average total cost of a task in the selected range — \(formatCost(avgTaskCost)) across \(taskCountInRange) task\(taskCountInRange == 1 ? "" : "s"). So \(String(format: "%.1f", ratio))× means this task cost \(String(format: "%.1f", ratio)) times the average task.")
+                                    Text("This task's TOTAL cost (\(formatCost(summary.totalCostUSD))) divided by the average cost of a recorded task — \(formatCost(avgTaskCost)) across \(taskCountInRange) task\(taskCountInRange == 1 ? "" : "s"). So \(String(format: "%.1f", ratio))× means this task cost \(String(format: "%.1f", ratio)) times the average task.")
                                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                                 }
                                 .padding(12).frame(width: 340)
@@ -265,23 +269,24 @@ struct TaskCostDetailSheet: View {
     /// Every DISTINCT model configuration that produced a record for this task, in first-seen
     /// order, with the roles that used it and its call count. Grouping is imperative, so it lives
     /// outside the `@ViewBuilder` body.
-    private func configRows() -> [(key: String, config: ModelConfiguration, roles: [AgentRole], calls: Int)] {
+    private func configRows() -> [(key: String, config: ModelConfiguration, roles: [AgentRole], calls: Int, cost: Double)] {
         // Group by CONTENT, not the config's UUID: a config edited in place keeps its id, so
         // id-grouping would fold pre- and post-edit settings into one row showing whichever was
         // seen first. Content grouping shows each distinct setting as its own row and also merges
-        // identical settings across roles.
+        // identical settings across roles. `cost` sums the per-turn cost of every record in the group.
         var order: [String] = []
-        var byKey: [String: (config: ModelConfiguration, roles: Set<AgentRole>, calls: Int)] = [:]
+        var byKey: [String: (config: ModelConfiguration, roles: Set<AgentRole>, calls: Int, cost: Double)] = [:]
         for record in records {
             guard let c = record.configuration else { continue }
             let key = configContentKey(c)
-            if byKey[key] == nil { byKey[key] = (c, [], 0); order.append(key) }
+            if byKey[key] == nil { byKey[key] = (c, [], 0, 0); order.append(key) }
             byKey[key]?.roles.insert(record.agentRole)
             byKey[key]?.calls += 1
+            byKey[key]?.cost += computeTurnCost(record)
         }
         return order.compactMap { key in
             guard let entry = byKey[key] else { return nil }
-            return (key, entry.config, entry.roles.sorted { $0.rawValue < $1.rawValue }, entry.calls)
+            return (key, entry.config, entry.roles.sorted { $0.rawValue < $1.rawValue }, entry.calls, entry.cost)
         }
     }
 
@@ -315,12 +320,13 @@ struct TaskCostDetailSheet: View {
             card(title: rows.count == 1 ? "Configuration" : "Configurations (\(rows.count))") {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 0) {
-                        Text("Model").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Roles").frame(width: 210, alignment: .leading)
+                        Text("Model").frame(width: 130, alignment: .leading)
+                        Text("Roles").frame(maxWidth: .infinity, alignment: .leading)
                         Text("Temp").frame(width: 56, alignment: .trailing)
                         Text("Max Out").frame(width: 70, alignment: .trailing)
                         Text("Context").frame(width: 70, alignment: .trailing)
                         Text("Calls").frame(width: 54, alignment: .trailing)
+                        Text("Cost").frame(width: 72, alignment: .trailing)
                     }
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -329,10 +335,11 @@ struct TaskCostDetailSheet: View {
                         HStack(spacing: 0) {
                             Text(row.config.model)
                                 .lineLimit(1).truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(width: 130, alignment: .leading)
+                                .help(row.config.model)
                             Text(row.roles.map(\.displayName).joined(separator: ", "))
                                 .lineLimit(1).foregroundStyle(.secondary)
-                                .frame(width: 210, alignment: .leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             Text(row.config.temperature.map { String(format: "%.1f", $0) } ?? "—")
                                 .monospacedDigit().frame(width: 56, alignment: .trailing)
                             Text(formatTokenCount(row.config.maxTokens))
@@ -341,6 +348,8 @@ struct TaskCostDetailSheet: View {
                                 .monospacedDigit().frame(width: 70, alignment: .trailing)
                             Text("\(row.calls)")
                                 .monospacedDigit().frame(width: 54, alignment: .trailing)
+                            Text(formatCostAligned(row.cost))
+                                .font(.system(.caption, design: .monospaced)).frame(width: 72, alignment: .trailing)
                         }
                         .font(.caption)
                         .padding(.vertical, 2)
@@ -368,13 +377,13 @@ struct TaskCostDetailSheet: View {
 
             // Header
             HStack(spacing: 0) {
-                Text("#").frame(width: 30, alignment: .trailing)
+                Text("#").frame(width: 30, alignment: .leading)
                 Text("Agent").frame(width: 60, alignment: .leading).padding(.leading, 8)
                 Text("In").frame(width: 60, alignment: .trailing)
                 Text("Out").frame(width: 60, alignment: .trailing)
                 Text("Cost").frame(width: 60, alignment: .trailing)
                 Text("Latency").frame(width: 60, alignment: .trailing)
-                Text("Tools").frame(width: 150, alignment: .leading).padding(.leading, 8)
+                Text("Tools").frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 8)
             }
             .font(.caption2.weight(.semibold))
             .foregroundStyle(.secondary)

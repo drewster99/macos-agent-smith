@@ -28,15 +28,11 @@ struct SpendingDashboardView: View {
     @State private var costDetail: CostDetail?
 
     /// Selection for the cost-detail drill-down sheet.
+    /// Only the Orchestration bucket uses the modal sheet now — it's range-scoped and
+    /// dashboard-specific. A specific task opens the standalone, resizable Task Cost WINDOW instead.
     private enum CostDetail: Identifiable {
-        case task(UUID)
         case orchestration
-        var id: String {
-            switch self {
-            case .task(let id): return id.uuidString
-            case .orchestration: return "orchestration"
-            }
-        }
+        var id: String { "orchestration" }
     }
 
     // MARK: Task ledger (pre-computed rows)
@@ -277,67 +273,18 @@ struct SpendingDashboardView: View {
                 ProgressView("Loading usage data...")
             }
         }
-        .sheet(item: $costDetail) { detail in
-            // Task count and average TASK cost come from the pre-computed ledger rows (task rows
-            // only), so Orchestration/unattributed cost never inflates the average.
-            let taskCount = max(1, ledgerRows.count)
-            let avgTaskCost = ledgerRows.isEmpty ? 0 : ledgerRows.reduce(0) { $0 + $1.cost } / Double(ledgerRows.count)
-            switch detail {
-            case .task(let taskID):
-                // Resolve the real AgentTask from the global inactive store (archived + deleted) so
-                // the sheet gets an authoritative title AND status even for tasks that were never
-                // summarized. `titleOverride` pins the header to the ledger row's resolved title so
-                // the two always agree; the summary is still passed for a summarized, non-inactive
-                // task (e.g. one still live in a session).
-                let inactiveTask = shared.archivedTasks.first(where: { $0.id == taskID })
-                    ?? shared.deletedTasks.first(where: { $0.id == taskID })
-                let summaryEntry = shared.storedTaskSummaries.first(where: { $0.id == taskID })
-                TaskCostDetailSheet(
-                    taskID: taskID,
-                    titleOverride: ledgerRows.first(where: { $0.taskID == taskID })?.title,
-                    task: inactiveTask,
-                    taskSummary: summaryEntry,
-                    records: filteredRecords.filter { $0.taskID == taskID },
-                    allRecordsSummary: currentSummary,
-                    taskCountInRange: taskCount,
-                    averageTaskCostUSD: avgTaskCost,
-                    aggregator: aggregator,
-                    providerNames: providerNames,
-                    onOpenTaskDetail: openTaskDetailAction(for: taskID)
-                )
-            case .orchestration:
-                // Orchestration is not a task, so "vs Average" (a per-task comparison) is hidden (0).
-                TaskCostDetailSheet(
-                    taskID: nil,
-                    titleOverride: "Orchestration",
-                    task: nil,
-                    taskSummary: nil,
-                    records: filteredRecords.filter { $0.taskID == nil },
-                    allRecordsSummary: currentSummary,
-                    taskCountInRange: taskCount,
-                    averageTaskCostUSD: 0,
-                    aggregator: aggregator,
-                    providerNames: providerNames
-                )
-            }
-        }
-    }
-
-    /// The "open task detail" action for the drill-down sheet's task-id link, or nil when the task's
-    /// session can't be resolved at all. The session is taken from the task's OWN usage records
-    /// (every record is stamped with its `sessionID`), NOT from `shared.focusedSessionID` — the
-    /// dashboard is its own window, so by the time it's frontmost the session window has resigned key
-    /// and `focusedSessionID` is nil. Resolving from records also opens an active task in the session
-    /// that actually owns it. Archived/deleted tasks (the common dashboard case) resolve via the
-    /// GLOBAL inactive store in `TaskDetailWindow` regardless of which session we open in.
-    private func openTaskDetailAction(for taskID: UUID) -> ((UUID) -> Void)? {
-        guard let sessionID = allRecords.first(where: { $0.taskID == taskID })?.sessionID
-                ?? shared.focusedSessionID else { return nil }
-        let open = openWindow
-        return { requestedTaskID in
-            AgentSmithApp.showOrOpenTaskDetail(
-                target: TaskDetailTarget(sessionID: sessionID, taskID: requestedTaskID),
-                openWindow: open
+        .sheet(item: $costDetail) { _ in
+            // Orchestration is not a task, so "vs Average" (a per-task comparison) is hidden (0).
+            TaskCostDetailSheet(
+                taskID: nil,
+                titleOverride: "Orchestration",
+                task: nil,
+                taskSummary: nil,
+                records: filteredRecords.filter { $0.taskID == nil },
+                taskCountInRange: max(1, ledgerRows.count),
+                averageTaskCostUSD: 0,
+                aggregator: aggregator,
+                providerNames: providerNames
             )
         }
     }
@@ -927,7 +874,7 @@ struct SpendingDashboardView: View {
                     Text("No tasks match \u{201C}\(ledgerSearch)\u{201D}").font(.caption).foregroundStyle(.secondary).padding(.vertical, 4)
                 } else {
                     ForEach(rows) { row in
-                        LedgerRowButton(onTap: { costDetail = .task(row.taskID) }, content: {
+                        LedgerRowButton(onTap: { AgentSmithApp.showOrOpenTaskCostDetail(taskID: row.taskID, openWindow: openWindow) }, content: {
                             ledgerRow(title: row.title, summary: row.summary)
                         })
                     }

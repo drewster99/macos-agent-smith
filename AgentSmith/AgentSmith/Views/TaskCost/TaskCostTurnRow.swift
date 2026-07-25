@@ -13,9 +13,10 @@ struct TaskCostTurnRow: View {
     let toolNames: String
 
     var body: some View {
-        HStack(spacing: 0) {
+        // Top-aligned so the fixed columns line up with the first line of a wrapped Tools cell.
+        HStack(alignment: .top, spacing: 0) {
             Text("\(displayNumber)")
-                .frame(width: 30, alignment: .trailing)
+                .frame(width: 30, alignment: .leading)
             Text(agentRole.displayName)
                 .foregroundStyle(AppColors.color(for: .agent(agentRole)))
                 .frame(width: 60, alignment: .leading)
@@ -29,8 +30,8 @@ struct TaskCostTurnRow: View {
             Text(latencyFormatted)
                 .frame(width: 60, alignment: .trailing)
             Text(toolNames)
-                .lineLimit(1)
-                .frame(width: 150, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 8)
         }
         .font(.caption2.monospacedDigit())
