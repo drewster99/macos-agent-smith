@@ -683,6 +683,11 @@ extension OrchestrationRuntime {
         } else {
             securityGate = nil
         }
+        // Count this criterion's LLM judgment toward the inspector's concurrency strip for as long
+        // as the evaluation round is in flight. Independent per-criterion runs stack here, so several
+        // concurrent validators show as N.
+        liveActivityTracker.begin(.validatorEvaluation)
+        defer { liveActivityTracker.end(.validatorEvaluation) }
         return await EvaluationRunner.runMessages(
             definition: definition,
             systemPrompt: systemPrompt,

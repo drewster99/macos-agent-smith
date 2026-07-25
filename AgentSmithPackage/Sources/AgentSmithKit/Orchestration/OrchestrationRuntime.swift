@@ -45,6 +45,12 @@ public actor OrchestrationRuntime {
     public let taskStore: TaskStore
     public let memoryStore: MemoryStore
 
+    /// Live per-type count of in-flight operations (Brown workers, security/validator evaluations,
+    /// summarizer runs, memory searches) for the inspector's concurrency meter. `nonisolated` so the
+    /// UI can attach its `onChange` and read `current()` without hopping the actor; the tracker is an
+    /// internally-locked `Sendable` class, and each subsystem brackets its own work into it.
+    public nonisolated let liveActivityTracker = LiveActivityTracker()
+
     /// Fixed UUID representing the human user for private Smith→User messages
     /// (`00000000-0000-0000-0000-000000000001`).
     public static let userID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
@@ -1943,6 +1949,11 @@ public actor OrchestrationRuntime {
         await powerMgr.start()
         powerManager = powerMgr
 
+        // Let the memory store bump the live-activity counter while a search is in flight, so
+        // the inspector's concurrency strip shows semantic/lexical queries alongside the agents.
+        // Idempotent — the tracker is runtime-scoped, so re-setting on every start is harmless.
+        await memoryStore.setActivityTracker(liveActivityTracker)
+
         // Create the TaskSummarizer only if a summarizer model is explicitly configured.
         // If not configured, task summarization is silently skipped.
         if let summarizerProvider = llmProviders[.summarizer],
@@ -1956,7 +1967,8 @@ public actor OrchestrationRuntime {
                 usageStore: usageStore,
                 configuration: summarizerConfig,
                 providerType: providerAPITypes[.summarizer]?.rawValue ?? "",
-                sessionID: sessionID
+                sessionID: sessionID,
+                activityTracker: liveActivityTracker
             )
         } else {
             taskSummarizer = nil
@@ -3120,6 +3132,7 @@ public actor OrchestrationRuntime {
                 }
             },
             attachmentURLProvider: attachmentURLProviderClosure,
+            activityTracker: liveActivityTracker,
             hasToolSucceeded: { [executionTracker] toolCallID in
                 await executionTracker.hasSucceeded(toolCallID: toolCallID)
             },
@@ -3410,6 +3423,8 @@ public actor OrchestrationRuntime {
             stopLogger.warning("spawnBrown: aborted or stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")
             return nil
         }
+        // A Brown worker just went live — refresh the concurrency meter's Brown count.
+        liveActivityTracker.set(.brownWorker, to: supervisor.handles(role: .brown).count)
 
         // Label the worker's channel messages with its task so the UI can distinguish
         // workers ("Brown" alone is ambiguous once several run concurrently).
@@ -3452,6 +3467,8 @@ public actor OrchestrationRuntime {
             stopLogger.notice("Runtime.terminateAgent agent not found id=\(agentSlug, privacy: .public) — early return")
             return false
         }
+        // A worker was removed — refresh the concurrency meter's Brown count.
+        liveActivityTracker.set(.brownWorker, to: supervisor.handles(role: .brown).count)
         let agent = handle.agent
         let agentRole: AgentRole? = handle.role
         let evaluator = handle.evaluator
@@ -3897,6 +3914,8 @@ Message:
         // discipline as stopAll) so a concurrent teardown interleaving with the archive work
         // below can never observe a half-removed agent.
         guard let handle = supervisor.remove(id: id) else { return }
+        // A worker was removed — refresh the concurrency meter's Brown count.
+        liveActivityTracker.set(.brownWorker, to: supervisor.handles(role: .brown).count)
         let agent = handle.agent
         let role: AgentRole? = handle.role
         let evaluator = handle.evaluator

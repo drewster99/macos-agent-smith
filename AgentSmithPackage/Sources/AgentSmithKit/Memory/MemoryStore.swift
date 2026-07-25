@@ -168,6 +168,9 @@ public actor MemoryStore {
     /// Fired after each `searchMemories` / `searchAll`, carrying the query, hit counts, and latency
     /// for the inspector's Memory log (the read-side analog of the Security Agent's evaluation log).
     private var onQueryRecorded: (@Sendable (MemoryQueryRecord) -> Void)?
+    /// Bumps the "memory search" in-flight count for the concurrency meter. Optional so the store
+    /// works headless (tests) with no tracker attached.
+    private var activityTracker: LiveActivityTracker?
     /// Set when `searchAll` bumps retrieval stats. Decoupled from `onChange?()` so reads don't
     /// trigger a full-corpus re-serialization; flushed lazily by `persistRetrievalStatsIfNeeded()`.
     private var retrievalStatsDirty = false
@@ -184,6 +187,11 @@ public actor MemoryStore {
     /// Registers a callback fired after each memory-store query with its timing + hit counts.
     public func setOnQueryRecorded(_ handler: @escaping @Sendable (MemoryQueryRecord) -> Void) {
         onQueryRecorded = handler
+    }
+
+    /// Attaches the shared live-activity tracker so searches count toward the concurrency meter.
+    public func setActivityTracker(_ tracker: LiveActivityTracker) {
+        activityTracker = tracker
     }
 
     /// Flushes any pending retrieval-stat bumps accumulated on the read path. If stats are
@@ -623,6 +631,9 @@ public actor MemoryStore {
         threshold: Double = 0.10,
         source: String = "system"
     ) async throws -> [MemorySearchResult] {
+        let tracker = activityTracker
+        tracker?.begin(.memorySearch)
+        defer { tracker?.end(.memorySearch) }
         let start = Date()
         let queryVector = try await engine.embed(query)
         try Self.validate(embedding: queryVector)
@@ -695,6 +706,9 @@ public actor MemoryStore {
         excludeDeletedTasks: Bool = true,
         source: String = "system"
     ) async throws -> [TaskSummarySearchResult] {
+        let tracker = activityTracker
+        tracker?.begin(.memorySearch)
+        defer { tracker?.end(.memorySearch) }
         let start = Date()
         let queryVector = try await engine.embed(query)
         try Self.validate(embedding: queryVector)
@@ -783,6 +797,9 @@ public actor MemoryStore {
         excludeDeletedTasks: Bool = true,
         source: String = "system"
     ) async throws -> SemanticSearchResults {
+        let tracker = activityTracker
+        tracker?.begin(.memorySearch)
+        defer { tracker?.end(.memorySearch) }
         let start = Date()
         // Each pool gets its own (optionally instruction-prefixed) query embedding. Reuse the
         // memory vector for tasks when the prefixed queries are identical — the common (no-prefix
