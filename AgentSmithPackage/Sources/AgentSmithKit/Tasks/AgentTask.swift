@@ -27,9 +27,10 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     public var lastBrownContext: String?
     /// LLM-generated summary of the task (populated after completion/failure).
     public var summary: String?
-    /// Relevant memories retrieved at task creation, for Brown's context.
+    /// Relevant memories retrieved at task creation AND at each template instantiation, for the
+    /// worker's context (a repeatedly-run template thus picks up newly-accumulated memories).
     public var relevantMemories: [RelevantMemory]?
-    /// Relevant prior task summaries retrieved at task creation.
+    /// Relevant prior task summaries retrieved at creation and at each template instantiation.
     public var relevantPriorTasks: [RelevantPriorTask]?
     /// When set, the task is held in `.scheduled` status (or `.pending` after the time
     /// arrives) and will not be auto-run by the queue until this date passes. The runtime

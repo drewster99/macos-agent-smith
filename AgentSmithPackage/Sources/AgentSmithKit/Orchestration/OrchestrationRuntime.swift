@@ -1578,8 +1578,35 @@ public actor OrchestrationRuntime {
     }
 
     /// Returns the currently active UUID for the given role, or nil if no such agent is running.
+    ///
+    /// Safe for ADDRESSING only on single-instance roles (`.smith`, `.summarizer`,
+    /// `.securityAgent`). Brown is a pool — `firstHandle` returns the OLDEST live worker,
+    /// which is an arbitrary answer to "which worker?" once more than one is running, so
+    /// anything addressing a worker must go through `liveWorkerID(taskID:)`. Passing `.brown`
+    /// is still fine for a presence check ("is any worker alive?"), which is all the
+    /// Brown-activity digest asks of it.
     public func agentIDForRole(_ role: AgentRole) -> UUID? {
         supervisor.firstHandle(role: role)?.id
+    }
+
+    /// The live worker for `taskID`, resolved task-first rather than role-first. Nil when no
+    /// live worker owns the task.
+    ///
+    /// Consults both bindings, because neither alone is complete: the handle carries a task
+    /// stamp, but the spawn-then-assign paths never set it, so the task's `assigneeIDs`
+    /// intersected with the live Brown registry is the fallback. That intersection is also
+    /// what `taskStore.taskForAgent` reads in the opposite direction, so worker→task and
+    /// task→worker agree by construction.
+    ///
+    /// A task has at most one live worker (a spawn assigns exactly one; termination
+    /// unassigns). If that invariant is ever broken this returns nil rather than picking
+    /// arbitrarily — an ambiguous answer here is what misdelivers a message to the wrong
+    /// worker, so callers get an honest "no worker" and report it.
+    public func liveWorkerID(taskID: UUID) async -> UUID? {
+        if let stamped = supervisor.workerHandle(taskID: taskID)?.id { return stamped }
+        guard let task = await taskStore.task(id: taskID) else { return nil }
+        let live = task.assigneeIDs.filter { supervisor.role(of: $0) == .brown }
+        return live.count == 1 ? live[0] : nil
     }
 
     /// Starts a task. Despite the historical name, this is no longer a full system
@@ -1660,6 +1687,14 @@ public actor OrchestrationRuntime {
             await taskStore.amendDescription(id: instance.id, amendment: amendment)
         }
         let announced = await taskStore.task(id: instance.id) ?? instance
+        // Fetch relevant context for THIS run (not just at template authoring) so a repeatedly-run
+        // template picks up memories accumulated since — attached before the worker's briefing reads it.
+        await TaskContextRetrieval.attachRelevantContext(
+            taskID: instance.id,
+            query: announced.title + " " + announced.renderedDescriptionWithTemplateInputs(),
+            memoryStore: memoryStore,
+            taskStore: taskStore
+        )
         await taskStore.addUpdate(id: taskID, message: "Started instance \(instance.id.uuidString) from this template.")
         await channel.post(ChannelMessage(
             sender: .system,
@@ -3651,6 +3686,10 @@ public actor OrchestrationRuntime {
             agentIDForRole: { [weak self] role in
                 guard let self else { return nil }
                 return await self.agentIDForRole(role)
+            },
+            workerIDForTask: { [weak self] taskID in
+                guard let self else { return nil }
+                return await self.liveWorkerID(taskID: taskID)
             },
             onSelfTerminate: { [weak self] in
                 guard let self else { return }

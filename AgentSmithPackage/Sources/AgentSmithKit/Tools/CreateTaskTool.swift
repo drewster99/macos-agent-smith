@@ -367,57 +367,23 @@ public struct CreateTaskTool: AgentTool {
             }
         }
 
-        // Search semantic memory for relevant context to attach to this task.
-        let searchQuery = title + " " + description
+        // Search semantic memory + prior tasks for relevant context to attach to this task.
+        let attached = await TaskContextRetrieval.attachRelevantContext(
+            taskID: task.id,
+            query: title + " " + description,
+            memoryStore: context.memoryStore,
+            taskStore: context.taskStore
+        )
         var contextNote = ""
-        do {
-            let results = try await context.memoryStore.searchAll(
-                query: searchQuery,
-                memoryLimit: 3,
-                taskLimit: 3,
-                memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
-                taskCosineGate: MemoryStore.taskInjectionCosineGate,
-                memoryInstruction: MemoryStore.memoryRetrievalInstruction,
-                taskInstruction: MemoryStore.taskRetrievalInstruction
-            )
-            if !results.isEmpty {
-                let memories: [RelevantMemory]? = results.memories.isEmpty ? nil : results.memories.map {
-                    RelevantMemory(
-                        content: $0.memory.content,
-                        tags: $0.memory.tags,
-                        similarity: $0.similarity,
-                        createdAt: $0.memory.createdAt,
-                        lastUpdatedAt: $0.memory.lastUpdatedAt
-                    )
-                }
-                let priorTasks: [RelevantPriorTask]? = results.taskSummaries.isEmpty ? nil : results.taskSummaries.map {
-                    RelevantPriorTask(
-                        taskID: $0.summary.id,
-                        title: $0.summary.title,
-                        summary: $0.summary.summary,
-                        similarity: $0.similarity,
-                        latestDate: $0.summary.createdAt
-                    )
-                }
-                await context.taskStore.setRelevantContext(
-                    id: task.id,
-                    memories: memories,
-                    priorTasks: priorTasks
-                )
-
-                var parts: [String] = []
-                if let memories, !memories.isEmpty {
-                    parts.append("\(memories.count) relevant memor\(memories.count == 1 ? "y" : "ies")")
-                }
-                if let priorTasks, !priorTasks.isEmpty {
-                    parts.append("\(priorTasks.count) relevant prior task\(priorTasks.count == 1 ? "" : "s")")
-                }
-                if !parts.isEmpty {
-                    contextNote = " Attached: \(parts.joined(separator: ", "))."
-                }
-            }
-        } catch {
-            // Memory search failure is non-fatal — task still gets created.
+        var noteParts: [String] = []
+        if !attached.memories.isEmpty {
+            noteParts.append("\(attached.memories.count) relevant memor\(attached.memories.count == 1 ? "y" : "ies")")
+        }
+        if !attached.priorTasks.isEmpty {
+            noteParts.append("\(attached.priorTasks.count) relevant prior task\(attached.priorTasks.count == 1 ? "" : "s")")
+        }
+        if !noteParts.isEmpty {
+            contextNote = " Attached: \(noteParts.joined(separator: ", "))."
         }
 
         // Build metadata for the task_created channel message, including any retrieved context.

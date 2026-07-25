@@ -247,6 +247,14 @@ struct RunTaskTool: AgentTool {
             }
             await context.taskStore.addUpdate(id: task.id, message: "Started instance \(instance.id.uuidString) from this template.")
             let announced = await context.taskStore.task(id: instance.id) ?? instance
+            // Fetch relevant context for THIS run (not just at template authoring) so a repeatedly-run
+            // template picks up memories accumulated since — attached before the worker's briefing reads it.
+            await TaskContextRetrieval.attachRelevantContext(
+                taskID: instance.id,
+                query: announced.title + " " + announced.renderedDescriptionWithTemplateInputs(),
+                memoryStore: context.memoryStore,
+                taskStore: context.taskStore
+            )
             await context.post(ChannelMessage(
                 sender: .system,
                 content: announced.title,
