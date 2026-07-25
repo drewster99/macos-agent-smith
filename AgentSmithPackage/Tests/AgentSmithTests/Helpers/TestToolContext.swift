@@ -75,6 +75,13 @@ enum TestToolContext {
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
+            // Stands in for OrchestrationRuntime.composeBrownTaskBriefing. Any test that drives a
+            // Brown far enough to compact (the empty-response and context-overflow paths both
+            // rebuild) needs this; without it the rebuild fails closed and prunes instead.
+            composeTaskBriefing: { [taskStore] taskID in
+                guard let task = await taskStore.task(id: taskID) else { return nil }
+                return "Task: \"\(task.title)\"\n\n\(task.description)"
+            },
             scheduleWake: scheduleWake,
             reportInboundUserMessage: reportInboundUserMessage,
             memoryStore: memoryStore,

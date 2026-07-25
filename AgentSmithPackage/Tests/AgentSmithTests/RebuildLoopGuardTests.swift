@@ -82,6 +82,13 @@ struct RebuildLoopGuardTests {
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in .brown },
+            // Stands in for OrchestrationRuntime.composeBrownTaskBriefing. `rebuildContextFromTask`
+            // fails closed without it, which would prune instead of rebuild and never reach the
+            // guard this test exercises.
+            composeTaskBriefing: { [taskStore] taskID in
+                guard let task = await taskStore.task(id: taskID) else { return nil }
+                return "Task: \"\(task.title)\"\n\n\(task.description)"
+            },
             memoryStore: memoryStore,
             setToolExecutionStatus: { _, _ in },
             hasToolSucceeded: { _ in false },

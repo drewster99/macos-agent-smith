@@ -220,6 +220,16 @@ public struct ToolContext: Sendable {
     /// Hands a just-submitted task to the acceptance-validation system. Called by
     /// `task_complete` after setting the result and the `.validating` status.
     public let beginTaskValidation: @Sendable (UUID) async -> Void
+    /// Recomposes the worker briefing for a task — byte-for-byte the same text a freshly
+    /// spawned worker is seeded with (acceptance criteria, step plan, working directories,
+    /// prior progress, last working state). Returns nil when the task is unknown.
+    ///
+    /// Exists so `rebuildContextFromTask` can re-seed a compacted worker from the ONE
+    /// briefing composer instead of a thinner parallel copy of it. The parallel copy silently
+    /// dropped the criteria, the step plan, the workspace paths, and the template-input
+    /// substitution, so a worker that compacted mid-task came back missing the contract it
+    /// was being judged against and the directories it was supposed to write evidence into.
+    public let composeTaskBriefing: @Sendable (UUID) async -> String?
     /// How many tasks may run concurrently (each with its own worker). Task-starting
     /// tools compare in-progress task counts against this. Defaults to 1 for contexts
     /// built outside the runtime.
@@ -357,6 +367,11 @@ public struct ToolContext: Sendable {
         agentIDForRole: @escaping @Sendable (AgentRole) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
         beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
+        // Unlike the trackers below, an unwired composer does NOT `assertionFailure`: nil is a
+        // meaningful answer here, and `rebuildContextFromTask` already reports it as a channel
+        // error and falls back to pruning the agent's own history. Aborting the process would
+        // be a harsher response than the condition warrants, and the diagnostic is already loud.
+        composeTaskBriefing: @escaping @Sendable (UUID) async -> String? = { _ in nil },
         workerCapacity: @escaping @Sendable () async -> Int = { 1 },
         isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
@@ -417,6 +432,7 @@ public struct ToolContext: Sendable {
         self.agentIDForRole = agentIDForRole
         self.onSelfTerminate = onSelfTerminate
         self.beginTaskValidation = beginTaskValidation
+        self.composeTaskBriefing = composeTaskBriefing
         self.workerCapacity = workerCapacity
         self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange

@@ -3588,77 +3588,93 @@ public actor AgentActor {
         Task.detached {
             await ctx.post(ChannelMessage(
                 sender: .system,
-                content: "Aggressively pruned \(prunedCount) messages for \(roleName) (no running task for rebuild)."
+                content: "Aggressively pruned \(prunedCount) messages for \(roleName) (task-state rebuild unavailable)."
             ))
         }
     }
 
-    /// Rebuilds Brown's conversation history from the current running task's data.
+    /// Reports a failed task-state rebuild as a channel error and logs it.
+    ///
+    /// This is the fail-closed leg of `rebuildContextFromTask`: the agent keeps running on a
+    /// sliding-window prune of its own history rather than adopting a task that isn't its own,
+    /// but the condition is anomalous — a worker exists to run a task — so it is surfaced as an
+    /// error rather than absorbed silently.
+    private func postRebuildFailure(_ reason: String) async {
+        let roleName = configuration.role.displayName
+        let agentIDPrefix = String(id.uuidString.prefix(8))
+        Self.stopLogger.error(
+            "rebuildContextFromTask failed role=\(roleName, privacy: .public) agent=\(agentIDPrefix, privacy: .public) reason=\(reason, privacy: .public)"
+        )
+        await toolContext.post(ChannelMessage(
+            sender: .system,
+            content: "Cannot rebuild \(roleName)'s context from task state: \(reason). Falling back to pruning the agent's own history — it will NOT be re-seeded from another task.",
+            metadata: ["isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+        ))
+    }
+
+    /// Rebuilds Brown's conversation history from ITS OWN task's data.
     ///
     /// Completely replaces the conversation history with:
     /// 1. The original system prompt
-    /// 2. A synthesized task instruction built from the task's current state (title, description,
-    ///    all progress updates, relevant memories/prior tasks)
+    /// 2. A freshly composed worker briefing — the SAME text a newly spawned worker gets
     /// 3. The last complete assistant + tool-result exchange from the old history (for continuity)
     ///
     /// This is far more efficient than pruning because task updates are a compressed log
     /// of accomplishments (~1 line each) vs the verbose tool call/result pairs they replaced.
     /// It also eliminates tool-pair stitching bugs that can cause API errors.
     ///
-    /// - Returns: `true` if a running task was found and context was rebuilt; `false` otherwise.
+    /// **Task binding.** The task comes from `taskForAgent` — this agent's own assignment —
+    /// and nothing else. This method used to take `allTasks().first(where: { $0.status ==
+    /// .running })`, and `allTasks()` sorts newest-first, so with more than one worker live
+    /// EVERY compacting worker deterministically adopted the most recently created running
+    /// task's identity. Observed 2026-07-24: a localization worker compacted while a second
+    /// worker's audit task was running, came back believing it was the audit worker, and —
+    /// having also lost its own progress log to the swap — discarded several thousand
+    /// uncommitted translations it no longer remembered making.
+    ///
+    /// `taskForAgent` accepts any actionable status, not just `.running` as the old lookup did.
+    /// That widening is deliberate: it is the SAME binding `task_update`, `task_complete`,
+    /// `manage_steps`, and `request_help` resolve through, so what the rebuild reads is by
+    /// construction what those tools write to. A second, narrower notion of "this worker's task"
+    /// is how the two came to disagree in the first place.
+    ///
+    /// **Fails closed.** A worker with no assignment, or a briefing that can't be composed,
+    /// yields `false` and an error on the channel. Callers fall back to `forceAggressivePrune`,
+    /// which keeps a window of the agent's OWN history. Rebuilding from a guessed task is
+    /// never the fallback — a plausible-looking envelope belonging to someone else is far
+    /// more dangerous than a truncated one belonging to nobody.
+    ///
+    /// - Returns: `true` if this agent's task was found and context was rebuilt; `false` otherwise.
     private func rebuildContextFromTask() async -> Bool {
-        let allTasks = await toolContext.taskStore.allTasks()
-        guard let task = allTasks.first(where: { $0.status == .running }) else {
+        guard let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) else {
+            await postRebuildFailure("it has no assigned task to rebuild from")
+            return false
+        }
+        guard let briefing = await toolContext.composeTaskBriefing(task.id) else {
+            await postRebuildFailure("the briefing for task \"\(task.title)\" could not be composed")
             return false
         }
 
         // Extract the last complete tool exchange before clearing history.
         let lastExchange = extractLastToolExchange()
 
-        // Post a task update so the rebuild is visible in the task's progress log.
+        let instruction = """
+            \(briefing)
+
+            Your conversation history was cleared because it exceeded the model's context window. \
+            The briefing above is your task's CURRENT state, re-read from the task store just now — \
+            its progress log reflects your work so far. Continue working on this task from where you \
+            left off. Do not repeat work that the progress updates show is already done, and do not \
+            discard or revert work on the assumption that you never did it. \
+            You are already this task's assigned worker — do not start it again; just continue.
+            """
+
+        // Post the rebuild marker AFTER composing the briefing, so the briefing carries the
+        // work log rather than this bookkeeping line.
         await toolContext.taskStore.addUpdate(
             id: task.id,
             message: "Context cleared due to size limits — rebuilding from task state and continuing work."
         )
-
-        // Rebuild conversation: system prompt + fresh task instruction.
-        var parts: [String] = []
-
-        if let memories = task.relevantMemories, !memories.isEmpty {
-            let memoryLines = memories.map { "- \($0.content) (similarity: \(String(format: "%.2f", $0.similarity)))" }
-            parts.append("Relevant memories:\n\(memoryLines.joined(separator: "\n"))")
-        }
-        if let priorTasks = task.relevantPriorTasks, !priorTasks.isEmpty {
-            let taskLines = priorTasks.map { priorTask in
-                "- \(priorTask.title): \(priorTask.summary) (similarity: \(String(format: "%.2f", priorTask.similarity))) — task_id: \(priorTask.taskID.uuidString)"
-            }
-            parts.append("Relevant prior task summaries (call `get_task_details(task_ids: [...])` with up to 10 IDs at once if you need full details):\n\(taskLines.joined(separator: "\n"))")
-        }
-
-        parts.append("""
-            Task: "\(task.title)"
-            Task ID: \(task.id.uuidString)
-
-            \(task.description)
-            """)
-
-        if !task.updates.isEmpty {
-            let history = task.updates.map { "- \($0.message)" }.joined(separator: "\n")
-            parts.append("Progress so far:\n\(history)")
-        }
-
-        if let brownContext = task.lastBrownContext {
-            parts.append("Last known working state:\n\(brownContext)")
-        }
-
-        parts.append("""
-            Your conversation history was cleared because it exceeded the model's context window. \
-            The task progress above reflects your work so far. Continue working on this task from where you left off. \
-            Do not repeat work that the progress updates show is already done. \
-            This task is already running — continue from the progress above.
-            """)
-
-        let instruction = parts.joined(separator: "\n\n")
 
         conversationHistory = [
             conversationHistory[0],  // System prompt

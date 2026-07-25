@@ -3659,6 +3659,10 @@ public actor OrchestrationRuntime {
             beginTaskValidation: { [weak self] taskID in
                 await self?.startTaskValidation(taskID: taskID)
             },
+            composeTaskBriefing: { [weak self] taskID in
+                guard let self, let task = await self.taskStore.task(id: taskID) else { return nil }
+                return await self.composeBrownTaskBriefing(for: task)
+            },
             workerCapacity: { [weak self] in
                 await self?.maxConcurrentWorkers ?? 1
             },
