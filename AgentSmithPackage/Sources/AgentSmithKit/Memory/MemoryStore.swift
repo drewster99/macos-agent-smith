@@ -162,7 +162,19 @@ public actor MemoryStore {
 
     // MARK: - Memory Operations
 
-    /// Saves a new memory, embedding the content as a single L2-normalized vector
+    /// Scheme token folded into a MEMORY's embedding signature. Bump it whenever the TEXT fed to the
+    /// embedder changes independently of the model, so existing vectors are detected as stale and
+    /// re-embedded. `tags1` = `embeddingSourceText` (content + tags); memories previously embedded
+    /// content only. Task summaries deliberately keep the bare model identifier — their embedding
+    /// text is unchanged, so this bump must not force them to re-embed.
+    private static let memoryEmbeddingScheme = "tags1"
+
+    /// The signature stamped on freshly-embedded MEMORIES (model identifier + scheme token).
+    private var memoryEmbeddingSignature: String {
+        "\(engine.model.identifier)#\(Self.memoryEmbeddingScheme)"
+    }
+
+    /// Saves a new memory, embedding its content + tags as a single L2-normalized vector
     /// using the current `SemanticSearchEngine`.
     @discardableResult
     public func save(
@@ -171,7 +183,7 @@ public actor MemoryStore {
         tags: [String] = [],
         sourceTaskID: UUID? = nil
     ) async throws -> MemoryEntry {
-        let vector = try await engine.embed(content)
+        let vector = try await engine.embed(MemoryEntry.embeddingSourceText(content: content, tags: tags))
         try Self.validate(embedding: vector)
         let entry = MemoryEntry(
             content: content,
@@ -179,7 +191,7 @@ public actor MemoryStore {
             source: source,
             tags: tags,
             sourceTaskID: sourceTaskID,
-            embeddingModelID: engine.model.identifier
+            embeddingModelID: memoryEmbeddingSignature
         )
         memories[entry.id] = entry
         onChange?()
@@ -200,10 +212,11 @@ public actor MemoryStore {
         guard let preEmbed = memories[id] else { return nil }
         let newContent = content ?? preEmbed.content
         let newTags = tags ?? preEmbed.tags
-        let reembedded = content != nil && content != preEmbed.content
+        // The embedding covers content + tags, so a tag-only edit must re-embed too.
+        let reembedded = newContent != preEmbed.content || newTags != preEmbed.tags
         let newEmbedding: [Float]
         if reembedded {
-            newEmbedding = try await engine.embed(newContent)
+            newEmbedding = try await engine.embed(MemoryEntry.embeddingSourceText(content: newContent, tags: newTags))
             try Self.validate(embedding: newEmbedding)
         } else {
             newEmbedding = preEmbed.embedding
@@ -226,7 +239,7 @@ public actor MemoryStore {
             retrievalCount: current.retrievalCount,
             lastUpdatedAt: Date(),
             lastUpdatedBy: updatedBy,
-            embeddingModelID: reembedded ? engine.model.identifier : current.embeddingModelID
+            embeddingModelID: reembedded ? memoryEmbeddingSignature : current.embeddingModelID
         )
         memories[id] = updated
         onChange?()
@@ -339,9 +352,10 @@ public actor MemoryStore {
     /// differs from the engine's current model identifier (and have re-embeddable text). Cheap; runs
     /// no embeddings. Lets the caller decide whether to show a progress UI before starting.
     public func staleEntryCount() -> Int {
-        let signature = engine.model.identifier
-        let mem = memories.values.filter { $0.embeddingModelID != signature && !$0.content.isEmpty }.count
-        let task = taskSummaries.values.filter { $0.embeddingModelID != signature && !$0.embeddingSourceText.isEmpty }.count
+        let memSignature = memoryEmbeddingSignature
+        let taskSignature = engine.model.identifier
+        let mem = memories.values.filter { $0.embeddingModelID != memSignature && !$0.content.isEmpty }.count
+        let task = taskSummaries.values.filter { $0.embeddingModelID != taskSignature && !$0.embeddingSourceText.isEmpty }.count
         return mem + task
     }
 
@@ -350,7 +364,8 @@ public actor MemoryStore {
     private static let reembedCheckpointInterval = 32
 
     public func reembedStaleEntries() async -> (memories: Int, taskSummaries: Int, failed: Int) {
-        let signature = engine.model.identifier
+        let memSignature = memoryEmbeddingSignature
+        let taskSignature = engine.model.identifier
         let start = Date()
         var memCount = 0, taskCount = 0, failed = 0
         // Each onChange enqueues a snapshot write of what's been re-embedded so far, so a kill
@@ -359,19 +374,20 @@ public actor MemoryStore {
             if (memCount + taskCount) % Self.reembedCheckpointInterval == 0 { onChange?() }
         }
 
-        for id in memories.filter({ $0.value.embeddingModelID != signature }).map(\.key) {
-            guard let entry = memories[id], entry.embeddingModelID != signature, !entry.content.isEmpty else { continue }
+        for id in memories.filter({ $0.value.embeddingModelID != memSignature }).map(\.key) {
+            guard let entry = memories[id], entry.embeddingModelID != memSignature, !entry.content.isEmpty else { continue }
             do {
-                let vector = try await engine.embed(entry.content)
+                let vector = try await engine.embed(entry.embeddingSourceText)
                 try Self.validate(embedding: vector)
-                // Re-read post-suspension (actor reentrancy): skip if deleted or content changed.
-                guard let cur = memories[id], cur.content == entry.content else { continue }
+                // Re-read post-suspension (actor reentrancy): skip if deleted, or content/tags changed
+                // (the embedding now depends on tags too, so a concurrent tag edit invalidates it).
+                guard let cur = memories[id], cur.content == entry.content, cur.tags == entry.tags else { continue }
                 memories[id] = MemoryEntry(
                     id: cur.id, content: cur.content, embedding: vector, source: cur.source,
                     tags: cur.tags, sourceTaskID: cur.sourceTaskID, createdAt: cur.createdAt,
                     lastRetrievedAt: cur.lastRetrievedAt, retrievalCount: cur.retrievalCount,
                     lastUpdatedAt: cur.lastUpdatedAt, lastUpdatedBy: cur.lastUpdatedBy,
-                    embeddingModelID: signature
+                    embeddingModelID: memSignature
                 )
                 memCount += 1
                 checkpointIfNeeded()
@@ -381,8 +397,8 @@ public actor MemoryStore {
             }
         }
 
-        for id in taskSummaries.filter({ $0.value.embeddingModelID != signature }).map(\.key) {
-            guard let entry = taskSummaries[id], entry.embeddingModelID != signature,
+        for id in taskSummaries.filter({ $0.value.embeddingModelID != taskSignature }).map(\.key) {
+            guard let entry = taskSummaries[id], entry.embeddingModelID != taskSignature,
                   !entry.embeddingSourceText.isEmpty else { continue }
             do {
                 let vector = try await engine.embed(entry.embeddingSourceText)
@@ -392,7 +408,7 @@ public actor MemoryStore {
                     id: cur.id, title: cur.title, summary: cur.summary,
                     embeddingSourceText: cur.embeddingSourceText, embedding: vector, status: cur.status,
                     taskCreatedAt: cur.taskCreatedAt, createdAt: cur.createdAt,
-                    embeddingModelID: signature
+                    embeddingModelID: taskSignature
                 )
                 taskCount += 1
                 checkpointIfNeeded()
@@ -405,7 +421,7 @@ public actor MemoryStore {
         if memCount > 0 || taskCount > 0 {
             let elapsed = Date().timeIntervalSince(start)
             let perDoc = elapsed * 1000 / Double(max(1, memCount + taskCount))
-            memoryStoreLogger.notice("reembedStaleEntries: re-embedded \(memCount, privacy: .public) memories + \(taskCount, privacy: .public) task summaries (\(failed, privacy: .public) failed) to model \(signature, privacy: .public) in \(String(format: "%.1f", elapsed), privacy: .public)s (\(String(format: "%.0f", perDoc), privacy: .public) ms/doc)")
+            memoryStoreLogger.notice("reembedStaleEntries: re-embedded \(memCount, privacy: .public) memories + \(taskCount, privacy: .public) task summaries (\(failed, privacy: .public) failed) to model \(taskSignature, privacy: .public) in \(String(format: "%.1f", elapsed), privacy: .public)s (\(String(format: "%.0f", perDoc), privacy: .public) ms/doc)")
             onChange?()
         }
         return (memCount, taskCount, failed)
@@ -602,7 +618,7 @@ public actor MemoryStore {
             } else {
                 semantic = 0
             }
-            let text = Self.textScore(queryTokens: queryTokens, document: entry.content)
+            let text = Self.textScore(queryTokens: queryTokens, document: entry.embeddingSourceText)
             if max(semantic, text) >= threshold {
                 entryRefs.append(entry)
                 semanticScores.append(semantic)

@@ -44,6 +44,19 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
     /// differs from the current engine identifier is stale and gets re-embedded.
     public var embeddingModelID: String?
 
+    /// Text used for BOTH the semantic embedding and the lexical (keyword) search document: the
+    /// content plus the tag words, so a query can match a memory by its tags as well as its content.
+    /// Tags are appended as plain words (no "Tags:" label) so the tokenizer sees the tag terms
+    /// without injecting a noise token that every tagged memory would then share.
+    public var embeddingSourceText: String {
+        Self.embeddingSourceText(content: content, tags: tags)
+    }
+
+    /// Free-function form so callers can build the embedding input before an entry exists.
+    public static func embeddingSourceText(content: String, tags: [String]) -> String {
+        tags.isEmpty ? content : content + "\n" + tags.joined(separator: " ")
+    }
+
     /// Who originated the memory at save time.
     public enum Source: String, Codable, Sendable {
         case user
