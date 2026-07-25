@@ -21,8 +21,6 @@ struct SpendingDashboardView: View {
 
     @State private var selectedRange: TimeRange = .week
     @State private var allRecords: [UsageRecord] = []
-    /// The date bucket currently hovered in the cost-over-time chart (nil = none).
-    @State private var chartHoveredDate: Date?
     /// What the cost-detail sheet is drilling into (nil = no sheet). A specific task, or the
     /// Orchestration bucket (records not attributed to any task).
     @State private var costDetail: CostDetail?
@@ -216,7 +214,12 @@ struct SpendingDashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 headlineCard()
-                costOverTimeChart()
+                CostOverTimeChart(
+                    series: chartSeries,
+                    itemsByDate: chartItemsByDate,
+                    bucketUnit: chartBucketUnit,
+                    formatCost: formatCost
+                )
                 breakdownPanels()
                 orchestrationLedger()
                 taskLedger()
@@ -283,8 +286,7 @@ struct SpendingDashboardView: View {
                 records: filteredRecords.filter { $0.taskID == nil },
                 taskCountInRange: max(1, ledgerRows.count),
                 averageTaskCostUSD: 0,
-                aggregator: aggregator,
-                providerNames: providerNames
+                aggregator: aggregator
             )
         }
     }
@@ -622,115 +624,130 @@ struct SpendingDashboardView: View {
         chartItemsByDate = Dictionary(grouping: items, by: \.date)
     }
 
-    private func costOverTimeChart() -> some View {
-        let bucketUnit = chartBucketUnit
-        let chartItems = chartSeries
-        let itemsByDate = chartItemsByDate
+    /// The cost-over-time chart, extracted so its hover state is LOCAL. The pointer crosses this
+    /// chart continuously while the dashboard scrolls; keeping `hoveredDate` here means that only
+    /// this view re-renders on hover, not the whole dashboard body (which would rebuild the Chart and
+    /// replay Swift Charts' entrance animation — the "redrawing one bar at a time" jump). Two more
+    /// guards keep it stable: the hover write is gated to actual bucket changes (not every pixel),
+    /// and implicit Chart animation is disabled so a re-render snaps to state instead of animating.
+    private struct CostOverTimeChart: View {
+        let series: [ChartItem]
+        let itemsByDate: [Date: [ChartItem]]
+        let bucketUnit: Calendar.Component
+        let formatCost: (Double) -> String
 
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("Cost Over Time")
-                .font(AppFonts.sectionHeader)
+        @State private var hoveredDate: Date?
 
-            if chartItems.isEmpty {
-                ContentUnavailableView(
-                    "No cost data",
-                    systemImage: "chart.bar",
-                    description: Text("No priced records in the selected range.")
-                )
-                .frame(height: 200)
-            } else {
-                Chart {
-                    ForEach(chartItems) { item in
-                        BarMark(
-                            x: .value("Date", item.date, unit: bucketUnit),
-                            y: .value("Cost", item.cost)
-                        )
-                        .foregroundStyle(by: .value("Provider", item.provider))
-                    }
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Cost Over Time")
+                    .font(AppFonts.sectionHeader)
 
-                    // Hover indicator: single RuleMark + annotation, rendered once
-                    // (outside the ForEach so it doesn't duplicate per provider).
-                    if let hoveredDate = chartHoveredDate {
-                        RuleMark(x: .value("Hovered", hoveredDate, unit: bucketUnit))
-                            .foregroundStyle(.gray.opacity(0.3))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 2]))
-                            .annotation(
-                                position: .top,
-                                spacing: 4,
-                                overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
-                            ) {
-                                chartTooltip(for: hoveredDate, items: itemsByDate[hoveredDate] ?? [], bucketUnit: bucketUnit)
-                            }
-                    }
-                }
-                .chartYAxis {
-                    AxisMarks(format: .currency(code: "USD"))
-                }
-                .chartOverlay { proxy in
-                    GeometryReader { geo in
-                        Rectangle()
-                            .fill(.clear)
-                            .contentShape(Rectangle())
-                            .onContinuousHover { phase in
-                                switch phase {
-                                case .active(let location):
-                                    guard let plotFrame = proxy.plotFrame else { return }
-                                    let origin = geo[plotFrame].origin
-                                    let x = location.x - origin.x
-                                    if let date: Date = proxy.value(atX: x) {
-                                        let cal = Calendar.current
-                                        let snapped = cal.dateInterval(of: bucketUnit, for: date)?.start ?? date
-                                        chartHoveredDate = snapped
-                                    }
-                                case .ended:
-                                    chartHoveredDate = nil
+                if series.isEmpty {
+                    ContentUnavailableView(
+                        "No cost data",
+                        systemImage: "chart.bar",
+                        description: Text("No priced records in the selected range.")
+                    )
+                    .frame(height: 200)
+                } else {
+                    Chart {
+                        ForEach(series) { item in
+                            BarMark(
+                                x: .value("Date", item.date, unit: bucketUnit),
+                                y: .value("Cost", item.cost)
+                            )
+                            .foregroundStyle(by: .value("Provider", item.provider))
+                        }
+
+                        // Hover indicator: single RuleMark + annotation, rendered once
+                        // (outside the ForEach so it doesn't duplicate per provider).
+                        if let hoveredDate {
+                            RuleMark(x: .value("Hovered", hoveredDate, unit: bucketUnit))
+                                .foregroundStyle(.gray.opacity(0.3))
+                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 2]))
+                                .annotation(
+                                    position: .top,
+                                    spacing: 4,
+                                    overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
+                                ) {
+                                    tooltip(for: hoveredDate)
                                 }
-                            }
+                        }
+                    }
+                    .chartYAxis {
+                        AxisMarks(format: .currency(code: "USD"))
+                    }
+                    .chartOverlay { proxy in
+                        GeometryReader { geo in
+                            Rectangle()
+                                .fill(.clear)
+                                .contentShape(Rectangle())
+                                .onContinuousHover { phase in
+                                    switch phase {
+                                    case .active(let location):
+                                        guard let plotFrame = proxy.plotFrame else { return }
+                                        let origin = geo[plotFrame].origin
+                                        let x = location.x - origin.x
+                                        if let date: Date = proxy.value(atX: x) {
+                                            let snapped = Calendar.current.dateInterval(of: bucketUnit, for: date)?.start ?? date
+                                            // Only write when the bucket actually changes — onContinuousHover
+                                            // fires per pixel, but the highlighted bar changes per bucket.
+                                            if snapped != hoveredDate { hoveredDate = snapped }
+                                        }
+                                    case .ended:
+                                        if hoveredDate != nil { hoveredDate = nil }
+                                    }
+                                }
+                        }
+                    }
+                    .frame(height: 220)
+                    // Snap to state on any re-render instead of replaying the bars' entrance animation.
+                    .transaction { $0.animation = nil }
+                }
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(AppColors.secondaryBackground)
+            )
+        }
+
+        /// Tooltip shown when hovering over a bar in the cost-over-time chart.
+        private func tooltip(for date: Date) -> some View {
+            let items = itemsByDate[date] ?? []
+            let formatter = DateFormatter()
+            switch bucketUnit {
+            case .month: formatter.dateFormat = "MMM yyyy"
+            case .hour: formatter.dateFormat = "h a, MMM d"
+            default: formatter.dateFormat = "MMM d, yyyy"
+            }
+            let total = items.reduce(0.0) { $0 + $1.cost }
+
+            return VStack(alignment: .leading, spacing: 4) {
+                Text(formatter.string(from: date))
+                    .font(.caption.weight(.semibold))
+                ForEach(items.sorted(by: { $0.cost > $1.cost })) { item in
+                    SpendingChartTooltipRow(provider: item.provider, costFormatted: formatCost(item.cost))
+                }
+                if items.count > 1 {
+                    Divider()
+                    HStack {
+                        Text("Total")
+                            .font(.caption2.weight(.semibold))
+                        Spacer(minLength: 8)
+                        Text(formatCost(total))
+                            .font(.caption2.monospacedDigit().weight(.semibold))
                     }
                 }
-                .frame(height: 220)
             }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(.ultraThickMaterial)
+                    .shadow(radius: 4)
+            )
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(AppColors.secondaryBackground)
-        )
-    }
-
-    /// Tooltip shown when hovering over a bar in the cost-over-time chart.
-    private func chartTooltip(for date: Date, items: [ChartItem], bucketUnit: Calendar.Component) -> some View {
-        let formatter = DateFormatter()
-        switch bucketUnit {
-        case .month: formatter.dateFormat = "MMM yyyy"
-        case .hour: formatter.dateFormat = "h a, MMM d"
-        default: formatter.dateFormat = "MMM d, yyyy"
-        }
-        let total = items.reduce(0.0) { $0 + $1.cost }
-
-        return VStack(alignment: .leading, spacing: 4) {
-            Text(formatter.string(from: date))
-                .font(.caption.weight(.semibold))
-            ForEach(items.sorted(by: { $0.cost > $1.cost })) { item in
-                SpendingChartTooltipRow(provider: item.provider, costFormatted: formatCost(item.cost))
-            }
-            if items.count > 1 {
-                Divider()
-                HStack {
-                    Text("Total")
-                        .font(.caption2.weight(.semibold))
-                    Spacer(minLength: 8)
-                    Text(formatCost(total))
-                        .font(.caption2.monospacedDigit().weight(.semibold))
-                }
-            }
-        }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(.ultraThickMaterial)
-                .shadow(radius: 4)
-        )
     }
 
     // MARK: - Section 3: Breakdown Panels

@@ -19,7 +19,6 @@ struct TaskListView: View {
 
     @State private var showArchived = false
     @State private var showDeleted = false
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let activeTasks = viewModel.activeTaskList

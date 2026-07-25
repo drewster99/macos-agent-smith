@@ -19,7 +19,7 @@ struct TaskCostTurnRow: View {
                 .frame(width: 30, alignment: .leading)
             Text(agentRole.displayName)
                 .foregroundStyle(AppColors.color(for: .agent(agentRole)))
-                .frame(width: 60, alignment: .leading)
+                .frame(width: 110, alignment: .leading)
                 .padding(.leading, 8)
             Text(inputTokensFormatted)
                 .frame(width: 60, alignment: .trailing)
@@ -32,7 +32,7 @@ struct TaskCostTurnRow: View {
             Text(toolNames)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 8)
+                .padding(.leading, 20)
         }
         .font(.caption2.monospacedDigit())
         .padding(.vertical, 1)

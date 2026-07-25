@@ -24,7 +24,6 @@ struct TaskCostDetailSheet: View {
     /// task rows only, so Orchestration/unattributed cost doesn't inflate it. 0 hides "vs Average".
     let averageTaskCostUSD: Double
     let aggregator: UsageAggregator
-    let providerNames: [String: String]
     /// Opens the full Task Detail window for this task. Nil for the Orchestration bucket (no task)
     /// or when the dashboard has no session to open it in — the id then renders as plain text.
     var onOpenTaskDetail: ((UUID) -> Void)? = nil
@@ -378,12 +377,12 @@ struct TaskCostDetailSheet: View {
             // Header
             HStack(spacing: 0) {
                 Text("#").frame(width: 30, alignment: .leading)
-                Text("Agent").frame(width: 60, alignment: .leading).padding(.leading, 8)
+                Text("Agent").frame(width: 110, alignment: .leading).padding(.leading, 8)
                 Text("In").frame(width: 60, alignment: .trailing)
                 Text("Out").frame(width: 60, alignment: .trailing)
                 Text("Cost").frame(width: 60, alignment: .trailing)
                 Text("Latency").frame(width: 60, alignment: .trailing)
-                Text("Tools").frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 8)
+                Text("Tools").frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 20)
             }
             .font(.caption2.weight(.semibold))
             .foregroundStyle(.secondary)

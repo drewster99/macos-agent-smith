@@ -17,7 +17,6 @@ struct TaskCostDetailWindow: View {
     @State private var records: [UsageRecord] = []
     @State private var task: AgentTask?
     @State private var summary: TaskSummaryEntry?
-    @State private var providerNames: [String: String] = [:]
     /// All-time average cost across tasks, for the "vs Average" comparison (0 hides it).
     @State private var averageTaskCostUSD: Double = 0
     @State private var taskCount: Int = 0
@@ -41,7 +40,6 @@ struct TaskCostDetailWindow: View {
                     taskCountInRange: taskCount,
                     averageTaskCostUSD: averageTaskCostUSD,
                     aggregator: aggregator,
-                    providerNames: providerNames,
                     onOpenTaskDetail: openTaskDetailAction(),
                     showsDoneButton: false
                 )
@@ -58,10 +56,6 @@ struct TaskCostDetailWindow: View {
         let mine = all.filter { $0.taskID == taskID }
         records = mine
         resolvedSessionID = mine.first?.sessionID
-
-        var names: [String: String] = [:]
-        for provider in shared.llmKit.providers { names[provider.id] = provider.name }
-        providerNames = names
 
         task = shared.archivedTasks.first(where: { $0.id == taskID })
             ?? shared.deletedTasks.first(where: { $0.id == taskID })
