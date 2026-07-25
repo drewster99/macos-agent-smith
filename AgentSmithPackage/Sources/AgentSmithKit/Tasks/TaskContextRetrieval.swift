@@ -30,7 +30,8 @@ public enum TaskContextRetrieval {
                 memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
                 taskCosineGate: MemoryStore.taskInjectionCosineGate,
                 memoryInstruction: MemoryStore.memoryRetrievalInstruction,
-                taskInstruction: MemoryStore.taskRetrievalInstruction
+                taskInstruction: MemoryStore.taskRetrievalInstruction,
+                source: "task-context"
             )
             guard !results.isEmpty else { return ([], []) }
 

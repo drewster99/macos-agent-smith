@@ -120,6 +120,34 @@ public struct RelevantPriorTask: Codable, Sendable, Equatable {
     }
 }
 
+/// A single memory-store query, logged for the inspector's Memory panel — the read-side analog of
+/// the Security Agent's `EvaluationRecord`. Captures what was asked, how many hits came back, and
+/// how long the round-trip (including the query embedding) took.
+public struct MemoryQueryRecord: Sendable, Identifiable, Equatable {
+    public let id = UUID()
+    /// When the query was issued.
+    public let timestamp: Date
+    /// The raw query text.
+    public let query: String
+    /// Number of memory hits returned.
+    public let memoryHits: Int
+    /// Number of prior-task-summary hits returned (0 for a memories-only search).
+    public let taskHits: Int
+    /// Wall-clock round-trip time in milliseconds, including the query embedding.
+    public let latencyMs: Int
+    /// What triggered the query (e.g. "auto-context", "task-context", "search_memory", "system").
+    public let source: String
+
+    public init(timestamp: Date, query: String, memoryHits: Int, taskHits: Int, latencyMs: Int, source: String) {
+        self.timestamp = timestamp
+        self.query = query
+        self.memoryHits = memoryHits
+        self.taskHits = taskHits
+        self.latencyMs = latencyMs
+        self.source = source
+    }
+}
+
 /// Thread-safe store for semantic memories and task summary embeddings.
 ///
 /// Uses **single-vector embeddings** produced by `SemanticSearchEngine` (Qwen3 via MLX
@@ -137,6 +165,9 @@ public actor MemoryStore {
     private var excludedTaskSummaryIDs: Set<UUID> = []
     private let engine: SemanticSearchEngine
     private var onChange: (@Sendable () -> Void)?
+    /// Fired after each `searchMemories` / `searchAll`, carrying the query, hit counts, and latency
+    /// for the inspector's Memory log (the read-side analog of the Security Agent's evaluation log).
+    private var onQueryRecorded: (@Sendable (MemoryQueryRecord) -> Void)?
     /// Set when `searchAll` bumps retrieval stats. Decoupled from `onChange?()` so reads don't
     /// trigger a full-corpus re-serialization; flushed lazily by `persistRetrievalStatsIfNeeded()`.
     private var retrievalStatsDirty = false
@@ -148,6 +179,11 @@ public actor MemoryStore {
     /// Registers a callback fired whenever memories or task summaries change.
     public func setOnChange(_ handler: @escaping @Sendable () -> Void) {
         onChange = handler
+    }
+
+    /// Registers a callback fired after each memory-store query with its timing + hit counts.
+    public func setOnQueryRecorded(_ handler: @escaping @Sendable (MemoryQueryRecord) -> Void) {
+        onQueryRecorded = handler
     }
 
     /// Flushes any pending retrieval-stat bumps accumulated on the read path. If stats are
@@ -584,7 +620,8 @@ public actor MemoryStore {
     public func searchMemories(
         query: String,
         limit: Int = 5,
-        threshold: Double = 0.10
+        threshold: Double = 0.10,
+        source: String = "system"
     ) async throws -> [MemorySearchResult] {
         let start = Date()
         let queryVector = try await engine.embed(query)
@@ -598,6 +635,7 @@ public actor MemoryStore {
         )
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         memoryStoreLogger.debug("searchMemories: \(results.count, privacy: .public) results from \(self.memories.count, privacy: .public) memories in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
+        onQueryRecorded?(MemoryQueryRecord(timestamp: start, query: query, memoryHits: results.count, taskHits: 0, latencyMs: ms, source: source))
         return results
     }
 
@@ -654,7 +692,8 @@ public actor MemoryStore {
         query: String,
         limit: Int = 5,
         threshold: Double = 0.10,
-        excludeDeletedTasks: Bool = true
+        excludeDeletedTasks: Bool = true,
+        source: String = "system"
     ) async throws -> [TaskSummarySearchResult] {
         let start = Date()
         let queryVector = try await engine.embed(query)
@@ -669,6 +708,7 @@ public actor MemoryStore {
         )
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         memoryStoreLogger.debug("searchTaskSummaries: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
+        onQueryRecorded?(MemoryQueryRecord(timestamp: start, query: query, memoryHits: 0, taskHits: results.count, latencyMs: ms, source: source))
         return results
     }
 
@@ -740,7 +780,8 @@ public actor MemoryStore {
         taskCosineGate: Double? = nil,
         memoryInstruction: String? = nil,
         taskInstruction: String? = nil,
-        excludeDeletedTasks: Bool = true
+        excludeDeletedTasks: Bool = true,
+        source: String = "system"
     ) async throws -> SemanticSearchResults {
         let start = Date()
         // Each pool gets its own (optionally instruction-prefixed) query embedding. Reuse the
@@ -791,6 +832,7 @@ public actor MemoryStore {
 
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         memoryStoreLogger.debug("searchAll: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
+        onQueryRecorded?(MemoryQueryRecord(timestamp: start, query: query, memoryHits: memoryResults.count, taskHits: taskResults.count, latencyMs: ms, source: source))
         return SemanticSearchResults(memories: memoryResults, taskSummaries: taskResults)
     }
 

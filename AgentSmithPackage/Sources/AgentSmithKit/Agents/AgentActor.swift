@@ -2895,7 +2895,8 @@ public actor AgentActor {
                 memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
                 taskCosineGate: MemoryStore.taskInjectionCosineGate,
                 memoryInstruction: MemoryStore.memoryRetrievalInstruction,
-                taskInstruction: MemoryStore.taskRetrievalInstruction
+                taskInstruction: MemoryStore.taskRetrievalInstruction,
+                source: "auto-context"
             )
         } catch {
             return
