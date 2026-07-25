@@ -436,6 +436,14 @@ struct TaskEditorSheet: View {
             }
             if saved {
                 onDone()
+            } else {
+                // On failure the view model set `taskActionError`, but its alert is attached to the
+                // sidebar BEHIND this modal sheet, so it never appears — Create/Save just looked dead.
+                // Surface the actual reason in-sheet (where the title/description errors show), and
+                // clear the view-model error so the hidden alert can't double-fire later.
+                localError = viewModel.taskActionError
+                    ?? "The task could not be saved. Check the fields and try again."
+                viewModel.taskActionError = nil
             }
         }
     }
