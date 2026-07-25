@@ -152,10 +152,14 @@ struct AgentSupervisor {
     }
 
     /// The current agent for a SINGLE-INSTANCE role (smith, summarizer, securityAgent).
-    /// Brown is a pool — worker callers must use `handles(role:)` or a task-scoped
-    /// lookup; at worker capacity 1 this still returns the lone Brown, which is why
-    /// legacy single-worker call sites (message_brown, digests) remain correct until the
-    /// M3 capacity-aware pass migrates them.
+    /// Brown is a pool — worker callers must use `handles(role:)` or a task-scoped lookup
+    /// (`OrchestrationRuntime.liveWorkerID(taskID:)`), since this returns the OLDEST live
+    /// worker and nothing more meaningful than that.
+    ///
+    /// `message_brown` and `amend_task` were migrated to the task-scoped lookup on
+    /// 2026-07-25; both had been silently correct only at worker capacity 1. The
+    /// Brown-activity digest still calls this with `.brown`, which is fine — it asks
+    /// "is any worker alive?", not "which one?".
     func firstHandle(role: AgentRole) -> AgentHandle? {
         handles(role: role).first
     }

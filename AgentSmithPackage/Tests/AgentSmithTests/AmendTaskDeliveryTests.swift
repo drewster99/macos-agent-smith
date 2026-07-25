@@ -31,6 +31,12 @@ struct AmendTaskDeliveryTests {
             abort: { _, _ in },
             agentRoleForID: { _ in nil },
             agentIDForRole: { role in role == .brown ? brownID : nil },
+            // Mirrors `OrchestrationRuntime.liveWorkerID(taskID:)`: the worker is resolved
+            // from the TASK, so a live worker on another task is never returned here.
+            workerIDForTask: { [taskStore] taskID in
+                guard let brownID, let task = await taskStore.task(id: taskID) else { return nil }
+                return task.assigneeIDs.contains(brownID) ? brownID : nil
+            },
             memoryStore: MemoryStore(engine: SemanticSearchEngine())
         )
     }

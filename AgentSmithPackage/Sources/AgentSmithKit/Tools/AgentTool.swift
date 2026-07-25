@@ -213,7 +213,15 @@ public struct ToolContext: Sendable {
     /// Resolves an agent ID to its role, used for access-control checks.
     public let agentRoleForID: @Sendable (UUID) async -> AgentRole?
     /// Resolves a role to the currently active agent's UUID, used for role-based addressing.
+    ///
+    /// **Single-instance roles only** (`.smith`, `.summarizer`, `.securityAgent`). Passing
+    /// `.brown` returns the OLDEST live worker, which is an arbitrary answer once the pool
+    /// holds more than one. To address a worker, use `workerIDForTask`.
     public let agentIDForRole: @Sendable (AgentRole) async -> UUID?
+    /// Resolves a task to the live worker running it, or nil if none is. The task-scoped
+    /// counterpart to `agentIDForRole(.brown)` and the only correct way to address a worker
+    /// while `maxConcurrentWorkers > 1`.
+    public let workerIDForTask: @Sendable (UUID) async -> UUID?
     /// Called when the agent's run loop exits naturally (errors or self-termination).
     /// Allows the runtime to clean up subscriptions and registry entries.
     public let onSelfTerminate: @Sendable () async -> Void
@@ -365,6 +373,7 @@ public struct ToolContext: Sendable {
         abort: @escaping @Sendable (String, AgentRole?) async -> Void,
         agentRoleForID: @escaping @Sendable (UUID) async -> AgentRole?,
         agentIDForRole: @escaping @Sendable (AgentRole) async -> UUID? = { _ in nil },
+        workerIDForTask: @escaping @Sendable (UUID) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
         beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
         // Unlike the trackers below, an unwired composer does NOT `assertionFailure`: nil is a
@@ -430,6 +439,7 @@ public struct ToolContext: Sendable {
         self.abort = abort
         self.agentRoleForID = agentRoleForID
         self.agentIDForRole = agentIDForRole
+        self.workerIDForTask = workerIDForTask
         self.onSelfTerminate = onSelfTerminate
         self.beginTaskValidation = beginTaskValidation
         self.composeTaskBriefing = composeTaskBriefing

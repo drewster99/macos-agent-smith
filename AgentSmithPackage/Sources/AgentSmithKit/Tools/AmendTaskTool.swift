@@ -100,9 +100,14 @@ struct AmendTaskTool: AgentTool {
         attachments: [Attachment],
         context: ToolContext
     ) async -> Bool {
-        guard let brownID = await context.agentIDForRole(.brown),
+        // Resolve the worker FROM the task. This used to take `agentIDForRole(.brown)` — the
+        // oldest live worker — and then require `task.assigneeIDs.contains(brownID)`. That
+        // guard did stop misdelivery, but it also meant an amendment to any task whose worker
+        // wasn't the oldest silently went undelivered while the caller was told it would be
+        // picked up "on the next start" — false, since that worker keeps running on the
+        // un-amended description.
+        guard let brownID = await context.workerIDForTask(taskID),
               let task = await context.taskStore.task(id: taskID),
-              task.assigneeIDs.contains(brownID),
               task.status == .running else {
             return false
         }

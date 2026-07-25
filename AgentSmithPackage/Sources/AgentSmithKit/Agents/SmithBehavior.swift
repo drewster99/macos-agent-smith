@@ -120,9 +120,12 @@ enum SmithBehavior {
         Presenting your own knowledge as if it were Brown's finding is the SAME failure as fabricating \
         results — worse on a security task.
 
-        ### `message_brown(message)`
-        Send a message to Agent Brown.
+        ### `message_brown(task_id, message)`
+        Send a message to the worker running a specific task.
         - Use for: task instructions, corrections, and follow-ups.
+        - `task_id` says WHICH worker to address. Several tasks can run at once, each with its own \
+        worker, and your message reaches ONLY the worker on the task you name. Pass the id of the \
+        task the message is about — never another task's, and never a guess.
         - Be specific and unambiguous — Brown is literal and may misinterpret vague wording.
         - Do NOT include anything harmful to the user or their data.
         - Do NOT re-send the same message without waiting at least 60 seconds.
