@@ -370,7 +370,10 @@ private struct AgentCard: View {
     let onUpdateMaxToolCalls: (Int) -> Void
 
     @Environment(\.openWindow) private var openWindow
-    @State private var expanded = true
+    /// Cards start COLLAPSED — the agent's details (tools, evaluations, context, turns) are opened on
+    /// demand rather than filling the panel by default (Security Agent in particular used to open with
+    /// its full evaluation log expanded).
+    @State private var expanded = false
     @State private var processingStartDate: Date?
     @State private var toolExecutingStartDate: Date?
     @State private var showingConfig = false
@@ -432,19 +435,8 @@ private struct AgentCard: View {
                             .font(.headline)
                             .foregroundStyle(hasActivity ? roleColor : .secondary)
                             .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
 
                         Spacer()
-
-                        AgentCardStatusBadge(
-                            isProcessing: isProcessing,
-                            hasActivity: hasActivity,
-                            isSecurityAgent: role == .securityAgent,
-                            isTerminated: role != .securityAgent && isTerminated,
-                            executingTools: executingTools,
-                            processingStartDate: processingStartDate,
-                            toolExecutingStartDate: toolExecutingStartDate
-                        )
 
                         if opensInWindow {
                             Image(systemName: "arrow.up.forward.square")
@@ -480,7 +472,24 @@ private struct AgentCard: View {
                 .padding(.leading, 4)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 2)
+
+            // Status on its own line under the name (indented past the dot) so a long
+            // "Working — <tool> MM:SS" never squeezes the name into a vertical stack of letters.
+            AgentCardStatusBadge(
+                isProcessing: isProcessing,
+                hasActivity: hasActivity,
+                isSecurityAgent: role == .securityAgent,
+                isTerminated: role != .securityAgent && isTerminated,
+                executingTools: executingTools,
+                processingStartDate: processingStartDate,
+                toolExecutingStartDate: toolExecutingStartDate
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 28)
+            .padding(.trailing, 12)
+            .padding(.bottom, 6)
 
             // Model info subtitle — aligned with agent name text (past the dot)
             if let config = modelConfig {

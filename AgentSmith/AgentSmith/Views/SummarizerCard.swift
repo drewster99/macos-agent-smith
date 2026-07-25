@@ -22,7 +22,8 @@ struct SummarizerCard: View {
     let onUpdatePollInterval: (TimeInterval) -> Void
     let onUpdateMaxToolCalls: (Int) -> Void
 
-    @State private var expanded = true
+    /// Starts COLLAPSED, like the other agent cards.
+    @State private var expanded = false
     @State private var showingConfig = false
 
     private static let roleColor = AppColors.summarizerAgent
