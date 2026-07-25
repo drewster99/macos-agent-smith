@@ -655,6 +655,31 @@ skip re-evaluation. Reduces call volume without loosening the trust boundary (th
 approval is explicit and bounded to the granted paths). Pairs with the
 "read-only tools through security, auto-approved for Smith/validators" work.
 
+### Smith's per-call security filter is egress-only — `save_memory` is ungated for Smith (decided 2026-07-25, NO CHANGE)
+
+Recorded so nobody "fixes" this later as a bug. `AgentActor.mustEvaluate` gates two
+different ways: Brown is spawned with `requiresToolApproval: true`, so EVERY tool call
+it makes gets a Security Agent verdict; Smith runs under `evaluatesOpenWorldToolsOnly`,
+so only `tool.isOpenWorld`, the read-only filesystem evidence quintet, and `attach_file`
+reach the evaluator. Its messaging/task/memory tools never touch the security path.
+
+The asymmetry that falls out: `save_memory` is classified DESTRUCTIVE in
+`ToolSafetyClassification` — deliberately, because auto-consolidation can rewrite or
+merge an existing memory with no clean undo — but it is not open-world, so the filter
+lets it through. Brown's memory writes are reviewed; Smith's are not, and the one hazard
+the destructive label exists to flag is exactly the one Smith isn't checked on.
+
+**Decision (Drew, 2026-07-25): correct as-is.** The egress filter is scoped to
+exfiltration, not to local irreversibility, and Smith's memory writes aren't worth an
+LLM round-trip each. If it is ever revisited, the honest fix is a THIRD predicate in
+`mustEvaluate` (destructive-but-local) — not relabelling `save_memory` as open-world,
+which would lie about what the tool touches and drag it into any future egress policy.
+
+Note for readers of CLAUDE.md: the "Nothing runs unreviewed or on a borrowed model"
+convention is about CONFIGURATION failing closed — a missing Security Agent provider
+fails `start()`, a missing validator model parks tasks — not a claim that every tool
+call gets a verdict.
+
 ### Validation UI follow-ups (2026-07-09)
 
 - ✅ (2026-07-10) **Task overlay bar**: retractable top-of-window bar with one live
