@@ -19,16 +19,12 @@ struct TaskListView: View {
 
     @State private var showArchived = false
     @State private var showDeleted = false
-    @State private var collapsedParentTaskIDs: Set<UUID> = []
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let activeTasks = viewModel.activeTaskList
         let archivedTasks = viewModel.archivedTaskList
         let deletedTasks = viewModel.recentlyDeletedTaskList
-        let activeTaskFamilies = taskFamilies(for: activeTasks)
-        let archivedTaskFamilies = taskFamilies(for: archivedTasks)
-        let deletedTaskFamilies = taskFamilies(for: deletedTasks)
 
         Group {
             if activeTasks.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
@@ -39,43 +35,27 @@ struct TaskListView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(activeTaskFamilies) { family in
-                        TaskFamilyRows(
-                            family: family,
-                            style: .active,
-                            viewModel: viewModel,
-                            isCollapsed: collapsedParentTaskIDs.contains(family.id),
-                            onToggleCollapsed: { toggleCollapsedParent(family.id) }
-                        )
+                    ForEach(taskFamilies(for: activeTasks)) { family in
+                        TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
                     }
 
                     if !archivedTasks.isEmpty || !deletedTasks.isEmpty {
                         bucketToggles(archivedCount: archivedTasks.count, deletedCount: deletedTasks.count)
                     }
 
+                    // Group the archived/deleted buckets only when their section is actually shown —
+                    // no point building families for a collapsed section on every render.
                     if showArchived && !archivedTasks.isEmpty {
                         TaskSectionHeader(title: "Archived")
-                        ForEach(archivedTaskFamilies) { family in
-                            TaskFamilyRows(
-                                family: family,
-                                style: .archived,
-                                viewModel: viewModel,
-                                isCollapsed: collapsedParentTaskIDs.contains(family.id),
-                                onToggleCollapsed: { toggleCollapsedParent(family.id) }
-                            )
+                        ForEach(taskFamilies(for: archivedTasks)) { family in
+                            TaskFamilyRows(family: family, style: .archived, viewModel: viewModel)
                         }
                     }
 
                     if showDeleted && !deletedTasks.isEmpty {
                         TaskSectionHeader(title: "Deleted")
-                        ForEach(deletedTaskFamilies) { family in
-                            TaskFamilyRows(
-                                family: family,
-                                style: .recentlyDeleted,
-                                viewModel: viewModel,
-                                isCollapsed: collapsedParentTaskIDs.contains(family.id),
-                                onToggleCollapsed: { toggleCollapsedParent(family.id) }
-                            )
+                        ForEach(taskFamilies(for: deletedTasks)) { family in
+                            TaskFamilyRows(family: family, style: .recentlyDeleted, viewModel: viewModel)
                         }
                     }
                 }
@@ -87,14 +67,6 @@ struct TaskListView: View {
             actions: { Button("OK") { viewModel.taskActionError = nil } },
             message: { Text(viewModel.taskActionError ?? "") }
         )
-    }
-
-    private func toggleCollapsedParent(_ taskID: UUID) {
-        if collapsedParentTaskIDs.contains(taskID) {
-            collapsedParentTaskIDs.remove(taskID)
-        } else {
-            collapsedParentTaskIDs.insert(taskID)
-        }
     }
 
     private func taskFamilies(for tasks: [AgentTask]) -> [TaskFamily] {
@@ -158,55 +130,47 @@ private struct TaskFamilyRows: View {
     let family: TaskFamily
     let style: TaskRowStyle
     let viewModel: AppViewModel
-    let isCollapsed: Bool
-    let onToggleCollapsed: () -> Void
 
-    private var hasChildren: Bool {
-        !family.children.isEmpty
-    }
-
-    /// Runs still in flight — pending, starting, running, validating, paused, interrupted,
-    /// scheduled, awaiting review. These are pinned above the history and are NEVER hidden by
-    /// collapsing: the point of collapsing is to put finished runs away, and a run you can no
-    /// longer see is exactly the one you'd want to have noticed.
-    private var liveChildren: [AgentTask] {
-        family.children.filter { !$0.status.isTerminal }
-    }
-
-    /// Finished runs (`.completed` / `.failed`) — the history the disclosure toggles.
-    private var finishedChildren: [AgentTask] {
-        family.children.filter { $0.status.isTerminal }
-    }
-
-    private var runListDisclosure: TaskRunListDisclosure? {
-        guard !finishedChildren.isEmpty else { return nil }
-        return TaskRunListDisclosure(
-            isCollapsed: isCollapsed,
-            hiddenRunCount: finishedChildren.count,
-            toggle: onToggleCollapsed
-        )
-    }
-
-    /// A template run stays compact even when it heads its own family row — which happens
-    /// whenever its parent template sits in a different bucket (the common case once
-    /// `archiveStaleCompleted` moves finished runs to Archived while the template stays
-    /// active). Keying on `parentTaskID` rather than on nesting keeps a run's presentation
-    /// stable no matter which list it lands in.
-    private var parentRowDensity: TaskRowDensity {
-        // A row that heads its own runs must be a standard card regardless of parentage: the
-        // summary line and its expand/collapse control only exist in that layout, so a compact
-        // row here would render children with no way to collapse them.
-        guard !hasChildren else { return .standard }
-        return family.parent.parentTaskID == nil ? .standard : .compact
-    }
+    /// Collapse is per-family LOCAL state, not a set owned by the list: toggling one family's run
+    /// history re-renders only that family, never the whole sidebar (and never re-groups the other
+    /// buckets). Finished-run history starts expanded. Persists across live task updates because the
+    /// family view keeps a stable identity (`family.id`).
+    @State private var isCollapsed = false
 
     var body: some View {
+        // Partition the children ONCE per body pass. `filter` isn't cached across property accesses,
+        // so pulling live/finished out as locals avoids re-filtering the (possibly large, for a
+        // template with many runs) child list several times per render.
+        let children = family.children
+        // Live runs — pending, starting, running, validating, paused, interrupted, scheduled,
+        // awaiting review. Pinned above the history and NEVER hidden by collapsing: a run you can no
+        // longer see is exactly the one you'd want to have noticed.
+        let liveChildren = children.filter { !$0.status.isTerminal }
+        // Finished runs (`.completed` / `.failed`) — the history the disclosure toggles.
+        let finishedChildren = children.filter { $0.status.isTerminal }
+        let hasChildren = !children.isEmpty
+
+        let disclosure: TaskRunListDisclosure? = finishedChildren.isEmpty ? nil : TaskRunListDisclosure(
+            isCollapsed: isCollapsed,
+            hiddenRunCount: finishedChildren.count,
+            toggle: { isCollapsed.toggle() }
+        )
+
+        // A row heading its own runs must be a standard card regardless of parentage: the summary
+        // line and its expand/collapse control only exist in that layout, so a compact row here
+        // would render children with no way to collapse them. A childless template run stays compact
+        // unless it's a true top-level task — keying on `parentTaskID`, not nesting, keeps a run's
+        // presentation stable no matter which bucket it lands in.
+        let density: TaskRowDensity = hasChildren
+            ? .standard
+            : (family.parent.parentTaskID == nil ? .standard : .compact)
+
         VStack(alignment: .leading, spacing: 0) {
             TaskListRow(
                 task: family.parent,
                 style: style,
-                density: parentRowDensity,
-                disclosure: runListDisclosure,
+                density: density,
+                disclosure: disclosure,
                 viewModel: viewModel
             )
 
