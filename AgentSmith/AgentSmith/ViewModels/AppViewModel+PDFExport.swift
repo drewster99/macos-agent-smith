@@ -79,9 +79,9 @@ extension AppViewModel {
     /// fresh usage-record fetch, renders the document, and returns the PDF bytes plus a
     /// suggested filename.
     ///
-    /// Computing directly — rather than via `loadTaskCost`/`loadTaskTokens` — avoids the
-    /// in-flight-guarded cache, which can early-return before it's populated and would then
-    /// silently drop the Cost row from the document.
+    /// Computing directly — rather than reading the on-screen totals — keeps the document
+    /// self-consistent: a task exported mid-run reports the tokens and cost of one fetch,
+    /// not a token cache from view-appear paired with a live cost from `CostBoard`.
     private func buildTaskPDF(
         _ task: AgentTask,
         options: TaskPDFFieldOptions

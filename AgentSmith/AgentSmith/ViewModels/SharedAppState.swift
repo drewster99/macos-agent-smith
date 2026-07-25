@@ -284,6 +284,13 @@ final class SharedAppState {
     /// touch the actor directly.
     private(set) var costBoardSnapshot: CostBoard.Snapshot = .empty
 
+    /// Live estimated cost per task, keyed by task ID — the main-thread mirror of
+    /// `CostBoard.taskCosts`, and the only thing the task cost chips read. Tasks with no
+    /// usage records are absent (not zero), so a caller can tell "cost nothing" from
+    /// "nothing recorded". Republished on a coalesced tick as records land, so a running
+    /// task's cost climbs while it runs instead of freezing at row-appear time.
+    private(set) var taskCosts: [UUID: Double] = [:]
+
     /// Snapshot of LiteLLM pricing keyed by `"providerID/modelID"`. Built once
     /// after the model catalog refresh completes. Handed to `CostBoard` and to
     /// any per-session cost helpers via the `pricingLookup` closure.
@@ -645,6 +652,9 @@ final class SharedAppState {
         let board = CostBoard(usageStore: usageStore, pricingLookup: pricingLookup)
         await board.setOnUpdate { [weak self] snapshot in
             await MainActor.run { self?.costBoardSnapshot = snapshot }
+        }
+        await board.setOnTaskCostsUpdate { [weak self] totals in
+            await MainActor.run { self?.taskCosts = totals }
         }
         await board.bootstrap()
         costBoard = board

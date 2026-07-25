@@ -493,30 +493,16 @@ struct TaskRowButton: View {
     }
 }
 
-/// Single row layout shared by all three buckets. The `style` argument drives the small
-/// presentational deltas (icon opacity, line limits, strikethrough, etc.) so we don't
-/// duplicate the layout three times. With `AgentTask: Equatable`, SwiftUI's per-input
-/// diff at the ForEach boundary skips unchanged rows when only one task in the array
-/// mutates.
-/// Composite key for the task-cost `.task(id:)` modifier. Re-firing must happen
+/// Composite key for the task-usage `.task(id:)` modifier. Re-firing must happen
 /// when either the task ID changes (different row) or the task reaches a terminal
 /// status (`.completed` or `.failed`) — that's when the underlying records stop
-/// growing and a fresh cache fetch is worthwhile. Shared by the sidebar row and
-/// the detail window so both surfaces pick up cost the moment a task finishes.
-struct TaskCostLoaderKey: Hashable {
+/// growing and a fresh fetch is worthwhile.
+///
+/// Cost does NOT use this. It reads `AppViewModel.cachedTaskCost(_:)`, which is live off
+/// `CostBoard`'s rollup; only token totals are still fetched per view and need a key.
+struct TaskUsageLoaderKey: Hashable {
     let taskID: UUID
     let isTerminal: Bool
-}
-
-/// Re-fire key for a parent row's bulk child-cost load. Keyed on the run count so a newly
-/// finished run pulls its cost in, without refetching on every unrelated redraw.
-struct TaskFamilyCostLoaderKey: Hashable {
-    let taskID: UUID
-    let childCount: Int
-    /// Also keyed on how many runs have FINISHED. A run reaching `.completed` doesn't change
-    /// the child count, so keying on count alone left the summary's total stuck at the partial
-    /// figure captured while that run was still mid-flight.
-    let finishedChildCount: Int
 }
 
 /// Roll-up of every run a parent task has spawned, for the parent's summary line.
@@ -581,6 +567,11 @@ private struct TaskFamilySummary {
     }
 }
 
+/// Single row layout shared by all three buckets. The `style` argument drives the small
+/// presentational deltas (icon opacity, line limits, strikethrough, etc.) so we don't
+/// duplicate the layout three times. With `AgentTask: Equatable`, SwiftUI's per-input
+/// diff at the ForEach boundary skips unchanged rows when only one task in the array
+/// mutates.
 private struct TaskRow: View {
     let task: AgentTask
     let style: TaskRowStyle
@@ -593,9 +584,9 @@ private struct TaskRow: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        // Resolve the run list ONCE per body pass and thread it into the loader key, the loader
-        // closure, and the summary. `childTasks(of:)` scans the active + archived lists, so the
-        // earlier per-piece re-derivation cost a standard row a few full scans on every redraw.
+        // Resolve the run list ONCE per body pass and thread it into both the layout and the
+        // summary. `childTasks(of:)` scans the active + archived lists, so the earlier
+        // per-piece re-derivation cost a standard row a few full scans on every redraw.
         let runs = childRuns
         Group {
             switch density {
@@ -604,39 +595,12 @@ private struct TaskRow: View {
             }
         }
         .contentShape(Rectangle())
-        // Lazy-load the task's estimated cost. The id includes whether the task
-        // has reached a terminal state (completed OR failed) so the loader
-        // re-fires when a task we're watching transitions out of `.running` —
-        // keying on `task.id` alone would only fire once on row appear and miss
-        // the post-completion records.
-        //
-        // `force: true` evicts any partial value cached by the detail window
-        // while the task was still running, so the list row picks up final cost.
-        .task(id: TaskCostLoaderKey(taskID: task.id, isTerminal: task.status.isTerminal)) {
-            await viewModel.loadTaskCost(task.id, force: true)
-        }
-        // Costs for this task's runs, so the summary line can total them. One bulk pass over
-        // the usage records — a template with hundreds of archived runs would otherwise
-        // rescan the whole record set once per run.
-        .task(id: childRunCostLoaderKey(runs: runs)) {
-            guard !runs.isEmpty else { return }
-            await viewModel.loadTaskCosts(for: runs.map(\.id))
-        }
     }
 
-    /// Runs spawned by this task, across active and archived. Empty for the overwhelming
-    /// majority of rows, which is what keeps the bulk-cost loader from firing at all — and
-    /// empty by construction for compact rows, which show no summary.
+    /// Runs spawned by this task, across active and archived. Empty by construction for
+    /// compact rows, which show no summary.
     private var childRuns: [AgentTask] {
         density == .standard ? viewModel.childTasks(of: task.id) : []
-    }
-
-    private func childRunCostLoaderKey(runs: [AgentTask]) -> TaskFamilyCostLoaderKey {
-        TaskFamilyCostLoaderKey(
-            taskID: task.id,
-            childCount: runs.count,
-            finishedChildCount: runs.count { $0.status.isTerminal }
-        )
     }
 
     // MARK: Layouts

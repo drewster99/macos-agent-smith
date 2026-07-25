@@ -297,17 +297,6 @@ final class AppViewModel {
     private let scheduledWakesWriter: SerialPersistenceWriter<[ScheduledWake]>
     private let sessionStateWriter: SerialPersistenceWriter<SessionState>
 
-    // MARK: - Cost caches
-
-    /// Cached per-task cost totals. Entries are added lazily by `loadTaskCost(_:)`
-    /// after the first fetch and live for the duration of the session — task
-    /// `UsageRecord`s are append-only and a completed task's records are immutable.
-    private var taskCostCache: [UUID: Double] = [:]
-    /// Set of task IDs with an in-flight `loadTaskCost(_:)` fetch — used to
-    /// suppress duplicate async queries when SwiftUI re-renders the same row
-    /// before the first fetch returns.
-    private var taskCostInFlight: Set<UUID> = []
-
     init(session: Session, shared: SharedAppState) {
         self.session = session
         self.shared = shared
@@ -767,7 +756,7 @@ final class AppViewModel {
                 self.toolExecutingByRole.removeAll()
                 self.agentToolNames.removeAll()
                 self.inspectorStore.clearAll()
-                self.clearCostCaches()
+                self.clearTaskTokenCache()
                 self.runtime = nil
             }
         }
@@ -1760,7 +1749,7 @@ final class AppViewModel {
         toolExecutingByRole.removeAll()
         agentToolNames.removeAll()
         inspectorStore.clearAll()
-        clearCostCaches()
+        clearTaskTokenCache()
         // The channel stream is cancelled + awaited inside flushPersistence() below
         // (quiesceChannelStream), so any messages still buffered in the channel are drained
         // and persisted before we tear down rather than dropped here.
@@ -2262,55 +2251,16 @@ final class AppViewModel {
         return total
     }
 
-    /// Returns the cached per-task cost if one is present, or `nil` if not yet fetched.
-    /// SwiftUI rows call this synchronously to render their chip; if `nil`, they
-    /// schedule `loadTaskCost(_:)` once to populate the cache.
-    func cachedTaskCost(_ taskID: UUID) -> Double? {
-        taskCostCache[taskID]
-    }
-
-    /// Loads and caches the total estimated cost for a single task by aggregating
-    /// its `UsageRecord`s from the shared `UsageStore`. Safe to call multiple
-    /// times for the same ID — concurrent calls collapse to a single fetch.
+    /// Total estimated cost for a task, or `nil` if it has no usage records at all.
+    /// SwiftUI rows call this synchronously to render their chip.
     ///
-    /// Pass `force: true` to evict the existing cache entry before refetching.
-    /// Use that on the `.running → .completed` transition so the detail view
-    /// doesn't get stuck on a partial cost computed mid-run.
-    func loadTaskCost(_ taskID: UUID, force: Bool = false) async {
-        if force {
-            taskCostCache.removeValue(forKey: taskID)
-        } else if taskCostCache[taskID] != nil {
-            return
-        }
-        // A forced reload must not be swallowed by an in-flight reservation. The reserver is
-        // holding a snapshot taken BEFORE the event that forced us here (a task reaching a
-        // terminal state), so deferring to it would cache a knowingly stale figure and never
-        // retry. An unforced call still collapses into the reservation.
-        if !force && taskCostInFlight.contains(taskID) { return }
-        taskCostInFlight.insert(taskID)
-        let records = await shared.usageStore.records(for: taskID)
-        taskCostCache[taskID] = estimatedCost(from: records)
-        taskCostInFlight.remove(taskID)
-    }
-
-    /// Loads and caches costs for many tasks in a single `UsageStore` pass. Already-cached
-    /// and in-flight IDs are skipped. Used by a parent row summarizing its runs — the
-    /// per-task `loadTaskCost` would rescan the whole record set once per run.
-    func loadTaskCosts(for taskIDs: [UUID]) async {
-        let missing = Set(taskIDs.filter { taskCostCache[$0] == nil && !taskCostInFlight.contains($0) })
-        guard !missing.isEmpty else { return }
-        taskCostInFlight.formUnion(missing)
-        let grouped = await shared.usageStore.records(forAnyOf: missing)
-        // This method is `@MainActor` but not atomic: the fetch above is a suspension point,
-        // and a forced single-task reload or a `clearCostCaches()` can land while we're parked.
-        // Both of those are semantically NEWER than the snapshot we're holding, so never
-        // overwrite an entry that appeared during the suspension — write only what is still
-        // absent. Same reason we discard our reservations rather than assuming we still own
-        // them: a reset may have handed them to someone else.
-        for id in missing where taskCostCache[id] == nil {
-            taskCostCache[id] = estimatedCost(from: grouped[id] ?? [])
-        }
-        taskCostInFlight.subtract(missing)
+    /// Reads `SharedAppState.taskCosts` — the live mirror of `CostBoard`'s rollup — so a
+    /// running task's figure climbs as its records land. This used to be a per-view-model
+    /// cache populated by a one-shot `UsageStore` scan on row appear, which meant an
+    /// in-flight task displayed whatever had accrued at that instant (nothing, for any task
+    /// started after its row was already on screen) until it reached a terminal status.
+    func cachedTaskCost(_ taskID: UUID) -> Double? {
+        shared.taskCosts[taskID]
     }
 
     /// Every run spawned by `taskID`, across the active and archived buckets. The sidebar's
@@ -2324,9 +2274,9 @@ final class AppViewModel {
     }
 
     /// Estimates the total cost of a set of usage records using current pricing.
-    /// Shared by `loadTaskCost(_:force:)` and the PDF exporter so the two never diverge,
-    /// and so the exporter can compute directly from a fresh fetch (bypassing the
-    /// in-flight-guarded cache, which can early-return before it's populated).
+    /// Used by the PDF exporter, which computes from its own fresh fetch. Applies the
+    /// same formula as `CostBoard.costOf` — the two must not diverge, or an exported
+    /// document and the on-screen chip would disagree about the same task.
     func estimatedCost(from records: [UsageRecord]) -> Double {
         let lookup = shared.pricingLookup
         var total: Double = 0
@@ -2390,8 +2340,8 @@ final class AppViewModel {
         taskTokenCache[taskID]
     }
 
-    /// Same caching model as `loadTaskCost(_:force:)`. Pass `force: true` to
-    /// drop a stale partial computed while the task was still running.
+    /// Populates `cachedTaskTokens(_:)`. Pass `force: true` to drop a stale partial
+    /// computed while the task was still running.
     func loadTaskTokens(_ taskID: UUID, force: Bool = false) async {
         if force {
             taskTokenCache.removeValue(forKey: taskID)
@@ -2402,12 +2352,15 @@ final class AppViewModel {
         taskTokenCache[taskID] = tokenTotals(from: records)
     }
 
-    /// Clears the per-task cost / token caches. Called from the same reset paths
-    /// that clear `inspectorStore` (session stop, abort, clear-log) so a subsequent
-    /// open of the same task ID refetches from the (possibly cleared) `UsageStore`.
-    func clearCostCaches() {
-        taskCostCache.removeAll(keepingCapacity: true)
-        taskCostInFlight.removeAll(keepingCapacity: true)
+    /// Clears the per-task token cache. Called from the same reset paths that clear
+    /// `inspectorStore` (session stop, abort, clear-log) so a subsequent open of the
+    /// same task ID refetches from the `UsageStore`.
+    ///
+    /// Per-task COST is deliberately not cleared here — it no longer lives in a
+    /// view-model cache. `CostBoard` derives it from the `UsageStore`, which these
+    /// reset paths don't touch, so a stop or abort now leaves the cost chips intact
+    /// rather than blanking them until each row happened to refetch.
+    func clearTaskTokenCache() {
         taskTokenCache.removeAll(keepingCapacity: true)
     }
 }
