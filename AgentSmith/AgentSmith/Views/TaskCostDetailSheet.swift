@@ -403,7 +403,7 @@ struct TaskCostDetailSheet: View {
             Circle().fill(color).frame(width: 8, height: 8)
             Text(name).font(.caption)
             Spacer()
-            Text(formatCost(cost)).font(.caption.monospacedDigit())
+            Text(formatCostAligned(cost)).font(.system(.caption, design: .monospaced)).frame(width: 78, alignment: .trailing)
             Text(detail).font(.caption2).foregroundStyle(.secondary).frame(width: 60, alignment: .trailing)
         }
     }
@@ -413,7 +413,7 @@ struct TaskCostDetailSheet: View {
             Text(label).font(.caption)
             Spacer()
             Text(formatTokenCount(count)).font(.caption.monospacedDigit()).frame(width: 60, alignment: .trailing)
-            Text(formatCost(cost)).font(.caption.monospacedDigit()).frame(width: 60, alignment: .trailing)
+            Text(formatCostAligned(cost)).font(.system(.caption, design: .monospaced)).frame(width: 72, alignment: .trailing)
         }
     }
 
@@ -439,6 +439,15 @@ struct TaskCostDetailSheet: View {
     private func formatCost(_ cost: Double) -> String {
         if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
         return String(format: "$%.2f", cost)
+    }
+    /// Same adaptive precision as `formatCost` (2 decimals, or 4 for sub-penny), but the 2-decimal
+    /// case is padded so the fraction is always 4 characters wide. Under a right-aligned MONOSPACED
+    /// font that puts the decimal point at a fixed offset from the right, so a column of these lines
+    /// up on the decimal regardless of integer width. The pad is U+2007 FIGURE SPACE (digit-width,
+    /// and not collapsed the way trailing ASCII spaces can be). Use with a monospaced font + trailing frame.
+    private func formatCostAligned(_ cost: Double) -> String {
+        if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
+        return String(format: "$%.2f\u{2007}\u{2007}", cost)
     }
     /// Per-turn cost — always 3 decimals so the (monospaced) column's decimal points line up
     /// and sub-penny turns stay legible. Turn-by-turn only; summary/breakdown rows use `formatCost`.
