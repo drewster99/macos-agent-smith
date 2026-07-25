@@ -252,7 +252,7 @@ struct SpendingDashboardView: View {
                     averageTaskCostUSD: avgTaskCost,
                     aggregator: aggregator,
                     providerNames: providerNames,
-                    onOpenTaskDetail: openTaskDetailAction()
+                    onOpenTaskDetail: openTaskDetailAction(for: taskID)
                 )
             case .orchestration:
                 // Orchestration is not a task, so "vs Average" (a per-task comparison) is hidden (0).
@@ -272,16 +272,20 @@ struct SpendingDashboardView: View {
         }
     }
 
-    /// The "open task detail" action for the drill-down sheet's task-id link, or nil when there's
-    /// no session to open it in. Targets the last-focused session tab: archived/deleted tasks (the
-    /// common dashboard case) resolve via the GLOBAL inactive store there regardless of session,
-    /// while a still-active task resolves only if it lives in that session.
-    private func openTaskDetailAction() -> ((UUID) -> Void)? {
-        guard let sessionID = shared.focusedSessionID else { return nil }
+    /// The "open task detail" action for the drill-down sheet's task-id link, or nil when the task's
+    /// session can't be resolved at all. The session is taken from the task's OWN usage records
+    /// (every record is stamped with its `sessionID`), NOT from `shared.focusedSessionID` — the
+    /// dashboard is its own window, so by the time it's frontmost the session window has resigned key
+    /// and `focusedSessionID` is nil. Resolving from records also opens an active task in the session
+    /// that actually owns it. Archived/deleted tasks (the common dashboard case) resolve via the
+    /// GLOBAL inactive store in `TaskDetailWindow` regardless of which session we open in.
+    private func openTaskDetailAction(for taskID: UUID) -> ((UUID) -> Void)? {
+        guard let sessionID = allRecords.first(where: { $0.taskID == taskID })?.sessionID
+                ?? shared.focusedSessionID else { return nil }
         let open = openWindow
-        return { taskID in
+        return { requestedTaskID in
             AgentSmithApp.showOrOpenTaskDetail(
-                target: TaskDetailTarget(sessionID: sessionID, taskID: taskID),
+                target: TaskDetailTarget(sessionID: sessionID, taskID: requestedTaskID),
                 openWindow: open
             )
         }

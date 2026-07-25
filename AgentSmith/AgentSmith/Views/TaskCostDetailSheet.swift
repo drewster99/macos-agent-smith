@@ -266,15 +266,15 @@ struct TaskCostDetailSheet: View {
     /// order, with the roles that used it and its call count. Grouping is imperative, so it lives
     /// outside the `@ViewBuilder` body.
     private func configRows() -> [(key: String, config: ModelConfiguration, roles: [AgentRole], calls: Int)] {
-        // Group by CONTENT (provider/model + temperature + max output + context), not the config's
-        // UUID: a config edited in place keeps its id, so id-grouping would fold pre- and post-edit
-        // settings into one row showing whichever was seen first. Content grouping shows each
-        // distinct setting as its own row and also merges identical settings across roles.
+        // Group by CONTENT, not the config's UUID: a config edited in place keeps its id, so
+        // id-grouping would fold pre- and post-edit settings into one row showing whichever was
+        // seen first. Content grouping shows each distinct setting as its own row and also merges
+        // identical settings across roles.
         var order: [String] = []
         var byKey: [String: (config: ModelConfiguration, roles: Set<AgentRole>, calls: Int)] = [:]
         for record in records {
             guard let c = record.configuration else { continue }
-            let key = "\(c.providerID)/\(c.model)|t=\(c.temperature.map { String(format: "%.2f", $0) } ?? "d")|max=\(c.maxTokens)|ctx=\(c.contextWindowSize)"
+            let key = configContentKey(c)
             if byKey[key] == nil { byKey[key] = (c, [], 0); order.append(key) }
             byKey[key]?.roles.insert(record.agentRole)
             byKey[key]?.calls += 1
@@ -283,6 +283,29 @@ struct TaskCostDetailSheet: View {
             guard let entry = byKey[key] else { return nil }
             return (key, entry.config, entry.roles.sorted { $0.rawValue < $1.rawValue }, entry.calls)
         }
+    }
+
+    /// A stable content fingerprint for grouping configurations: every field that changes the
+    /// model's behavior, so two configs differing only in `id` merge while any real difference
+    /// splits into its own row. In this app roles routinely share a base model but differ in
+    /// per-role tuning (thinking budget/effort), so those must be part of the key or distinct
+    /// configs collapse. Temperature is exact — no rounding — so near-equal values don't collide.
+    private func configContentKey(_ c: ModelConfiguration) -> String {
+        let temperature = c.temperature.map { "\($0)" } ?? "default"
+        let thinking = "\(c.thinkingBudget.map { "\($0)" } ?? "-")/\(c.thinkingEffort ?? "-")"
+        let overrides = c.extraJSONOverrides
+            .map { dict in dict.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",") }
+            ?? "-"
+        return [
+            "\(c.providerID)/\(c.model)",
+            "t=\(temperature)",
+            "out=\(c.maxTokens)",
+            "ctx=\(c.contextWindowSize)",
+            "think=\(thinking)",
+            "cache=\(c.extendedCacheTTL)",
+            "stream=\(c.streaming)",
+            "ov=\(overrides)"
+        ].joined(separator: "|")
     }
 
     @ViewBuilder
