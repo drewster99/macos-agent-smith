@@ -128,6 +128,42 @@ struct SpendingDashboardView: View {
     /// Aggregated summary of `priorRecords`.
     @State private var priorSummary: UsageSummary = .empty()
 
+    /// Cost-over-time bars (stacked by provider), precomputed so chart hover doesn't re-aggregate.
+    @State private var chartSeries: [ChartItem] = []
+    /// `chartSeries` grouped by bucket date, for the hover tooltip's O(1) lookup.
+    @State private var chartItemsByDate: [Date: [ChartItem]] = [:]
+    /// The calendar bucket the current range charts by (hour/day/month).
+    @State private var chartBucketUnit: Calendar.Component = .day
+
+    /// Breakdown-card datasets, one per card, precomputed so a chart hover or filter keystroke
+    /// doesn't re-aggregate `filteredRecords` four times.
+    @State private var providerBreakdown: [BreakdownBar] = []
+    @State private var agentBreakdown: [BreakdownBar] = []
+    @State private var modelBreakdown: [ModelBreakdownRow] = []
+    @State private var toolBreakdown: [ToolBreakdownRow] = []
+
+    /// One bar in the By-Provider / By-Agent cards: display name, cost, share of total, and tint.
+    private struct BreakdownBar: Identifiable {
+        let id: String
+        let name: String
+        let cost: Double
+        let fraction: Double
+        let color: Color
+    }
+    /// One row in the By-Model card.
+    private struct ModelBreakdownRow: Identifiable {
+        let id: String
+        let model: String
+        let cost: Double
+        let calls: Int
+    }
+    /// One row in the Tool Calls card.
+    private struct ToolBreakdownRow: Identifiable {
+        let id: String
+        let tool: String
+        let count: Int
+    }
+
     // MARK: - Time range
 
     enum TimeRange: String, CaseIterable, Identifiable {
@@ -362,6 +398,45 @@ struct SpendingDashboardView: View {
             return TaskLedgerRow(id: key.uuidString, taskID: key, title: ledgerTitle(for: key, using: taskLookup), summary: value)
         }
         recomputeDisplayRows()
+        recomputeChartSeries(agg)
+        recomputeBreakdowns(agg)
+    }
+
+    /// Builds the four breakdown-card datasets once per data/range change (one pass each over
+    /// `filteredRecords`), so the cards render from ready arrays. Shares run before the ledger so
+    /// `currentSummary` (the denominator) is already set.
+    private func recomputeBreakdowns(_ agg: UsageAggregator) {
+        let total = currentSummary.totalCostUSD
+        func share(_ cost: Double) -> Double { total > 0 ? cost / total : 0 }
+
+        providerBreakdown = agg.byProvider(filteredRecords)
+            .compactMap { key, value -> BreakdownBar? in
+                guard let key else { return nil }
+                return BreakdownBar(id: key, name: providerDisplayName(key), cost: value.totalCostUSD,
+                                    fraction: share(value.totalCostUSD), color: .accentColor)
+            }
+            .sorted { $0.cost > $1.cost }
+
+        agentBreakdown = agg.byAgent(filteredRecords)
+            .map { role, value in
+                BreakdownBar(id: role.rawValue, name: role.displayName, cost: value.totalCostUSD,
+                             fraction: share(value.totalCostUSD), color: AppColors.color(for: .agent(role)))
+            }
+            .sorted { $0.cost > $1.cost }
+
+        modelBreakdown = Array(
+            agg.byModel(filteredRecords)
+                .map { ModelBreakdownRow(id: $0.key, model: $0.key, cost: $0.value.totalCostUSD, calls: $0.value.callCount) }
+                .sorted { $0.cost > $1.cost }
+                .prefix(8)
+        )
+
+        toolBreakdown = Array(
+            toolFrequencyFromRecords(filteredRecords)
+                .map { ToolBreakdownRow(id: $0.key, tool: $0.key, count: $0.value) }
+                .sorted { $0.count > $1.count }
+                .prefix(8)
+        )
     }
 
     /// Task titles keyed by task id, merged from every global source that carries one. A title needs
@@ -571,34 +646,39 @@ struct SpendingDashboardView: View {
         let cost: Double
     }
 
-    private func costOverTimeChart() -> some View {
-        let bucketUnit: Calendar.Component = {
-            switch selectedRange {
-            case .today: return .hour
-            case .week, .month: return .day
-            case .all: return .month
-            }
-        }()
-        let byProvider = aggregator.byProvider(filteredRecords)
-        let providerIDs = byProvider.keys.compactMap { $0 }.sorted()
+    /// Builds the cost-over-time bars once per data/range change (multiple O(n) passes over
+    /// `filteredRecords`), so chart hover and unrelated body updates don't re-aggregate them.
+    private func recomputeChartSeries(_ agg: UsageAggregator) {
+        let bucketUnit: Calendar.Component
+        switch selectedRange {
+        case .today: bucketUnit = .hour
+        case .week, .month: bucketUnit = .day
+        case .all: bucketUnit = .month
+        }
+        chartBucketUnit = bucketUnit
 
-        // Build time-series data: for each provider, get daily/monthly buckets
-        var chartItems: [ChartItem] = []
+        let providerIDs = agg.byProvider(filteredRecords).keys.compactMap { $0 }.sorted()
+        var items: [ChartItem] = []
         for providerID in providerIDs {
             let providerRecords = filteredRecords.filter { $0.providerID == providerID }
-            let buckets = aggregator.byTimeBucket(providerRecords, unit: bucketUnit)
+            let buckets = agg.byTimeBucket(providerRecords, unit: bucketUnit)
             let displayName = providerDisplayName(providerID)
             for (date, summary) in buckets {
-                chartItems.append(ChartItem(
+                items.append(ChartItem(
                     id: "\(displayName)|\(date.timeIntervalSinceReferenceDate)",
                     date: date, provider: displayName, cost: summary.totalCostUSD
                 ))
             }
         }
-        chartItems.sort { $0.date < $1.date }
+        items.sort { $0.date < $1.date }
+        chartSeries = items
+        chartItemsByDate = Dictionary(grouping: items, by: \.date)
+    }
 
-        // Group by date for the hover tooltip
-        let itemsByDate = Dictionary(grouping: chartItems, by: \.date)
+    private func costOverTimeChart() -> some View {
+        let bucketUnit = chartBucketUnit
+        let chartItems = chartSeries
+        let itemsByDate = chartItemsByDate
 
         return VStack(alignment: .leading, spacing: 8) {
             Text("Cost Over Time")
@@ -709,73 +789,43 @@ struct SpendingDashboardView: View {
     // MARK: - Section 3: Breakdown Panels
 
     private func breakdownPanels() -> some View {
-        let summary = currentSummary
-
         // Static 2x2 grid via two HStacks. The card set is fixed at four; a non-lazy layout
-        // sidesteps the lazy-grid project-rule violation while preserving visual structure.
+        // sidesteps the lazy-grid project-rule violation while preserving visual structure. Each
+        // card reads its precomputed dataset — the aggregation happens in `recomputeBreakdowns`.
         return VStack(spacing: 16) {
             HStack(alignment: .top, spacing: 16) {
             breakdownCard(title: "By Provider") {
-                let byProvider = aggregator.byProvider(filteredRecords)
-                    .compactMap { k, v -> (String, String, UsageSummary)? in
-                        guard let k else { return nil }
-                        return (k, providerDisplayName(k), v)
-                    }
-                    .sorted { $0.2.totalCostUSD > $1.2.totalCostUSD }
-
-                ForEach(byProvider, id: \.0) { _, displayName, provSummary in
-                    providerBar(
-                        name: displayName,
-                        cost: provSummary.totalCostUSD,
-                        fraction: summary.totalCostUSD > 0 ? provSummary.totalCostUSD / summary.totalCostUSD : 0
-                    )
+                ForEach(providerBreakdown) { bar in
+                    providerBar(name: bar.name, cost: bar.cost, fraction: bar.fraction, color: bar.color)
                 }
             }
 
-            // By Agent
             breakdownCard(title: "By Agent") {
-                let byAgent = aggregator.byAgent(filteredRecords)
-                    .sorted { $0.value.totalCostUSD > $1.value.totalCostUSD }
-
-                ForEach(byAgent, id: \.key) { role, agentSummary in
-                    providerBar(
-                        name: role.displayName,
-                        cost: agentSummary.totalCostUSD,
-                        fraction: summary.totalCostUSD > 0 ? agentSummary.totalCostUSD / summary.totalCostUSD : 0,
-                        color: AppColors.color(for: .agent(role))
-                    )
+                ForEach(agentBreakdown) { bar in
+                    providerBar(name: bar.name, cost: bar.cost, fraction: bar.fraction, color: bar.color)
                 }
             }
             }
 
             HStack(alignment: .top, spacing: 16) {
             breakdownCard(title: "By Model") {
-                let byModel = aggregator.byModel(filteredRecords)
-                    .sorted { $0.value.totalCostUSD > $1.value.totalCostUSD }
-                    .prefix(8)
-
-                ForEach(Array(byModel), id: \.key) { model, modelSummary in
+                ForEach(modelBreakdown) { row in
                     SpendingByModelRow(
-                        modelName: model,
-                        costFormatted: formatCost(modelSummary.totalCostUSD),
-                        callCount: modelSummary.callCount
+                        modelName: row.model,
+                        costFormatted: formatCost(row.cost),
+                        callCount: row.calls
                     )
                 }
             }
 
-            // Tool distribution
             breakdownCard(title: "Tool Calls") {
-                let toolCounts = toolFrequencyFromRecords(filteredRecords)
-                    .sorted { $0.value > $1.value }
-                    .prefix(8)
-
-                if toolCounts.isEmpty {
+                if toolBreakdown.isEmpty {
                     Text("No tool call data")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(Array(toolCounts), id: \.key) { tool, count in
-                        SpendingToolCountRow(toolName: tool, count: count)
+                    ForEach(toolBreakdown) { row in
+                        SpendingToolCountRow(toolName: row.tool, count: row.count)
                     }
                 }
             }
