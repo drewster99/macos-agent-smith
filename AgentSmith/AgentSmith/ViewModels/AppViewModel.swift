@@ -1621,7 +1621,7 @@ final class AppViewModel {
         // `tasks` with a non-active disposition, so presence alone isn't enough).
         let activeTasks = tasks.filter { $0.disposition == .active }
         let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let inFlightStatuses: Set<AgentTask.Status> = [.starting, .running, .validating, .awaitingReview]
+        let inFlightStatuses: Set<AgentTask.Status> = [.starting, .running, .validating, .awaitingReview, .awaitingHelp]
 
         // Drop entries whose task vanished (deleted/archived elsewhere).
         taskOverlayEntries.removeAll { byID[$0.id] == nil }

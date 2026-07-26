@@ -62,10 +62,9 @@ struct ProvideHelpTool: AgentTool {
                 """)
         }
 
-        await context.taskStore.clearHelpRequest(id: taskID)
-        await context.taskStore.updateStatus(id: taskID, status: .running)
-
-        // Find an existing Brown, or auto-spawn one (e.g. after app restart while parked).
+        // Secure the worker BEFORE consuming the help request or flipping status — otherwise a spawn
+        // that fails at capacity (e.g. after a restart, all slots busy) leaves the task `.running`
+        // with no Brown AND no recoverable help request. Find an existing Brown, or auto-spawn one.
         var brownID: UUID?
         var brownWasSpawned = false
         for agentID in task.assigneeIDs {
@@ -81,8 +80,10 @@ struct ProvideHelpTool: AgentTool {
         }
 
         guard let brownID else {
-            return .failure("Task returned to running, but failed to spawn a Brown agent. Check provider configuration.")
+            return .failure("Couldn't spawn a Brown to resume this task — worker slots may all be busy, or a provider is misconfigured. The task stays parked awaiting help; try again once a slot frees.")
         }
+        await context.taskStore.clearHelpRequest(id: taskID)
+        await context.taskStore.updateStatus(id: taskID, status: .running)
 
         let content: String
         if brownWasSpawned {

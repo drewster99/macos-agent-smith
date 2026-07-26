@@ -421,6 +421,7 @@ private extension AgentTask.Status {
         case .running: return "circle.lefthalf.filled"
         case .validating: return "checklist"
         case .awaitingReview: return "person.crop.circle.badge.questionmark"
+        case .awaitingHelp: return "lifepreserver.fill"
         case .completed: return "checkmark.circle.fill"
         case .failed: return "xmark.circle.fill"
         default: return "circle"
@@ -432,6 +433,7 @@ private extension AgentTask.Status {
         case .running: return AppColors.stepInProgress
         case .validating: return .teal
         case .awaitingReview: return .purple
+        case .awaitingHelp: return .orange
         case .completed: return AppColors.verdictAccepted
         case .failed: return AppColors.verdictRejected
         default: return .secondary

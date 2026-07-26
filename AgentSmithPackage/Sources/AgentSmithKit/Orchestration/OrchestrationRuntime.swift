@@ -2281,6 +2281,14 @@ public actor OrchestrationRuntime {
 
         activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
+        // A validator model may already be configured at boot (the runtime is built with providers
+        // BEFORE tasks are restored), so a task persisted-parked on a missing validator would
+        // otherwise sit until the next `setProviders`. Release it now — no-op when nothing is parked
+        // or no validator is configured.
+        if llmProviders[.validator] != nil, llmConfigs[.validator] != nil {
+            releaseTasksBlockedOnValidatorModel()
+        }
+
         // A task that escalated to `.awaitingReview` PURELY because the validator errored (no
         // pending help request, not parked on a missing validator model) re-validates on restart
         // rather than waiting on a human — validation is idempotent, so the machine gets another
