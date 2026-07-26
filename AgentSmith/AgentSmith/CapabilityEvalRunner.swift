@@ -303,7 +303,7 @@ enum CapabilityEvalRunner {
                 let test = ModelProber.makeTrailingSystemTurnTest()
                 let forcedConfig = ModelConfiguration(
                     name: "probe:\(target.modelID):trailing-system", providerID: target.providerID,
-                    // 4096, not the ~256 a nine-character echo needs. max_tokens caps thinking AND
+                    // 5000, not the ~256 a nine-character echo needs. max_tokens caps thinking AND
                     // text together, and on this family thinking is on by default (Opus 5, Sonnet 5)
                     // or unconditional (Fable 5) with no way to switch it off — Fable 5 rejects
                     // `thinking: {type: "disabled"}` outright. At 256 the reasoning consumed the
@@ -313,7 +313,12 @@ enum CapabilityEvalRunner {
                     // because it finished thinking inside the budget. A starved probe that reads as
                     // "couldn't find out" is the expensive kind of wrong: it looks like a real
                     // measurement of the model rather than a misconfiguration of the harness.
-                    modelID: target.modelID, temperature: nil, maxOutputTokens: 4096,
+                    //
+                    // Sized for headroom rather than economy, and it costs nothing to be generous:
+                    // this is a ceiling, not an allocation. The reply is nine characters, so the
+                    // budget is only ever consumed by reasoning, and billing follows tokens
+                    // actually produced. Raise it before trimming it.
+                    modelID: target.modelID, temperature: nil, maxOutputTokens: 5000,
                     streaming: false,
                     extraJSONOverrides: test.overrides
                 )
