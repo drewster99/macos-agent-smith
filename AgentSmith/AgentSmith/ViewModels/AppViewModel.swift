@@ -664,7 +664,8 @@ final class AppViewModel {
             autoAdvanceEnabled: autoRunNextTask,
             autoRunInterruptedTasks: autoRunInterruptedTasks,
             memoryStore: sharedMemoryStore,
-            inactiveTaskStore: sharedInactiveStore
+            inactiveTaskStore: sharedInactiveStore,
+            liveActivityTracker: shared.liveActivityTracker
         )
         // Bridge per-session attachment persistence into the runtime so the new
         // attachment-aware tools (create_task / task_update / task_complete) can

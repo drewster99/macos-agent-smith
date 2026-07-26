@@ -62,7 +62,9 @@ struct InspectorView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
-                .padding(.bottom, 8)
+                .padding(.bottom, 6)
+
+            ConcurrencyStrip(shared: viewModel.shared)
 
             Divider()
 
@@ -73,6 +75,7 @@ struct InspectorView: View {
                     RoleAgentCard(viewModel: viewModel, role: .securityAgent, roleMessages: securityAgentMessages)
                     ValidatorAgentCard(viewModel: viewModel)
                     SummarizerAgentCard(viewModel: viewModel, summarizerMessages: summarizerMessages)
+                    MemoryQueryCard(shared: viewModel.shared)
                 }
             }
         }
@@ -910,6 +913,198 @@ struct DirectMessageInputRow: View {
         guard !text.isEmpty else { return }
         onSend(text)
         draftText = ""
+    }
+}
+
+// MARK: - Concurrency Strip
+
+/// A compact, color-coded meter of how many operations of each kind are running app-wide RIGHT NOW —
+/// Brown workers, Security/Validator evaluations, Summarizer runs, and memory searches. Reads
+/// `SharedAppState.liveActivitySnapshot` (the single app-wide tracker's main-thread mirror), so the
+/// counts are TOTALS across every tab, not per-session. Each chip lights when its count > 0 and dims
+/// to a neutral dot at zero; the chips reflow to the inspector's width.
+private struct ConcurrencyStrip: View {
+    /// Read the snapshot INSIDE this view (not passed down from `InspectorView.body`) so only this
+    /// strip re-renders on each activity tick — the agent cards' body evaluation stays gated by their
+    /// own caches, per this file's observation-narrowing rules.
+    let shared: SharedAppState
+
+    private struct Meter: Identifiable {
+        let id: String
+        let count: Int
+        let label: String
+        let color: Color
+    }
+
+    private func meters(_ snapshot: LiveActivityTracker.Snapshot) -> [Meter] {
+        [
+            Meter(id: "brown", count: snapshot.brownWorkers, label: "Brown",
+                  color: AppColors.color(for: .agent(.brown))),
+            Meter(id: "security", count: snapshot.securityEvaluations, label: "Security",
+                  color: AppColors.color(for: .agent(.securityAgent))),
+            Meter(id: "validator", count: snapshot.validatorEvaluations, label: "Validator",
+                  color: AppColors.color(for: .agent(.validator))),
+            Meter(id: "summarizer", count: snapshot.summarizerRuns, label: "Summarizer",
+                  color: AppColors.color(for: .agent(.summarizer))),
+            // Memory search shares the purple used by the Memory query card below.
+            Meter(id: "search", count: snapshot.memorySearches, label: "Search", color: .purple)
+        ]
+    }
+
+    var body: some View {
+        let snapshot = shared.liveActivitySnapshot
+        FlowLayout(spacing: 10) {
+            ForEach(meters(snapshot)) { meter in
+                ConcurrencyChip(count: meter.count, label: meter.label, color: meter.color)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .animation(.easeOut(duration: 0.15), value: snapshot)
+    }
+}
+
+/// One count in the concurrency strip: a colored dot + count + label, going neutral/secondary at zero.
+private struct ConcurrencyChip: View {
+    let count: Int
+    let label: String
+    let color: Color
+
+    private var active: Bool { count > 0 }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(active ? color : AppColors.inactiveDot)
+                .frame(width: 7, height: 7)
+            Text("\(count)")
+                .font(AppFonts.inspectorLabel)
+                .fontWeight(active ? .semibold : .regular)
+                .monospacedDigit()
+                .foregroundStyle(active ? .primary : .secondary)
+            Text(label)
+                .font(AppFonts.inspectorLabel)
+                .foregroundStyle(active ? .secondary : .tertiary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(count) \(label) running")
+    }
+}
+
+// MARK: - Memory Query Log
+
+/// Global log of memory-store queries (semantic + keyword searches) with response times — the
+/// read-side analog of the Security Agent's evaluation log. Reads `shared.memoryQueryRecords`
+/// (global, since the `MemoryStore` is shared across sessions). Starts collapsed; the header shows a
+/// live query count so activity is glanceable without expanding.
+private struct MemoryQueryCard: View {
+    @Bindable var shared: SharedAppState
+    @State private var expanded = false
+
+    var body: some View {
+        let records = shared.memoryQueryRecords
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            }, label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(records.isEmpty ? AppColors.inactiveDot : Color.purple)
+                        .frame(width: 8, height: 8)
+                    Text("Memory")
+                        .font(.headline)
+                        .foregroundStyle(records.isEmpty ? .secondary : Color.purple)
+                    Spacer()
+                    Text("\(records.count) quer\(records.count == 1 ? "y" : "ies")")
+                        .font(AppFonts.inspectorLabel)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            })
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            if expanded {
+                if records.isEmpty {
+                    Text("No memory queries yet.")
+                        .font(AppFonts.inspectorBody)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
+                } else {
+                    VStack(alignment: .leading, spacing: 3) {
+                        // Newest first; cap the rendered rows so a long session doesn't build a huge tree.
+                        ForEach(records.suffix(40).reversed()) { record in
+                            MemoryQueryRecordRow(record: record)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                }
+            }
+
+            Divider()
+        }
+    }
+}
+
+/// A single memory-query log entry: hit counts, source, latency, time; tap to expand the full query.
+struct MemoryQueryRecordRow: View {
+    let record: MemoryQueryRecord
+    @State private var expanded = false
+
+    var body: some View {
+        Button(action: {
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        }, label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text("\(record.memoryHits)m·\(record.taskHits)t")
+                        .font(AppFonts.microMonoBadge)
+                        .fontWeight(.bold)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.purple.opacity(0.8))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+
+                    Text(record.source)
+                        .font(AppFonts.inspectorBody)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Text("\(record.latencyMs)ms")
+                        .font(AppFonts.inspectorBody)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+
+                    Text(record.timestamp, style: .time)
+                        .font(AppFonts.inspectorBody)
+                        .foregroundStyle(.tertiary)
+                }
+
+                Text(record.query)
+                    .font(AppFonts.inspectorBody)
+                    .foregroundStyle(.primary)
+                    .lineLimit(expanded ? nil : 1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+                    .textSelection(.enabled)
+            }
+            .padding(.vertical, 3)
+            .padding(.horizontal, 6)
+            .background(Color.purple.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
+        })
+        .buttonStyle(.plain)
     }
 }
 

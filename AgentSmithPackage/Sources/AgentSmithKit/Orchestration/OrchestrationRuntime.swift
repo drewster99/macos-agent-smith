@@ -49,7 +49,11 @@ public actor OrchestrationRuntime {
     /// summarizer runs, memory searches) for the inspector's concurrency meter. `nonisolated` so the
     /// UI can attach its `onChange` and read `current()` without hopping the actor; the tracker is an
     /// internally-locked `Sendable` class, and each subsystem brackets its own work into it.
-    public nonisolated let liveActivityTracker = LiveActivityTracker()
+    ///
+    /// Injected — a SINGLE app-wide instance is shared across every session's runtime (and the shared
+    /// `MemoryStore`), so the strip shows total concurrency across all tabs rather than per-session
+    /// counts. See `SharedAppState.liveActivityTracker`.
+    public nonisolated let liveActivityTracker: LiveActivityTracker
 
     /// Fixed UUID representing the human user for private Smith→User messages
     /// (`00000000-0000-0000-0000-000000000001`).
@@ -1342,11 +1346,13 @@ public actor OrchestrationRuntime {
         autoAdvanceEnabled: Bool = true,
         autoRunInterruptedTasks: Bool = false,
         memoryStore: MemoryStore? = nil,
-        inactiveTaskStore: InactiveTaskStore = InactiveTaskStore()
+        inactiveTaskStore: InactiveTaskStore = InactiveTaskStore(),
+        liveActivityTracker: LiveActivityTracker = LiveActivityTracker()
     ) {
         self.channel = MessageChannel()
         self.taskStore = TaskStore(inactiveStore: inactiveTaskStore)
         self.memoryStore = memoryStore ?? MemoryStore(engine: semanticSearchEngine)
+        self.liveActivityTracker = liveActivityTracker
         self.llmProviders = providers
         self.llmConfigs = configurations
         self.providerAPITypes = providerAPITypes
@@ -1948,11 +1954,6 @@ public actor OrchestrationRuntime {
         let powerMgr = PowerAssertionManager(taskStore: taskStore)
         await powerMgr.start()
         powerManager = powerMgr
-
-        // Let the memory store bump the live-activity counter while a search is in flight, so
-        // the inspector's concurrency strip shows semantic/lexical queries alongside the agents.
-        // Idempotent — the tracker is runtime-scoped, so re-setting on every start is harmless.
-        await memoryStore.setActivityTracker(liveActivityTracker)
 
         // Create the TaskSummarizer only if a summarizer model is explicitly configured.
         // If not configured, task summarization is silently skipped.

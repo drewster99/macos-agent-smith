@@ -284,6 +284,30 @@ final class SharedAppState {
     /// touch the actor directly.
     private(set) var costBoardSnapshot: CostBoard.Snapshot = .empty
 
+    /// The single app-wide live-activity tracker. Shared across EVERY session's `OrchestrationRuntime`
+    /// (injected at construction) and the shared `MemoryStore`, so the inspector's concurrency strip
+    /// shows TOTAL in-flight operations across all tabs, not per-session counts.
+    let liveActivityTracker = LiveActivityTracker()
+
+    /// Main-thread mirror of `liveActivityTracker`'s snapshot, republished via its `onChange` so the
+    /// inspector's concurrency strip observes it without touching the tracker's lock.
+    private(set) var liveActivitySnapshot = LiveActivityTracker.Snapshot()
+
+    /// Rolling log of memory-store queries (newest last), surfaced in the inspector's Memory card.
+    /// Global because the `MemoryStore` is shared across sessions. Capped so a long-running app
+    /// doesn't accumulate unbounded records.
+    private(set) var memoryQueryRecords: [MemoryQueryRecord] = []
+    /// Newest-first cap for `memoryQueryRecords`.
+    private static let maxMemoryQueryRecords = 200
+
+    /// Appends a memory-query record to the rolling log, trimming the oldest past the cap.
+    func appendMemoryQueryRecord(_ record: MemoryQueryRecord) {
+        memoryQueryRecords.append(record)
+        if memoryQueryRecords.count > Self.maxMemoryQueryRecords {
+            memoryQueryRecords.removeFirst(memoryQueryRecords.count - Self.maxMemoryQueryRecords)
+        }
+    }
+
     /// Live cost and token totals per task, keyed by task ID — the main-thread mirror of
     /// `CostBoard.taskUsage`, and the only source the per-task figures read. Tasks with no
     /// usage records are absent (not zero), so a caller can tell "used nothing" from
@@ -468,6 +492,13 @@ final class SharedAppState {
         }
         self.inactiveTasksWriter = SerialPersistenceWriter(label: "inactiveTasks") { snapshot in
             try await pm.saveInactiveTasks(snapshot)
+        }
+
+        // Mirror the app-wide live-activity tracker onto the main thread for the inspector's
+        // concurrency strip. `setOnChange` delivers the current snapshot immediately, then on
+        // every begin/end/set, so the mirror is live from launch.
+        liveActivityTracker.setOnChange { [weak self] snapshot in
+            Task { @MainActor [weak self] in self?.liveActivitySnapshot = snapshot }
         }
     }
 
@@ -715,6 +746,17 @@ final class SharedAppState {
         if let store = memoryStore { return store }
         let engine = try await ensureSemanticEngine()
         let store = MemoryStore(engine: engine)
+
+        // Collect each query into the global memory log for the inspector's Memory card.
+        await store.setOnQueryRecorded { [weak self] record in
+            Task { @MainActor [weak self] in
+                self?.appendMemoryQueryRecord(record)
+            }
+        }
+
+        // The shared store is app-wide, so its in-flight search count belongs to the single
+        // app-wide tracker — the ONE place its `activityTracker` is set. Runtimes no longer wire it.
+        await store.setActivityTracker(liveActivityTracker)
 
         await store.setOnChange { [weak self] in
             Task { @MainActor [weak self] in
