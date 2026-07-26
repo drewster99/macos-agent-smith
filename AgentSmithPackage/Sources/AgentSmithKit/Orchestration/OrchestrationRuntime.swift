@@ -2511,28 +2511,16 @@ public actor OrchestrationRuntime {
                     """)
             }
 
-            // Help requests are their own `.awaitingHelp` state now — a blocker (Smith answers via
-            // `provide_help`), never a finished-work review. `.awaitingReview` is review-only.
+            // Help requests are their own `.awaitingHelp` state — a blocker Smith answers via
+            // `provide_help`. Validator-error parks (`.awaitingReview`) are deliberately NOT surfaced
+            // to Smith: they're the USER's to resolve from the task row, and they re-validate on cold
+            // boot anyway. Smith no longer reviews validation.
             let helpRequestTasks = awaitingHelpTasks
-            let reviewTasks = awaitingReviewTasks
-            if !reviewTasks.isEmpty {
-                let taskList = reviewTasks.map { task in
-                    var entry = "- \(task.title) (id: \(task.id.uuidString))"
-                    if let result = task.result {
-                        entry += "\n  Result: \(result)"
-                    }
-                    if let commentary = task.commentary {
-                        entry += "\n  Commentary: \(commentary)"
-                    }
-                    return entry
-                }.joined(separator: "\n")
-                parts.append("\(reviewTasks.count) task(s) are awaiting your review:\n\(taskList)\nReview each and call `review_work`.")
-            }
             if !helpRequestTasks.isEmpty {
                 let taskList = helpRequestTasks.map { task in
                     "- \(task.title) (id: \(task.id.uuidString))\n  \(task.helpRequest ?? "")"
                 }.joined(separator: "\n")
-                parts.append("\(helpRequestTasks.count) task(s) have a BLOCKER from Brown awaiting your help (not a review):\n\(taskList)\nResolve each with `provide_help`, or `message_user` first if you need something from the user. Do NOT call `review_work` on these.")
+                parts.append("\(helpRequestTasks.count) task(s) have a BLOCKER from Brown awaiting your help:\n\(taskList)\nResolve each with `provide_help`, or `message_user` first if you need something from the user.")
             }
 
             if !validatingTasks.isEmpty {
@@ -2551,7 +2539,8 @@ public actor OrchestrationRuntime {
                     \(taskList)
                     The runtime has re-enqueued validation for these task(s). Do NOT call `run_task`, \
                     `create_task`, or `message_brown` for them, and do NOT recreate any side-effect work \
-                    they already performed. Wait for validation to complete; if validation escalates, use `review_work`.
+                    they already performed. Wait for validation to complete — it needs nothing from you, \
+                    and if it can't reach a verdict the user resolves it, not you.
                     """)
             }
 

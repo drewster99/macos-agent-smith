@@ -2639,7 +2639,7 @@ public actor AgentActor {
     /// target is the task it just created). Read-only tools (`get_task_details`, `list_tasks`)
     /// are deliberately absent: looking is orchestration, not acting on a task.
     static let smithTaskActionTools: Set<String> = [
-        "review_work", "provide_help", "edit_task", "set_template_inputs",
+        "provide_help", "edit_task", "set_template_inputs",
         "set_acceptance_criteria", "manage_steps", "run_task", "update_task",
         "amend_task", "manage_task_disposition", "schedule_task_action"
     ]
@@ -2684,7 +2684,6 @@ public actor AgentActor {
 
     private func updatePostCallFlags(call: LLMToolCall, result: String, succeeded: Bool, sentMessage: inout Bool, calledTaskComplete: inout Bool, calledCreateTask: inout Bool) {
         if call.name == "message_user" && result == "Message sent to user." { sentMessage = true }
-        if call.name == "review_work" && (result.contains("accepted and marked COMPLETE") || result.hasPrefix("Changes requested")) { sentMessage = true }
         if call.name == "message_brown" && result == "Message sent to Brown." { sentMessage = true }
         if call.name == "reply_to_user" && result == "Reply sent to user." { sentMessage = true }
         // A successful task_complete or request_help hands control to another actor. Use the
