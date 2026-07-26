@@ -63,9 +63,10 @@ final class AppViewModel {
     var hasRestoredHistory = false
     /// Number of messages loaded from disk at launch (available for restore).
     var persistedHistoryCount = 0
-    /// The first task currently awaiting Smith's review, if any. Drives the review banner.
+    /// The first task currently parked for attention — a validator-error escalation the USER resolves
+    /// (`.awaitingReview`) or a Brown blocker Smith answers (`.awaitingHelp`). Drives the banner.
     var taskAwaitingReview: AgentTask? {
-        tasks.first { $0.status == .awaitingReview }
+        tasks.first { $0.status == .awaitingReview || $0.status == .awaitingHelp }
     }
     /// Set when a task action (archive, delete) is blocked; drives the error alert.
     var taskActionError: String? = nil
@@ -1701,10 +1702,7 @@ final class AppViewModel {
             taskActionError = "This task can't be run right now (status: \(task.status.rawValue))."
             return
         }
-        let slotHolders = tasks.filter {
-            $0.id != task.id &&
-            ($0.status == .starting || $0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
-        }
+        let slotHolders = tasks.filter { $0.id != task.id && $0.occupiesWorkerSlot }
         let capacity = await runtime?.workerSlots().capacity ?? 1
         if slotHolders.count >= capacity {
             let names = slotHolders.prefix(3).map { "“\($0.title)”" }.joined(separator: ", ")

@@ -107,7 +107,10 @@ public struct ToolAvailabilityContext: Sendable {
     public let agentRole: AgentRole
     /// Whether the task store contains any active tasks with a runnable status (pending, paused, or interrupted).
     public let hasRunnableTasks: Bool
-    /// Whether the task store contains any active tasks with awaitingReview status.
+    /// Whether any active task has a Brown blocked on a `request_help` (`.awaitingHelp`) — gates
+    /// Smith's `provide_help` (offered) and `message_brown` (disabled). Despite the legacy name it no
+    /// longer keys on `.awaitingReview`: that is now a user-owned validator-error park with no live
+    /// worker, and must not gate Smith's messaging of unrelated running workers.
     public let hasAwaitingReviewTasks: Bool
 
     public init(lastDirectUserMessageAt: Date? = nil, agentRole: AgentRole, hasRunnableTasks: Bool = false, hasAwaitingReviewTasks: Bool = false) {

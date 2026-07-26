@@ -75,6 +75,9 @@ struct UpdateTaskTool: AgentTool {
         if status == .awaitingReview {
             return .failure("`awaitingReview` is reserved — it is where acceptance validation parks a task when it ESCALATES, for the USER to resolve from the task row. (Help requests park in `awaitingHelp`.) You cannot set it directly.")
         }
+        if status == .awaitingHelp {
+            return .failure("`awaitingHelp` is reserved — only Brown's `request_help` parks a task there (and it sets the help request); answer it with `provide_help`. Setting it directly would strand a task that occupies a slot but has no blocker to resolve.")
+        }
         if status == .validating {
             return .failure("`validating` is reserved — only Brown's `task_complete` submission enters validation. Setting it directly would strand the task with no validation run attached.")
         }

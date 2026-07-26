@@ -28,7 +28,7 @@ struct MainViewDetailColumn: View {
             }
 
             if let reviewTask = viewModel.taskAwaitingReview {
-                ReviewBanner(taskTitle: reviewTask.title, isHelpRequest: reviewTask.helpRequest != nil)
+                ReviewBanner(taskTitle: reviewTask.title, isHelpRequest: reviewTask.status == .awaitingHelp)
             }
 
             ChannelLogView(

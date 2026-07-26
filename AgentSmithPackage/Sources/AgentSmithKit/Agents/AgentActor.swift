@@ -1131,7 +1131,10 @@ public actor AgentActor {
             do {
                 let activeTasks = await toolContext.taskStore.allTasks().filter { $0.disposition == .active }
                 let hasRunnableTasks = activeTasks.contains { $0.status.isRunnable }
-                let hasAwaitingReview = activeTasks.contains { $0.status == .awaitingReview || $0.status == .awaitingHelp }
+                // Gate on `.awaitingHelp` (a Brown blocked on a help request) only — NOT `.awaitingReview`,
+                // which is now a user-owned validator-error park with its worker already gone; letting it
+                // gate would disable message_brown / provide_help across unrelated running workers.
+                let hasAwaitingReview = activeTasks.contains { $0.status == .awaitingHelp }
                 let availabilityContext = ToolAvailabilityContext(
                     lastDirectUserMessageAt: lastDirectUserMessageAt,
                     agentRole: configuration.role,
@@ -2355,7 +2358,7 @@ public actor AgentActor {
             lastDirectUserMessageAt: lastDirectUserMessageAt,
             agentRole: configuration.role,
             hasRunnableTasks: activeTasks.contains { $0.status.isRunnable },
-            hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingReview || $0.status == .awaitingHelp }
+            hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingHelp }
         )
     }
 

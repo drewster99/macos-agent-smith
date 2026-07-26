@@ -39,12 +39,13 @@ struct MessageBrownTool: AgentTool {
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
-        // Defense-in-depth: reject if any task is awaiting review or help, even if the tool was
-        // presented from a stale definition cache. Those submissions have their own resolution
-        // paths; message_brown is not one of them.
+        // Defense-in-depth: reject while a Brown is blocked on a help request (`.awaitingHelp`), even
+        // if the tool was presented from a stale definition cache — that blocker's resolution is
+        // `provide_help`, not message_brown. A user-owned `.awaitingReview` park has no live Brown and
+        // must NOT gate messaging of unrelated running workers.
         let activeTasks = await context.taskStore.allTasks().filter { $0.disposition == .active }
-        if activeTasks.contains(where: { $0.status == .awaitingReview || $0.status == .awaitingHelp }) {
-            return .failure("Cannot message Brown while a task is awaiting review or help. Resolve the submission first (`provide_help` for a blocker).")
+        if activeTasks.contains(where: { $0.status == .awaitingHelp }) {
+            return .failure("Cannot message Brown while a task is awaiting your help — resolve it with `provide_help` first.")
         }
 
         guard case .string(let message) = arguments["message"] else {

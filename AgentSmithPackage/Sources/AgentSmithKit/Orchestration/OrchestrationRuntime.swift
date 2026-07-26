@@ -4036,9 +4036,11 @@ Message:
         // waiting on Smith's `review_work`, and the `task_complete` already woke Smith with the
         // review prompt. A recurring "Brown activity" digest here is pure noise; historically it
         // woke Smith every 10 minutes into a "No action needed" text-only loop that the circuit
-        // breaker eventually terminated. Smith's job in this state is to review, not to monitor.
+        // breaker eventually terminated. When a Brown is blocked on a help request, Smith's job is to
+        // answer it (provide_help), not monitor — but a user-owned validator-error park (.awaitingReview)
+        // is NOT Smith's, so it must NOT suppress the activity digest for unrelated running workers.
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        if activeTasks.contains(where: { $0.status == .awaitingReview || $0.status == .awaitingHelp }) { return nil }
+        if activeTasks.contains(where: { $0.status == .awaitingHelp }) { return nil }
         return await Self.assembleBrownActivityDigest(channel: channel, since: since)
     }
 

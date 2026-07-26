@@ -993,13 +993,16 @@ extension OrchestrationRuntime {
 
     /// All criteria settled: complete the task (status, worker teardown, completion banner,
     /// summarization). The terminated hook then drives auto-advance and Smith's context compaction.
-    /// Also the shared body for a USER "accept" of an escalation, hence the CAS accepts
-    /// `.awaitingReview` too (`acceptEscalatedTask` records its override verdicts first).
-    private func completeValidatedTask(taskID: UUID) async {
-        // CAS: only complete from a judged/parked state — a pause/stop that landed after the
-        // coordinator's status snapshot must not be overwritten by this completion.
-        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: [.validating, .awaitingReview]) else { return }
-        guard let completed = await taskStore.task(id: taskID) else { return }
+    /// `from` is the CAS gate: the machine path completes only from `.validating`; a USER accept
+    /// passes `[.awaitingReview]` so it can NEVER complete a task a concurrent Re-validate moved to
+    /// `.validating`. Returns whether it CLAIMED the transition — `acceptEscalatedTask` records its
+    /// override verdicts only after this succeeds, so a lost race never orphans them.
+    @discardableResult
+    private func completeValidatedTask(taskID: UUID, from allowedStatuses: Set<AgentTask.Status> = [.validating]) async -> Bool {
+        // CAS: only complete from an allowed state — a pause/stop/re-validate that landed after the
+        // caller's status snapshot must not be overwritten by this completion.
+        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses) else { return false }
+        guard let completed = await taskStore.task(id: taskID) else { return false }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
         }
@@ -1024,6 +1027,7 @@ extension OrchestrationRuntime {
                 No action is needed from you.]
                 """)
         }
+        return true
     }
 
     /// Rejections with rounds remaining: the punch list goes DIRECTLY to the worker —
@@ -1129,27 +1133,35 @@ extension OrchestrationRuntime {
     /// Re-run acceptance validation on an escalated task — the machine gets another go (fresh budget).
     public func revalidateEscalatedTask(taskID: UUID) async {
         guard isUserResolvableEscalation(await taskStore.task(id: taskID)) else { return }
-        await taskStore.resetValidationRound(id: taskID)
+        // Claim the transition BEFORE zeroing the convergence budget, so a lost race can't leave a
+        // task the winner moved elsewhere with a reset counter. Nothing consumes the counter between
+        // here and `startTaskValidation` below.
         guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview]) else { return }
+        await taskStore.resetValidationRound(id: taskID)
         await taskStore.addUpdate(id: taskID, message: "Re-running acceptance validation at the user's request.")
         startTaskValidation(taskID: taskID)
     }
 
     /// User accepts the escalated result as-is, overriding any criterion the machine never settled.
-    /// Reuses the shared completion path (`completeValidatedTask`) after recording the overrides.
+    /// Reuses the shared completion path (`completeValidatedTask`).
     public func acceptEscalatedTask(taskID: UUID) async {
         guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
         let settled = task.validation?.settledCriterionIDs() ?? []
         let unsettled = task.acceptanceCriteria.filter { !settled.contains($0.id) }
+        let round = task.validation?.round ?? 0
+        // Claim the completion (CAS from `.awaitingReview` ONLY) BEFORE writing any override verdict.
+        // A lost race — a double-click, or a concurrent re-validate/send-back/fail that already moved
+        // the task off `.awaitingReview` — returns false, so a sticky ACCEPT override can never land on
+        // a task this call didn't complete (which a later re-validation would then wrongly skip), and
+        // we never complete a task that a concurrent Re-validate put back into `.validating`.
+        guard await completeValidatedTask(taskID: taskID, from: [.awaitingReview]) else { return }
         if !unsettled.isEmpty {
-            let round = task.validation?.round ?? 0
             await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
                 CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
                                        validatorName: "user override", validatorHash: "-", round: round)
             }, judgedAgainst: task.acceptanceCriteria)
             await taskStore.addUpdate(id: taskID, message: "Accepted by the user, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).")
         }
-        await completeValidatedTask(taskID: taskID)
     }
 
     /// User fails the escalated task outright.
@@ -1171,7 +1183,6 @@ extension OrchestrationRuntime {
     /// the old one down), then flip to running with the result cleared and the feedback delivered.
     public func sendEscalatedTaskBackToBrown(taskID: UUID, feedback: String) async {
         guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
-        await taskStore.resetValidationRound(id: taskID)
         // Secure the worker BEFORE mutating status (the ordering lesson from returnRejectionsToWorker).
         var brownID = task.assigneeIDs.first { supervisor.role(of: $0) == .brown }
         var brownWasSpawned = false
@@ -1183,6 +1194,7 @@ extension OrchestrationRuntime {
         guard let brownID else {
             // No worker slot free: re-queue as pending; the fresh briefing carries the feedback.
             guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview]) else { return }
+            await taskStore.resetValidationRound(id: taskID)
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Sent back by the user (no worker slot free — re-queued):\n\(feedback)")
             return
@@ -1191,18 +1203,27 @@ extension OrchestrationRuntime {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
             return
         }
+        await taskStore.resetValidationRound(id: taskID)
         await taskStore.clearResult(id: taskID)
         await taskStore.addUpdate(id: taskID, message: "Sent back by the user with changes:\n\(feedback)")
-        let content = brownWasSpawned
-            ? "## Task: \(task.title)\n\n\(task.description)\n\n## Changes Required\n\(feedback)"
-            : "Results sent back — changes required on task '\(task.title)': \(feedback)"
-        await channel.post(ChannelMessage(
-            sender: .system,
-            recipientID: brownID,
-            recipient: .agent(.brown),
-            content: content,
-            metadata: ["messageKind": .string("changes_requested"), "taskTitle": .string(task.title), "taskID": .string(taskID.uuidString)]
-        ))
+        let refreshed = await taskStore.task(id: taskID) ?? task
+        if brownWasSpawned, let brownAgent = supervisor.agent(id: brownID) {
+            // A respawned Brown starts with only its system prompt, so deliver the FULL briefing —
+            // which restores `lastBrownContext` (saved at escalation), acceptance criteria, the step
+            // plan, prior updates, and attachments — then the changes. Same mechanism as a fresh start.
+            await brownAgent.setAcknowledgesTaskOnFirstTurn()
+            let briefing = await composeBrownTaskBriefing(for: refreshed) + "\n\n## Changes required by the user\n\(feedback)"
+            await brownAgent.appendUserMessage(briefing, attachments: await collectTaskAttachments(refreshed))
+        } else {
+            // A still-live Brown already has the context — just hand it the feedback.
+            await channel.post(ChannelMessage(
+                sender: .system,
+                recipientID: brownID,
+                recipient: .agent(.brown),
+                content: "Results sent back — changes required on task '\(refreshed.title)': \(feedback)",
+                metadata: ["messageKind": .string("changes_requested"), "taskTitle": .string(refreshed.title), "taskID": .string(taskID.uuidString)]
+            ))
+        }
     }
 
     /// Renders the rejected criteria as a numbered punch list: one block per rejection,
@@ -1271,18 +1292,22 @@ extension OrchestrationRuntime {
     /// holding a slot: a park can sit indefinitely, and re-validation doesn't need Brown (it judges
     /// the persisted result). Brown's context is saved first so a user "send back" can respawn it.
     private func escalateValidation(taskID: UUID, reason: String) async {
-        // CAS: only escalate if still validating — never overwrite a pause/stop that landed
-        // after the coordinator's status snapshot.
-        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating]) else { return }
-        guard let task = await taskStore.task(id: taskID) else { return }
+        // Tear the worker down FIRST, while the task is still `.validating` — a state with NO user
+        // row-actions — so the user can't fire a resolution (e.g. Send Back reusing the still-live
+        // Brown) during the teardown window and strand a running task with no worker. Save context
+        // first so a later Send Back can respawn from it.
+        guard let task = await taskStore.task(id: taskID), task.status == .validating else { return }
         if let brownHandle = liveWorkerHandle(for: task) {
             await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
         }
         for agentID in task.assigneeIDs {
             _ = await terminateAgent(id: agentID)
         }
-        // Tearing the worker down freed a slot, but the task isn't terminal, so `onTaskTerminated`
-        // won't fire the usual auto-advance — kick it here so a pending task can take the slot.
+        // Publish the park only after the worker is gone. CAS: a pause/stop that landed during
+        // teardown must not be overwritten (such a transition tears Brown down anyway).
+        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating]) else { return }
+        // The freed slot isn't a terminal event, so `onTaskTerminated` won't fire the usual
+        // auto-advance — kick it here so a pending task can take the slot.
         await advanceAfterFreedWorkerSlot()
         await channel.post(ChannelMessage(
             sender: .system,
