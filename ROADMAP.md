@@ -599,6 +599,20 @@ Why `toolUse` can't simply be enforced from the catalog today: `ModelCapabilitie
 
 Next: decide how/when profiles replace or feed `ModelInfo` (explicitly deferred), and scope a full run — hundreds of models × several serial calls is real money, so `--targets` exists now and `--only-unknown` / `--dry-run` / resume matter before it's pointed at everything. Some findings are decodable rather than probeable (Gemini's `outputTokenLimit`, Anthropic's effort block) — the decode-side work will let the sweep `skip` them.
 
+### Probe dimension: where a mid-conversation system turn is legal, per model (2026-07-26)
+
+Needed before we can ship **guide messages / reminders** — a task-scoped instruction ("don't touch the production database while testing") injected near the generation point rather than buried in the system prompt 200 messages back. The whole value is recency: restated at the tail it competes with nothing, restated at position 0 it decays. Parking it at the tail is also nearly free for caching — the trailing turn is uncached anyway, so the only new cost is the reminder's own tokens — whereas inserting it mid-history re-processes everything after it on every request. So the design wants the tail. The question the probe has to answer is whether a given model/endpoint will actually *honor* a system turn there.
+
+**Anthropic is model-gated with placement rules.** `{"role": "system"}` inside `messages` (as opposed to the top-level `system` parameter) is accepted on Opus 5, Opus 4.8, Fable 5, and Mythos 5, and rejected on Sonnet 5 with `role 'system' is not supported on this model`. Where accepted it must follow a `user` message (or an `assistant` message ending in server-tool use), must be either the last entry or be followed by an `assistant` turn, can never be `messages[0]`, and is text-only. Note this rules out the OpenAI-style "insert before the current user message" layout outright — on Anthropic the reminder goes *after* the user turn, as the last element.
+
+**Prefer decoding, fall back to probing — and treat a payload claim as a claim.** If `/v1/models` grows an explicit capability flag for this, seed from it like every other decodable field. Today it reportedly does the *worst* possible thing: some model metadata marks Sonnet 5 as supporting mid-conversation system messages while the canonical docs say it doesn't. That is precisely the `gemini-2.5-flash-image` situation from the entry above — a claim indistinguishable from evidence once it's in a struct — so this dimension should probe even when the payload answers, at least until we've seen the two agree.
+
+**OpenAI-compat is the harder half, because acceptance ≠ honored.** OpenAI itself is permissive: `system`/`developer` messages are legal at any index including last, consecutive system turns are fine, and the array need not end with a user turn. But that permissiveness belongs to OpenAI, not to the wire format — every OpenAI-compatible endpoint (our vLLM box included) applies its own chat template, and mid-conversation or trailing system turns are exactly where templates diverge. Three distinct outcomes, only one of which is an error: a hard 400 on non-alternating roles; a **silent drop**; or a **silent hoist to the front**. The hoist is the dangerous one — no error, a plausible response, and the reminder has quietly lost the recency that was the entire point.
+
+So this can't be a "does it 400?" check. It has to be behavioral, matching the standard the rest of the battery already holds itself to (vision demands two facts about a shape, PDF demands a transcribed code, tool use demands the fetched identifier). The shape: put a low-ambiguity instruction in `messages[0]` and its direct contradiction in the injected system turn, then read which one the response obeys. Obeying the injected turn establishes honored-in-place; obeying `messages[0]` means dropped or hoisted, and the two are indistinguishable from one call but equivalent for our purposes — neither is usable. Run it twice per model, once with the system turn before the user message and once after, since those are separate answers and the "after" one is the placement we actually want.
+
+Findings stay tri-state like the rest of `ModelProfile`, so "couldn't find out" never reads as a measured false. Consumers: whatever composes guide messages picks placement per provider+model rather than assuming, with the documented fallback for anything that comes back unsupported — a `<system-reminder>`-wrapped text block appended to the user turn's content. That fallback needs its own note: text inside a user turn is forgeable by anything that writes user-visible input, so tag-strip attacker-influenced content before assembly or the boundary between our instruction and their text stops being real.
+
 ### Tool-execution timeout is cooperative, not a hard wall-clock cap (2026-07-15)
 
 `AgentActor.runToolWithTimeout` races the tool against a sleep in a `withThrowingTaskGroup`,
@@ -1841,6 +1855,126 @@ Candidates flagged so far (value = current default):
 - **Inspector ring buffers.** `AgentActor.maxTurnRecords` **100**, `SecurityEvaluator.maxHistory` **100**.
 
 Overlaps with the holistic-oversized-input item above (the char/token caps) — do them together. No behavior change intended; this is "stop hardcoding, expose the knobs."
+
+### Inspector "Now" panel + M2 telemetry re-key (design settled 2026-07-26; full phased plan)
+
+**Status:** Phase 0 complete (this plan + the CLAUDE.md architecture-decision note). Phases 1–4 below build in order, each an independently build-green commit, reviewed between. UI settled through sketch iteration — the reference render is the artifact "Now panel — outline v7".
+
+#### Decision
+
+The right inspector stops being a role-keyed **directory/config surface** and becomes a live **"Now" panel** — what is happening *this second*. Three responsibilities move OFF the inspector as a result:
+- per-agent model/tuning config → **Settings** (the per-card gear sheets go away)
+- one task's full detail (transcripts, turn records, per-agent history) → a **click-into-a-task** view (the task-centric grouping from the early sketches, reused — not discarded)
+- durable spend → the **cost panel / spending dashboard**
+
+The panel rides on re-keying inspector telemetry from `AgentRole` → **per-instance identity** — the long-deferred "M2 inspector re-key" (see the worker-pool section above; this is its detailed plan). The pretty view is ~20%; the telemetry re-key is the other ~80% and touches the delicate agent-lifecycle machinery (2026-07-08 zombie-agent incident lives in this code), so it is phased and reviewed, never one-shot.
+
+#### Settled panel rules (do not re-litigate without cause)
+
+- **Outline shape.** Top group **Orchestration** (Smith; Summarizer operations). Then **Live tasks**. Each task → its agent(s) (indented) → their tool calls (indented again). One row per item.
+- **Fixed left edge.** Left of every row is `indent + name` only — **no dots anywhere** (role identity IS the name color), no leading lifecycle glyph. A leading marker that changes width makes names jitter as state flips; forbidden. **Everything that changes lives in the right column.**
+- **Current state, not history.** A running call shows a timer; a finished call dims + shows duration then drops; an already-decided security verdict is NOT shown (it's history). Finished leaves linger briefly, then fall under a cap; live leaves are never trimmed.
+- **Security representation.** A tool call gated on security says `security wait` on its own row. The Security agent appears as a **nested row under that call, only while active**, state `evaluating` (or `done`) — never a reason/verdict string (history). Auto-approved calls (those in `autoApprovedToolsByRole`) show no Security row.
+- **Reentrancy → one row per concurrent instance.** Security, Summarizer and Validators are reentrant (`SecurityEvaluator` is documented thread-safe for parallel batches). A Brown firing a parallel batch shows N `Security · evaluating` rows at once; multiple summarizer ops show as multiple rows; etc.
+- **Validators independent.** One row per acceptance criterion (not "Validator ×2"), light-text tagged with the criterion, keeping `judging`. Alt form offered: chip `1 of 3` (criterion index).
+- **Brown persists at handoff.** When Brown finishes and validation starts, its row stays under the task as `done` beside the Validator(s) — the worker doesn't vanish.
+- **Attention ordering.** A task needing *your* action sorts to the top with an amber highlight. Post-security-change there is no per-call user approval, so the actionable states are task-level: `.awaitingReview` escalations (validation couldn't be machine-judged, or an unassigned validator parked the task) and errors — not tool-call approval.
+- **Money.** One aggregate line at the top (`today · run`). No per-item cost anywhere in the panel.
+- **Context management is visible** — two DIFFERENT mechanisms, see Phase 4.
+
+#### Instance identity (the crux)
+
+The runtime already models instances (`AgentSupervisor.AgentHandle` by UUID; per-Brown `SecurityEvaluator`; `taskID` on the handle) — telemetry just collapses them to `AgentRole`. Introduce one unified reference, e.g.:
+
+```
+struct AgentInstanceRef: Hashable, Sendable {
+    let role: AgentRole
+    let instanceID: UUID        // AgentActor UUID for Smith/Brown; synthetic per-op/eval id otherwise
+    let taskID: UUID?           // subject task; nil for Smith's taskless egress
+    let criterionIndex: Int?    // validators: which acceptance criterion
+    let label: String?          // display hint (task title prefix, criterion text, op description)
+}
+```
+
+- **Smith / Brown** (real `AgentActor`s): `instanceID` = the supervisor handle's agent UUID.
+- **Security** (stateless evaluator, NOT an actor): keyed by the subject it guards — the subject agent's id + `taskID` (nil for Smith egress). Rendered nested under the specific tool call.
+- **Validator** (stateless evaluator): `taskID` + `criterionIndex`.
+- **Summarizer operations**: a per-op `instanceID` + a subject descriptor (`compacting Smith's context`, `summarizing <taskID>`).
+
+#### Dependency: security model (LANDED 2026-07-26, commits 346ca51 → 9b3dc68)
+
+The security-model change this plan was written against is now in `main`:
+- **The Security Agent is an unconditional chokepoint** — *every* tool call from every agent routes through it; the unevaluated path is deleted (no evaluator ⇒ the call is DENIED, never run unreviewed), and the Security Agent can't recurse (it holds no tools). The old routing decision (`mustEvaluate`) and the old split (`evaluatesOpenWorldToolsOnly` egress-only vs Brown all-tools) are **deleted**.
+- **What varies is verdict COST, not routing:** `SecurityEvaluator.autoApprovedToolsByRole: [AgentRole: Set<String>]` names the calls approved without an LLM round-trip — still recorded, posted, and countable, so cheap never means invisible. Fail-closed: an unlisted role or tool gets a real evaluation. There is **no user setting** (`enablePerToolCheck` / `perCallApprovalEnabled` deleted) — do not build any per-call approval toggle or UI.
+- **Inspector consequence:** every tool call carries a security disposition, but the panel shows a `Security · evaluating` row ONLY while active (current-state); auto-approved calls (per the table) resolve instantly with no persistent row. **There is no per-call user-approval gate**, so the flow is `security wait → evaluating → allowed (runs) / blocked (stops)` — no `needs approval` state originating from security. The attention-highlight (below) keys on task-level escalations instead.
+- **Note:** the `.validator` role and its config surface (`ValidatorAgentCard` in the Agents inspector) already exist — this plan surfaces validators in the *live* Now panel, it does not add their config.
+
+#### Phase 1 — telemetry re-key (foundation; app stays visually identical)
+
+Re-key the data pipeline; keep the CURRENT `InspectorView` working via compatibility accessors so this phase is build-green with no visible change.
+- Add `AgentInstanceRef`. Change runtime callbacks to carry it instead of bare `AgentRole`: `onTurnRecorded`, `onProcessingStateChange`, `onToolExecutionStateChange`, `onAgentStarted`, `onContextChanged`.
+- `EvaluationRecord` gains `subjectAgentID: UUID?`, `taskID: UUID?`, `evaluatorRole` (securityAgent | validator); keep `taskTitle`. Custom `Codable` with `decodeIfPresent` for back-compat.
+- `SecurityEvaluator` / `EvaluationRunner`+`TaskValidationCoordinator`: stamp subject-agent id + taskID (+ criterionIndex for validators) when firing `onEvaluationRecorded` / `onTurnRecorded`.
+- `AgentInspectorStore`: `turnsByInstance` / `liveContextsByInstance` keyed by `instanceID`; evaluations queryable by taskID + subject + evaluatorRole; **`terminatedAgentArchive` re-keyed by `instanceID`** (retain role + taskID + label). Add role→primary-instance compatibility accessors so the old view still renders.
+- `OrchestrationRuntime`: update every callback call-site; archive by instanceID.
+- Verify build via drews-xcode-mcp; smoke-test (app 15s, screenshot, logs). Commit.
+
+#### Phase 2 — AppViewModel per-instance state + window targeting
+
+- Replace role-keyed `processingRoles` / `toolExecutingByRole` / `agentToolNames` with per-`instanceID` maps (keep role-collapsing accessors until Phase 3 flips the view).
+- `AgentInspectorTarget(sessionID, role)` → `(sessionID, AgentInstanceRef)`; allow multiple concurrent Brown windows; update `openWindow` sites.
+- Cost helpers: add a **durable** per-instance figure sourced from `UsageStore` (per-role, or per-task for a worker via the existing `loadTaskCost` path) — not the session-scoped 100-turn buffer that resets (item 5). Keep the aggregate top line.
+- Build-green + smoke. Commit.
+
+#### Phase 3 — the "Now" panel view (the visible flip)
+
+- Replace `InspectorView`'s role cards with the outline: Orchestration group + Live-tasks tree (task → agent → tool calls → nested `Security` while active), per the settled rules above.
+- **Preserve the observation discipline** the current file documents (anti "update multiple times per frame"): `ForEach` over stable `AgentInstanceRef` ids; per-row `Equatable` cached structs; narrowed `.onChange` watchers. **Collapsed rows cache only a light summary; heavy detail (context/turns) is fetched on expand or window-open — stored detail must NOT drive sidebar updates** (your item-3 directive). Don't fan out heavy per-instance caches.
+- Move per-agent config out to **Settings**; retire the per-card gear sheets.
+- Build the **click-into-a-task** detail view (task-centric layout) as the home for the heavy per-task history (may split to a follow-up commit).
+- Build-green + smoke + screenshot review. Commit.
+
+#### Phase 4 — context-management hooks + tests
+
+- Emit context-management telemetry:
+  - `compactSmithContext` / `autoCompactSmithIfNeeded` → a **Summarizer op** event (`compacting Smith's context`, start/finish) into the inspector store.
+  - Summarizer task-summaries → summarizer-op events (reentrant → multiple rows).
+  - Brown `rebuildContextFromTask` → a **Brown-local state** event (`rebuilding context`) — NOT a summarizer op (deterministic, no LLM). Smith's emergency `pruneNonBrownHistory` is deterministic and likely not surfaced.
+- Tests (Swift Testing, package suite): callback instance-routing; `EvaluationRecord` attribution (taskID / subject / evaluatorRole); reentrancy (N concurrent security under one Brown → N rows); `EvaluationRecord` decode back-compat + any `[AgentRole: V]` persisted dicts that could see new keys; terminated archive keyed by instance; compaction-event emission for both Smith and Brown paths.
+- Full package test run (`swift test --skip MemoryStoreIntegrationTests`). Commit.
+
+#### Guardrails / out of scope
+
+- Security Agent stays **text-verdict** (SAFE/WARN/UNSAFE/ABORT), never tool-call evaluation.
+- Validator stays a **stateless evaluator** — a role, not a supervised `AgentActor` (no run loop / lifecycle surface).
+- Per-instance UI state lives on `AppViewModel`, never `SharedAppState` (per-session isolation).
+- Do not reintroduce a per-call user-approval toggle (`perCallApprovalEnabled` is going away).
+- The left-task-sidebar breakdown (below) and the M4 serial-scoping-off-the-lifecycle-queue work are separate tracks — don't scope-creep them in here.
+
+### Left task sidebar — sectioned breakdown (design pending, noted 2026-07-25)
+
+The left task list has outgrown its flat shape. **Not starting today — notes only.**
+
+**Current state** (`TaskListView.swift`): active tasks are grouped into parent+child "families" (`taskFamilies`), then **Archived** and **Deleted** hang off the *bottom* as collapsible buckets (`showArchived` / `showDeleted` toggles via `bucketToggles`), each re-grouped into families only when expanded. The recent per-family roll-up for template runs (`3d7db26`) helped, but the list is still hard to scan.
+
+**Pain points motivating the redesign** (user, 2026-07-25):
+- Live/active tasks are "all over the place" — no clear ordering for what's happening vs what's done.
+- Some **child tasks don't appear under their template/parent** — the family grouping misses parent→child links for certain template runs. (Fix as part of, or before, this.)
+
+**Desired breakdown** — distinct sections instead of one flat list:
+- **Recents** — pinned at the top (recently active / running / just-finished).
+- **History** — older terminal runs (completed / failed / cancelled).
+- **Task Library** — reusable / template tasks, **grouped however the user wishes** (user-defined grouping).
+- **Archived** and **Deleted** — still required, but **relocated** out of the current bottom-of-list append into their own proper place.
+
+**Open design questions to resolve before building:**
+- The line between **Recents** and **History** — time window, last-activity recency, or terminal-vs-active? (Likely: Recents = recently touched/running/just-finished; History = everything older and terminal.)
+- What qualifies for the **Task Library** vs a one-off task — template/premade tasks and user-authored reusable definitions, and how that relates to the existing template "family parent" concept.
+- **User-defined grouping** for the library — folders / tags / collections? Needs a grouping model + persistence, and a scope decision (library is probably global like templates, not per-session).
+- Where **Archived / Deleted** land — dedicated collapsed sections in the same list, or a separate archive/trash view.
+- Preserve the existing per-family template roll-up behavior; fold it into the Library section rather than duplicating grouping logic.
+
+No implementation today; this is a placeholder so the direction isn't lost.
 
 ## Blockers
 
