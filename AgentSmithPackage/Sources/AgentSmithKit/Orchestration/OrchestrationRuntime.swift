@@ -2380,6 +2380,9 @@ public actor OrchestrationRuntime {
                     if let memories = resumingTask.relevantMemories, !memories.isEmpty {
                         let memoryLines = memories.map { "- \($0.content) (similarity: \(String(format: "%.2f", $0.similarity)))" }
                         smithParts.append("### Relevant memories:\n\(memoryLines.joined(separator: "\n"))")
+                        // Attached at task-creation time, but injected HERE and again on every
+                        // respawn and context rebuild — so one retrieval can bill many injections.
+                        await memoryStore.recordInjections(memoryIDs: memories.compactMap(\.memoryID))
                     }
                     if let priorTasks = resumingTask.relevantPriorTasks, !priorTasks.isEmpty {
                         let taskLines = priorTasks.map { task in

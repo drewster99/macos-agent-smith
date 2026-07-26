@@ -77,6 +77,10 @@ struct SearchMemoryTool: AgentTool {
         )
         let memories = rawResults.memories.filter { $0.similarity >= Self.toolSearchFloor }
         let taskSummaries = rawResults.taskSummaries.filter { $0.similarity >= Self.toolSearchFloor }
+        // Count injections for what SURVIVES the floor, not what the search returned: the ones
+        // filtered out here were retrieved but never shown to the agent. Recorded before the
+        // early return below so a floor that rejects everything records nothing.
+        await context.memoryStore.recordInjections(memoryIDs: memories.map(\.memory.id))
         let results = (memories: memories, taskSummaries: taskSummaries, isEmpty: memories.isEmpty && taskSummaries.isEmpty)
 
         if results.isEmpty {

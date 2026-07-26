@@ -519,6 +519,29 @@ struct MemoryEditorView: View {
                 }
             }
 
+            // Row 3: injection stats. Kept on their own line rather than folded in with
+            // retrievals: the gap between the two counts is the interesting part — a memory
+            // found often but injected rarely is being filtered out downstream, and one
+            // injected far more often than retrieved is riding along on a task briefing.
+            HStack(spacing: 8) {
+                Spacer()
+                if let injectedAt = memory.lastInjectedAt {
+                    Text("Last injected \(formatDateTime(injectedAt))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Text("•")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Text("\(memory.injectionCount) injection\(memory.injectionCount == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text("Never injected into an agent's context")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
             HStack(spacing: 8) {
                 Button("Edit") {
                     editingMemoryID = memory.id

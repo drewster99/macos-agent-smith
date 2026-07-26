@@ -2944,6 +2944,12 @@ public actor AgentActor {
         mutated.content = mutated.content + "\n\n" + block
         pendingChannelMessages[currentIdx] = mutated
 
+        // Count the injection only now — the block is committed to the message Smith will read.
+        // Every earlier return in this function (empty results, message already drained) leaves
+        // these memories retrieved but NOT injected, which is exactly the distinction the two
+        // counters exist to draw.
+        await toolContext.memoryStore.recordInjections(memoryIDs: results.memories.map(\.memory.id))
+
         // Post a memory_searched banner so the auto-search appears in the UI transcript like
         // a manually-invoked one. memory_searched is filtered out in `receiveChannelMessage`,
         // so this banner won't loop back into Smith's pending queue. Result entries are

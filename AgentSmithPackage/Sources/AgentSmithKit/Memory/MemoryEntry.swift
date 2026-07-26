@@ -32,6 +32,23 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
     /// as `lastRetrievedAt` — editor browsing does not increment this.
     public var retrievalCount: Int
 
+    /// The most recent time this memory's TEXT actually entered an agent's LLM context, or
+    /// `nil` if it never has.
+    ///
+    /// Distinct from `lastRetrievedAt` on purpose. Retrieval is "a search returned it"; injection
+    /// is "an agent was made to read it." A search can return a memory that is then dropped by a
+    /// relevance floor (`SearchMemoryTool`), or attached to a task that is deleted before it runs,
+    /// or selected for a message that gets drained before the block lands — all retrievals, no
+    /// injection. The reverse also holds: one retrieval can inject repeatedly, because a task's
+    /// attached memories are re-rendered into the briefing on every spawn, respawn, and context
+    /// rebuild. Retrieval answers "is this memory findable?"; injection answers "what is actually
+    /// costing context tokens?"
+    public var lastInjectedAt: Date?
+
+    /// Total number of times this memory's text has entered an agent's context. Same scoping as
+    /// `lastInjectedAt`.
+    public var injectionCount: Int
+
     /// Set the most recent time the memory's content or tags were edited. `nil` if the
     /// memory has never been modified since creation.
     public var lastUpdatedAt: Date?
@@ -82,6 +99,8 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
         createdAt: Date = Date(),
         lastRetrievedAt: Date? = nil,
         retrievalCount: Int = 0,
+        lastInjectedAt: Date? = nil,
+        injectionCount: Int = 0,
         lastUpdatedAt: Date? = nil,
         lastUpdatedBy: UpdateSource? = nil,
         embeddingModelID: String? = nil
@@ -95,6 +114,8 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.lastRetrievedAt = lastRetrievedAt
         self.retrievalCount = retrievalCount
+        self.lastInjectedAt = lastInjectedAt
+        self.injectionCount = injectionCount
         self.lastUpdatedAt = lastUpdatedAt
         self.lastUpdatedBy = lastUpdatedBy
         self.embeddingModelID = embeddingModelID
@@ -102,7 +123,8 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, content, embedding, source, tags, sourceTaskID, createdAt
-        case lastRetrievedAt, retrievalCount, lastUpdatedAt, lastUpdatedBy, embeddingModelID
+        case lastRetrievedAt, retrievalCount, lastInjectedAt, injectionCount
+        case lastUpdatedAt, lastUpdatedBy, embeddingModelID
     }
 
     public init(from decoder: Decoder) throws {
@@ -116,6 +138,11 @@ public struct MemoryEntry: Codable, Identifiable, Sendable {
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastRetrievedAt = try c.decodeIfPresent(Date.self, forKey: .lastRetrievedAt)
         retrievalCount = try c.decodeIfPresent(Int.self, forKey: .retrievalCount) ?? 0
+        // Absent in every entry written before injection tracking existed: those decode to
+        // "never injected", which is honest — we have no record either way, and inventing one
+        // from retrievalCount would assert an equivalence this field exists to deny.
+        lastInjectedAt = try c.decodeIfPresent(Date.self, forKey: .lastInjectedAt)
+        injectionCount = try c.decodeIfPresent(Int.self, forKey: .injectionCount) ?? 0
         lastUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .lastUpdatedAt)
         lastUpdatedBy = try c.decodeIfPresent(UpdateSource.self, forKey: .lastUpdatedBy)
         embeddingModelID = try c.decodeIfPresent(String.self, forKey: .embeddingModelID)

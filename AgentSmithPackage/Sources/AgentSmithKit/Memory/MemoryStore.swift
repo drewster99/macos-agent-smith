@@ -77,6 +77,11 @@ public struct RelevantMemory: Codable, Sendable, Equatable {
     public let content: String
     public let tags: [String]
     public let similarity: Double
+    /// The `MemoryEntry` this was copied from, so rendering it into a briefing can be counted
+    /// against that memory's `injectionCount`. Optional: tasks persisted before this field
+    /// existed decode with `nil` and simply aren't attributable — the copy below still renders,
+    /// it just can't be traced back. Also `nil`-safe if the source memory is later deleted.
+    public let memoryID: UUID?
     /// When the source `MemoryEntry` was originally saved. Optional so older tasks on
     /// disk (saved before this field existed) decode without falling over.
     public let createdAt: Date?
@@ -89,13 +94,15 @@ public struct RelevantMemory: Codable, Sendable, Equatable {
         tags: [String],
         similarity: Double,
         createdAt: Date? = nil,
-        lastUpdatedAt: Date? = nil
+        lastUpdatedAt: Date? = nil,
+        memoryID: UUID? = nil
     ) {
         self.content = content
         self.tags = tags
         self.similarity = similarity
         self.createdAt = createdAt
         self.lastUpdatedAt = lastUpdatedAt
+        self.memoryID = memoryID
     }
 }
 
@@ -324,6 +331,8 @@ public actor MemoryStore {
             createdAt: current.createdAt,
             lastRetrievedAt: current.lastRetrievedAt,
             retrievalCount: current.retrievalCount,
+            lastInjectedAt: current.lastInjectedAt,
+            injectionCount: current.injectionCount,
             lastUpdatedAt: Date(),
             lastUpdatedBy: updatedBy,
             embeddingModelID: reembedded ? memoryEmbeddingSignature : current.embeddingModelID
@@ -473,6 +482,7 @@ public actor MemoryStore {
                     id: cur.id, content: cur.content, embedding: vector, source: cur.source,
                     tags: cur.tags, sourceTaskID: cur.sourceTaskID, createdAt: cur.createdAt,
                     lastRetrievedAt: cur.lastRetrievedAt, retrievalCount: cur.retrievalCount,
+                    lastInjectedAt: cur.lastInjectedAt, injectionCount: cur.injectionCount,
                     lastUpdatedAt: cur.lastUpdatedAt, lastUpdatedBy: cur.lastUpdatedBy,
                     embeddingModelID: memSignature
                 )
@@ -704,6 +714,28 @@ public actor MemoryStore {
             source: source
         ))
         return results
+    }
+
+    /// Records that these memories' text actually entered an agent's LLM context, bumping
+    /// `lastInjectedAt` and `injectionCount`. Call at the moment of injection — after the block
+    /// is committed to the message, after the relevance floor has run, when the briefing renders
+    /// — NOT when a search returns, which is what `retrievalCount` already measures.
+    ///
+    /// IDs with no matching entry are skipped: a memory can be deleted between the search that
+    /// found it and the context that used it, and that is not worth failing a turn over.
+    /// Marked dirty rather than flushed, like the retrieval bumps — `persistRetrievalStatsIfNeeded()`
+    /// writes both out together at termination rather than re-serializing the embedding-bearing
+    /// corpus on every agent turn.
+    public func recordInjections(memoryIDs: [UUID], at date: Date = Date()) {
+        var trackedAny = false
+        for id in memoryIDs {
+            guard var stored = memories[id] else { continue }
+            stored.lastInjectedAt = date
+            stored.injectionCount += 1
+            memories[id] = stored
+            trackedAny = true
+        }
+        if trackedAny { retrievalStatsDirty = true }
     }
 
     /// Embeds the DISTINCT queries in a single batched forward pass and returns them keyed by

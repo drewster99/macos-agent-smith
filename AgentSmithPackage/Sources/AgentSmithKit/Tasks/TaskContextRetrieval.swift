@@ -41,7 +41,8 @@ public enum TaskContextRetrieval {
                     tags: $0.memory.tags,
                     similarity: $0.similarity,
                     createdAt: $0.memory.createdAt,
-                    lastUpdatedAt: $0.memory.lastUpdatedAt
+                    lastUpdatedAt: $0.memory.lastUpdatedAt,
+                    memoryID: $0.memory.id
                 )
             }
             let priorTasks = results.taskSummaries.map {
