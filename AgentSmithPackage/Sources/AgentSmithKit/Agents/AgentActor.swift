@@ -523,23 +523,6 @@ public actor AgentActor {
         preflightScopingActive = active
     }
 
-    /// Whether this tool call must go through the Security Agent before it runs.
-    ///
-    /// EVERY tool call from every agent does. There is no per-role routing rule and no user
-    /// setting: the Security Agent is a chokepoint, and what varies is only how expensive the
-    /// verdict is — `SecurityEvaluator.autoApprovedToolsByRole` clears the cheap ones without an
-    /// LLM call while still recording and posting them. This replaced a scheme where an
-    /// unevaluated tool was also an INVISIBLE one, absent from the transcript entirely.
-    ///
-    /// The Security Agent cannot recurse into itself: it holds no tools.
-    ///
-    /// Unconditionally true, including when no evaluator is configured. A missing Security Agent
-    /// must not silently downgrade to running tools unreviewed — `executeWithApproval` denies the
-    /// call instead, which is the same fail-closed stance `start()` takes when it refuses to launch
-    /// without a Security Agent provider.
-    private func mustEvaluate(_ tool: any AgentTool) -> Bool {
-        true
-    }
 
     /// The last few user-role messages, concatenated, for the Security Agent's context when this
     /// agent has no task to describe (Smith). The motivating request may be many turns back — a
@@ -1748,7 +1731,14 @@ public actor AgentActor {
             guard isRunning else { break }
 
             if segment.isLifecycle {
-                // --- Lifecycle segment: execute sequentially, no approval ---
+                // --- Lifecycle segment: execute sequentially, one at a time ---
+                // These route through the Security Agent like everything else. They used to skip
+                // it entirely ("no approval"), which was the last hole in the chokepoint — and the
+                // quietest one, since a bypassed call also posted no tool_request and so never
+                // appeared in the transcript as a call at all. `taskLifecycleTools` are pre-cleared
+                // in `autoApprovedToolsByRole`, so routing them costs a recorded auto-approval
+                // rather than an LLM round-trip; the sequencing and the `task_complete` break
+                // below are unchanged, because a lifecycle segment still runs its calls in order.
                 for call in segment.calls {
                     guard isRunning else { break }
                     let result: String
@@ -1758,7 +1748,7 @@ public actor AgentActor {
                             result = rejection
                             succeeded = false
                         } else {
-                            let outcome = await directExecute(call, tool: tool)
+                            let outcome = await executeWithApproval(call, tool: tool)
                             result = outcome.result
                             succeeded = outcome.succeeded
                         }
@@ -1998,19 +1988,12 @@ public actor AgentActor {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
                             succeeded = false
-                        } else if mustEvaluate(tool) {
+                        } else {
+                            // No unevaluated branch: every call goes through the Security Agent.
                             let siblings = segment.calls.count > 1
                                 ? approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil }
                                 : []
                             let outcome = await executeWithApproval(call, tool: tool, parallelIndex: batchIndex, parallelCount: segment.calls.count, siblingCallSummaries: siblings)
-                            result = outcome.result
-                            succeeded = outcome.succeeded
-                        } else {
-                            let outcome = await directExecute(
-                                call,
-                                tool: tool,
-                                postVisibility: shouldPostDirectToolVisibility(tool)
-                            )
                             result = outcome.result
                             succeeded = outcome.succeeded
                         }
@@ -2284,9 +2267,6 @@ public actor AgentActor {
         ))
     }
 
-    private func shouldPostDirectToolVisibility(_ tool: any AgentTool) -> Bool {
-        configuration.role == .smith && !mustEvaluate(tool)
-    }
 
     private func directExecute(_ call: LLMToolCall, tool: any AgentTool, postVisibility: Bool = false) async -> (result: String, succeeded: Bool) {
         if postVisibility {

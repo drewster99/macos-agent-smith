@@ -179,12 +179,17 @@ actor SecurityEvaluator {
         .smith: Set<String>([
             "message_brown", "message_user", "provide_help", "report_inbound_user_message",
             "create_task", "run_task", "update_task", "edit_task", "amend_task",
-            "get_task_details", "list_tasks", "set_template_inputs", "manage_task_disposition",
+            "get_task_details", "list_tasks", "set_template_inputs",
             "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
             "list_scheduled_wakes", "get_current_time", "search_memory",
             "list_scriptable_apps", "get_app_scripting_schema"
-        ]).union(readOnlyFilesystemEvidenceTools),
-        .brown: [],
+        ]).union(readOnlyFilesystemEvidenceTools).union(AgentActor.taskLifecycleTools),
+        // The worker's own tools are all judged. The only pre-cleared entries are the task
+        // LIFECYCLE calls — `task_complete`, `request_help`, `reply_to_user` and friends — which
+        // are how a worker reports progress and hands control back. They were previously executed
+        // with no approval AND no transcript entry; pre-clearing routes and records them without
+        // putting an LLM between a worker and its ability to say "I'm done" or "I'm blocked".
+        .brown: AgentActor.taskLifecycleTools,
         .validator: readOnlyFilesystemEvidenceTools
     ]
 
