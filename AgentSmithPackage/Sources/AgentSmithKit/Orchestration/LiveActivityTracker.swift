@@ -25,8 +25,10 @@ public final class LiveActivityTracker: @unchecked Sendable {
         }
     }
 
+    /// The per-operation activity kinds — those a caller brackets with `begin`/`end`. Brown workers
+    /// are deliberately NOT here: a Brown is an absolute pool size reported per-runtime via
+    /// `setBrownWorkers`, not a single bracketed operation.
     public enum Kind: Sendable {
-        case brownWorker
         case securityEvaluation
         case validatorEvaluation
         case summarizerRun
@@ -35,6 +37,9 @@ public final class LiveActivityTracker: @unchecked Sendable {
 
     private let lock = NSLock()
     private var snapshot = Snapshot()
+    /// Live Brown-worker count per reporting runtime. The snapshot's `brownWorkers` is the SUM, so
+    /// concurrent sessions add up instead of one runtime's absolute report clobbering another's.
+    private var brownWorkersBySource: [ObjectIdentifier: Int] = [:]
     private var onChange: (@Sendable (Snapshot) -> Void)?
 
     public init() {}
@@ -61,18 +66,20 @@ public final class LiveActivityTracker: @unchecked Sendable {
     /// Decrements the in-flight count for `kind` (clamped at zero).
     public func end(_ kind: Kind) { adjust(kind, by: -1) }
 
-    /// Sets an ABSOLUTE count — used for the Brown worker pool, which the runtime tracks by
-    /// spawn/terminate rather than by bracketing a single operation.
-    public func set(_ kind: Kind, to value: Int) {
+    /// Reports the ABSOLUTE Brown-worker count for one runtime (`source`). The snapshot exposes the
+    /// SUM across all reporting runtimes, so a multi-session app shows total live Browns rather than
+    /// whichever session reported last. A count of zero drops the source entirely (a stopped runtime
+    /// leaves no residue). Callers recompute from their supervisor at each brown lifecycle change, so
+    /// this self-heals even if a single transition is missed.
+    public func setBrownWorkers(source: ObjectIdentifier, to value: Int) {
         let clamped = max(0, value)
         lock.lock()
-        switch kind {
-        case .brownWorker: snapshot.brownWorkers = clamped
-        case .securityEvaluation: snapshot.securityEvaluations = clamped
-        case .validatorEvaluation: snapshot.validatorEvaluations = clamped
-        case .summarizerRun: snapshot.summarizerRuns = clamped
-        case .memorySearch: snapshot.memorySearches = clamped
+        if clamped == 0 {
+            brownWorkersBySource[source] = nil
+        } else {
+            brownWorkersBySource[source] = clamped
         }
+        snapshot.brownWorkers = brownWorkersBySource.values.reduce(0, +)
         let snap = snapshot
         let handler = onChange
         lock.unlock()
@@ -82,7 +89,6 @@ public final class LiveActivityTracker: @unchecked Sendable {
     private func adjust(_ kind: Kind, by delta: Int) {
         lock.lock()
         switch kind {
-        case .brownWorker: snapshot.brownWorkers = max(0, snapshot.brownWorkers + delta)
         case .securityEvaluation: snapshot.securityEvaluations = max(0, snapshot.securityEvaluations + delta)
         case .validatorEvaluation: snapshot.validatorEvaluations = max(0, snapshot.validatorEvaluations + delta)
         case .summarizerRun: snapshot.summarizerRuns = max(0, snapshot.summarizerRuns + delta)

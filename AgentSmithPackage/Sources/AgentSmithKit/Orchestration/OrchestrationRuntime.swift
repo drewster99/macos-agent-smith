@@ -1917,6 +1917,7 @@ public actor OrchestrationRuntime {
         // read it fire-and-forget, and nilling it here would silently skip them.
         // The next successful start overwrites it anyway.
         _ = supervisor.endGeneration()
+        refreshBrownWorkerActivityCount()
         await channel.setCurrentSessionID(nil)
     }
 
@@ -2963,6 +2964,7 @@ public actor OrchestrationRuntime {
         // interleaved flow after this line belongs to a NEW generation this stopAll
         // doesn't touch; the lifecycle queue makes that interleaving impossible anyway.
         let handles = supervisor.endGeneration()
+        refreshBrownWorkerActivityCount()
         // Drop per-Smith delivery tracking. Anything delivered-but-not-incorporated stays in
         // `pendingUserMessages` and will be redelivered to the next Smith by its start-drain.
         deliveredUserMessageChannelIDs.removeAll()
@@ -3141,6 +3143,14 @@ public actor OrchestrationRuntime {
                 await executionTracker.hasFailed(toolCallID: toolCallID)
             }
         )
+    }
+
+    /// Publishes THIS runtime's live Brown-worker count to the shared activity tracker, keyed by the
+    /// runtime instance so counts SUM across sessions rather than one session's report clobbering
+    /// another's. Recomputed from the supervisor, so it converges on the truth at every brown
+    /// lifecycle change (spawn, terminate, self-terminate, and both `endGeneration` teardowns).
+    private func refreshBrownWorkerActivityCount() {
+        liveActivityTracker.setBrownWorkers(source: ObjectIdentifier(self), to: supervisor.handles(role: .brown).count)
     }
 
     /// Spawns a Brown+Security Agent pair. Terminates any existing Brown first (single Brown policy).
@@ -3425,7 +3435,7 @@ public actor OrchestrationRuntime {
             return nil
         }
         // A Brown worker just went live — refresh the concurrency meter's Brown count.
-        liveActivityTracker.set(.brownWorker, to: supervisor.handles(role: .brown).count)
+        refreshBrownWorkerActivityCount()
 
         // Label the worker's channel messages with its task so the UI can distinguish
         // workers ("Brown" alone is ambiguous once several run concurrently).
@@ -3469,7 +3479,7 @@ public actor OrchestrationRuntime {
             return false
         }
         // A worker was removed — refresh the concurrency meter's Brown count.
-        liveActivityTracker.set(.brownWorker, to: supervisor.handles(role: .brown).count)
+        refreshBrownWorkerActivityCount()
         let agent = handle.agent
         let agentRole: AgentRole? = handle.role
         let evaluator = handle.evaluator
@@ -3916,7 +3926,7 @@ Message:
         // below can never observe a half-removed agent.
         guard let handle = supervisor.remove(id: id) else { return }
         // A worker was removed — refresh the concurrency meter's Brown count.
-        liveActivityTracker.set(.brownWorker, to: supervisor.handles(role: .brown).count)
+        refreshBrownWorkerActivityCount()
         let agent = handle.agent
         let role: AgentRole? = handle.role
         let evaluator = handle.evaluator
