@@ -1784,6 +1784,13 @@ public actor AgentActor {
                 let allTasks = await toolContext.taskStore.allTasks()
                 let currentTask = allTasks.first { $0.assigneeIDs.contains(toolContext.agentID) && $0.status == .running }
                 let parallelCount = segment.calls.count
+                // Same justification context the sequential path supplies. Computed here, once,
+                // because it is actor-isolated and the evaluations below run in a task group.
+                // Always nil in practice today — this path requires `requiresToolApproval`, which
+                // only Brown sets, and Brown always has a running task — but the two paths must
+                // not disagree about what the evaluator is told, or opening this path to Smith
+                // later would quietly drop the context behind exactly its egress calls.
+                let agentContext = currentTask == nil ? recentUserMessagesForEvaluation() : nil
 
                 var entries: [ParallelEntry] = []
                 // Calls rejected before Security Agent evaluation (unavailable for role / unknown tool).
@@ -1866,6 +1873,7 @@ public actor AgentActor {
                         agentRoleName: roleName,
                         callerRole: role,
                         toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: entry.tool),
+                        agentContext: agentContext,
                         sanctionedDirectories: sanctionedDirectories,
                         toolCallID: entry.call.id
                     )

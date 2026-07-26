@@ -465,7 +465,10 @@ actor SecurityEvaluator {
         siblingCalls: String?,
         agentRoleName: String,
         callerRole: AgentRole,
-        toolGroupDescription: String? = nil,
+        /// `nil` means "this tool belongs to no group" — a real answer, not an omission, which is
+        /// why there is no default: a new call site must decide rather than silently drop the
+        /// provenance of whatever it is asking about.
+        toolGroupDescription: String?,
         agentContext: String? = nil,
         sanctionedDirectories: [String] = [],
         toolCallID: String? = nil

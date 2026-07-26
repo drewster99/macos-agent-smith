@@ -104,6 +104,7 @@ struct SecurityEvaluatorTests {
             siblingCalls: nil,
             agentRoleName: "Brown",
             callerRole: .brown,
+            toolGroupDescription: nil,  // built-in tool: no group
             toolCallID: toolCallID
         )
     }
@@ -320,6 +321,7 @@ struct SecurityEvaluatorTests {
             siblingCalls: nil,
             agentRoleName: "Brown",
             callerRole: .brown,
+            toolGroupDescription: nil,  // built-in tool: no group
             toolCallID: "first"
         )
 
@@ -335,6 +337,7 @@ struct SecurityEvaluatorTests {
             siblingCalls: nil,
             agentRoleName: "Brown",
             callerRole: .brown,
+            toolGroupDescription: nil,  // built-in tool: no group
             toolCallID: "second"
         )
 
@@ -364,13 +367,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "first"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "first"
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "second"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "second"
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -397,13 +400,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "first"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "first"
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "second"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "second"
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -430,13 +433,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: nil
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: nil
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: nil
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: nil
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -494,6 +497,7 @@ struct SecurityEvaluatorTests {
             siblingCalls: nil,
             agentRoleName: "Brown",
             callerRole: .brown,
+            toolGroupDescription: nil,  // built-in tool: no group
             toolCallID: "edit-1"
         )
 
@@ -531,6 +535,7 @@ struct SecurityEvaluatorTests {
             siblingCalls: nil,
             agentRoleName: "Brown",
             callerRole: .brown,
+            toolGroupDescription: nil,  // built-in tool: no group
             toolCallID: nil
         )
 

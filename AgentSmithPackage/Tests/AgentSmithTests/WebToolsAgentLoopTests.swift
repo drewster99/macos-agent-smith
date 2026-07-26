@@ -145,6 +145,7 @@ struct WebToolsAgentLoopTests {
             siblingCalls: nil,
             agentRoleName: "Brown",
             callerRole: .brown,
+            toolGroupDescription: nil,  // built-in tool: no group
             toolCallID: "call-1"
         )
     }

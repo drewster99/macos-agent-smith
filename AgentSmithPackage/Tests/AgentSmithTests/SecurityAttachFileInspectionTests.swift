@@ -51,6 +51,7 @@ struct SecurityAttachFileInspectionTests {
             siblingCalls: nil,
             agentRoleName: "Brown",
             callerRole: .brown,
+            toolGroupDescription: nil,  // built-in tool: no group
             toolCallID: nil
         )
     }

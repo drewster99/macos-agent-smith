@@ -659,7 +659,13 @@ extension OrchestrationRuntime {
                     toolName: call.name,
                     toolParams: call.arguments,
                     toolDescription: tool.definition(for: .securityAgent).description,
-                    toolParameterDefs: "",
+                    // The evaluator judges PARAMETERS; handing it an empty schema left it guessing
+                    // what the values it was looking at even meant. Same rendering the agent path
+                    // uses, so a validator's evidence read is described to the Security Agent
+                    // exactly as a worker's would be.
+                    toolParameterDefs: AgentActor.formatToolParameterDefinitions(
+                        tool.definition(for: .securityAgent).parameters
+                    ),
                     taskTitle: gateTaskTitle,
                     taskID: gateTaskID,
                     taskDescription: gateTaskDescription,
