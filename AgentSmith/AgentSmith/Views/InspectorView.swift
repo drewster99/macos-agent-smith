@@ -57,19 +57,23 @@ struct InspectorView: View {
         VStack(spacing: 0) {
             CostEstimateSection(snapshot: viewModel.shared.costBoardSnapshot)
 
-            Text("Agents")
-                .font(AppFonts.sectionHeader)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
-                .padding(.bottom, 6)
-
-            ConcurrencyStrip(shared: viewModel.shared)
-
             Divider()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    NowLiveSection(viewModel: viewModel)
+
+                    Text("Agents")
+                        .font(AppFonts.sectionHeader)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 12)
+                        .padding(.bottom, 6)
+
+                    ConcurrencyStrip(shared: viewModel.shared)
+
+                    Divider()
+
                     RoleAgentCard(viewModel: viewModel, role: .smith, roleMessages: smithMessages)
                     RoleAgentCard(viewModel: viewModel, role: .brown, roleMessages: brownMessages)
                     RoleAgentCard(viewModel: viewModel, role: .securityAgent, roleMessages: securityAgentMessages)
