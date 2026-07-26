@@ -32,6 +32,12 @@ final class AgentInspectorStore {
     /// `liveContexts` (the role-collapsed view the current cards read).
     var liveContextsByInstance: [AgentInstanceRef: [LLMMessage]] = [:]
 
+    /// Bounds the per-instance maps: a long run cycles through many worker instances, and
+    /// without this both instance maps would grow without limit (the role-keyed maps are
+    /// bounded per-role). LRU by last touch; the least-recently-updated instance is evicted.
+    private var instanceTouchOrder: [AgentInstanceRef] = []
+    private static let maxTrackedInstances = 32
+
     /// Security evaluation records from Security Agent/SecurityEvaluator.
     var evaluationRecords: [EvaluationRecord] = []
 
@@ -51,14 +57,33 @@ final class AgentInspectorStore {
         turnsByRole[ref.role] = turns
         pruneOldTurnSnapshots(for: ref.role)
 
-        // Per-instance mirror (the re-key). Capped like the role view; snapshot-stripping
-        // stays on the role path for now, since the instance store is not yet a UI source.
+        // Per-instance mirror (the re-key), bounded so a long run with many workers can't
+        // grow it without limit: capped per instance, LRU-evicted by instance count (see
+        // touchInstance), and each stored copy has its heavy contextSnapshot stripped — the
+        // live context is available via liveContextsByInstance.
+        var lightweight = turn
+        lightweight.stripContextSnapshot()
         var instanceTurns = turnsByInstance[ref] ?? []
-        instanceTurns.append(turn)
+        instanceTurns.append(lightweight)
         if instanceTurns.count > Self.maxTurnRecords {
             instanceTurns.removeFirst(instanceTurns.count - Self.maxTurnRecords)
         }
         turnsByInstance[ref] = instanceTurns
+        touchInstance(ref)
+    }
+
+    /// Records the most-recent touch for `ref` and evicts the least-recently-updated
+    /// instance's heavy data once the tracked-instance cap is exceeded.
+    private func touchInstance(_ ref: AgentInstanceRef) {
+        if let existing = instanceTouchOrder.firstIndex(of: ref) {
+            instanceTouchOrder.remove(at: existing)
+        }
+        instanceTouchOrder.append(ref)
+        while instanceTouchOrder.count > Self.maxTrackedInstances {
+            let evicted = instanceTouchOrder.removeFirst()
+            turnsByInstance[evicted] = nil
+            liveContextsByInstance[evicted] = nil
+        }
     }
 
     /// Caps turn record count and strips contextSnapshot from older turns for a given role.
@@ -90,6 +115,7 @@ final class AgentInspectorStore {
     func updateLiveContext(_ messages: [LLMMessage], for ref: AgentInstanceRef) {
         liveContexts[ref.role] = messages
         liveContextsByInstance[ref] = messages
+        touchInstance(ref)
     }
 
     /// Appends a newly completed security evaluation record.
@@ -123,6 +149,7 @@ final class AgentInspectorStore {
         turnsByInstance.removeAll()
         liveContexts.removeAll()
         liveContextsByInstance.removeAll()
+        instanceTouchOrder.removeAll()
         evaluationRecords.removeAll()
     }
 
