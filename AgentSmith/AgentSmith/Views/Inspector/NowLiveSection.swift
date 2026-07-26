@@ -1,15 +1,16 @@
 import SwiftUI
 import AgentSmithKit
 
-/// The live "Now" view at the top of the inspector: the tasks that are happening right now,
-/// each with its current stage and its most recent tool activity.
+/// The live "Now" view at the top of the inspector: the tasks happening right now, each
+/// with its stage, its Brown's live micro-state, whether the Security Agent is reviewing
+/// one of its calls, and its most recent tool activity.
 ///
-/// Tool activity is bucketed straight from the channel by `taskID`, so it is accurate
-/// per task without depending on the still-role-keyed per-agent telemetry. This is the
-/// first visible slice of the "Now panel" (see ROADMAP: *Inspector "Now" panel + M2
-/// telemetry re-key*). Per-instance security/validator nesting and live agent micro-state
-/// arrive with the telemetry re-key; nothing shown here is faked in the meantime — states
-/// that aren't yet available are simply omitted, not guessed.
+/// Sources: recent tool calls are bucketed from the channel by `taskID`; the Brown state
+/// (`thinking` / `running <tool>` / `waiting on security`) and the nested `Security ·
+/// evaluating` row come from the per-instance telemetry (the M2 re-key), matched to a task
+/// via the Brown instance id in its `assigneeIDs`. Auto-approved read-only evidence takes
+/// the no-LLM fast path, so it correctly shows no security wait. Nothing is faked — a state
+/// that isn't currently signalled is simply omitted.
 struct NowLiveSection: View {
     let viewModel: AppViewModel
 
