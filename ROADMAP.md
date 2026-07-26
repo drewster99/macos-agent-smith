@@ -599,6 +599,59 @@ Why `toolUse` can't simply be enforced from the catalog today: `ModelCapabilitie
 
 Next: decide how/when profiles replace or feed `ModelInfo` (explicitly deferred), and scope a full run — hundreds of models × several serial calls is real money, so `--targets` exists now and `--only-unknown` / `--dry-run` / resume matter before it's pointed at everything. Some findings are decodable rather than probeable (Gemini's `outputTokenLimit`, Anthropic's effort block) — the decode-side work will let the sweep `skip` them.
 
+### Guide messages / system reminders — a per-call `systemReminder` in SwiftLLMKit (design 2026-07-26)
+
+**Not being built yet — but build around it.** The shape is settled; this entry is the design of record so nothing lands that makes it harder.
+
+**What it is.** A task-scoped nudge plus volatile state, injected at the *tail* of the prompt — immediately before generation — rather than buried in the system prompt N turns back. Two kinds of content share the slot: constraints ("do not touch the production database while testing") and ambient state (current time, working directory, active task/step, budget). Recency is the entire point: a rule stated at position 0 competes with everything since; the same rule restated at the tail competes with nothing. This is what Claude Code's `<system-reminder>` blocks are.
+
+**Tail placement is nearly free, and that's not incidental.** The cache is a single linear prefix match — a breakpoint is a read/write point along it, not a partition. Content that changes every turn re-processes *everything downstream of it*, so the trailing turn is the only position where fresh-every-call content costs merely its own tokens (the tail was uncached anyway). Corollary that bit us in review: **volatile state must never go in the system prompt.** Splitting `system` into a cached head + a volatile tail block sounds appealing and is a trap — the entire messages array sits downstream of that block, so a per-call timestamp there means the conversation history never caches. Damage scales with change frequency (a date is daily and survivable; a clock time is ruinous).
+
+**Content discipline.** Section constraints and context separately (`<constraints>` / `<context>`) — undifferentiated, models both treat ambient telemetry as an instruction and skim past a real constraint buried in key-value noise. And because this is the highest-attention position in the prompt, don't fill it reflexively: budget counters are the classic own-goal (a model shown remaining-tokens right before generating starts hedging and truncating). Keep it small — it is the one thing in the prompt that is never cached and it rides on every single request.
+
+#### Why the naive implementation fails today
+
+The app owns history and the kit is stateless: `AgentActor.conversationHistory` (`AgentActor.swift:68`), system seeded at index 0 (`:380`), compaction preserving index 0 (`:754`), against `LLMProvider.send(messages:tools:overrides:)`. The canonical in-memory shape is OpenAI-shaped (flat array, system at 0) and the kit translates per provider at send time.
+
+**All three providers silently hoist mid-array system messages to the front:** Anthropic `AnthropicProvider.swift:106–117` → top-level `system`, joined `\n\n`; Gemini `GeminiProvider.swift:118–176` → `systemInstruction`; OpenAI-compatible `OpenAICompatibleProvider.swift:143–159` → `systemParts`/`developerParts`. There is no logging in any of those loops. So appending `.system` to `conversationHistory` cannot work on **any** backend — including the OpenAI path, whose wire format would natively accept a trailing system turn — without editing all three. That's what makes the per-call override the only workable design rather than merely the tidy one.
+
+"Hoist" differs only in destination, never in whether: Anthropic and Gemini relocate to a *different field* (`system` / `systemInstruction`); OpenAI-compat keeps it in `messages` but merges every system text into a single front block at index 0, with developer text merged into a second block at index 1 (`:160–168`, ordered that way deliberately per OpenAI's precedence model). In all three, a `.system` at input index 47 does not stay at index 47.
+
+**The cache damage is the same everywhere, not an Anthropic quirk.** Prefix caching means the front of the prompt is the front of the prefix, so a per-turn-changing reminder folded into it — whether that's Anthropic's `system` field or OpenAI's `messages[0]` — invalidates the entire conversation on every request. Anthropic merely makes it conspicuous by hanging an explicit `cache_control` breakpoint on that exact block (`:195–206`). Not a live bug today (`AgentActor` only ever writes index 0) — a latent trap that fires the moment someone implements this the obvious way, and one that fails silently and expensively rather than erroring.
+
+#### The decision
+
+`LLMCallOverrides.systemReminder: String?` — a per-call knob, which is exactly what that type already documents itself as. Plain `String`: the app composes the sections (it knows what state it has), the kit only places it. Keeping the kit's surface dumb is the clean boundary — wire shaping in the kit, content in the app.
+
+The payoff is that the accumulation footgun becomes **structurally impossible**: it never enters `conversationHistory`, so it cannot be persisted, pruned, compacted, or replayed later as a stale assertion. That matters more for state than for rules — a stale "current time: 14:00" three turns back doesn't read as expired, it reads as a fact.
+
+| Provider | Placement | Gate |
+|---|---|---|
+| Anthropic | trailing `{"role":"system"}` in `messages` — explicitly **not** the `system` field | `supportsMidConversationSystem` (probed) |
+| OpenAI-compatible | trailing `{"role":"system"\|"developer"}` | same flag + existing `supportsDeveloperRole` |
+| Gemini | extra `<system-reminder>` text part on the last user-role content | none — always this path |
+| Ollama | OpenAI-compat shaped | same as OpenAI-compat |
+
+**Anthropic placement rules** (they constrain us): must follow a `user` message (or an `assistant` message ending in server-tool use), must be either last or followed by an `assistant` turn, never index 0, text-only. So it goes *after* the user message — the OpenAI-style "insert before the current user turn" layout is illegal there, and trailing placement is both legal on Anthropic and cheaper everywhere, so it's the single layout.
+
+**Gemini has no mid-conversation system mechanism at all** — not model-gated, not beta, structurally absent. `contents` accepts `user` and `model` only (`GeminiProvider.swift:441`'s `case .system, .developer: return "user"` is a documented defensive fallback), and `systemInstruction` is the sole system channel, at the front. Nothing to probe, no flag. Target the last *user-role* entry, which in a tool-calling loop is the function-response entry (already encoded `"role": "user"`, `:336`); if nothing user-roled is last, append a fresh user content rather than attaching to a `model` turn. Gemini's caching is explicit `cachedContent` and the provider only ever *reads* `cachedContentTokenCount` (`:538`), so there is no automatic prefix cache to poison there — but the recency argument stands on its own.
+
+**One shared `<system-reminder>` renderer** for Gemini (always) and the Anthropic/OpenAI unsupported-model fallback, so the tag format cannot drift between providers and there is exactly one place to enforce tag-stripping. That stripping is load-bearing: text inside a user turn is forgeable by anything that writes user-visible input, so attacker-influenced content must have `<system-reminder>` tags removed before assembly or the boundary between our instruction and their text stops being real.
+
+**Capability flag:** `BehaviorFlags.supportsMidConversationSystem: Bool = false`, sibling to `supportsDeveloperRole` (`BehaviorFlags.swift:75`) — same shape of problem (a role some endpoints honor and others don't, with a documented translation fallback), same forward-compatible decode, and default-false means everyone gets the safe user-turn path until proven otherwise.
+
+**Warn on stray system messages.** Index 0 is the legitimate base prompt and should stay quiet; a `.system`/`.developer` at index > 0 is a bug signal, and per the project's own no-silent-fallbacks rule it should be surfaced — `logger.warning` naming the index and the destination it's being hoisted to. Once `systemReminder` exists there is a correct channel, at which point escalating to a throw is defensible; that's a decision, not a given, since it's a behavior change for anything relying on the merge. Note the diagnostic gap today: Anthropic's cache log (`:493`) reports read/created/uncached, so a cache collapse *is* observable after the fact, but nothing connects it to its cause.
+
+**Verify while building:** Anthropic sets top-level `cache_control` for auto-rolling breakpoints (`:157`) alongside explicit ones on `system` and the last tool. With a changing reminder now last, confirm the auto-roll degrades gracefully (Anthropic keeps up to 4 and takes the longest match) against real `cache_read_input_tokens` rather than assuming — getting this wrong quietly costs the whole conversation prefix, which is the exact failure this feature exists to avoid.
+
+**Release:** kit-side change, so the full dance — change → build → commit → push → tag → push tag → bump `from: "0.0.111"` in `AgentSmithPackage/Package.swift`.
+
+#### If we ever add OpenAI's Responses API
+
+Same tail rule — a trailing `developer` item in `input`, never `instructions` (which is injected at the front and carries the identical whole-prefix trap). But Responses has a wrinkle the other three don't: with `store: true` the **server** owns history and you cannot retract an item you already sent, so injected reminders accumulate permanently and replay forever. The float-and-re-add pattern that makes this safe everywhere else is unavailable.
+
+Recommendation is `store: false` with a client-managed item array, keeping reasoning continuity across tool calls via `include: ["reasoning.encrypted_content"]` (the ZDR path). That collapses Responses into the same shape as the other three — app owns history, kit shapes the wire — and preserves the one genuinely unique Responses capability. Adopting `previous_response_id` would introduce a second, incompatible history model that only one provider uses and leak provider shape up into `AgentActor`, which is precisely what the kit exists to prevent. Constraints that never change can simply live in `instructions`, re-sent verbatim, at zero cache cost.
+
 ### Probe dimension: where a mid-conversation system turn is legal, per model (2026-07-26)
 
 Needed before we can ship **guide messages / reminders** — a task-scoped instruction ("don't touch the production database while testing") injected near the generation point rather than buried in the system prompt 200 messages back. The whole value is recency: restated at the tail it competes with nothing, restated at position 0 it decays. Parking it at the tail is also nearly free for caching — the trailing turn is uncached anyway, so the only new cost is the reminder's own tokens — whereas inserting it mid-history re-processes everything after it on every request. So the design wants the tail. The question the probe has to answer is whether a given model/endpoint will actually *honor* a system turn there.
@@ -612,6 +665,10 @@ Needed before we can ship **guide messages / reminders** — a task-scoped instr
 So this can't be a "does it 400?" check. It has to be behavioral, matching the standard the rest of the battery already holds itself to (vision demands two facts about a shape, PDF demands a transcribed code, tool use demands the fetched identifier). The shape: put a low-ambiguity instruction in `messages[0]` and its direct contradiction in the injected system turn, then read which one the response obeys. Obeying the injected turn establishes honored-in-place; obeying `messages[0]` means dropped or hoisted, and the two are indistinguishable from one call but equivalent for our purposes — neither is usable. Run it twice per model, once with the system turn before the user message and once after, since those are separate answers and the "after" one is the placement we actually want.
 
 Findings stay tri-state like the rest of `ModelProfile`, so "couldn't find out" never reads as a measured false. Consumers: whatever composes guide messages picks placement per provider+model rather than assuming, with the documented fallback for anything that comes back unsupported — a `<system-reminder>`-wrapped text block appended to the user turn's content. That fallback needs its own note: text inside a user turn is forgeable by anything that writes user-visible input, so tag-strip attacker-influenced content before assembly or the boundary between our instruction and their text stops being real.
+
+**Scope: Anthropic-style and OpenAI-compatible only. Gemini is out** — it has no mid-conversation system mechanism at any model or version (`contents` is `user`/`model` only), so there is nothing to establish and no flag to set. Its answer is a static no, hard-coded, not probed.
+
+**Sequencing — this probe cannot run before the `systemReminder` override lands.** `CapabilityEvalRunner` probes through `any LLMProvider`, and that is precisely the layer that hoists mid-array system messages to the front (all three providers do it, silently — see the entry above). A probe run today would measure *our own kit*, not the endpoint, and would report "hoisted" for every model including ones that genuinely support a trailing system turn. Either the override ships first and the probe drives it, or the probe needs a raw request path that bypasses normal send. The former is simpler and is the plan of record.
 
 ### Tool-execution timeout is cooperative, not a hard wall-clock cap (2026-07-15)
 
@@ -1975,6 +2032,37 @@ The left task list has outgrown its flat shape. **Not starting today — notes o
 - Preserve the existing per-family template roll-up behavior; fold it into the Library section rather than duplicating grouping logic.
 
 No implementation today; this is a placeholder so the direction isn't lost.
+
+### Re-evaluate whether Smith should get parallel tool-call execution (noted 2026-07-26)
+
+**Today:** Smith's multi-call turns execute SEQUENTIALLY. `AgentActor`'s parallel branch is gated on
+`segment.calls.count > 1 && configuration.requiresToolApproval`, and `requiresToolApproval: true` is
+set in exactly one place — `OrchestrationRuntime` at Brown spawn. Smith's config never sets it, so
+Smith has never met the condition.
+
+**Was it deliberately disabled for Smith?** I went looking and found no such decision. The parallel
+branch was written as the *approval segment* path in `dfe47b8` (Apr 2026, "Parallel tool call fixes:
+segmented execution, concurrency cap, false abort prevention") — its concerns were segmenting mixed
+lifecycle/approval batches, capping concurrent security evaluations at 5 to stop overwhelming LLM
+backends (Ollama "too many concurrent requests"), and a false-abort bug where each retry incremented
+the failure counter. All Brown-shaped problems. Smith's exclusion reads as a consequence of who the
+path was built for, not a security judgment about Smith.
+
+Two things that might be the "good reason" being half-remembered, both unrelated:
+- `disableParallelToolCalls` — a per-model behavior flag that omits `parallel_tool_calls` from the
+  request. Provider compatibility for strict endpoints that 400 on the field; nothing to do with Smith.
+- `de2703d` "Adopt SwiftLLMKit 0.0.44: parallel tool calls on by default" — a provider-level default.
+
+**Why it matters now:** since the Security Agent became an unconditional chokepoint, every one of
+Smith's tool calls is evaluated. A Smith turn emitting N calls pays N *sequential* round-trips where
+Brown pays roughly one wall-clock unit. That cost didn't exist when most of Smith's tools bypassed
+review entirely.
+
+**Before enabling, check:** (a) the concurrency cap from `dfe47b8` still holds — Smith's fan-out
+would stack on top of every live Brown's; (b) ordering assumptions in Smith's own tool handling
+(`task_complete`-style breaks, `smithTurnTargetTaskID` attribution scanning `response.toolCalls`);
+(c) that the parallel path's inputs stay identical to the sequential one — `agentContext` was missing
+there until 2026-07-26 and only harmless because the path was Brown-only.
 
 ## Blockers
 

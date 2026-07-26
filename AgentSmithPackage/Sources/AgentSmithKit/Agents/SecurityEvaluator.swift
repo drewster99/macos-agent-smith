@@ -269,9 +269,14 @@ actor SecurityEvaluator {
     /// instruction. `buildEvalPrompt` frames it as an untrusted claim rather than context, which
     /// is the same stance the scoping pass takes via `ToolGroup.source` / `trustLevel`.
     static func toolGroupDescription(for tool: any AgentTool) -> String? {
-        guard let mcp = tool as? MCPBridgedTool else { return nil }
-        return mcp.serverInstructions
-            ?? "External MCP server configured by the user. It provided no description of itself."
+        if let mcp = tool as? MCPBridgedTool {
+            return mcp.serverInstructions
+                ?? "External MCP server configured by the user. It provided no description of itself."
+        }
+        // Built-ins get their family's description. Prefixed with the group name so the evaluator
+        // can tell WHICH family this is, not just what that family means.
+        guard let group = BuiltInToolGroup.group(forToolName: tool.name) else { return nil }
+        return "\(group.displayName) (\(group.rawValue)) — \(group.groupDescription)"
     }
 
     /// Whether `toolName` is pre-cleared for `role`. Fail-closed on both axes.
@@ -1011,15 +1016,21 @@ actor SecurityEvaluator {
             )
             return (candidate, group)
         }
+        // Per-family group when the tool has one, so the scoping pass can reason about "filesystem"
+        // and "shell" separately instead of seeing one undifferentiated "built-in" bucket. Groups
+        // dedupe by ID in the caller, so several appear side by side.
+        let builtInGroup = BuiltInToolGroup.group(forToolName: tool.name)
         let group = ToolSetScopingUserPrompt.ToolGroup(
-            toolGroupID: "builtin",
-            name: "Built-in tools",
-            description: "Tools provided and vetted by the system. Their capability flags are authoritative facts.",
+            toolGroupID: builtInGroup?.rawValue ?? "builtin",
+            name: builtInGroup?.displayName ?? "Built-in tools",
+            description: (builtInGroup?.groupDescription).map {
+                "Provided and vetted by the system; capability flags are authoritative facts. \($0)"
+            } ?? "Tools provided and vetted by the system. Their capability flags are authoritative facts.",
             source: .builtIn
         )
         let candidate = ToolSetScopingUserPrompt.CandidateTool(
             toolID: tool.name,
-            toolGroupID: "builtin",
+            toolGroupID: builtInGroup?.rawValue ?? "builtin",
             trustLevel: .requiredBySystem,
             name: tool.name,
             description: tool.smithFacingSummary,
