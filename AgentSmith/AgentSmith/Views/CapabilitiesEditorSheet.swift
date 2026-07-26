@@ -220,6 +220,13 @@ struct CapabilitiesEditorSheet: View {
 
             Divider()
 
+            // Chat support is the GATING capability: when it's off the model can't be called at all,
+            // so surface it as a pinned banner rather than leaving it as one buried row far below the
+            // (now-misleading) Vision/Tool/Reasoning rows.
+            if resolvedModelInfo?.supportsChatCompletions == false {
+                chatNotAChatModelBanner()
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     sectionHeader("Capabilities")
@@ -284,6 +291,28 @@ struct CapabilitiesEditorSheet: View {
             .font(.subheadline.bold())
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Pinned warning for a model that does NOT serve the chat-completions endpoint Agent Smith talks
+    /// to. Shown only when chat resolves OFF — the case where the capability rows below resolve to
+    /// unreachable defaults and assigning the model 404s at call time.
+    private func chatNotAChatModelBanner() -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Not a chat model")
+                    .font(.subheadline.bold())
+                Text("This model doesn't serve the chat-completions endpoint Agent Smith uses (it's responses-/embeddings-only), so assigning it to an agent fails with HTTP 404. The capabilities below are unreachable defaults. Use “Chat completions” under Status & Identity to override if this is wrong.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.35), lineWidth: 0.5))
     }
 
     /// `reported` is the model's own ceiling (probe/catalog), shown as a persistent reference.
