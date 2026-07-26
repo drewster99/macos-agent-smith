@@ -303,7 +303,17 @@ enum CapabilityEvalRunner {
                 let test = ModelProber.makeTrailingSystemTurnTest()
                 let forcedConfig = ModelConfiguration(
                     name: "probe:\(target.modelID):trailing-system", providerID: target.providerID,
-                    modelID: target.modelID, temperature: nil, maxOutputTokens: 256,
+                    // 4096, not the ~256 a nine-character echo needs. max_tokens caps thinking AND
+                    // text together, and on this family thinking is on by default (Opus 5, Sonnet 5)
+                    // or unconditional (Fable 5) with no way to switch it off — Fable 5 rejects
+                    // `thinking: {type: "disabled"}` outright. At 256 the reasoning consumed the
+                    // whole budget and the request returned 200 with an EMPTY body, which grades
+                    // inconclusive: "accepted but did not echo its code". Measured 2026-07-26 —
+                    // fable-5, sonnet-5 and opus-4-8 all failed this way while opus-5 passed, purely
+                    // because it finished thinking inside the budget. A starved probe that reads as
+                    // "couldn't find out" is the expensive kind of wrong: it looks like a real
+                    // measurement of the model rather than a misconfiguration of the harness.
+                    modelID: target.modelID, temperature: nil, maxOutputTokens: 4096,
                     streaming: false,
                     extraJSONOverrides: test.overrides
                 )
