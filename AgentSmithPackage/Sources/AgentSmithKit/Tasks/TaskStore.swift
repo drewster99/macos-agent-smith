@@ -910,8 +910,8 @@ public actor TaskStore {
         return validation.round
     }
 
-    /// Resets the validation counters (round + stall) for a fresh rework cycle — a
-    /// `review_work` reject, or `run_task`'s auto-reset of a failed task. Without this,
+    /// Resets the validation counters (round + stall) for a fresh rework cycle — a user
+    /// "send back to Brown"/re-validate, or `run_task`'s auto-reset of a failed task. Without this,
     /// a resubmission would instantly re-fail on a stale stall counter. Sticky accepts,
     /// the verdict ledger, and pinned definitions all survive — only the counters
     /// refresh.

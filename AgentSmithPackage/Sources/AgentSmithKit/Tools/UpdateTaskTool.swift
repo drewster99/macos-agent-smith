@@ -3,7 +3,7 @@ import Foundation
 /// Allows Smith to update a task's status.
 struct UpdateTaskTool: AgentTool {
     let name = "update_task"
-    let toolDescription = "Manually update a task's status. ESCAPE HATCH ONLY — for normal workflow, use `review_work` (to accept/reject), `run_task` (to start, retry, or reopen — including reopening completed tasks; do not flip status manually first), or the lifecycle tool calls Brown makes itself. Use this only when nothing else applies — e.g., marking a truly stuck task as `failed` so you can move on."
+    let toolDescription = "Manually update a task's status. ESCAPE HATCH ONLY — for normal workflow, use `run_task` (to start, retry, or reopen — including reopening completed tasks; do not flip status manually first) or the lifecycle tool calls Brown makes itself; acceptance validation handles completion. Use this only when nothing else applies — e.g., marking a truly stuck task as `failed` so you can move on."
 
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
@@ -73,7 +73,7 @@ struct UpdateTaskTool: AgentTool {
             return .failure("`running` cannot be set directly — it would create a task that LOOKS in-flight but has no worker, and it blocks the auto-run queue. Use `run_task` to actually start a task (it spawns the worker); if it refuses because another task is running, wait for that task to finish.")
         }
         if status == .awaitingReview {
-            return .failure("`awaitingReview` is reserved — it is where acceptance validation parks a task when it ESCALATES (and where help requests park). You cannot set it directly. If the task needs your review, wait for the escalation notice, then call `review_work`.")
+            return .failure("`awaitingReview` is reserved — it is where acceptance validation parks a task when it ESCALATES, for the USER to resolve from the task row. (Help requests park in `awaitingHelp`.) You cannot set it directly.")
         }
         if status == .validating {
             return .failure("`validating` is reserved — only Brown's `task_complete` submission enters validation. Setting it directly would strand the task with no validation run attached.")

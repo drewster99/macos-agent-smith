@@ -104,18 +104,18 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     public var userToolOverrides: [String: Bool]?
 
     /// Non-nil when Brown has escalated a blocker via `request_help` and is waiting for Smith.
-    /// The task sits in `.awaitingReview` (reusing the review wait/slot machinery) but this
-    /// field marks it as a help request rather than completed work: `review_work` refuses it
-    /// and Smith answers via `provide_help`, which clears this and returns the task to running.
-    /// Holds the formatted blocker + what's needed, for Smith's context and the UI.
+    /// The task sits in its own `.awaitingHelp` state (Brown stays alive, holding its slot); Smith
+    /// answers via `provide_help`, which clears this and returns the task to running. Holds the
+    /// formatted blocker + what's needed, for Smith's context and the UI.
     public var helpRequest: String?
 
     /// Non-nil when validation could not run for a CONFIGURATION reason (today: no model is
-    /// assigned to `AgentRole.validator`). Like `helpRequest` the task parks in
-    /// `.awaitingReview`, but this one is nobody's to resolve — `review_work` refuses it,
-    /// because a human-free "accept" here would be exactly the unjudged pass the validation
-    /// system exists to prevent. Cleared automatically when a validator model is assigned,
-    /// which returns the task to `.validating` and re-enqueues it.
+    /// assigned to `AgentRole.validator`). The task parks in `.awaitingReview`, but this one is
+    /// nobody's to resolve — it isn't offered the user's escalation actions, because a human-free
+    /// "accept" here would be exactly the unjudged pass the validation system exists to prevent.
+    /// Cleared automatically when a validator model is assigned, which returns the task to
+    /// `.validating` and re-enqueues it. (Distinguishes a config park from a validator-error park —
+    /// see `occupiesWorkerSlot` and the escalation row actions.)
     public var validationBlockedReason: String?
 
     /// Whether this task currently holds one of the `maxConcurrentWorkers` slots — i.e. has a LIVE

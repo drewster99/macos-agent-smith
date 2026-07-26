@@ -1229,14 +1229,11 @@ extension OrchestrationRuntime {
         }.joined(separator: "\n\n")
     }
 
-    /// Escalation: the bounded loop failed to converge, a validator errored past retry,
-    /// or validation isn't configured. The task parks in `.awaitingReview` — Smith's
-    /// review_work becomes the resolution tool — and both Smith and the user are
-    /// actively notified. Escalation must never be silent.
-    /// Parks a submitted task because no model is assigned to `AgentRole.validator`. Unlike
-    /// `escalateValidation` this is NOT handed to Smith — `review_work` refuses a blocked task,
-    /// so it sits until a validator model exists. Assigning one releases it (`setProviders` →
-    /// `releaseValidationBlockedTasks`).
+    /// Parks a submitted task because no model is assigned to `AgentRole.validator`. Unlike an
+    /// `escalateValidation` park (a validator ERROR, which the user resolves from the task row),
+    /// this one is nobody's to resolve — it carries `validationBlockedReason`, keeps its worker
+    /// alive, and is NOT offered the user's escalation actions. It sits until a validator model
+    /// exists; assigning one releases it (`setProviders` → `releaseValidationBlockedTasks`).
     private func blockValidationForMissingValidatorModel(taskID: UUID) async {
         let reason = "No model is assigned to the Validator role, so acceptance validation cannot run. Assign one in the Agents inspector; this task resumes validating automatically."
         guard await taskStore.blockValidation(id: taskID, reason: reason) else { return }

@@ -88,6 +88,53 @@ struct TaskValidationCoordinatorTests {
         return await store.task(id: taskID)?.status
     }
 
+    // MARK: - User resolution of a validator-error escalation (replaces review_work)
+
+    /// A task parked in `.awaitingReview` with one rejected (unsettled) criterion + a result —
+    /// the shape a validator-error escalation leaves behind, ready for the user's row actions.
+    private func makeEscalatedTask(on runtime: OrchestrationRuntime) async -> (AgentTask, AcceptanceCriterion) {
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Escalated task", description: "d")
+        let criterion = AcceptanceCriterion(name: "the validator got this wrong", origin: .user)
+        await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+        await store.setResult(id: task.id, result: "correct work", commentary: nil, attachments: [])
+        _ = await store.beginValidationRound(id: task.id)
+        await store.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "wrongly rejected"), validatorName: "default", validatorHash: "x", round: 1)
+        ], judgedAgainst: [criterion])
+        await store.updateStatus(id: task.id, status: .awaitingReview)
+        return (await store.task(id: task.id) ?? task, criterion)
+    }
+
+    @Test("User accept records a 'user override' verdict, logs it, and completes the task")
+    func userAcceptRecordsOverride() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        let (task, criterion) = await makeEscalatedTask(on: runtime)
+        await runtime.acceptEscalatedTask(taskID: task.id)
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.status == .completed)
+        #expect(final?.validation?.settledCriterionIDs() == [criterion.id], "the override settles the criterion")
+        #expect(final?.validation?.verdictRecords.last?.validatorName == "user override")
+        #expect(final?.updates.contains { $0.message.contains("overriding acceptance validation") } == true)
+    }
+
+    @Test("User re-validate takes the task out of awaitingReview back into judging")
+    func userRevalidateLeavesAwaitingReview() async throws {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let (task, _) = await makeEscalatedTask(on: runtime)
+        await runtime.revalidateEscalatedTask(taskID: task.id)
+        let settled = await waitForStatusChange(on: runtime, taskID: task.id, away: .awaitingReview)
+        #expect(settled != .awaitingReview, "re-validation must move it back into the judging pipeline")
+    }
+
+    @Test("User fail marks the escalated task failed")
+    func userFailMarksFailed() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        let (task, _) = await makeEscalatedTask(on: runtime)
+        await runtime.failEscalatedTask(taskID: task.id)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .failed)
+    }
+
     @Test("All criteria accepted → task completes; the implicit default criterion is materialized")
     func acceptanceCompletesCriterionlessTask() async {
         let runtime = makeRuntime(verdictScript: ["ACCEPT"])
@@ -398,13 +445,10 @@ struct TaskValidationCoordinatorTests {
         #expect(parked?.result == "The thing was done.", "the submission is untouched — it was never judged")
         #expect(parked?.validation?.verdictRecords.isEmpty != false, "nothing may be recorded as judged")
 
-        // Not Smith's to resolve: review_work refuses it outright.
-        let review = try await ReviewWorkTool().execute(
-            arguments: ["task_id": .string(task.id.uuidString), "accepted": .bool(true), "feedback": .string("looks fine")],
-            context: TestToolContext.make(agentRole: .smith, taskStore: await runtime.taskStore)
-        )
-        #expect(!review.succeeded)
-        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "a refused review changes nothing")
+        // Not the user's to resolve either: the escalation row actions gate on a non-blocked park,
+        // so accepting a config-blocked task is a no-op.
+        await runtime.acceptEscalatedTask(taskID: task.id)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "a config-blocked park is not user-resolvable — accept changes nothing")
 
         // Assigning a validator model is the only thing that unsticks it.
         await runtime.setProviders(

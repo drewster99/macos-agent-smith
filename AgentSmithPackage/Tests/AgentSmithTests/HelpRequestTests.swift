@@ -120,21 +120,17 @@ struct HelpRequestTests {
         #expect(result.output.contains("not a help request"))
     }
 
-    @Test("review_work refuses a help-request task and points to provide_help")
-    func reviewWorkRefusesHelpRequest() async throws {
-        let channel = MessageChannel()
+    @Test("request_help parks in awaitingHelp — its own state, not a review")
+    func requestHelpUsesAwaitingHelpState() async throws {
         let taskStore = TaskStore()
-        let brownID = UUID(), smithID = UUID()
+        let brownID = UUID()
         let task = await taskStore.addTask(title: "Blocked task", description: "...")
         await taskStore.assignAgent(taskID: task.id, agentID: brownID)
         await taskStore.requestHelp(id: task.id, request: "Blocker: x\nNeeded: y")
 
-        let ctx = Self.smithContext(taskStore: taskStore, channel: channel, brownID: brownID, smithID: smithID)
-        let result = try await ReviewWorkTool().execute(
-            arguments: ["task_id": .string(task.id.uuidString), "accepted": .bool(true)],
-            context: ctx
-        )
-        #expect(!result.succeeded)
-        #expect(result.output.contains("provide_help"))
+        let parked = await taskStore.task(id: task.id)
+        #expect(parked?.status == .awaitingHelp, "a help request is its own state, never .awaitingReview")
+        #expect(parked?.helpRequest != nil)
+        #expect(parked?.result == nil, "a help request carries no result")
     }
 }

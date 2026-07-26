@@ -5,9 +5,9 @@ import Foundation
 /// The honest counterpart to `task_complete`. When Brown cannot proceed without information,
 /// a decision, or access that only the user or Smith can provide — and has exhausted its own
 /// tools — it calls this instead of submitting a non-result via `task_complete`. The task is
-/// parked in `awaitingReview` (reusing the review wait/slot machinery) but flagged as a help
-/// request, so Smith answers via `provide_help` rather than `review_work`. Mirrors the
-/// `task_complete` → `review_work` round-trip exactly: submit, go idle, wake on Smith's reply.
+/// parked in its own `awaitingHelp` state (Brown stays alive, holding its slot), flagged via
+/// `helpRequest`, so Smith answers via `provide_help`. Round-trip: submit, go idle, wake on Smith's
+/// reply. (Completed work goes through `task_complete` → acceptance validation, never Smith.)
 public struct RequestHelpTool: AgentTool {
     public let name = "request_help"
     public let toolDescription = """
@@ -76,7 +76,7 @@ public struct RequestHelpTool: AgentTool {
 
             Resolve it with `provide_help` (answer Brown and return the task to running). If you \
             need something from the user first, `message_user` to ask, then `provide_help` once \
-            you have it. Do not call `review_work` on this task.
+            you have it.
             """
 
         await context.post(ChannelMessage(

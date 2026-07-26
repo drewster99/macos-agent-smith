@@ -2,10 +2,10 @@ import Foundation
 
 /// Smith tool: answers a help request Brown raised via `request_help`.
 ///
-/// The counterpart to `request_help` (as `review_work` is to `task_complete`). It clears the
-/// task's help flag, returns it to `running`, and delivers Smith's answer to Brown — waking it
-/// to continue with the new information. Only valid for a task that is actually a help request;
-/// completed-work submissions go through `review_work` instead.
+/// The counterpart to `request_help`. It clears the task's help flag, returns it to `running`, and
+/// delivers Smith's answer to Brown — waking it to continue with the new information. Only valid for a
+/// task that is actually a help request (`.awaitingHelp`); completed-work submissions are judged by
+/// acceptance validation, never by Smith.
 struct ProvideHelpTool: AgentTool {
     let name = "provide_help"
     let toolDescription = """
@@ -13,7 +13,7 @@ struct ProvideHelpTool: AgentTool {
         continue in `response` — the missing information, the decision, the clarification. This \
         returns the task to running and delivers your answer to Brown. If you still need \
         something from the user first, call `message_user` to ask, and only call `provide_help` \
-        once you have the answer. (For reviewing completed work, use `review_work` instead.)
+        once you have the answer. (You do not review completed work — acceptance validation does that.)
         """
 
     let parameters: [String: AnyCodable] = [
@@ -58,7 +58,7 @@ struct ProvideHelpTool: AgentTool {
         guard task.helpRequest != nil else {
             return .failure("""
                 Task '\(task.title)' is not a help request. `provide_help` only answers a blocker \
-                Brown raised via `request_help`. For completed work in awaitingReview, use `review_work`.
+                Brown raised via `request_help`. Completed work is judged by acceptance validation, not you.
                 """)
         }
 
