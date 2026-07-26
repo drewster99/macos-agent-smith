@@ -257,6 +257,32 @@ enum CapabilityEvalRunner {
                 }
             }
 
+            // A trailing {"role":"system"} steering turn — the placement a per-call system reminder
+            // needs. Anthropic-only for now: Gemini has no mid-conversation system mechanism at any
+            // model (contents is user/model only), and OpenAI-compatible endpoints need their own
+            // before/after variant because a chat template may honor one placement and mangle the
+            // other. Nothing in Anthropic's /models payload states this, so asking is the only way.
+            //
+            // The body is FORCED via extraJSONOverrides for the same reason effort is: our own
+            // providers hoist mid-array system messages to the front, so a system message handed to
+            // send() can never reach the wire in trailing position. Arrays replace outright in
+            // mergeJSONOverrides, so this measures the ENDPOINT rather than our kit — without it
+            // every model would report a uniform "no", including ones that support it.
+            if provider.apiType == .anthropic, profile.trailingSystemTurn == nil {
+                let test = ModelProber.makeTrailingSystemTurnTest()
+                let forcedConfig = ModelConfiguration(
+                    name: "probe:\(target.modelID):trailing-system", providerID: target.providerID,
+                    modelID: target.modelID, temperature: nil, maxOutputTokens: 256,
+                    streaming: false,
+                    extraJSONOverrides: test.overrides
+                )
+                let forcedLLM = kit.makeProvider(configuration: forcedConfig, provider: provider)
+                profile.trailingSystemTurn = await ModelProber.probeTrailingSystemTurn(
+                    llm: forcedLLM, test: test, modelID: target.modelID
+                )
+                profile.callCount += 1
+            }
+
             // Non-chat models are dropped AFTER probing (chat is a probed result, not known up
             // front). We'll likely discard these downstream anyway; the flag makes that explicit.
             if discardNonChat, profile.chat.value == false {
