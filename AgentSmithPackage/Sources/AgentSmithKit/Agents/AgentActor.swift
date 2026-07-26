@@ -2855,9 +2855,20 @@ public actor AgentActor {
 
     // MARK: - Auto-memory context (Smith)
 
-    /// Opening delimiter of the auto-memory block appended to Smith's user messages, closed by
-    /// `[/AUTO_MEMORY_CONTEXT]`. The pair bounds text the USER DID NOT WRITE, so Smith can tell
-    /// retrieved background from the person's own words.
+    /// Opening delimiter of the auto-memory block, closed by `[/AUTO_MEMORY_CONTEXT]`.
+    ///
+    /// The block is appended AFTER the user's own text, separated by a blank line, inside the
+    /// USER turn itself (`injectAutoMemoryContextIfNeeded` mutates Smith's local copy of the
+    /// pending message; the `ChannelMessage` in the transcript is untouched). Retrieved memory
+    /// content is arbitrary stored text, and grafting it into a user turn unmarked would present
+    /// it to Smith as something the person said — a memory phrased as an instruction would read
+    /// as one. The pair, plus the system note the block opens with, is what draws that line. Keep
+    /// them whatever the retrieval cadence: this is a prompt-injection boundary, not bookkeeping.
+    ///
+    /// Contents are verbatim and uncapped — each hit carries its FULL memory content and ALL its
+    /// tags (`formatAutoMemoryContextBlock`). Only the number of hits is bounded, by the search's
+    /// `memoryLimit`. So the block's context cost scales with how long the matched memories are,
+    /// which is a separate budget from the retrieval latency.
     ///
     /// Retrieval runs on EVERY user message — each message is its own question and deserves its
     /// own memories. It stays affordable because a user-message retrieval searches memories only
