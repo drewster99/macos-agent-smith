@@ -135,6 +135,33 @@ struct TaskValidationCoordinatorTests {
         #expect(await runtime.taskStore.task(id: task.id)?.status == .failed)
     }
 
+    @Test("User send-back re-runs the worker and clears the result for rework")
+    func userSendBackReturnsToBrown() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        let (task, _) = await makeEscalatedTask(on: runtime)
+        await runtime.sendEscalatedTaskBackToBrown(taskID: task.id, feedback: "add the missing section")
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.status == .running || final?.status == .pending,
+                "send-back returns the task to the worker (or re-queues it if no slot is free)")
+        #expect(final?.result == nil, "the rejected result is cleared for the rework")
+        #expect(final?.updates.contains { $0.message.contains("Sent back by the user") } == true)
+    }
+
+    @Test("occupiesWorkerSlot: validator-error park frees the slot; help/config parks keep it")
+    func occupiesWorkerSlotDistinguishesParks() async {
+        var t = await makeRuntime(verdictScript: []).taskStore.addTask(title: "t", description: "d")
+        t.status = .awaitingReview; t.validationBlockedReason = nil
+        #expect(t.occupiesWorkerSlot == false, "a validator-error park has had its worker torn down")
+        t.validationBlockedReason = "no validator model"
+        #expect(t.occupiesWorkerSlot == true, "a missing-validator park keeps its worker alive")
+        t.status = .awaitingHelp; t.validationBlockedReason = nil
+        #expect(t.occupiesWorkerSlot == true, "a help block keeps its blocked worker")
+        t.status = .running
+        #expect(t.occupiesWorkerSlot == true)
+        t.status = .pending
+        #expect(t.occupiesWorkerSlot == false)
+    }
+
     @Test("All criteria accepted → task completes; the implicit default criterion is materialized")
     func acceptanceCompletesCriterionlessTask() async {
         let runtime = makeRuntime(verdictScript: ["ACCEPT"])
