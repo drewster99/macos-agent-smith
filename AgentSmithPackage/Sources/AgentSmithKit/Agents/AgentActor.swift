@@ -1131,7 +1131,7 @@ public actor AgentActor {
             do {
                 let activeTasks = await toolContext.taskStore.allTasks().filter { $0.disposition == .active }
                 let hasRunnableTasks = activeTasks.contains { $0.status.isRunnable }
-                let hasAwaitingReview = activeTasks.contains { $0.status == .awaitingReview }
+                let hasAwaitingReview = activeTasks.contains { $0.status == .awaitingReview || $0.status == .awaitingHelp }
                 let availabilityContext = ToolAvailabilityContext(
                     lastDirectUserMessageAt: lastDirectUserMessageAt,
                     agentRole: configuration.role,
@@ -2355,7 +2355,7 @@ public actor AgentActor {
             lastDirectUserMessageAt: lastDirectUserMessageAt,
             agentRole: configuration.role,
             hasRunnableTasks: activeTasks.contains { $0.status.isRunnable },
-            hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingReview }
+            hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingReview || $0.status == .awaitingHelp }
         )
     }
 
@@ -2855,21 +2855,14 @@ public actor AgentActor {
 
     // MARK: - Auto-memory context (Smith)
 
-    /// Marker embedded in Smith's user messages when auto-memory context has been attached.
-    /// Used to detect existing context in the current conversation history (post-pruning) so
-    /// we don't re-attach the same kind of background to consecutive user messages.
-    private static let autoMemoryContextMarker = "[AUTO_MEMORY_CONTEXT]"
-
-    /// When true, Smith's auto-memory context injects at most once per conversation (guarded by the
-    /// marker above).
+    /// Opening delimiter of the auto-memory block appended to Smith's user messages, closed by
+    /// `[/AUTO_MEMORY_CONTEXT]`. The pair bounds text the USER DID NOT WRITE, so Smith can tell
+    /// retrieved background from the person's own words.
     ///
-    /// `false` — retrieve on EVERY user message — is the intended behavior, not a leftover from an
-    /// evaluation: each message is its own question and deserves its own memories. It was affordable
-    /// to make permanent only once a user-message retrieval stopped searching the prior-task corpus
-    /// (see `injectAutoMemoryContextIfNeeded`), which halved the embedding work per message.
-    /// The guard code (`conversationHasAutoMemoryContext`) stays intact so the once-per-conversation
-    /// behavior remains one flag away if per-message retrieval ever proves too expensive.
-    private static let autoMemoryOncePerConversation = false
+    /// Retrieval runs on EVERY user message — each message is its own question and deserves its
+    /// own memories. It stays affordable because a user-message retrieval searches memories only
+    /// (see `injectAutoMemoryContextIfNeeded`), which is one query embedding rather than two.
+    private static let autoMemoryContextMarker = "[AUTO_MEMORY_CONTEXT]"
 
     private static let autoMemoryContextDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -2894,9 +2887,6 @@ public actor AgentActor {
 
         let query = userMessage.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
-
-        // Skip if a prior auto-context is still present in the conversation history (post-pruning).
-        if Self.autoMemoryOncePerConversation && conversationHasAutoMemoryContext() { return }
 
         // Capture the target message ID before the await — we re-locate by ID afterward
         // because the actor may process other isolated methods during the suspend, and a
@@ -2927,10 +2917,6 @@ public actor AgentActor {
         }
 
         guard !results.isEmpty else { return }
-
-        // Re-check the marker — another path on this actor may have added a marker-bearing
-        // user message into the conversation while we were awaiting the search.
-        if Self.autoMemoryOncePerConversation && conversationHasAutoMemoryContext() { return }
 
         // Re-locate the target message by ID. If it's no longer in the pending queue
         // (e.g. drained by an interleaved code path), skip silently.
@@ -2982,18 +2968,6 @@ public actor AgentActor {
             content: query,
             metadata: bannerMetadata
         ))
-    }
-
-    /// Returns true if any user message in the current conversation history contains the
-    /// auto-memory marker, indicating context was already attached and is still in scope.
-    private func conversationHasAutoMemoryContext() -> Bool {
-        for msg in conversationHistory where msg.role == .user {
-            if case .text(let text) = msg.content,
-               text.contains(Self.autoMemoryContextMarker) {
-                return true
-            }
-        }
-        return false
     }
 
     /// Formats the auto-attached memory + prior tasks block. Layout mirrors `SearchMemoryTool`'s
