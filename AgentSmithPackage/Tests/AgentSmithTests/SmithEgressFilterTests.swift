@@ -56,7 +56,6 @@ struct SmithEgressFilterTests {
             tools: [tool], toolContext: context
         )
         await agent.setSecurityEvaluator(denyingEvaluator())
-        await agent.setEvaluatesOpenWorldToolsOnly(true)
         let history = HistoryRecorder()
         await agent.setOnContextChanged { messages in history.update(messages) }
         await agent.start(initialInstruction: "go")

@@ -194,7 +194,7 @@ struct TaskValidationCoordinatorTests {
             "REJECT: the log file was never written",
             "ACCEPT"
         ])
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let criteria = [
             AcceptanceCriterion(name: "A: code compiles", origin: .user),
@@ -270,7 +270,7 @@ struct TaskValidationCoordinatorTests {
             "REJECT: round 3 miss",
             "ACCEPT"
         ])
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         // Drive the non-convergence path with a budget of 3 rather than scripting a full shipped
         // budget's worth of identical rejection rounds. What's under test is the stall RULE —
         // consecutive rounds with nothing newly settled — not the specific number.
@@ -428,7 +428,7 @@ struct TaskValidationCoordinatorTests {
             "ACCEPT",
             "REJECT: beta is missing its header"
         ])
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let criteria = [AcceptanceCriterion(
             name: "every item is valid",

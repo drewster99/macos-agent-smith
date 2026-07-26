@@ -777,7 +777,12 @@ private struct MessageRow: View, Equatable {
               case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
         switch d {
         case "approved": return "\u{2705}"   // checkmark
-        case "autoApproved": return "\u{2705}"  // checkmark (comment below explains auto-approval)
+        // A gear, NOT a checkmark: the green tick means a Security Agent read this call and judged
+        // it; this means a hardcoded rule cleared it and no one looked. Both are "approved", but
+        // they carry different amounts of assurance, and the glyph is the only place a reader can
+        // see which they got. (Unicode has no real "automatic" mark — the camera convention is a
+        // bare "A", whose circled form reads as the anarchy symbol.)
+        case "autoApproved": return "\u{2699}\u{FE0F}"  // gear — cleared by rule, not judged
         case "warning": return "\u{26A0}\u{FE0F}" // warning
         case "denied": return "\u{1F6AB}"    // prohibited
         case "abort": return "\u{1F6D1}"     // stop sign
@@ -842,7 +847,12 @@ private struct MessageRow: View, Equatable {
               case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
         switch d {
         case "approved": return "Safety: Approved"
-        case "autoApproved": return "Safety: Auto-approved"
+        // Carries the detail the removed banner used to show, so the reason is still one hover away.
+        case "autoApproved":
+            if case .string(let msg) = securityReviewMessage?.metadata?["dispositionMessage"], !msg.isEmpty {
+                return "Safety: Auto-approved — \(msg)"
+            }
+            return "Safety: Auto-approved"
         case "warning": return "Safety: Warning"
         case "denied": return "Safety: Denied"
         case "abort": return "Safety: Abort triggered"
@@ -855,12 +865,11 @@ private struct MessageRow: View, Equatable {
               case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
         switch d {
         case "autoApproved":
-            // The reason varies (trusted filesystem read vs identical WARN retry) — use the actual
-            // disposition message rather than assuming one kind of auto-approval.
-            if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
-                return "Auto-approved (\(msg))"
-            }
-            return "Auto-approved"
+            // No banner. Auto-approvals are now the common case — every pre-cleared tool call
+            // produces one — and a line of explanatory text under each is more noise than signal.
+            // The plain ✔️ carries the meaning, and hovering it still shows the full reason via
+            // `dispositionTooltip`, so nothing is lost except the vertical space.
+            return nil
         case "warning", "denied", "abort":
             // Use the full disposition message from metadata (includes retry instruction for WARN)
             if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {

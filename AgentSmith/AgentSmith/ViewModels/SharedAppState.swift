@@ -197,9 +197,6 @@ final class SharedAppState {
     }
     /// Security: whether Security Agent evaluates each individual Brown tool call (SAFE/WARN/UNSAFE/ABORT).
     /// Off ⇒ Brown's approved tools run without per-call review. Applied immediately to active sessions.
-    var enablePerToolCheck: Bool = SharedAppState.boolDefault(key: "enablePerToolCheck", default: true) {
-        didSet { UserDefaults.standard.set(enablePerToolCheck, forKey: "enablePerToolCheck"); notifyToolSecurityChanged() }
-    }
     /// Global per-tool availability policy (Default/Always/Never), keyed by tool name. Overrides the
     /// automatic scoping verdict for Brown. Persisted as JSON; applied immediately to active sessions.
     var globalToolPolicies: [String: ToolPolicy] = SharedAppState.loadToolPolicies() {

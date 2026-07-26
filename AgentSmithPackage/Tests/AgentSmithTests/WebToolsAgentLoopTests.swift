@@ -40,6 +40,20 @@ struct WebToolsAgentLoopTests {
 
     /// Drives a Brown `AgentActor` whose first LLM response is `toolCall`, then empty responses
     /// so the loop terminates. Returns the final conversation history.
+    /// An evaluator that approves everything, for tests exercising the TOOL LOOP rather than
+    /// security. Every tool call now routes through the Security Agent, and a missing evaluator
+    /// denies rather than executing — so a loop test has to supply one.
+    private func approvingEvaluator() -> SecurityEvaluator {
+        SecurityEvaluator(
+            provider: MockLLMProvider(responses: Array(repeating: LLMResponse(text: "SAFE"), count: 16)),
+            systemPrompt: "security gatekeeper",
+            channel: MessageChannel(),
+            abort: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
+        )
+    }
+
     private func runBrown(tool: any AgentTool, toolCall: LLMToolCall) async -> [LLMMessage] {
         let channel = MessageChannel()
         let taskStore = TaskStore()
@@ -55,6 +69,7 @@ struct WebToolsAgentLoopTests {
             id: agentID, configuration: Self.brownConfig(), provider: provider,
             tools: [tool], toolContext: context
         )
+        await agent.setSecurityEvaluator(approvingEvaluator())
         let history = HistoryRecorder()
         await agent.setOnContextChanged { messages in history.update(messages) }
 
@@ -129,6 +144,7 @@ struct WebToolsAgentLoopTests {
             taskDescription: "d",
             siblingCalls: nil,
             agentRoleName: "Brown",
+            callerRole: .brown,
             toolCallID: "call-1"
         )
     }

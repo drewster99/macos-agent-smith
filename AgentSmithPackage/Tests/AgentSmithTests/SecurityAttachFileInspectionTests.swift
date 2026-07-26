@@ -50,6 +50,7 @@ struct SecurityAttachFileInspectionTests {
             taskDescription: "d",
             siblingCalls: nil,
             agentRoleName: "Brown",
+            callerRole: .brown,
             toolCallID: nil
         )
     }

@@ -55,7 +55,7 @@ struct Phase2LongLivedSmithTests {
         let runtime = makeRuntime()
         // Pre-flight scoping off: the mock Security Agent can't emit the scoping JSON,
         // and scoping behavior has its own coverage.
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let smithBefore = await runtime.agentIDForRole(.smith)
         #expect(smithBefore != nil)
@@ -88,7 +88,7 @@ struct Phase2LongLivedSmithTests {
     @Test("A second task start replaces the worker, still under the same Smith")
     func secondTaskReplacesWorker() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let smithID = await runtime.agentIDForRole(.smith)
         let store = await runtime.taskStore
@@ -116,7 +116,7 @@ struct Phase2LongLivedSmithTests {
     @Test("spawnBrown cycles the same task's worker; at capacity a different task's spawn is refused, never evicting")
     func spawnPolicyCyclesButNeverEvicts() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setWorkerCapacity(1)
         await runtime.start()
         let store = await runtime.taskStore
@@ -140,7 +140,7 @@ struct Phase2LongLivedSmithTests {
     @Test("At capacity 2, workers for two tasks coexist; a third spawn is refused")
     func capacityTwoAllowsConcurrentWorkers() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setWorkerCapacity(2)
         await runtime.start()
         let store = await runtime.taskStore
@@ -167,7 +167,7 @@ struct Phase2LongLivedSmithTests {
     @Test("A start racing past the tool checks is PENDED by the serialized gate, not failed, not evicting")
     func capacityGatePendsTheRaceLoser() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setWorkerCapacity(1)
         await runtime.start()
         let store = await runtime.taskStore
@@ -195,7 +195,7 @@ struct Phase2LongLivedSmithTests {
     @Test("Starting a template clones a fresh instance and runs it; the template stays put")
     func templateStartClonesAndRuns() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let store = await runtime.taskStore
         let template = await store.addTask(title: "Nightly", description: "d", isTemplate: true)
@@ -221,7 +221,7 @@ struct Phase2LongLivedSmithTests {
     @Test("Starting a template through the runtime preserves supplied template inputs")
     func templateStartPreservesRuntimeInputValues() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let store = await runtime.taskStore
         let template = await store.addTask(title: "Targeted run", description: "d", isTemplate: true)
@@ -247,7 +247,7 @@ struct Phase2LongLivedSmithTests {
     @Test("A per-run amendment lands on the cloned instance, never the template")
     func templateAmendmentAppliesToCloneNotTemplate() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let store = await runtime.taskStore
         let template = await store.addTask(title: "Nightly", description: "base description", isTemplate: true)
@@ -272,7 +272,7 @@ struct Phase2LongLivedSmithTests {
     @Test("Auto-advance never starts a template")
     func autoAdvanceSkipsTemplates() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setAutoAdvance(true)
         await runtime.start()
         let store = await runtime.taskStore
@@ -298,7 +298,7 @@ struct Phase2LongLivedSmithTests {
     @Test("A worker spawn failure marks the task failed and tells the surviving Smith")
     func spawnFailureNotifiesSmithInContext() async {
         let runtime = makeRuntime(includeBrown: false)
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.start()
         let smithBefore = await runtime.agentIDForRole(.smith)
 
@@ -319,7 +319,7 @@ struct Phase2LongLivedSmithTests {
     @Test("Cold boot validates running task that already has submitted result")
     func coldBootValidatesRunningTaskWithSubmittedResult() async {
         let runtime = makeRuntime()
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         let store = await runtime.taskStore
         let task = await store.addTask(title: "Reply to Drew", description: "Send the reply.")
         await store.updateStatus(id: task.id, status: .running)
@@ -342,7 +342,7 @@ struct Phase2LongLivedSmithTests {
     @Test("Cold boot resumes ALL interrupted tasks up to worker capacity, not just the first")
     func coldBootResumesAllInterruptedUpToCapacity() async {
         let runtime = makeRuntime(autoRunInterrupted: true)
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setWorkerCapacity(2)
         let store = await runtime.taskStore
 
@@ -366,7 +366,7 @@ struct Phase2LongLivedSmithTests {
     @Test("Cold-boot resume is capped by capacity: at capacity 1, one of two interrupted tasks stays interrupted")
     func coldBootResumeCappedByCapacity() async {
         let runtime = makeRuntime(autoRunInterrupted: true)
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setWorkerCapacity(1)
         let store = await runtime.taskStore
 
@@ -387,7 +387,7 @@ struct Phase2LongLivedSmithTests {
     @Test("Launch resume queue drains overflow interrupted tasks as slots free")
     func launchResumeQueueDrainsOverflow() async {
         let runtime = makeRuntime(autoRunInterrupted: true)
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setWorkerCapacity(2)
         let store = await runtime.taskStore
         func statusOf(_ id: UUID) async -> AgentTask.Status? { await store.task(id: id)?.status }
@@ -426,7 +426,7 @@ struct Phase2LongLivedSmithTests {
     @Test("A task Stopped MID-session is not re-resumed — only the launch batch auto-resumes")
     func midSessionStopStaysStopped() async {
         let runtime = makeRuntime(autoRunInterrupted: true)
-        await runtime.setToolSecurity(preflightScoping: false, perCallCheck: false, globalPolicy: [:])
+        await runtime.setToolSecurity(preflightScoping: false, globalPolicy: [:])
         await runtime.setWorkerCapacity(2)
         let store = await runtime.taskStore
 

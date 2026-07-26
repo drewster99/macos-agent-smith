@@ -688,7 +688,6 @@ final class AppViewModel {
         // effect on the next session start (consistent with the other start-time settings).
         await newRuntime.setToolSecurity(
             preflightScoping: shared.enablePreflightScoping,
-            perCallCheck: shared.enablePerToolCheck,
             globalPolicy: shared.globalToolPolicies
         )
         // Worker-pool capacity ("Max simultaneous tasks" in Settings): applied at start
@@ -1479,9 +1478,8 @@ final class AppViewModel {
     /// Settings change (via the registered observer) so changes take effect without a session restart.
     private func pushToolSecurity() {
         let pre = shared.enablePreflightScoping
-        let per = shared.enablePerToolCheck
         let pol = shared.globalToolPolicies
-        Task { await runtime?.setToolSecurity(preflightScoping: pre, perCallCheck: per, globalPolicy: pol) }
+        Task { await runtime?.setToolSecurity(preflightScoping: pre, globalPolicy: pol) }
     }
 
     /// Debounced trigger for a provider rebuild. A single model-field edit fires `updateAgentConfig`

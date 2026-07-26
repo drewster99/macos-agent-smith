@@ -71,10 +71,13 @@ public actor OrchestrationRuntime {
     private var smith: AgentActor? { supervisor.firstHandle(role: .smith)?.agent }
     private var smithID: UUID? { supervisor.firstHandle(role: .smith)?.id }
     /// Global tool-security configuration (user Settings); applied to each Brown at spawn.
-    /// `preflightScopingEnabled` gates the Security Agent pre-flight scoping pass; `perCallCheckEnabled`
-    /// gates the per-tool-call Security Agent evaluation; `globalToolPolicy` is the per-tool Always/Never map.
+    /// `preflightScopingEnabled` gates the Security Agent pre-flight scoping pass; `globalToolPolicy`
+    /// is the per-tool Always/Never map.
+    ///
+    /// There is deliberately no per-call-evaluation switch here. Whether a tool call reaches the
+    /// Security Agent is not a user setting — every call does — and which calls are cheap to clear
+    /// is `SecurityEvaluator.autoApprovedToolsByRole`, a hardcoded table rather than configuration.
     private var preflightScopingEnabled = true
-    private var perCallCheckEnabled = true
     private var globalToolPolicy: [String: ToolPolicy] = [:]
 
     /// Set synchronously at the top of `start()` (before its first `await`) and cleared via
@@ -1504,9 +1507,8 @@ public actor OrchestrationRuntime {
         maxConsecutiveValidationRoundsWithoutProgress = max(1, rounds)
     }
 
-    public func setToolSecurity(preflightScoping: Bool, perCallCheck: Bool, globalPolicy: [String: ToolPolicy]) async {
+    public func setToolSecurity(preflightScoping: Bool, globalPolicy: [String: ToolPolicy]) async {
         preflightScopingEnabled = preflightScoping
-        perCallCheckEnabled = perCallCheck
         globalToolPolicy = globalPolicy
         // Apply to every live worker so changes take effect immediately (no session restart) —
         // picked up on the worker's next turn (policy / scoping flag) or next tool call
@@ -1515,7 +1517,6 @@ public actor OrchestrationRuntime {
             let brown = workerHandle.agent
             await brown.setGlobalToolPolicy(globalPolicy)
             await brown.setPreflightScopingActive(preflightScoping)
-            await brown.setPerCallApprovalEnabled(perCallCheck)
         }
     }
 
@@ -2091,7 +2092,6 @@ public actor OrchestrationRuntime {
             await smithEvaluator.setOnTurnRecorded { turn in turnCallback(.securityAgent, turn) }
         }
         await smithAgent.setSecurityEvaluator(smithEvaluator)
-        await smithAgent.setEvaluatesOpenWorldToolsOnly(true)
 
         // A shared evaluator for acceptance validators' read-only evidence calls (auto-approved,
         // so it's a choke point, not a blocker). Separate instance from Smith's so their
@@ -3413,7 +3413,6 @@ public actor OrchestrationRuntime {
             dynamicToolsProvider: mcpToolsProvider
         )
         await brownAgent.setSecurityEvaluator(evaluator)
-        await brownAgent.setPerCallApprovalEnabled(perCallCheckEnabled)
         if let scopedApprovedNames, let task {
             await brownAgent.enableToolScoping(approvedNames: scopedApprovedNames)
             await brownAgent.setPreflightScopingActive(preflightScopingEnabled)

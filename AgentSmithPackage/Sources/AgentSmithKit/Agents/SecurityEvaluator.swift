@@ -156,6 +156,43 @@ actor SecurityEvaluator {
         "file_read", "directory_listing", "directory_tree", "glob", "grep"
     ]
 
+    /// Tool names auto-approved for a given caller — approved WITHOUT an LLM round-trip, but still
+    /// recorded, posted, and countable exactly like a real verdict.
+    ///
+    /// This table is the ONLY thing that varies by caller. Every tool call from every agent now
+    /// reaches this evaluator (the Security Agent itself holds no tools, so it cannot recurse);
+    /// the table decides which of those calls are worth an LLM opinion. It replaced a user-facing
+    /// on/off switch and a set of role-shaped routing exclusions in `AgentActor`, where a tool that
+    /// skipped review also skipped the transcript — invisible rather than cheap.
+    ///
+    /// **Fail-closed: a role absent here, or a tool absent from its set, gets a real evaluation.**
+    /// New tools are therefore evaluated until someone deliberately adds them, which is the safe
+    /// direction for the mistake to run.
+    ///
+    /// - `.smith` — its orchestration surface: messaging, task lifecycle, scheduling, and read-only
+    ///   inspection. Deliberately EXCLUDES the open-world tools (`web_search`, `web_fetch`,
+    ///   `instant_answer`) and `attach_file`, which ingests bytes and ships images to the provider.
+    ///   Those are Smith's egress surface and always get a verdict.
+    /// - `.brown` — nothing. The worker holds bash/file/process tools; everything it does is judged.
+    /// - `.validator` — the read-only evidence quartet, which is its entire toolset.
+    static let autoApprovedToolsByRole: [AgentRole: Set<String>] = [
+        .smith: Set<String>([
+            "message_brown", "message_user", "provide_help", "report_inbound_user_message",
+            "create_task", "run_task", "update_task", "edit_task", "amend_task",
+            "get_task_details", "list_tasks", "set_template_inputs", "manage_task_disposition",
+            "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
+            "list_scheduled_wakes", "get_current_time", "search_memory",
+            "list_scriptable_apps", "get_app_scripting_schema"
+        ]).union(readOnlyFilesystemEvidenceTools),
+        .brown: [],
+        .validator: readOnlyFilesystemEvidenceTools
+    ]
+
+    /// Whether `toolName` is pre-cleared for `role`. Fail-closed on both axes.
+    static func isAutoApproved(toolName: String, role: AgentRole) -> Bool {
+        autoApprovedToolsByRole[role]?.contains(toolName) ?? false
+    }
+
     /// When true, a read-only filesystem evidence call from an eligible caller (Smith / validator)
     /// is approved WITHOUT an LLM round-trip — but still recorded and posted to the channel, so the
     /// call stays visible and countable and the gate can be tightened later (e.g. real evaluation,
@@ -348,28 +385,29 @@ actor SecurityEvaluator {
         taskDescription: String?,
         siblingCalls: String?,
         agentRoleName: String,
+        callerRole: AgentRole,
         agentContext: String? = nil,
-        readOnlyAutoApproveEligible: Bool = false,
         sanctionedDirectories: [String] = [],
         toolCallID: String? = nil
     ) async -> SecurityDisposition {
         let parsedParams = Self.parseToolParams(toolParams)
 
-        // Fast-path: a read-only filesystem evidence call from an eligible caller (Smith /
-        // validator) is approved without an LLM round-trip. It still goes ALL THE WAY through the
-        // evaluator's normal recording path (`recordEvaluation` — same as an LLM verdict, minus the
-        // network call), producing a synthetic SAFE response and firing `onEvaluationRecorded` so
-        // the inspector and any downstream review posting treat it identically to a real verdict.
-        // Gated by TOOL NAME, not just the eligibility flag, so nothing mutating or network-bound
-        // can ride this path.
-        if autoApproveReadOnlyEvidence, readOnlyAutoApproveEligible,
-           Self.readOnlyFilesystemEvidenceTools.contains(toolName) {
-            let disposition = SecurityDisposition(approved: true, message: "trusted read-only filesystem access", isAutoApproval: true)
-            appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved trusted read-only filesystem access)", toolCallID: toolCallID)
+        // Fast-path: a call pre-cleared for this caller by `autoApprovedToolsByRole` is approved
+        // without an LLM round-trip. It still goes ALL THE WAY through the evaluator's normal
+        // recording path (`recordEvaluation` — same as an LLM verdict, minus the network call),
+        // producing a synthetic SAFE response and firing `onEvaluationRecorded` so the inspector
+        // and any downstream review posting treat it identically to a real verdict. Cheap is not
+        // the same as invisible: these calls stay in the transcript and stay countable, so the
+        // table can be tightened later without first having to rediscover what it was hiding.
+        // Keyed on TOOL NAME as well as role, so nothing mutating or network-bound can ride this
+        // path by virtue of who asked.
+        if autoApproveReadOnlyEvidence, Self.isAutoApproved(toolName: toolName, role: callerRole) {
+            let disposition = SecurityDisposition(approved: true, message: "pre-cleared for \(callerRole.displayName)", isAutoApproval: true)
+            appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved: pre-cleared for \(callerRole.displayName))", toolCallID: toolCallID)
             recordEvaluation(
                 toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
-                prompt: "(auto-approved without LLM evaluation: trusted read-only filesystem access)",
-                response: "SAFE — auto-approved trusted read-only filesystem access",
+                prompt: "(auto-approved without LLM evaluation: pre-cleared for \(callerRole.displayName))",
+                response: "SAFE — auto-approved, pre-cleared for \(callerRole.displayName)",
                 disposition: disposition, startTime: Date(), toolCallID: toolCallID ?? ""
             )
             return disposition

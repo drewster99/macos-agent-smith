@@ -665,7 +665,7 @@ extension OrchestrationRuntime {
                     taskDescription: gateTaskDescription,
                     siblingCalls: nil,
                     agentRoleName: AgentRole.validator.displayName,
-                    readOnlyAutoApproveEligible: true,
+                    callerRole: .validator,
                     toolCallID: call.id
                 )
                 // Surface the verdict on the SAME path as an agent's tool call — the shared
@@ -681,7 +681,13 @@ extension OrchestrationRuntime {
                 return disposition.approved
             }
         } else {
-            securityGate = nil
+            // No Security Agent, no tools. This used to fall through to `nil` — "then reads
+            // execute directly, exactly as before" — which made the chokepoint conditional on
+            // configuration and let a validator read the filesystem unreviewed. Refusing costs a
+            // validator its evidence tools; permitting costs the guarantee that nothing runs
+            // unreviewed, which is the more expensive of the two. `start()` already refuses to
+            // launch without a Security Agent provider, so this should be unreachable.
+            securityGate = { _, _ in false }
         }
         // Count this criterion's LLM judgment toward the inspector's concurrency strip for as long
         // as the evaluation round is in flight. Independent per-criterion runs stack here, so several

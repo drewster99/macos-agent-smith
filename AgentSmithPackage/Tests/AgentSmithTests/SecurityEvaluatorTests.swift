@@ -103,6 +103,7 @@ struct SecurityEvaluatorTests {
             taskDescription: "Test desc",
             siblingCalls: nil,
             agentRoleName: "Brown",
+            callerRole: .brown,
             toolCallID: toolCallID
         )
     }
@@ -318,6 +319,7 @@ struct SecurityEvaluatorTests {
             taskDescription: "d",
             siblingCalls: nil,
             agentRoleName: "Brown",
+            callerRole: .brown,
             toolCallID: "first"
         )
 
@@ -332,6 +334,7 @@ struct SecurityEvaluatorTests {
             taskDescription: "d",
             siblingCalls: nil,
             agentRoleName: "Brown",
+            callerRole: .brown,
             toolCallID: "second"
         )
 
@@ -361,13 +364,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", toolCallID: "first"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "first"
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", toolCallID: "second"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "second"
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -394,13 +397,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", toolCallID: "first"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "first"
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", toolCallID: "second"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: "second"
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -427,13 +430,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", toolCallID: nil
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: nil
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", toolCallID: nil
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolCallID: nil
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -490,6 +493,7 @@ struct SecurityEvaluatorTests {
             taskDescription: "d",
             siblingCalls: nil,
             agentRoleName: "Brown",
+            callerRole: .brown,
             toolCallID: "edit-1"
         )
 
@@ -526,6 +530,7 @@ struct SecurityEvaluatorTests {
             taskDescription: "d",
             siblingCalls: nil,
             agentRoleName: "Brown",
+            callerRole: .brown,
             toolCallID: nil
         )
 

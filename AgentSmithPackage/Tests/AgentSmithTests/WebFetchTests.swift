@@ -380,6 +380,16 @@ struct WebFetchNetworkTests {
             tools: [WebFetchTool(session: Self.pageSession())],
             toolContext: context
         )
+        // Every tool call routes through the Security Agent now, and a missing evaluator denies
+        // rather than executing — so a loop test must supply one that approves.
+        await agent.setSecurityEvaluator(SecurityEvaluator(
+            provider: MockLLMProvider(responses: Array(repeating: LLMResponse(text: "SAFE"), count: 16)),
+            systemPrompt: "security gatekeeper",
+            channel: MessageChannel(),
+            abort: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
+        ))
 
         final class Recorder: @unchecked Sendable {
             private let lock = NSLock(); private var latest: [LLMMessage] = []
