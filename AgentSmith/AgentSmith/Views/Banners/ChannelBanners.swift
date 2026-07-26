@@ -106,24 +106,27 @@ func parseContextEntries(_ raw: String) -> [String] {
 /// Renders a single context entry as a bold header line followed by an optional body.
 /// The header is the first line of the entry; everything after the first newline is body.
 /// Used by both `TaskCreatedBanner` (prior tasks) and `MemoryBanner` (search results).
-@ViewBuilder
-func contextEntryView(_ entry: String) -> some View {
-    let split = entry.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-    let header = split.first.map(String.init) ?? entry
-    let body = split.count > 1 ? String(split[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
-    VStack(alignment: .leading, spacing: 3) {
-        Text(header)
-            .font(AppFonts.inspectorBody.weight(.semibold))
-            .foregroundStyle(.primary)
-            .textSelection(.enabled)
-        if !body.isEmpty {
-            Text(body)
-                .font(AppFonts.inspectorBody)
-                .foregroundStyle(.secondary)
+struct ContextEntryView: View {
+    let entry: String
+    
+    var body: some View {
+        let split = entry.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        let header = split.first.map(String.init) ?? entry
+        let body = split.count > 1 ? String(split[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        VStack(alignment: .leading, spacing: 3) {
+            Text(header)
+                .font(AppFonts.inspectorBody.weight(.semibold))
+                .foregroundStyle(.primary)
                 .textSelection(.enabled)
+            if !body.isEmpty {
+                Text(body)
+                    .font(AppFonts.inspectorBody)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
 }
 
 /// Compact banner announcing a `schedule_task_action` — replaces the standalone
@@ -692,9 +695,16 @@ struct MemoryBanner: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                expandedBody()
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 4)
+                ExpandedBody(
+                    kind: kind,
+                    detail: detail,
+                    tags: tags,
+                    source: source,
+                    memoryResults: memoryResults,
+                    taskResults: taskResults
+                )
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
             }
 
             accentColor.frame(height: 1).opacity(0.3)
@@ -744,52 +754,58 @@ struct MemoryBanner: View {
         }
     }
 
-    @ViewBuilder
+    private struct ExpandedBody: View {
+        let kind: MemoryBanner.Kind
+        let detail: String?
+        let tags: String?
+        let source: String?
+        let memoryResults: String?
+        let taskResults: String?
+        
+        var body: some View {
+            switch kind {
+            case .saved, .consolidated:
+                if let detail, !detail.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(detail)
+                            .font(AppFonts.channelBody)
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
 
-    private func expandedBody() -> some View {
-        switch kind {
-        case .saved, .consolidated:
-            if let detail, !detail.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(detail)
-                        .font(AppFonts.channelBody)
-                        .foregroundStyle(.primary)
-                        .textSelection(.enabled)
-
-                    if let tags, !tags.isEmpty {
-                        Text("Tags: \(tags)")
-                            .font(AppFonts.channelTimestamp)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let source, !source.isEmpty {
-                        Text("Source: \(source)")
-                            .font(AppFonts.channelTimestamp)
-                            .foregroundStyle(.secondary)
+                        if let tags, !tags.isEmpty {
+                            Text("Tags: \(tags)")
+                                .font(AppFonts.channelTimestamp)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let source, !source.isEmpty {
+                            Text("Source: \(source)")
+                                .font(AppFonts.channelTimestamp)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
-            }
-        case .searched:
-            VStack(alignment: .leading, spacing: 10) {
-                if let memoryResults, !memoryResults.isEmpty {
-                    Text("Memories")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    let entries = parseContextEntries(memoryResults)
-                    ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
-                        ContextEntryDividedRow(entry: entry, showsDivider: idx > 0)
+            case .searched:
+                VStack(alignment: .leading, spacing: 10) {
+                    if let memoryResults, !memoryResults.isEmpty {
+                        Text("Memories")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        let entries = parseContextEntries(memoryResults)
+                        ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
+                            ContextEntryDividedRow(entry: entry, showsDivider: idx > 0)
+                        }
                     }
-                }
-                if let taskResults, !taskResults.isEmpty {
-                    Text("Prior Tasks")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    let entries = parseContextEntries(taskResults)
-                    ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
-                        ContextEntryDividedRow(entry: entry, showsDivider: idx > 0)
+                    if let taskResults, !taskResults.isEmpty {
+                        Text("Prior Tasks")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        let entries = parseContextEntries(taskResults)
+                        ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
+                            ContextEntryDividedRow(entry: entry, showsDivider: idx > 0)
+                        }
                     }
                 }
             }
         }
     }
-
 }

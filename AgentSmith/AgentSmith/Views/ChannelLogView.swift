@@ -807,40 +807,6 @@ private struct MessageRow: View, Equatable {
         return content.isEmpty ? nil : content
     }
 
-    /// The disposition indicator rendered as its own control. Clicking it opens a popover with
-    /// the Security Agent's verdict text — kept separate from the row's expand toggle so the
-    /// checkmark reveals the safety rationale without expanding the tool-call data. Nested inside
-    /// the toggle button's label; like the file-path button, it consumes its own hits.
-    @ViewBuilder
-    private func securityDispositionControl() -> some View {
-        if let indicator = dispositionIndicator {
-            Button(action: { showSecurityPopover.toggle() }, label: {
-                Text(indicator)
-            })
-            .buttonStyle(.plain)
-            .help(dispositionTooltipText ?? "Security review")
-            .popover(isPresented: $showSecurityPopover, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(dispositionTooltipText ?? "Security review")
-                        .font(.caption.bold())
-                        .foregroundStyle(dispositionCommentColor)
-                    if let text = securityReviewPopoverText {
-                        Text(text)
-                            .font(AppFonts.channelBody)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text("No details provided.")
-                            .font(AppFonts.channelBody)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: 420)
-            }
-        }
-    }
-
     /// Human-readable tooltip text describing what the safety monitor determined.
     private var dispositionTooltipText: String? {
         guard let review = securityReviewMessage,
@@ -936,16 +902,65 @@ private struct MessageRow: View, Equatable {
             )
 
             if isToolRequest {
-                toolRequestBody()
+                if isFileWrite {
+                    FileWriteRequestBodyView(
+                        message: message,
+                        toolOutputMessage: toolOutputMessage,
+                        parallelBadge: parallelBadge,
+                        dispositionComment: dispositionComment,
+                        dispositionCommentColor: dispositionCommentColor,
+                        effectiveDiffLines: effectiveDiffLines,
+                        collapsedErrorPreview: collapsedErrorPreview,
+                        isExpanded: $isExpanded
+                    ) {
+                        SecurityDispositionControlView(
+                            dispositionIndicator: dispositionIndicator,
+                            dispositionTooltipText: dispositionTooltipText,
+                            dispositionCommentColor: dispositionCommentColor,
+                            securityReviewPopoverText: securityReviewPopoverText
+                        )
+                    }
+                } else {
+                    GenericToolRequestBodyView(
+                        message: message,
+                        toolOutputMessage: toolOutputMessage,
+                        parallelBadge: parallelBadge,
+                        effectiveToolFilePath: effectiveToolFilePath,
+                        dispositionComment: dispositionComment,
+                        dispositionCommentColor: dispositionCommentColor,
+                        effectiveFileEditStrings: effectiveFileEditStrings,
+                        fileEditFailed: fileEditFailed,
+                        isFileRead: isFileRead,
+                        toolCallDisplayText: toolCallDisplayText,
+                        remainderWithoutPath: remainderWithoutPath,
+                        collapsedErrorPreview: collapsedErrorPreview,
+                        openFileOrFallback: openFileOrFallback,
+                        isExpanded: $isExpanded
+                    ) {
+                        SecurityDispositionControlView(
+                            dispositionIndicator: dispositionIndicator,
+                            dispositionTooltipText: dispositionTooltipText,
+                            dispositionCommentColor: dispositionCommentColor,
+                            securityReviewPopoverText: securityReviewPopoverText
+                        )
+                    }
+                }
             } else if isToolOutput {
                 // Standalone tool output (no parent tool_request found — edge case)
-                standaloneToolOutput()
+                StandaloneToolOutputView(message: message, isExpanded: $isExpanded)
             } else if isSecurityReview {
                 // Standalone security review (no parent tool_request found — edge case)
                 MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
                     .foregroundStyle(securityReviewColor)
             } else if let maxLines = defaultMaxLines {
-                collapsibleMessageBody(maxLines: maxLines)
+                CollapsibleMessageBodyView(
+                    message: message,
+                    effectiveSplitLines: effectiveSplitLines,
+                    isExpanded: isExpanded,
+                    isSummarizerMessage: isSummarizerMessage,
+                    maxLines: maxLines,
+                    isExpandedBinding: $isExpanded
+                )
             } else {
                 MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1071,85 +1086,6 @@ private struct MessageRow: View, Equatable {
         message.stringMetadata("tool") == "file_write"
     }
 
-    @ViewBuilder
-
-    private func toolRequestBody() -> some View {
-        if isFileWrite {
-            fileWriteRequestBody()
-        } else {
-            genericToolRequestBody()
-        }
-    }
-
-    // MARK: file_write display
-
-    @ViewBuilder
-
-    private func fileWriteRequestBody() -> some View {
-        // Line 1: "file_write /dir/path/filename ⚡1/3 (show more) ✅"
-        Button(action: { isExpanded.toggle() }, label: {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                FileWritePathView(path: message.stringMetadata("fileWritePath") ?? "")
-                if let badge = parallelBadge {
-                    Text("⚡\(badge)")
-                        .font(.caption2.bold())
-                        .foregroundStyle(AppColors.cyanBadgeForeground)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(AppColors.cyanBadgeBackground)
-                        .clipShape(Capsule())
-                }
-                if isExpanded {
-                    Text("(show less)")
-                        .font(.caption)
-                        .foregroundStyle(AppColors.disclosureToggle)
-                } else if toolOutputHasMore {
-                    Text("(show more)")
-                        .font(.caption)
-                        .foregroundStyle(AppColors.disclosureToggle)
-                }
-                securityDispositionControl()
-            }
-            .contentShape(Rectangle())
-        })
-        .buttonStyle(.plain)
-
-        // Disposition comment (for WARN/UNSAFE/ABORT)
-        if let comment = dispositionComment {
-            MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
-                .foregroundStyle(dispositionCommentColor)
-                .padding(.leading, 12)
-        }
-
-        // Inline diff: rendered from precomputed [DiffLine] that AgentActor
-        // stashed into `fileWriteDiff` metadata at post time. Storing only
-        // the diff lines (not the raw old+new file contents) keeps
-        // channel_log.json bounded regardless of file size.
-        if let diffLines = effectiveDiffLines {
-            DiffView(lines: diffLines)
-        }
-
-        // Tool output: suppressed when collapsed unless first line begins with "error".
-        // Full content is revealed on expand.
-        if let output = toolOutputMessage {
-            if isExpanded {
-                Text(output.content)
-                    .font(AppFonts.channelBody.monospaced())
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            } else if let errorLine = collapsedErrorPreview(output.content) {
-                Text(errorLine)
-                    .font(AppFonts.channelBody.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .padding(.leading, 12)
-                    .textSelection(.enabled)
-            }
-        }
-    }
-
     // MARK: generic tool display
 
     /// Whether this tool call was part of a parallel batch.
@@ -1213,105 +1149,6 @@ private struct MessageRow: View, Equatable {
         }
     }
 
-    @ViewBuilder
-
-    private func genericToolRequestBody() -> some View {
-        // Line 1: "[bash] pwd (more) ✅" — tool name as chip, rest in secondary.
-        // Outer Button toggles expand; inner Button on path opens the file. The inner
-        // Button consumes its own hits so tapping the path doesn't collapse the row.
-        Button(action: { isExpanded.toggle() }, label: {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                let displayText = isExpanded ? message.content : toolCallDisplayText
-                let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
-                ToolNameChip(name: toolName)
-                if let path = effectiveToolFilePath {
-                    Button(action: { openFileOrFallback(path: path) }, label: {
-                        ToolPathText(path: path)
-                    })
-                    .buttonStyle(.plain)
-                    let extra = remainderWithoutPath(displayText, path: path)
-                    if !extra.isEmpty {
-                        Text(extra)
-                            .font(AppFonts.channelBody)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(isExpanded ? nil : 1)
-                    }
-                } else {
-                    let remainder = displayText.hasPrefix(toolName) ? String(displayText.dropFirst(toolName.count)) : ": \(displayText)"
-                    let cleanRemainder = remainder.hasPrefix(": ") ? String(remainder.dropFirst(2)) : remainder
-                    Text(cleanRemainder)
-                        .font(AppFonts.channelBody)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(isExpanded ? nil : 1)
-                }
-                if let badge = parallelBadge {
-                    Text("⚡\(badge)")
-                        .font(.caption2.bold())
-                        .foregroundStyle(AppColors.cyanBadgeForeground)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(AppColors.cyanBadgeBackground)
-                        .clipShape(Capsule())
-                }
-                if isExpanded {
-                    Text("(show less)")
-                        .font(.caption)
-                        .foregroundStyle(AppColors.disclosureToggle)
-                } else if toolOutputHasMore {
-                    Text("(show more)")
-                        .font(.caption)
-                        .foregroundStyle(AppColors.disclosureToggle)
-                }
-                securityDispositionControl()
-            }
-            .contentShape(Rectangle())
-        })
-        .buttonStyle(.plain)
-
-        // Disposition comment (for WARN/UNSAFE/ABORT) — always shown in full
-        if let comment = dispositionComment {
-            MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
-                .foregroundStyle(dispositionCommentColor)
-                .padding(.leading, 12)
-        }
-
-        // file_edit inline diff — parse old_string / new_string from params.
-        // Suppress the diff if the edit failed (e.g., `old_string` not found) so the
-        // UI doesn't imply a change was applied when it wasn't. The error line from the
-        // tool output is still shown below.
-        if message.stringMetadata("tool") == "file_edit",
-           !fileEditFailed,
-           let strings = effectiveFileEditStrings {
-            DiffView(oldContent: strings.oldString, newContent: strings.newString)
-        }
-
-        // Tool output: suppressed when collapsed unless first line begins with "error".
-        // Full content is revealed on expand.
-        if let output = toolOutputMessage {
-            if isExpanded {
-                let fullText: String = {
-                    if case .string(let expanded) = output.metadata?["expandedContent"] {
-                        return expanded
-                    }
-                    return output.content
-                }()
-                Text(fullText)
-                    .font(AppFonts.channelBody.monospaced())
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            } else if !isFileRead, let errorLine = collapsedErrorPreview(output.content) {
-                Text(errorLine)
-                    .font(AppFonts.channelBody.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .padding(.leading, 12)
-                    .textSelection(.enabled)
-            }
-        }
-    }
-
     /// Extracts (old_string, new_string) from a `file_edit` tool_request's params metadata.
     /// Cached into `cachedFileEditStrings` via `.onChange(of: message, initial: true)`.
     private static func extractFileEditStrings(from message: ChannelMessage) -> FileEditStrings? {
@@ -1346,27 +1183,6 @@ private struct MessageRow: View, Equatable {
         }
     }
 
-    @ViewBuilder
-
-    private func standaloneToolOutput() -> some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            Text(message.content)
-                .font(AppFonts.channelBody.monospaced())
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-        } label: {
-            if case .string(let toolName) = message.metadata?["tool"] {
-                Text("Output: \(toolName)")
-                    .font(AppFonts.channelBody)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Output")
-                    .font(AppFonts.channelBody)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
     private var securityReviewColor: Color {
         guard case .string(let disposition) = message.metadata?["securityDisposition"] else {
             return .secondary
@@ -1381,62 +1197,327 @@ private struct MessageRow: View, Equatable {
         }
     }
 
-    // MARK: - Collapsible message body
-
-    /// Renders a message body with a default line limit and inline "(show more)".
-    /// Summarizer messages indent from the 2nd line onwards.
-    /// Reads `effectiveSplitLines` (cached via `.onChange(of: message, initial: true)`,
-    /// with synchronous fallback) rather than re-splitting `message.content` on every
-    /// body re-evaluation.
-    @ViewBuilder
-    private func collapsibleMessageBody(maxLines: Int) -> some View {
-        let lines = effectiveSplitLines
-        let needsTruncation = lines.count > maxLines
-
-        if isExpanded || !needsTruncation {
-            VStack(alignment: .leading, spacing: 1) {
-                // For summarizer: indent all lines after the first
-                if isSummarizerMessage {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                        MarkdownText(content: line, baseFont: AppFonts.channelBody)
-                            .padding(.leading, index > 0 ? 12 : 0)
-                    }
-                } else {
-                    MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if needsTruncation {
-                Button(action: { isExpanded = false }, label: {
-                    Text("(show less)")
-                        .font(.caption)
-                        .foregroundStyle(AppColors.disclosureToggle)
-                        .padding(.leading, isSummarizerMessage ? 12 : 0)
+    // MARK: - Extracted View structs (refactored from func ... -> some View)
+    // These nested structs replace the helper functions to improve SwiftUI performance
+    // by enabling better view caching and reducing body recalculation.
+    
+    /// Renders the security disposition indicator with popover.
+    struct SecurityDispositionControlView: View {
+        let dispositionIndicator: String?
+        let dispositionTooltipText: String?
+        let dispositionCommentColor: Color
+        let securityReviewPopoverText: String?
+        
+        @State private var showSecurityPopover = false
+        
+        var body: some View {
+            if let indicator = dispositionIndicator {
+                Button(action: { showSecurityPopover.toggle() }, label: {
+                    Text(indicator)
                 })
                 .buttonStyle(.plain)
-            }
-        } else {
-            let visibleLines = Array(lines.prefix(maxLines))
-            Button(action: { isExpanded = true }, label: {
-                VStack(alignment: .leading, spacing: 1) {
-                    ForEach(Array(visibleLines.dropLast().enumerated()), id: \.offset) { index, line in
-                        MarkdownText(content: line, baseFont: AppFonts.channelBody)
-                            .padding(.leading, isSummarizerMessage && index > 0 ? 12 : 0)
+                .help(dispositionTooltipText ?? "Security review")
+                .popover(isPresented: $showSecurityPopover, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(dispositionTooltipText ?? "Security review")
+                            .font(.caption.bold())
+                            .foregroundStyle(dispositionCommentColor)
+                        if let text = securityReviewPopoverText {
+                            Text(text)
+                                .font(AppFonts.channelBody)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text("No details provided.")
+                                .font(AppFonts.channelBody)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(visibleLines.last ?? "")
-                            .font(AppFonts.channelBody)
-                            .lineLimit(1)
-                        Text(" (show more)")
+                    .padding(12)
+                    .frame(maxWidth: 420)
+                }
+            }
+        }
+    }
+    
+    /// Renders a file_write tool request row.
+    struct FileWriteRequestBodyView: View {
+        let message: ChannelMessage
+        let toolOutputMessage: ChannelMessage?
+        let parallelBadge: String?
+        let dispositionComment: String?
+        let dispositionCommentColor: Color
+        let effectiveDiffLines: [DiffLine]?
+        let collapsedErrorPreview: (String) -> String?
+        
+        @Binding var isExpanded: Bool
+        let securityDispositionControl: () -> SecurityDispositionControlView
+        
+        private var toolOutputHasMore: Bool {
+            guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
+            if let errorLine = collapsedErrorPreview(output.content) {
+                return output.content.count > errorLine.count
+            }
+            return true
+        }
+        
+        var body: some View {
+            Button(action: { isExpanded.toggle() }, label: {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    FileWritePathView(path: message.stringMetadata("fileWritePath") ?? "")
+                    if let badge = parallelBadge {
+                        Text("⚡\(badge)")
+                            .font(.caption2.bold())
+                            .foregroundStyle(AppColors.cyanBadgeForeground)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(AppColors.cyanBadgeBackground)
+                            .clipShape(Capsule())
+                    }
+                    if isExpanded {
+                        Text("(show less)")
+                            .font(.caption)
+                            .foregroundStyle(AppColors.disclosureToggle)
+                    } else if toolOutputHasMore {
+                        Text("(show more)")
                             .font(.caption)
                             .foregroundStyle(AppColors.disclosureToggle)
                     }
-                    .padding(.leading, isSummarizerMessage && maxLines > 1 ? 12 : 0)
+                    securityDispositionControl()
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             })
             .buttonStyle(.plain)
+            
+            if let comment = dispositionComment {
+                MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
+                    .foregroundStyle(dispositionCommentColor)
+                    .padding(.leading, 12)
+            }
+            
+            if let diffLines = effectiveDiffLines {
+                DiffView(lines: diffLines)
+            }
+            
+            if let output = toolOutputMessage {
+                if isExpanded {
+                    Text(output.content)
+                        .font(AppFonts.channelBody.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                } else if let errorLine = collapsedErrorPreview(output.content) {
+                    Text(errorLine)
+                        .font(AppFonts.channelBody.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.leading, 12)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+    
+    /// Renders a generic tool request row.
+    struct GenericToolRequestBodyView: View {
+        let message: ChannelMessage
+        let toolOutputMessage: ChannelMessage?
+        let parallelBadge: String?
+        let effectiveToolFilePath: String?
+        let dispositionComment: String?
+        let dispositionCommentColor: Color
+        let effectiveFileEditStrings: FileEditStrings?
+        let fileEditFailed: Bool
+        let isFileRead: Bool
+        let toolCallDisplayText: String
+        let remainderWithoutPath: (String, String) -> String
+        let collapsedErrorPreview: (String) -> String?
+        let openFileOrFallback: (String) -> Void
+        
+        @Binding var isExpanded: Bool
+        let securityDispositionControl: () -> SecurityDispositionControlView
+        
+        private var toolOutputHasMore: Bool {
+            guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
+            if let errorLine = collapsedErrorPreview(output.content) {
+                return output.content.count > errorLine.count
+            }
+            return true
+        }
+        
+        var body: some View {
+            Button(action: { isExpanded.toggle() }, label: {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    let displayText = isExpanded ? message.content : toolCallDisplayText
+                    let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
+                    ToolNameChip(name: toolName)
+                    if let path = effectiveToolFilePath {
+                        Button(action: { openFileOrFallback(path) }, label: {
+                            ToolPathText(path: path)
+                        })
+                        .buttonStyle(.plain)
+                        let extra = remainderWithoutPath(displayText, path)
+                        if !extra.isEmpty {
+                            Text(extra)
+                                .font(AppFonts.channelBody)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(isExpanded ? nil : 1)
+                        }
+                    } else {
+                        let remainder = displayText.hasPrefix(toolName) ? String(displayText.dropFirst(toolName.count)) : ": \(displayText)"
+                        let cleanRemainder = remainder.hasPrefix(": ") ? String(remainder.dropFirst(2)) : remainder
+                        Text(cleanRemainder)
+                            .font(AppFonts.channelBody)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(isExpanded ? nil : 1)
+                    }
+                    if let badge = parallelBadge {
+                        Text("⚡\(badge)")
+                            .font(.caption2.bold())
+                            .foregroundStyle(AppColors.cyanBadgeForeground)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(AppColors.cyanBadgeBackground)
+                            .clipShape(Capsule())
+                    }
+                    if isExpanded {
+                        Text("(show less)")
+                            .font(.caption)
+                            .foregroundStyle(AppColors.disclosureToggle)
+                    } else if toolOutputHasMore {
+                        Text("(show more)")
+                            .font(.caption)
+                            .foregroundStyle(AppColors.disclosureToggle)
+                    }
+                    securityDispositionControl()
+                }
+                .contentShape(Rectangle())
+            })
+            .buttonStyle(.plain)
+            
+            if let comment = dispositionComment {
+                MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
+                    .foregroundStyle(dispositionCommentColor)
+                    .padding(.leading, 12)
+            }
+            
+            if message.stringMetadata("tool") == "file_edit",
+               !fileEditFailed,
+               let strings = effectiveFileEditStrings {
+                DiffView(oldContent: strings.oldString, newContent: strings.newString)
+            }
+            
+            if let output = toolOutputMessage {
+                if isExpanded {
+                    let fullText: String = {
+                        if case .string(let expanded) = output.metadata?["expandedContent"] {
+                            return expanded
+                        }
+                        return output.content
+                    }()
+                    Text(fullText)
+                        .font(AppFonts.channelBody.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                } else if !isFileRead, let errorLine = collapsedErrorPreview(output.content) {
+                    Text(errorLine)
+                        .font(AppFonts.channelBody.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.leading, 12)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+    
+    /// Renders a standalone tool output as a DisclosureGroup.
+    struct StandaloneToolOutputView: View {
+        let message: ChannelMessage
+        
+        @Binding var isExpanded: Bool
+        
+        var body: some View {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                Text(message.content)
+                    .font(AppFonts.channelBody.monospaced())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            } label: {
+                if case .string(let toolName) = message.metadata?["tool"] {
+                    Text("Output: \(toolName)")
+                        .font(AppFonts.channelBody)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Output")
+                        .font(AppFonts.channelBody)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+    
+    /// Renders a collapsible message body with truncation.
+    struct CollapsibleMessageBodyView: View {
+        let message: ChannelMessage
+        let effectiveSplitLines: [String]
+        let isExpanded: Bool
+        let isSummarizerMessage: Bool
+        let maxLines: Int
+        
+        @Binding var isExpandedBinding: Bool
+        
+        var body: some View {
+            let lines = effectiveSplitLines
+            let needsTruncation = lines.count > maxLines
+            
+            if isExpandedBinding || !needsTruncation {
+                VStack(alignment: .leading, spacing: 1) {
+                    if isSummarizerMessage {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                            MarkdownText(content: line, baseFont: AppFonts.channelBody)
+                                .padding(.leading, index > 0 ? 12 : 0)
+                        }
+                    } else {
+                        MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if needsTruncation {
+                    Button(action: { isExpandedBinding = false }, label: {
+                        Text("(show less)")
+                            .font(.caption)
+                            .foregroundStyle(AppColors.disclosureToggle)
+                            .padding(.leading, isSummarizerMessage ? 12 : 0)
+                    })
+                    .buttonStyle(.plain)
+                }
+            } else {
+                let visibleLines = Array(lines.prefix(maxLines))
+                Button(action: { isExpandedBinding = true }, label: {
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(Array(visibleLines.dropLast().enumerated()), id: \.offset) { index, line in
+                            MarkdownText(content: line, baseFont: AppFonts.channelBody)
+                                .padding(.leading, isSummarizerMessage && index > 0 ? 12 : 0)
+                        }
+                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                            Text(visibleLines.last ?? "")
+                                .font(AppFonts.channelBody)
+                                .lineLimit(1)
+                            Text(" (show more)")
+                                .font(.caption)
+                                .foregroundStyle(AppColors.disclosureToggle)
+                        }
+                        .padding(.leading, isSummarizerMessage && maxLines > 1 ? 12 : 0)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                })
+                .buttonStyle(.plain)
+            }
         }
     }
 }

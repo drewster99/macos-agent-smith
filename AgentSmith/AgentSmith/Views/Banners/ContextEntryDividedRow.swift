@@ -15,7 +15,7 @@ struct ContextEntryDividedRow: View {
             Divider()
                 .opacity(showsDivider ? 0.4 : 0)
                 .frame(height: showsDivider ? 1 : 0)
-            contextEntryView(entry)
+            ContextEntryView(entry: entry)
         }
     }
 }
