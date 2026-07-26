@@ -840,15 +840,15 @@ final class AppViewModel {
         )
         await liveTaskStore.autoArchiveStaleCompletedIfEnabled()
 
-        await newRuntime.setOnTurnRecorded { [weak self] role, turn in
+        await newRuntime.setOnTurnRecorded { [weak self] ref, turn in
             Task { @MainActor [weak self] in
-                self?.inspectorStore.appendTurn(turn, for: role)
+                self?.inspectorStore.appendTurn(turn, for: ref)
             }
         }
 
-        await newRuntime.setOnContextChanged { [weak self] role, messages in
+        await newRuntime.setOnContextChanged { [weak self] ref, messages in
             Task { @MainActor [weak self] in
-                self?.inspectorStore.updateLiveContext(messages, for: role)
+                self?.inspectorStore.updateLiveContext(messages, for: ref)
             }
         }
 

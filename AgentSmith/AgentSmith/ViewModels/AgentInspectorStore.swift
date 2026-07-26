@@ -14,6 +14,11 @@ final class AgentInspectorStore {
     /// to prevent O(n^2) memory growth on long sessions.
     var turnsByRole: [AgentRole: [LLMTurnRecord]] = [:]
 
+    /// Per-INSTANCE turn records (the M2 re-key): keyed by `AgentInstanceRef` so concurrent
+    /// workers of the same role stay distinct. Populated alongside `turnsByRole`, which
+    /// remains the role-collapsed view the current inspector cards read.
+    var turnsByInstance: [AgentInstanceRef: [LLMTurnRecord]] = [:]
+
     /// Maximum number of turn records kept per role. Oldest are dropped when exceeded.
     private static let maxTurnRecords = 100
 
@@ -22,6 +27,10 @@ final class AgentInspectorStore {
 
     /// Live conversation history for each agent, pushed on every material change.
     var liveContexts: [AgentRole: [LLMMessage]] = [:]
+
+    /// Per-INSTANCE live context, keyed by `AgentInstanceRef`; populated alongside
+    /// `liveContexts` (the role-collapsed view the current cards read).
+    var liveContextsByInstance: [AgentInstanceRef: [LLMMessage]] = [:]
 
     /// Security evaluation records from Security Agent/SecurityEvaluator.
     var evaluationRecords: [EvaluationRecord] = []
@@ -36,11 +45,20 @@ final class AgentInspectorStore {
     /// (`dict[key] = newValue`) but not always on chained mutating-method calls
     /// through a default subscript, so SwiftUI views observing `turnsByRole`
     /// would otherwise miss appends and never re-render the LLM Turns section.
-    func appendTurn(_ turn: LLMTurnRecord, for role: AgentRole) {
-        var turns = turnsByRole[role] ?? []
+    func appendTurn(_ turn: LLMTurnRecord, for ref: AgentInstanceRef) {
+        var turns = turnsByRole[ref.role] ?? []
         turns.append(turn)
-        turnsByRole[role] = turns
-        pruneOldTurnSnapshots(for: role)
+        turnsByRole[ref.role] = turns
+        pruneOldTurnSnapshots(for: ref.role)
+
+        // Per-instance mirror (the re-key). Capped like the role view; snapshot-stripping
+        // stays on the role path for now, since the instance store is not yet a UI source.
+        var instanceTurns = turnsByInstance[ref] ?? []
+        instanceTurns.append(turn)
+        if instanceTurns.count > Self.maxTurnRecords {
+            instanceTurns.removeFirst(instanceTurns.count - Self.maxTurnRecords)
+        }
+        turnsByInstance[ref] = instanceTurns
     }
 
     /// Caps turn record count and strips contextSnapshot from older turns for a given role.
@@ -69,8 +87,9 @@ final class AgentInspectorStore {
     }
 
     /// Updates the live conversation history for the given agent role.
-    func updateLiveContext(_ messages: [LLMMessage], for role: AgentRole) {
-        liveContexts[role] = messages
+    func updateLiveContext(_ messages: [LLMMessage], for ref: AgentInstanceRef) {
+        liveContexts[ref.role] = messages
+        liveContextsByInstance[ref] = messages
     }
 
     /// Appends a newly completed security evaluation record.
@@ -101,7 +120,9 @@ final class AgentInspectorStore {
     /// Clears all inspector data (e.g. on full stop/reset).
     func clearAll() {
         turnsByRole.removeAll()
+        turnsByInstance.removeAll()
         liveContexts.removeAll()
+        liveContextsByInstance.removeAll()
         evaluationRecords.removeAll()
     }
 

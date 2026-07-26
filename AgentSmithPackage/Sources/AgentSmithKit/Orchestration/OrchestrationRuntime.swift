@@ -149,7 +149,7 @@ public actor OrchestrationRuntime {
     /// Callback fired when an agent comes online, passing its role and configured tool names.
     private var onAgentStarted: (@Sendable (AgentRole, [String]) -> Void)?
     /// Callback fired when an agent records a new LLM turn, for incremental UI updates.
-    private var onTurnRecorded: (@Sendable (AgentRole, LLMTurnRecord) -> Void)?
+    private var onTurnRecorded: (@Sendable (AgentInstanceRef, LLMTurnRecord) -> Void)?
     /// Fired when an agent learns a model's true maximum output-token limit from a backend
     /// rejection. Args: `(providerID, modelID, limit)`. The app layer persists the limit as
     /// a catalog override so future provider builds clamp to it.
@@ -157,7 +157,7 @@ public actor OrchestrationRuntime {
     /// Callback fired when a security evaluation is recorded, for incremental UI updates.
     private var onEvaluationRecorded: (@Sendable (EvaluationRecord) -> Void)?
     /// Callback fired when an agent's conversation history changes, for live inspector updates.
-    private var onContextChanged: (@Sendable (AgentRole, [LLMMessage]) -> Void)?
+    private var onContextChanged: (@Sendable (AgentInstanceRef, [LLMMessage]) -> Void)?
     /// Optional hook the app layer wires to surface timer events as system messages in the
     /// channel transcript when the user has the Debug → Show Timer Activity toggle on. Async
     /// because the app layer may need to hop to MainActor to read the user-defaults flag.
@@ -1560,7 +1560,7 @@ public actor OrchestrationRuntime {
     }
 
     /// Registers a callback fired when any agent records a new LLM turn.
-    public func setOnTurnRecorded(_ handler: @escaping @Sendable (AgentRole, LLMTurnRecord) -> Void) {
+    public func setOnTurnRecorded(_ handler: @escaping @Sendable (AgentInstanceRef, LLMTurnRecord) -> Void) {
         onTurnRecorded = handler
     }
 
@@ -1574,7 +1574,7 @@ public actor OrchestrationRuntime {
     }
 
     /// Registers a callback fired when an agent's conversation history changes.
-    public func setOnContextChanged(_ handler: @escaping @Sendable (AgentRole, [LLMMessage]) -> Void) {
+    public func setOnContextChanged(_ handler: @escaping @Sendable (AgentInstanceRef, [LLMMessage]) -> Void) {
         onContextChanged = handler
     }
 
@@ -2089,7 +2089,7 @@ public actor OrchestrationRuntime {
             await smithEvaluator.setOnEvaluationRecorded(evalCallback)
         }
         if let turnCallback = onTurnRecorded {
-            await smithEvaluator.setOnTurnRecorded { turn in turnCallback(.securityAgent, turn) }
+            await smithEvaluator.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .securityAgent, instanceID: id), turn) }
         }
         await smithAgent.setSecurityEvaluator(smithEvaluator)
 
@@ -2125,10 +2125,10 @@ public actor OrchestrationRuntime {
             return await broker.drainPendingDeliveries(for: .smith).map(\.text)
         }
         if let turnCallback = onTurnRecorded {
-            await smithAgent.setOnTurnRecorded { turn in turnCallback(.smith, turn) }
+            await smithAgent.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .smith, instanceID: id), turn) }
         }
         if let contextCallback = onContextChanged {
-            await smithAgent.setOnContextChanged { messages in contextCallback(.smith, messages) }
+            await smithAgent.setOnContextChanged { messages in contextCallback(AgentInstanceRef(role: .smith, instanceID: id), messages) }
         }
         // Brown-activity digest assembler: pulls recent channel messages since the cutoff and
         // formats a brief summary that Smith can react to without polling. Returns nil when
@@ -3246,7 +3246,7 @@ public actor OrchestrationRuntime {
         // token usage and cost (previously empty — Security Agent produced no turn records, so its card
         // always read 0 tokens / $0.00 even though its usage was in the global UsageStore).
         if let turnCallback = onTurnRecorded {
-            await evaluator.setOnTurnRecorded { turn in turnCallback(.securityAgent, turn) }
+            await evaluator.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .securityAgent, instanceID: brownID), turn) }
         }
 
         // Brown's message filter: drop security review messages and tool execution trace messages.
@@ -3427,10 +3427,10 @@ public actor OrchestrationRuntime {
         await brownAgent.setUsageStore(usageStore)
         await brownAgent.setSessionID(currentSessionID)
         if let turnCallback = onTurnRecorded {
-            await brownAgent.setOnTurnRecorded { turn in turnCallback(.brown, turn) }
+            await brownAgent.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .brown, instanceID: brownID), turn) }
         }
         if let contextCallback = onContextChanged {
-            await brownAgent.setOnContextChanged { messages in contextCallback(.brown, messages) }
+            await brownAgent.setOnContextChanged { messages in contextCallback(AgentInstanceRef(role: .brown, instanceID: brownID), messages) }
         }
         // Push Brown's LIVE scoped tool set to the inspector as it changes. Reuses the
         // `onAgentStarted` sink (which just sets `agentToolNames[role]`), so the inspector shows
