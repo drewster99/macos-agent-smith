@@ -2861,9 +2861,14 @@ public actor AgentActor {
     private static let autoMemoryContextMarker = "[AUTO_MEMORY_CONTEXT]"
 
     /// When true, Smith's auto-memory context injects at most once per conversation (guarded by the
-    /// marker above). Temporarily `false` to surface the banner on EVERY user message while we
-    /// evaluate retrieval; flip back to `true` to restore once-per-conversation behavior. The guard
-    /// code (`conversationHasAutoMemoryContext`) is intentionally left intact for that reason.
+    /// marker above).
+    ///
+    /// `false` — retrieve on EVERY user message — is the intended behavior, not a leftover from an
+    /// evaluation: each message is its own question and deserves its own memories. It was affordable
+    /// to make permanent only once a user-message retrieval stopped searching the prior-task corpus
+    /// (see `injectAutoMemoryContextIfNeeded`), which halved the embedding work per message.
+    /// The guard code (`conversationHasAutoMemoryContext`) stays intact so the once-per-conversation
+    /// behavior remains one flag away if per-message retrieval ever proves too expensive.
     private static let autoMemoryOncePerConversation = false
 
     private static let autoMemoryContextDateFormatter: DateFormatter = {

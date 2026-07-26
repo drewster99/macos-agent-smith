@@ -1106,6 +1106,19 @@ struct MemoryQueryRecordRow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .multilineTextAlignment(.leading)
                     .textSelection(.enabled)
+
+                // Where the time actually went. Collapsed rows keep the single total — the split
+                // only earns its space once you're looking at one query in particular. A real
+                // conditional rather than a zero-height/zero-opacity row: the enclosing VStack
+                // has `spacing: 3`, so a hidden child would still pad every collapsed row. The
+                // usual objection to conditionals in a body is lost view identity, which a
+                // stateless leaf Text has nothing to lose.
+                if expanded {
+                    Text(record.phaseBreakdown)
+                        .font(AppFonts.inspectorBody)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
             }
             .padding(.vertical, 3)
             .padding(.horizontal, 6)

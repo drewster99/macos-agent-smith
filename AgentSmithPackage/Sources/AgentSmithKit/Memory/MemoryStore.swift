@@ -161,6 +161,13 @@ public struct MemoryQueryRecord: Sendable, Identifiable, Equatable {
     /// What triggered the query (e.g. "auto-context", "task-context", "search_memory", "system").
     public let source: String
 
+    /// Compact "embed 180ms · mem-scan 34ms · task-scan 0ms" phase split, for the inspector's
+    /// Memory card. Phases that didn't run are still printed: a ZERO is the informative part —
+    /// it's how you tell a corpus that was SKIPPED from one that was scored and matched nothing.
+    public var phaseBreakdown: String {
+        "embed \(embedMs)ms · mem-scan \(memorySearchMs)ms · task-scan \(taskSearchMs)ms"
+    }
+
     public init(
         timestamp: Date,
         query: String,
