@@ -1177,49 +1177,33 @@ extension OrchestrationRuntime {
         }
     }
 
+    /// The machine could not render a verdict (validator errored past its retry). This is NOT handed
+    /// to Smith — Smith no longer judges validation. The task parks in `.awaitingReview` for the USER
+    /// to resolve (accept / send back / re-validate / fail), and its worker is torn down so it stops
+    /// holding a slot: a park can sit indefinitely, and re-validation doesn't need Brown (it judges
+    /// the persisted result). Brown's context is saved first so a user "send back" can respawn it.
     private func escalateValidation(taskID: UUID, reason: String) async {
         // CAS: only escalate if still validating — never overwrite a pause/stop that landed
         // after the coordinator's status snapshot.
         guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating]) else { return }
         guard let task = await taskStore.task(id: taskID) else { return }
+        if let brownHandle = liveWorkerHandle(for: task) {
+            await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
+        }
+        for agentID in task.assigneeIDs {
+            _ = await terminateAgent(id: agentID)
+        }
+        // Tearing the worker down freed a slot, but the task isn't terminal, so `onTaskTerminated`
+        // won't fire the usual auto-advance — kick it here so a pending task can take the slot.
+        await advanceAfterFreedWorkerSlot()
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "Validation escalation for \"\(task.title)\": \(reason)",
+            content: "\"\(task.title)\" needs your attention: acceptance validation could not reach a verdict — \(reason) Re-validate, accept, send it back, or fail it. It also re-validates automatically on the next restart.",
             metadata: [
                 "messageKind": .string("validation_escalation"),
                 "taskID": .string(taskID.uuidString),
                 "isWarning": .bool(true)
             ]
         ))
-        // Tell the WORKER too — without this it never learns the last round's outcome
-        // (punch lists stop at escalation) and flails: re-reasoning about old
-        // rejections, calling request_help into an already-parked task. A distinct
-        // messageKind — the worker's filter drops "validation_escalation" (the public
-        // banner), and this private notice must get through.
-        if let workerID = task.assigneeIDs.first(where: { supervisor.role(of: $0) == .brown }) {
-            await channel.post(ChannelMessage(
-                sender: .system,
-                recipientID: workerID,
-                recipient: .agent(.brown),
-                content: """
-                    [Acceptance validation has ESCALATED your task to Smith: \(reason)] \
-                    Do NOT resubmit, rework anything, or call request_help — the task is already \
-                    in Smith's hands. STOP and wait: Smith will either accept the work as-is or \
-                    send you specific changes.
-                    """,
-                metadata: [
-                    "messageKind": .string("validation_wait_notice"),
-                    "taskID": .string(taskID.uuidString)
-                ]
-            ))
-        }
-        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-            await smithAgent.appendUserMessage("""
-                [System: Task "\(task.title)" (ID: \(taskID.uuidString)) was submitted but acceptance validation \
-                ESCALATED: \(reason) The task is awaiting your review — inspect the result and the validation \
-                verdicts in the task's updates, then call `review_work` to accept it or send it back with \
-                feedback. Tell the user briefly that this task needs attention.]
-                """)
-        }
     }
 }

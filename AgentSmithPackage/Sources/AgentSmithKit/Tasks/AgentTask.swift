@@ -118,6 +118,23 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// which returns the task to `.validating` and re-enqueues it.
     public var validationBlockedReason: String?
 
+    /// Whether this task currently holds one of the `maxConcurrentWorkers` slots — i.e. has a LIVE
+    /// worker. `starting`/`running`/`validating`/`awaitingHelp` always do (Brown is alive, working,
+    /// or blocked on a help answer). `.awaitingReview` is the split case: a validator-error park has
+    /// had its worker torn down (does NOT occupy), but a missing-validator park (`validationBlockedReason`
+    /// set) keeps its worker alive waiting on config (DOES occupy). This is the tool-side proxy for the
+    /// runtime's authoritative live-Brown count — keep the two in agreement.
+    public var occupiesWorkerSlot: Bool {
+        switch status {
+        case .starting, .running, .validating, .awaitingHelp:
+            return true
+        case .awaitingReview:
+            return validationBlockedReason != nil
+        case .pending, .paused, .interrupted, .scheduled, .completed, .failed:
+            return false
+        }
+    }
+
     /// Whether a step may be HARD-deleted from this task's plan (`manage_steps` `purge`),
     /// as opposed to tombstoned. True only while the plan is still a draft nobody has worked
     /// or judged against: purging elsewhere would destroy real history rather than tidy an

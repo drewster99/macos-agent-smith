@@ -157,22 +157,22 @@ struct RunTaskTool: AgentTool {
         let allTasks = await context.taskStore.allTasks()
         let capacity = await context.workerCapacity()
         let slotHolders = allTasks.filter {
-            $0.disposition == .active && $0.id != taskID &&
-            ($0.status == .starting || $0.status == .running || $0.status == .validating || $0.status == .awaitingReview || $0.status == .awaitingHelp)
+            $0.disposition == .active && $0.id != taskID && $0.occupiesWorkerSlot
         }
         if !task.isTemplate && slotHolders.count >= capacity {
-            // Help requests and reviews deserve a pointed message — resolving one is
-            // usually the fastest way to free a slot.
+            // A blocker deserves a pointed message — resolving one is usually the fastest way to
+            // free a slot. (A validator-error park does NOT hold a slot — its worker is gone — so
+            // it never appears here; the only slot-holding `.awaitingReview` is a config block.)
             if let helpTask = slotHolders.first(where: { $0.status == .awaitingHelp }) {
                 return .failure("""
                     Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(helpTask.title)' \
                     has a blocker from Brown awaiting your help. Resolve it with `provide_help` to free a slot.
                     """)
             }
-            if let reviewTask = slotHolders.first(where: { $0.status == .awaitingReview }) {
+            if let blockedTask = slotHolders.first(where: { $0.status == .awaitingReview }) {
                 return .failure("""
-                    Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(reviewTask.title)' \
-                    is awaiting your review. Resolve it to free a slot.
+                    Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(blockedTask.title)' \
+                    is parked waiting on validator configuration. Assign a Validator model to release it and free a slot.
                     """)
             }
             let names = slotHolders.map { "'\($0.title)'" }.joined(separator: ", ")

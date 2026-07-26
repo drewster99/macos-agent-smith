@@ -859,6 +859,15 @@ public actor OrchestrationRuntime {
         ))
     }
 
+    /// Fills a worker slot that freed OUTSIDE a task-terminal event — e.g. a validator-error park
+    /// tears its worker down but the task stays active (`.awaitingReview`), so `onTaskTerminated`
+    /// never fires. Mirrors that callback's drain: a scheduled run claims the slot first, else the
+    /// oldest pending task does. Non-private so the validation coordinator can call it.
+    func advanceAfterFreedWorkerSlot() async {
+        let kicked = await drainPendingScheduledRunQueue()
+        if !kicked { await drainPendingTaskQueue() }
+    }
+
     /// Drains the head of `pendingScheduledRunQueue` if no task is currently in flight.
     /// Self-checking — safe to call any time the runtime suspects state may have shifted
     /// (typically from `onTaskTerminated`). Skips queue entries whose tasks are no longer
@@ -1760,15 +1769,14 @@ public actor OrchestrationRuntime {
         // old full-restart path's resume-ability guarantee.
         for brownHandle in supervisor.handles(role: .brown) {
             let workerTask = await taskStore.taskForAgent(agentID: brownHandle.id)
-            // Slot-holding statuses: running/validating (actively working or awaiting a
-            // punch list) and awaitingReview (parked worker that provide_help /
-            // review_work-reject unparks — terminating it would lose its context).
-            // Paused is deliberately NOT one: the scheduled-interrupt flow pauses the
-            // blocker precisely so its worker cycles out here (context saved first;
-            // resume respawns from lastBrownContext).
+            // A worker on a slot-holding task is untouchable (see `AgentTask.occupiesWorkerSlot`):
+            // running/validating (working or awaiting a punch list), awaitingHelp (blocked on a help
+            // answer), and a missing-validator park (waiting on config). Paused is deliberately NOT
+            // one: the scheduled-interrupt flow pauses the blocker precisely so its worker cycles out
+            // here (context saved first; resume respawns from lastBrownContext). A validator-error
+            // park already had its worker torn down at escalation, so it never reaches this loop.
             let occupiesSlot = workerTask.map {
-                ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview || $0.status == .awaitingHelp)
-                    && $0.disposition == .active
+                $0.occupiesWorkerSlot && $0.disposition == .active
             } ?? false
             guard !occupiesSlot else { continue }
             // Context is saved only for the workers actually being cycled out — saving
@@ -3994,7 +4002,9 @@ Message:
     /// Takes the Brown reference explicitly (rather than resolving through the
     /// supervisor) so `stopAll` can call it AFTER the registry has been snapshot-and-
     /// cleared at teardown entry.
-    private func saveBrownContextToTask(brownID: UUID, brown: AgentActor) async {
+    /// Non-private so the validation coordinator (a same-module extension in another file) can save a
+    /// worker's context before tearing it down on an escalation park.
+    func saveBrownContextToTask(brownID: UUID, brown: AgentActor) async {
         let context = await brown.contextSnapshot()
 
         // Find the task Brown was working on
