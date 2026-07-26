@@ -2268,17 +2268,10 @@ public actor AgentActor {
     }
 
 
-    private func directExecute(_ call: LLMToolCall, tool: any AgentTool, postVisibility: Bool = false) async -> (result: String, succeeded: Bool) {
-        if postVisibility {
-            await postToolRequestToChannel(
-                call,
-                tool: tool,
-                task: nil,
-                parallelIndex: 0,
-                parallelCount: 1,
-                siblingCallSummaries: []
-            )
-        }
+    /// Runs an ALREADY-APPROVED call. Its only caller is `executeWithApproval`, which has posted
+    /// the tool_request and the verdict itself — hence no visibility posting here. It carried a
+    /// `postVisibility` flag for the old un-evaluated path, which no longer exists.
+    private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> (result: String, succeeded: Bool) {
 
         let agentIDPrefix = String(id.uuidString.prefix(8))
         let outcome = await Self.runToolWithTimeout(call, tool: tool, context: toolContext) { name, seconds in
@@ -2288,15 +2281,6 @@ public actor AgentActor {
         turnToolResultChars += outcome.result.count
         await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
         recordToolOutcome(name: call.name, succeeded: outcome.succeeded)
-        if postVisibility {
-            await Self.postToolOutputToChannel(
-                result: outcome.result,
-                call: call,
-                role: configuration.role,
-                context: toolContext,
-                taskTitle: channelTaskTitle
-            )
-        }
         return (outcome.result, outcome.succeeded)
     }
 
