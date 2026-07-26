@@ -234,6 +234,32 @@ enum CapabilityEvalRunner {
                 preferLowImageDetail: preferLowImageDetail
             )
 
+            // An empty wallet is ACCOUNT-wide, not a fact about this model: every remaining call
+            // fails identically. Left running, the sweep spends a call per model and prints one
+            // indistinguishable "?" per row, burying the single fact that explains all of them —
+            // and the evidence column truncates the message before the useful half. Observed live
+            // on an 11-model Anthropic sweep, where the operator could not tell from the summary
+            // that the account simply needed topping up. Stop, say so in full, and leave the
+            // stored records alone (nothing was established, so nothing is written).
+            if CapabilityProbe.textIndicatesBillingProblem(profile.chat.evidence ?? "") {
+                let remaining = targets.count - index - 1
+                print("")
+                print(String(repeating: "!", count: 100))
+                print("  BILLING PROBLEM — \(target.providerID) refused the call for payment reasons.")
+                print("  This says NOTHING about any model; every call fails the same way until it is resolved.")
+                print("")
+                print("  \(profile.chat.evidence ?? "")")
+                print("")
+                if remaining > 0 {
+                    print("  Stopping the sweep: \(remaining) further model(s) skipped rather than re-learning this.")
+                }
+                print("  Probe records are untouched — nothing was established, so nothing was written.")
+                print(String(repeating: "!", count: 100))
+                print("")
+                profiles.append(profile)
+                break
+            }
+
             // Effort on OpenAI-compatible endpoints can't go through LLMCallOverrides — the
             // provider only emits reasoning_effort when the supportsReasoningEffort flag is set,
             // so an unflagged model silently drops it and a "no error" proves nothing. Forcing
@@ -483,9 +509,23 @@ enum CapabilityEvalRunner {
             ("vision",         { cell($0.vision) }),
             ("pdf-input",      { cell($0.pdfInput) }),
             ("temperature",    { cell($0.acceptsTemperature) }),
-            ("trailing-sys",   { $0.trailingSystemTurn.map(cell) ?? "-" }),
+            ("trailing-system", { $0.trailingSystemTurn.map(cell) ?? "-" }),
+            // Established effort levels, shallow → deep. Spelled out rather than abbreviated: the
+            // whole point is which ladder rungs this model actually accepts, and "med" or "xh"
+            // makes that a guess. Absent levels were never attempted, not rejected.
+            ("effort",         { $0.establishedEffortLevels.isEmpty ? "-"
+                                    : $0.establishedEffortLevels.joined(separator: ",") }),
             ("max-context",    { intCell($0.maxContextTokens) }),
-            ("max-output",     { intCell($0.maxOutputTokens) }),
+            // maxOutputBoundedByContext is mutually exclusive with maxOutputTokens — when the
+            // endpoint has no independent output cap, that one stays inconclusive and this holds
+            // the governing context length. Folded into one column rather than adding a second
+            // that is empty on nearly every row; "ctx-bound" says which of the two answers it is.
+            ("max-output",     { profile in
+                if let bounded = profile.maxOutputBoundedByContext, bounded.status == .established {
+                    return "ctx-bound"
+                }
+                return intCell(profile.maxOutputTokens)
+            }),
             ("price-in/out",   { profile in
                 guard let pricing = profile.pricing, pricing.base.hasAnyRate else { return "-" }
                 return formatPrice(pricing)
