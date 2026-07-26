@@ -666,6 +666,7 @@ extension OrchestrationRuntime {
                     siblingCalls: nil,
                     agentRoleName: AgentRole.validator.displayName,
                     callerRole: .validator,
+                    toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: tool),
                     toolCallID: call.id
                 )
                 // Surface the verdict on the SAME path as an agent's tool call — the shared

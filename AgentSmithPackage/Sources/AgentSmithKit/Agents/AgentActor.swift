@@ -1865,6 +1865,7 @@ public actor AgentActor {
                         siblingCalls: entry.siblings.isEmpty ? nil : entry.siblings,
                         agentRoleName: roleName,
                         callerRole: role,
+                        toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: entry.tool),
                         sanctionedDirectories: sanctionedDirectories,
                         toolCallID: entry.call.id
                     )
@@ -2207,6 +2208,7 @@ public actor AgentActor {
             siblingCalls: siblings,
             agentRoleName: configuration.role.displayName,
             callerRole: configuration.role,
+            toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: tool),
             agentContext: agentContext,
             sanctionedDirectories: sanctionedDirectories,
             toolCallID: call.id
