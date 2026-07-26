@@ -2273,6 +2273,18 @@ public actor OrchestrationRuntime {
 
         activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
+        // A task that escalated to `.awaitingReview` PURELY because the validator errored (no
+        // pending help request, not parked on a missing validator model) re-validates on restart
+        // rather than waiting on a human — validation is idempotent, so the machine gets another
+        // pass before anyone is asked to intervene. This is deliberately NOT done for help requests
+        // (Brown needs an answer a restart can't give) or missing-validator parks (need config).
+        for task in activeTasks where task.status == .awaitingReview
+            && task.helpRequest == nil && task.validationBlockedReason == nil {
+            await taskStore.addUpdate(id: task.id, message: "Re-running acceptance validation after restart instead of waiting on manual review.")
+            await taskStore.updateStatus(id: task.id, status: .validating)
+        }
+        activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
+
         // Validation is idempotent and restartable: tasks caught mid-validation by a
         // quit/crash re-enqueue from their sticky-verdict state (partial rounds were
         // never persisted as conclusions).
