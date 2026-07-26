@@ -183,13 +183,20 @@ actor SecurityEvaluator {
             "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
             "list_scheduled_wakes", "get_current_time", "search_memory",
             "list_scriptable_apps", "get_app_scripting_schema"
-        ]).union(readOnlyFilesystemEvidenceTools).union(AgentActor.taskLifecycleTools),
+        ]).union(readOnlyFilesystemEvidenceTools),
         // The worker's own tools are all judged. The only pre-cleared entries are the task
-        // LIFECYCLE calls — `task_complete`, `request_help`, `reply_to_user` and friends — which
-        // are how a worker reports progress and hands control back. They were previously executed
-        // with no approval AND no transcript entry; pre-clearing routes and records them without
-        // putting an LLM between a worker and its ability to say "I'm done" or "I'm blocked".
-        .brown: AgentActor.taskLifecycleTools,
+        // LIFECYCLE calls — how a worker reports progress and hands control back. They were
+        // previously executed with no approval AND no transcript entry; pre-clearing routes and
+        // records them without putting an LLM between a worker and its ability to say "I'm done"
+        // or "I'm blocked".
+        //
+        // Spelled out rather than referencing `AgentActor.taskLifecycleTools`, DELIBERATELY. That
+        // set answers a sequencing question — which calls run in their own ordered segment — not
+        // "what is safe to skip review on". Wiring the two together means anyone adding a tool
+        // there for sequencing reasons silently widens this security carve-out: a fail-OPEN
+        // coupling. Duplication drifts the other way — a lifecycle tool missing from this list
+        // just gets a real evaluation — so the copy is the safer of the two mistakes.
+        .brown: ["task_complete", "task_update", "request_help", "reply_to_user"],
         .validator: readOnlyFilesystemEvidenceTools
     ]
 
