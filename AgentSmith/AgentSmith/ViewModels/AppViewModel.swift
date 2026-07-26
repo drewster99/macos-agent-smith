@@ -1461,6 +1461,19 @@ final class AppViewModel {
         )
     }
 
+    // MARK: - User resolution of a validator-error escalation (`.awaitingReview`)
+
+    /// Re-run acceptance validation on an escalated task.
+    func revalidateEscalatedTask(id: UUID) async { await runtime?.revalidateEscalatedTask(taskID: id) }
+    /// Accept an escalated task's result as-is, overriding any unsettled criteria.
+    func acceptEscalatedTask(id: UUID) async { await runtime?.acceptEscalatedTask(taskID: id) }
+    /// Fail an escalated task outright.
+    func failEscalatedTask(id: UUID) async { await runtime?.failEscalatedTask(taskID: id) }
+    /// Send an escalated task back to Brown with feedback (respawns the worker from saved context).
+    func sendEscalatedTaskBackToBrown(id: UUID, feedback: String) async {
+        await runtime?.sendEscalatedTaskBackToBrown(taskID: id, feedback: feedback)
+    }
+
     /// Pushes the current global tool-security settings to this session's runtime. Called on a
     /// Settings change (via the registered observer) so changes take effect without a session restart.
     private func pushToolSecurity() {

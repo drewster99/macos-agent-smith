@@ -991,13 +991,14 @@ extension OrchestrationRuntime {
         ))
     }
 
-    /// All criteria settled: complete the task — the machine analogue of review_work's
-    /// accept path (status, worker teardown, completion banner, summarization). The
-    /// terminated hook then drives auto-advance and Smith's context compaction.
+    /// All criteria settled: complete the task (status, worker teardown, completion banner,
+    /// summarization). The terminated hook then drives auto-advance and Smith's context compaction.
+    /// Also the shared body for a USER "accept" of an escalation, hence the CAS accepts
+    /// `.awaitingReview` too (`acceptEscalatedTask` records its override verdicts first).
     private func completeValidatedTask(taskID: UUID) async {
-        // CAS: only complete if still validating — a pause/stop that landed after the
+        // CAS: only complete from a judged/parked state — a pause/stop that landed after the
         // coordinator's status snapshot must not be overwritten by this completion.
-        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: [.validating]) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: [.validating, .awaitingReview]) else { return }
         guard let completed = await taskStore.task(id: taskID) else { return }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
@@ -1111,6 +1112,96 @@ extension OrchestrationRuntime {
                 "taskTitle": .string(task.title),
                 "taskID": .string(taskID.uuidString)
             ]
+        ))
+    }
+
+    // MARK: - User resolution of a validator-error escalation (replaces Smith's retired review_work)
+    //
+    // A validator-error park is nobody's to judge automatically — Smith no longer reviews. These are
+    // the USER's four resolutions, invoked from the task row. All gate on `.awaitingReview` with NO
+    // `validationBlockedReason` (a missing-validator config park is not a judgment call — it releases
+    // itself when a validator model is assigned).
+
+    private func isUserResolvableEscalation(_ task: AgentTask?) -> Bool {
+        task?.status == .awaitingReview && task?.validationBlockedReason == nil
+    }
+
+    /// Re-run acceptance validation on an escalated task — the machine gets another go (fresh budget).
+    public func revalidateEscalatedTask(taskID: UUID) async {
+        guard isUserResolvableEscalation(await taskStore.task(id: taskID)) else { return }
+        await taskStore.resetValidationRound(id: taskID)
+        guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview]) else { return }
+        await taskStore.addUpdate(id: taskID, message: "Re-running acceptance validation at the user's request.")
+        startTaskValidation(taskID: taskID)
+    }
+
+    /// User accepts the escalated result as-is, overriding any criterion the machine never settled.
+    /// Reuses the shared completion path (`completeValidatedTask`) after recording the overrides.
+    public func acceptEscalatedTask(taskID: UUID) async {
+        guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
+        let settled = task.validation?.settledCriterionIDs() ?? []
+        let unsettled = task.acceptanceCriteria.filter { !settled.contains($0.id) }
+        if !unsettled.isEmpty {
+            let round = task.validation?.round ?? 0
+            await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
+                CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
+                                       validatorName: "user override", validatorHash: "-", round: round)
+            }, judgedAgainst: task.acceptanceCriteria)
+            await taskStore.addUpdate(id: taskID, message: "Accepted by the user, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).")
+        }
+        await completeValidatedTask(taskID: taskID)
+    }
+
+    /// User fails the escalated task outright.
+    public func failEscalatedTask(taskID: UUID) async {
+        guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.awaitingReview]) else { return }
+        for agentID in task.assigneeIDs { _ = await terminateAgent(id: agentID) }
+        taskWorkspace(for: taskID).cleanupTemporary()
+        await taskStore.addUpdate(id: taskID, message: "Failed by the user from a validation escalation.")
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Task \"\(task.title)\" was failed by the user.",
+            metadata: ["messageKind": .string("task_failed"), "taskID": .string(taskID.uuidString), "isWarning": .bool(true)]
+        ))
+    }
+
+    /// User sends the escalated task back to Brown with free-text feedback. Mirrors the old
+    /// review_work reject: secure a worker (respawning from saved context — the escalation park tore
+    /// the old one down), then flip to running with the result cleared and the feedback delivered.
+    public func sendEscalatedTaskBackToBrown(taskID: UUID, feedback: String) async {
+        guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
+        await taskStore.resetValidationRound(id: taskID)
+        // Secure the worker BEFORE mutating status (the ordering lesson from returnRejectionsToWorker).
+        var brownID = task.assigneeIDs.first { supervisor.role(of: $0) == .brown }
+        var brownWasSpawned = false
+        if brownID == nil, let spawned = await spawnBrown(for: task) {
+            await taskStore.assignAgent(taskID: taskID, agentID: spawned)
+            brownID = spawned
+            brownWasSpawned = true
+        }
+        guard let brownID else {
+            // No worker slot free: re-queue as pending; the fresh briefing carries the feedback.
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview]) else { return }
+            await taskStore.clearResult(id: taskID)
+            await taskStore.addUpdate(id: taskID, message: "Sent back by the user (no worker slot free — re-queued):\n\(feedback)")
+            return
+        }
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.awaitingReview]) else {
+            if brownWasSpawned { _ = await terminateAgent(id: brownID) }
+            return
+        }
+        await taskStore.clearResult(id: taskID)
+        await taskStore.addUpdate(id: taskID, message: "Sent back by the user with changes:\n\(feedback)")
+        let content = brownWasSpawned
+            ? "## Task: \(task.title)\n\n\(task.description)\n\n## Changes Required\n\(feedback)"
+            : "Results sent back — changes required on task '\(task.title)': \(feedback)"
+        await channel.post(ChannelMessage(
+            sender: .system,
+            recipientID: brownID,
+            recipient: .agent(.brown),
+            content: content,
+            metadata: ["messageKind": .string("changes_requested"), "taskTitle": .string(task.title), "taskID": .string(taskID.uuidString)]
         ))
     }
 

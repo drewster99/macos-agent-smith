@@ -326,6 +326,7 @@ struct TaskRowButton: View {
     @Environment(\.openWindow) private var openWindow
     @State private var templateRunInputTask: AgentTask?
     @State private var taskEditorTask: AgentTask?
+    @State private var sendBackTask: AgentTask?
 
     var body: some View {
         Button {
@@ -360,6 +361,16 @@ struct TaskRowButton: View {
             TaskEditorSheet(mode: .edit(task), viewModel: viewModel) {
                 taskEditorTask = nil
             }
+        }
+        .sheet(item: $sendBackTask) { task in
+            SendBackToBrownSheet(
+                task: task,
+                onSend: { feedback in
+                    sendBackTask = nil
+                    Task { await viewModel.sendEscalatedTaskBackToBrown(id: task.id, feedback: feedback) }
+                },
+                onCancel: { sendBackTask = nil }
+            )
         }
     }
 
@@ -457,7 +468,9 @@ struct TaskRowButton: View {
                 Label("Delete", systemImage: "trash")
             })
 
-        case .awaitingReview, .awaitingHelp:
+        case .awaitingReview:
+            escalationMenu(task: task, viewModel: viewModel)
+        case .awaitingHelp:
             EmptyView()
 
         case .pending, .paused, .interrupted:
@@ -480,6 +493,29 @@ struct TaskRowButton: View {
             Divider()
             Button(role: .destructive, action: { Task { await viewModel.deleteTask(id: task.id) } }, label: {
                 Label("Delete", systemImage: "trash")
+            })
+        }
+    }
+
+    /// Actions for a task parked in `.awaitingReview` by a validation escalation — the user's
+    /// resolutions now that Smith no longer reviews. A missing-validator config park
+    /// (`validationBlockedReason` set) auto-releases when a Validator model is assigned, so it offers
+    /// nothing here.
+    @ViewBuilder
+    private func escalationMenu(task: AgentTask, viewModel: AppViewModel) -> some View {
+        if task.validationBlockedReason == nil {
+            Button(action: { Task { await viewModel.revalidateEscalatedTask(id: task.id) } }, label: {
+                Label("Re-validate", systemImage: "arrow.clockwise")
+            })
+            Button(action: { sendBackTask = task }, label: {
+                Label("Send Back to Brown…", systemImage: "arrowshape.turn.up.left")
+            })
+            Divider()
+            Button(action: { Task { await viewModel.acceptEscalatedTask(id: task.id) } }, label: {
+                Label("Accept As-Is", systemImage: "checkmark.circle")
+            })
+            Button(role: .destructive, action: { Task { await viewModel.failEscalatedTask(id: task.id) } }, label: {
+                Label("Fail", systemImage: "xmark.circle")
             })
         }
     }
@@ -1180,5 +1216,42 @@ struct ScheduledRunsPopoverRow: View {
         if interval < 3600 { return "in \(Int(interval / 60)) min" }
         if interval < 86400 { return String(format: "in %.1f h", interval / 3600) }
         return String(format: "in %.1f d", interval / 86400)
+    }
+}
+
+/// Feedback form for sending an escalated task back to Brown with specific changes. Brown respawns
+/// from its saved context and the feedback becomes its "changes required" brief.
+private struct SendBackToBrownSheet: View {
+    let task: AgentTask
+    let onSend: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var feedback: String = ""
+
+    private var trimmed: String { feedback.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Send “\(task.title)” back to Brown")
+                .font(.headline)
+            Text("Describe exactly what needs to change. Brown respawns with the task context plus your feedback.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: $feedback)
+                .font(.body)
+                .frame(minHeight: 140)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.3)))
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Send Back") { onSend(trimmed) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmed.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 420, idealWidth: 480)
     }
 }
