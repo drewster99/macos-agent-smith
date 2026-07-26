@@ -192,6 +192,12 @@ final class AppViewModel {
     var toolExecutingByRole: [AgentRole: [String: Int]] = [:]
     /// Tools available to each agent role, populated when agents come online.
     var agentToolNames: [AgentRole: [String]] = [:]
+    /// Per-INSTANCE mirrors of the three role-keyed views above (the M2 re-key), keyed by
+    /// `AgentInstanceRef` so concurrent workers of a role stay distinct. Populated alongside
+    /// the role-keyed dicts, which the current inspector cards still read.
+    var processingInstances: Set<AgentInstanceRef> = []
+    var toolExecutingByInstance: [AgentInstanceRef: [String: Int]] = [:]
+    var agentToolNamesByInstance: [AgentInstanceRef: [String]] = [:]
     /// Whether the Inspector panel is visible.
     var showInspector = false
     /// Dedicated observable store for inspector data, updated via push callbacks.
@@ -754,44 +760,63 @@ final class AppViewModel {
                 self.abortReason = reason
                 self.isRunning = false
                 self.processingRoles.removeAll()
+                self.processingInstances.removeAll()
                 self.toolExecutingByRole.removeAll()
+                self.toolExecutingByInstance.removeAll()
                 self.agentToolNames.removeAll()
+                self.agentToolNamesByInstance.removeAll()
                 self.inspectorStore.clearAll()
                 self.runtime = nil
             }
         }
 
-        await newRuntime.setOnProcessingStateChange { [weak self] role, isProcessing in
+        await newRuntime.setOnProcessingStateChange { [weak self] ref, isProcessing in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if isProcessing {
-                    self.processingRoles.insert(role)
+                    self.processingRoles.insert(ref.role)
+                    self.processingInstances.insert(ref)
                 } else {
-                    self.processingRoles.remove(role)
+                    self.processingRoles.remove(ref.role)
+                    self.processingInstances.remove(ref)
                 }
             }
         }
 
-        await newRuntime.setOnToolExecutionStateChange { [weak self] role, toolName, started in
+        await newRuntime.setOnToolExecutionStateChange { [weak self] ref, toolName, started in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                var counts = self.toolExecutingByRole[role] ?? [:]
+                // Role-collapsed view (legacy cards).
+                var counts = self.toolExecutingByRole[ref.role] ?? [:]
                 if started {
                     counts[toolName, default: 0] += 1
                 } else if let n = counts[toolName] {
                     if n <= 1 { counts.removeValue(forKey: toolName) } else { counts[toolName] = n - 1 }
                 }
                 if counts.isEmpty {
-                    self.toolExecutingByRole.removeValue(forKey: role)
+                    self.toolExecutingByRole.removeValue(forKey: ref.role)
                 } else {
-                    self.toolExecutingByRole[role] = counts
+                    self.toolExecutingByRole[ref.role] = counts
+                }
+                // Per-instance view (the re-key).
+                var instanceCounts = self.toolExecutingByInstance[ref] ?? [:]
+                if started {
+                    instanceCounts[toolName, default: 0] += 1
+                } else if let n = instanceCounts[toolName] {
+                    if n <= 1 { instanceCounts.removeValue(forKey: toolName) } else { instanceCounts[toolName] = n - 1 }
+                }
+                if instanceCounts.isEmpty {
+                    self.toolExecutingByInstance.removeValue(forKey: ref)
+                } else {
+                    self.toolExecutingByInstance[ref] = instanceCounts
                 }
             }
         }
 
-        await newRuntime.setOnAgentStarted { [weak self] role, toolNames in
+        await newRuntime.setOnAgentStarted { [weak self] ref, toolNames in
             Task { @MainActor [weak self] in
-                self?.agentToolNames[role] = toolNames
+                self?.agentToolNames[ref.role] = toolNames
+                self?.agentToolNamesByInstance[ref] = toolNames
             }
         }
 
@@ -1755,8 +1780,11 @@ final class AppViewModel {
         stopLogger.notice("VM.stopAll runtime.stopAll returned session=\(self.session.name, privacy: .public) elapsedMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
         isRunning = false
         processingRoles.removeAll()
+        processingInstances.removeAll()
         toolExecutingByRole.removeAll()
+        toolExecutingByInstance.removeAll()
         agentToolNames.removeAll()
+        agentToolNamesByInstance.removeAll()
         inspectorStore.clearAll()
         // The channel stream is cancelled + awaited inside flushPersistence() below
         // (quiesceChannelStream), so any messages still buffered in the channel are drained

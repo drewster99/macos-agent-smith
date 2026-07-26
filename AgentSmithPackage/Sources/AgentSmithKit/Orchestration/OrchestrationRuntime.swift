@@ -139,15 +139,15 @@ public actor OrchestrationRuntime {
     /// Callback to notify the app layer when abort is triggered.
     private var onAbort: (@Sendable (String) -> Void)?
     /// Callback to notify the app layer when an agent starts or stops an LLM call.
-    private var onProcessingStateChange: (@Sendable (AgentRole, Bool) -> Void)?
+    private var onProcessingStateChange: (@Sendable (AgentInstanceRef, Bool) -> Void)?
     /// Callback to notify the app layer when an agent starts or stops executing a tool.
     /// Distinct from `onProcessingStateChange` (LLM call) — fires for the tool-execution
     /// span, which can be much longer (e.g. a slow AppleScript) and otherwise leaves the
     /// UI showing the agent as "Idle" while it's actually blocked waiting on a tool to
     /// return. The `String` parameter is the tool's name; `Bool` is `true` on start.
-    private var onToolExecutionStateChange: (@Sendable (AgentRole, String, Bool) -> Void)?
+    private var onToolExecutionStateChange: (@Sendable (AgentInstanceRef, String, Bool) -> Void)?
     /// Callback fired when an agent comes online, passing its role and configured tool names.
-    private var onAgentStarted: (@Sendable (AgentRole, [String]) -> Void)?
+    private var onAgentStarted: (@Sendable (AgentInstanceRef, [String]) -> Void)?
     /// Callback fired when an agent records a new LLM turn, for incremental UI updates.
     private var onTurnRecorded: (@Sendable (AgentInstanceRef, LLMTurnRecord) -> Void)?
     /// Fired when an agent learns a model's true maximum output-token limit from a backend
@@ -1388,13 +1388,13 @@ public actor OrchestrationRuntime {
     }
 
     /// Registers a callback fired when an agent starts or stops an LLM API call.
-    public func setOnProcessingStateChange(_ handler: @escaping @Sendable (AgentRole, Bool) -> Void) {
+    public func setOnProcessingStateChange(_ handler: @escaping @Sendable (AgentInstanceRef, Bool) -> Void) {
         onProcessingStateChange = handler
     }
 
     /// Registers a callback fired when an agent starts or stops executing a tool.
     /// Parameters: agent role, tool name, started (true on start, false on completion).
-    public func setOnToolExecutionStateChange(_ handler: @escaping @Sendable (AgentRole, String, Bool) -> Void) {
+    public func setOnToolExecutionStateChange(_ handler: @escaping @Sendable (AgentInstanceRef, String, Bool) -> Void) {
         onToolExecutionStateChange = handler
     }
 
@@ -1552,10 +1552,10 @@ public actor OrchestrationRuntime {
     /// Forwards a live available-tool-names update to the same sink as agent-start, so the
     /// inspector's "Available Tools" reflects the current (scoped) set rather than the static list.
     private func publishAvailableToolNames(_ role: AgentRole, _ names: [String]) {
-        onAgentStarted?(role, names)
+        onAgentStarted?(AgentInstanceRef.forRole(role, instanceID: nil), names)
     }
 
-    public func setOnAgentStarted(_ handler: @escaping @Sendable (AgentRole, [String]) -> Void) {
+    public func setOnAgentStarted(_ handler: @escaping @Sendable (AgentInstanceRef, [String]) -> Void) {
         onAgentStarted = handler
     }
 
@@ -2658,7 +2658,7 @@ public actor OrchestrationRuntime {
         // unsubscribes and drops it (stop() on a never-started agent is a no-op).
         guard !aborted, !stopRequested else { return }
         await smithAgent.start(initialInstruction: initialInstruction)
-        onAgentStarted?(.smith, await smithAgent.toolNames)
+        onAgentStarted?(AgentInstanceRef(role: .smith, instanceID: id), await smithAgent.toolNames)
 
         await channel.post(ChannelMessage(
             sender: .system,
@@ -3469,12 +3469,12 @@ public actor OrchestrationRuntime {
         }
         supervisor.addSubscription(brownSubID, to: brownID)
 
-        onAgentStarted?(.securityAgent, SecurityAgentBehavior.toolNames)
+        onAgentStarted?(AgentInstanceRef(role: .securityAgent, instanceID: brownID), SecurityAgentBehavior.toolNames)
 
         // Seed the inspector BEFORE the run loop starts, so Brown's first refreshActiveTools —
         // which publishes the authoritative available set via onActiveToolNamesChanged — overwrites
         // the seed instead of racing it. Pre-start, toolNames reports the scoped approved names.
-        onAgentStarted?(.brown, await brownAgent.toolNames)
+        onAgentStarted?(AgentInstanceRef(role: .brown, instanceID: brownID), await brownAgent.toolNames)
         await brownAgent.start()
 
         return brownID
@@ -3762,15 +3762,15 @@ public actor OrchestrationRuntime {
             },
             onProcessingStateChange: { [weak self] isProcessing in
                 guard let self else { return }
-                Task { await self.notifyProcessingStateChange(role: role, isProcessing: isProcessing) }
+                Task { await self.notifyProcessingStateChange(role: role, instanceID: agentID, isProcessing: isProcessing) }
             },
             onSecurityAgentProcessingStateChange: { [weak self] isProcessing in
                 guard let self else { return }
-                Task { await self.notifyProcessingStateChange(role: .securityAgent, isProcessing: isProcessing) }
+                Task { await self.notifyProcessingStateChange(role: .securityAgent, instanceID: agentID, isProcessing: isProcessing) }
             },
             onToolExecutionStateChange: { [weak self] toolName, started in
                 guard let self else { return }
-                Task { await self.notifyToolExecutionStateChange(role: role, toolName: toolName, started: started) }
+                Task { await self.notifyToolExecutionStateChange(role: role, instanceID: agentID, toolName: toolName, started: started) }
             },
             scheduleWake: { [wakeScheduler] request in
                 guard let wakeScheduler else { return .error("Scheduler not available.") }
@@ -3928,13 +3928,13 @@ Message:
         return .success("Inbound user message reported to Smith.")
     }
 
-    private func notifyProcessingStateChange(role: AgentRole, isProcessing: Bool) async {
-        onProcessingStateChange?(role, isProcessing)
+    private func notifyProcessingStateChange(role: AgentRole, instanceID: UUID? = nil, isProcessing: Bool) async {
+        onProcessingStateChange?(AgentInstanceRef.forRole(role, instanceID: instanceID), isProcessing)
         await powerManager?.activityOccurred()
     }
 
-    private func notifyToolExecutionStateChange(role: AgentRole, toolName: String, started: Bool) async {
-        onToolExecutionStateChange?(role, toolName, started)
+    private func notifyToolExecutionStateChange(role: AgentRole, instanceID: UUID? = nil, toolName: String, started: Bool) async {
+        onToolExecutionStateChange?(AgentInstanceRef.forRole(role, instanceID: instanceID), toolName, started)
         await powerManager?.activityOccurred()
     }
 
