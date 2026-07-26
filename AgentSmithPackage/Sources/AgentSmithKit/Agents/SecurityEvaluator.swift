@@ -177,7 +177,10 @@ actor SecurityEvaluator {
     /// - `.validator` — the read-only evidence quartet, which is its entire toolset.
     static let autoApprovedToolsByRole: [AgentRole: Set<String>] = [
         .smith: Set<String>([
-            "message_brown", "message_user", "provide_help", "report_inbound_user_message",
+            // Only tools Smith actually holds. A grant for a tool a role can't call is dead, and
+            // dead grants read as intent to a later reviewer — `report_inbound_user_message` was
+            // listed here and belongs to Brown.
+            "message_brown", "message_user", "provide_help",
             "create_task", "run_task", "update_task", "edit_task", "amend_task",
             "get_task_details", "list_tasks", "set_template_inputs",
             "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
