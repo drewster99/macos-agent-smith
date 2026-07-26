@@ -298,8 +298,15 @@ public actor AgentActor {
     private var drainNotifications: (@Sendable () async -> [String])?
 
     private var maxToolCallsPerIteration: Int
-    /// Maximum concurrent Security Agent evaluations to prevent overwhelming the LLM backend.
-    private static let maxConcurrentEvaluations = 8
+    /// Maximum concurrent Security Agent evaluations for ONE agent's tool batch, enforced as a
+    /// sliding window rather than a fan-out.
+    ///
+    /// This is per AGENT, not global: with `maxConcurrentWorkers` Browns live, the ceiling across
+    /// the app is this times that, before the validator's own concurrent evaluations are counted.
+    /// Raised 8 → 20 on 2026-07-26. The original cap of 5 (later 8) came from Ollama returning
+    /// "too many concurrent requests"; if a backend starts refusing again, this is the first knob
+    /// to turn back down.
+    private static let maxConcurrentEvaluations = 20
 
     /// Worst-case character overhead for tool definitions and per-turn suffixes
     /// that are sent with each API call but not stored in conversationHistory.
