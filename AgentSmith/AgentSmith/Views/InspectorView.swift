@@ -951,11 +951,20 @@ private struct ConcurrencyStrip: View {
         ]
     }
 
+    /// Two chips per row, laid out as a Grid (not a free-flowing row) so the same column position
+    /// lines up across rows — e.g. Security and Summarizer share a left edge, Search sits under Brown.
+    private static let columnCount = 2
+
     var body: some View {
         let snapshot = shared.liveActivitySnapshot
-        FlowLayout(spacing: 10) {
-            ForEach(meters(snapshot)) { meter in
-                ConcurrencyChip(count: meter.count, label: meter.label, color: meter.color)
+        let ms = meters(snapshot)
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            ForEach(Array(stride(from: 0, to: ms.count, by: Self.columnCount)), id: \.self) { start in
+                GridRow {
+                    ForEach(ms[start ..< min(start + Self.columnCount, ms.count)]) { meter in
+                        ConcurrencyChip(count: meter.count, label: meter.label, color: meter.color)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
