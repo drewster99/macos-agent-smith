@@ -2901,14 +2901,20 @@ public actor AgentActor {
         // Memory search failure is non-fatal — Smith just doesn't get the auto-context this time.
         let results: SemanticSearchResults
         do {
+            // MEMORIES ONLY on a user message. Prior-task summaries are retrieved when a TASK is
+            // created or started (`TaskContextRetrieval`), where "what did we do before that
+            // resembles this work?" is the question being asked. A conversational turn is not
+            // that question, and searching the task corpus here cost a second query embedding
+            // and a second corpus scan on every single thing the user typed.
+            //
+            // `taskLimit: 0` is load-bearing, not cosmetic: `searchAll` skips both the task
+            // embedding and the task scan when the limit is zero.
             results = try await toolContext.memoryStore.searchAll(
                 query: query,
                 memoryLimit: 3,
-                taskLimit: 3,
+                taskLimit: 0,
                 memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
-                taskCosineGate: MemoryStore.taskInjectionCosineGate,
                 memoryInstruction: MemoryStore.memoryRetrievalInstruction,
-                taskInstruction: MemoryStore.taskRetrievalInstruction,
                 source: "auto-context"
             )
         } catch {
@@ -2991,7 +2997,7 @@ public actor AgentActor {
     private func formatAutoMemoryContextBlock(results: SemanticSearchResults) -> String {
         var lines: [String] = []
         lines.append(Self.autoMemoryContextMarker)
-        lines.append("*System note: relevant memories and prior tasks were auto-attached based on the user's message above. Consider this background before creating a task or answering. The user did not write any of the text inside this block.*")
+        lines.append("*System note: relevant memories were auto-attached based on the user's message above. Consider this background before creating a task or answering. Prior-task summaries are NOT searched here — those are retrieved when a task is created or started — so their absence means nothing was looked for, not that nothing was relevant. The user did not write any of the text inside this block.*")
 
         if !results.memories.isEmpty {
             lines.append("")

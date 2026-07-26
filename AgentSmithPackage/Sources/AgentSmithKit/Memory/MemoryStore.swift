@@ -39,11 +39,26 @@ private enum MemoryStoreError: Error, CustomStringConvertible {
     /// The embedding backend returned a vector containing NaN or infinity. Cosine
     /// math would propagate non-finite values through scoring and break sort order.
     case nonFiniteEmbedding
+    /// A batched embed returned a different number of vectors than queries handed to it.
+    /// Vectors are matched to queries positionally, so a count mismatch means we can no
+    /// longer trust WHICH query any vector belongs to — failing beats searching a corpus
+    /// with another pool's query vector.
+    case batchEmbeddingCountMismatch(expected: Int, received: Int)
+    /// A pool was scheduled for search but its query vector is missing from the batch result.
+    /// Only reachable through a keying bug in `embedDistinct`; it earns an error rather than a
+    /// fallback because returning `[]` would be indistinguishable from a genuine "nothing
+    /// matched", quietly reporting an empty corpus we never actually scored.
+    case missingMemoryQueryEmbedding
+    case missingTaskQueryEmbedding
 
     var description: String {
         switch self {
         case .emptyEmbedding: return "Embedding backend returned an empty vector"
         case .nonFiniteEmbedding: return "Embedding backend returned a non-finite vector (NaN/inf)"
+        case let .batchEmbeddingCountMismatch(expected, received):
+            return "Batch embed returned \(received) vectors for \(expected) queries"
+        case .missingMemoryQueryEmbedding: return "Batch embed result is missing the memory query vector"
+        case .missingTaskQueryEmbedding: return "Batch embed result is missing the task query vector"
         }
     }
 }
@@ -135,15 +150,36 @@ public struct MemoryQueryRecord: Sendable, Identifiable, Equatable {
     public let taskHits: Int
     /// Wall-clock round-trip time in milliseconds, including the query embedding.
     public let latencyMs: Int
+    /// Milliseconds spent producing the query embedding(s). Usually the dominant term — a
+    /// corpus scan is arithmetic over cached vectors, an embed is a model forward pass.
+    public let embedMs: Int
+    /// Milliseconds spent scoring the MEMORY corpus. Zero when memories weren't searched.
+    public let memorySearchMs: Int
+    /// Milliseconds spent scoring the PRIOR-TASK corpus. Zero when task summaries weren't
+    /// searched — which is the normal case for auto-context on a user message.
+    public let taskSearchMs: Int
     /// What triggered the query (e.g. "auto-context", "task-context", "search_memory", "system").
     public let source: String
 
-    public init(timestamp: Date, query: String, memoryHits: Int, taskHits: Int, latencyMs: Int, source: String) {
+    public init(
+        timestamp: Date,
+        query: String,
+        memoryHits: Int,
+        taskHits: Int,
+        latencyMs: Int,
+        embedMs: Int = 0,
+        memorySearchMs: Int = 0,
+        taskSearchMs: Int = 0,
+        source: String
+    ) {
         self.timestamp = timestamp
         self.query = query
         self.memoryHits = memoryHits
         self.taskHits = taskHits
         self.latencyMs = latencyMs
+        self.embedMs = embedMs
+        self.memorySearchMs = memorySearchMs
+        self.taskSearchMs = taskSearchMs
         self.source = source
     }
 }
@@ -635,19 +671,58 @@ public actor MemoryStore {
         tracker?.begin(.memorySearch)
         defer { tracker?.end(.memorySearch) }
         let start = Date()
+        let embedStart = Date()
         let queryVector = try await engine.embed(query)
         try Self.validate(embedding: queryVector)
+        let embedMs = Int(Date().timeIntervalSince(embedStart) * 1000)
         let queryTokens = Self.queryTokenSet(from: query)
+        let searchStart = Date()
         let results = searchMemoriesInternal(
             queryVector: queryVector,
             queryTokens: queryTokens,
             limit: limit,
             threshold: threshold
         )
+        let memorySearchMs = Int(Date().timeIntervalSince(searchStart) * 1000)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        memoryStoreLogger.debug("searchMemories: \(results.count, privacy: .public) results from \(self.memories.count, privacy: .public) memories in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
-        onQueryRecorded?(MemoryQueryRecord(timestamp: start, query: query, memoryHits: results.count, taskHits: 0, latencyMs: ms, source: source))
+        memoryStoreLogger.notice("searchMemories [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.memories.count, privacy: .public) memories in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms, memory-scan \(memorySearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
+        onQueryRecorded?(MemoryQueryRecord(
+            timestamp: start,
+            query: query,
+            memoryHits: results.count,
+            taskHits: 0,
+            latencyMs: ms,
+            embedMs: embedMs,
+            memorySearchMs: memorySearchMs,
+            source: source
+        ))
         return results
+    }
+
+    /// Embeds the DISTINCT queries in a single batched forward pass and returns them keyed by
+    /// query text. Deduplicating matters as much as batching: when two pools share an
+    /// instruction prefix (or use none) the prefixed queries are identical, and embedding that
+    /// text twice would be pure waste rather than merely a larger batch.
+    private func embedDistinct(_ queries: [String]) async throws -> [String: [Float]] {
+        var distinct: [String] = []
+        for query in queries where !distinct.contains(query) {
+            distinct.append(query)
+        }
+        guard !distinct.isEmpty else { return [:] }
+
+        let vectors = try await engine.embed(batch: distinct)
+        guard vectors.count == distinct.count else {
+            throw MemoryStoreError.batchEmbeddingCountMismatch(
+                expected: distinct.count,
+                received: vectors.count
+            )
+        }
+        var byQuery: [String: [Float]] = [:]
+        for (query, vector) in zip(distinct, vectors) {
+            try Self.validate(embedding: vector)
+            byQuery[query] = vector
+        }
+        return byQuery
     }
 
     private func searchMemoriesInternal(
@@ -657,6 +732,10 @@ public actor MemoryStore {
         threshold: Double,
         cosineGate: Double? = nil
     ) -> [MemorySearchResult] {
+        // A caller asking for zero results is asking us NOT to search this corpus. Scoring
+        // every entry and then discarding all of it is pure waste — and `searchAll` skips the
+        // matching query embedding on the same condition.
+        guard limit > 0 else { return [] }
         var entryRefs: [MemoryEntry] = []
         var semanticScores: [Double] = []
         var textScores: [Double] = []
@@ -710,9 +789,12 @@ public actor MemoryStore {
         tracker?.begin(.memorySearch)
         defer { tracker?.end(.memorySearch) }
         let start = Date()
+        let embedStart = Date()
         let queryVector = try await engine.embed(query)
         try Self.validate(embedding: queryVector)
+        let embedMs = Int(Date().timeIntervalSince(embedStart) * 1000)
         let queryTokens = Self.queryTokenSet(from: query)
+        let searchStart = Date()
         let results = searchTaskSummariesInternal(
             queryVector: queryVector,
             queryTokens: queryTokens,
@@ -720,9 +802,19 @@ public actor MemoryStore {
             threshold: threshold,
             excludeDeleted: excludeDeletedTasks
         )
+        let taskSearchMs = Int(Date().timeIntervalSince(searchStart) * 1000)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        memoryStoreLogger.debug("searchTaskSummaries: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
-        onQueryRecorded?(MemoryQueryRecord(timestamp: start, query: query, memoryHits: 0, taskHits: results.count, latencyMs: ms, source: source))
+        memoryStoreLogger.notice("searchTaskSummaries [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms, task-scan \(taskSearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
+        onQueryRecorded?(MemoryQueryRecord(
+            timestamp: start,
+            query: query,
+            memoryHits: 0,
+            taskHits: results.count,
+            latencyMs: ms,
+            embedMs: embedMs,
+            taskSearchMs: taskSearchMs,
+            source: source
+        ))
         return results
     }
 
@@ -734,6 +826,9 @@ public actor MemoryStore {
         cosineGate: Double? = nil,
         excludeDeleted: Bool = true
     ) -> [TaskSummarySearchResult] {
+        // See `searchMemoriesInternal`: limit 0 means "don't search this corpus at all",
+        // not "score everything and return none of it".
+        guard limit > 0 else { return [] }
         var entryRefs: [TaskSummaryEntry] = []
         var semanticScores: [Double] = []
         var textScores: [Double] = []
@@ -801,36 +896,52 @@ public actor MemoryStore {
         tracker?.begin(.memorySearch)
         defer { tracker?.end(.memorySearch) }
         let start = Date()
-        // Each pool gets its own (optionally instruction-prefixed) query embedding. Reuse the
-        // memory vector for tasks when the prefixed queries are identical — the common (no-prefix
-        // or same-prefix) case — so we don't pay for a second embed needlessly.
-        let memoryQuery = Self.instructed(memoryInstruction, query)
-        let taskQuery = Self.instructed(taskInstruction, query)
-        let memoryVector = try await engine.embed(memoryQuery)
-        try Self.validate(embedding: memoryVector)
-        let taskVector: [Float]
-        if taskQuery == memoryQuery {
-            taskVector = memoryVector
-        } else {
-            taskVector = try await engine.embed(taskQuery)
-            try Self.validate(embedding: taskVector)
+        // Each pool gets its own (optionally instruction-prefixed) query embedding, because the
+        // instructions steer an instruction-tuned model toward different neighbourhoods. Both
+        // are embedded in ONE batched forward pass rather than two sequential ones: the prefixes
+        // still differ and each pool still gets its own vector, we just stop paying twice for it.
+        // A pool with a zero limit isn't being searched, so it contributes no query at all.
+        let memoryQuery = memoryLimit > 0 ? Self.instructed(memoryInstruction, query) : nil
+        let taskQuery = taskLimit > 0 ? Self.instructed(taskInstruction, query) : nil
+
+        let embedStart = Date()
+        let vectors = try await embedDistinct([memoryQuery, taskQuery].compactMap { $0 })
+        let embedMs = Int(Date().timeIntervalSince(embedStart) * 1000)
+
+        var memoryResults: [MemorySearchResult] = []
+        var memorySearchMs = 0
+        if let memoryQuery {
+            guard let memoryVector = vectors[memoryQuery] else {
+                throw MemoryStoreError.missingMemoryQueryEmbedding
+            }
+            let searchStart = Date()
+            memoryResults = searchMemoriesInternal(
+                queryVector: memoryVector,
+                queryTokens: Self.queryTokenSet(from: memoryQuery),
+                limit: memoryLimit,
+                threshold: threshold,
+                cosineGate: memoryCosineGate
+            )
+            memorySearchMs = Int(Date().timeIntervalSince(searchStart) * 1000)
         }
 
-        let memoryResults = searchMemoriesInternal(
-            queryVector: memoryVector,
-            queryTokens: Self.queryTokenSet(from: memoryQuery),
-            limit: memoryLimit,
-            threshold: threshold,
-            cosineGate: memoryCosineGate
-        )
-        let taskResults = searchTaskSummariesInternal(
-            queryVector: taskVector,
-            queryTokens: Self.queryTokenSet(from: taskQuery),
-            limit: taskLimit,
-            threshold: threshold,
-            cosineGate: taskCosineGate,
-            excludeDeleted: excludeDeletedTasks
-        )
+        var taskResults: [TaskSummarySearchResult] = []
+        var taskSearchMs = 0
+        if let taskQuery {
+            guard let taskVector = vectors[taskQuery] else {
+                throw MemoryStoreError.missingTaskQueryEmbedding
+            }
+            let searchStart = Date()
+            taskResults = searchTaskSummariesInternal(
+                queryVector: taskVector,
+                queryTokens: Self.queryTokenSet(from: taskQuery),
+                limit: taskLimit,
+                threshold: threshold,
+                cosineGate: taskCosineGate,
+                excludeDeleted: excludeDeletedTasks
+            )
+            taskSearchMs = Int(Date().timeIntervalSince(searchStart) * 1000)
+        }
 
         // Retrieval-stat bumps for the memories we actually return. Marked dirty (not flushed) so we
         // don't re-serialize the embedding-bearing corpus on every read; persistRetrievalStatsIfNeeded()
@@ -848,8 +959,18 @@ public actor MemoryStore {
         if trackedAnyRetrieval { retrievalStatsDirty = true }
 
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        memoryStoreLogger.debug("searchAll: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (query: \(query.prefix(60), privacy: .public))")
-        onQueryRecorded?(MemoryQueryRecord(timestamp: start, query: query, memoryHits: memoryResults.count, taskHits: taskResults.count, latencyMs: ms, source: source))
+        memoryStoreLogger.notice("searchAll [\(source, privacy: .public)]: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms, memory-scan \(memorySearchMs, privacy: .public)ms over \(self.memories.count, privacy: .public), task-scan \(taskSearchMs, privacy: .public)ms over \(self.taskSummaries.count, privacy: .public)) (query: \(query.prefix(60), privacy: .public))")
+        onQueryRecorded?(MemoryQueryRecord(
+            timestamp: start,
+            query: query,
+            memoryHits: memoryResults.count,
+            taskHits: taskResults.count,
+            latencyMs: ms,
+            embedMs: embedMs,
+            memorySearchMs: memorySearchMs,
+            taskSearchMs: taskSearchMs,
+            source: source
+        ))
         return SemanticSearchResults(memories: memoryResults, taskSummaries: taskResults)
     }
 
