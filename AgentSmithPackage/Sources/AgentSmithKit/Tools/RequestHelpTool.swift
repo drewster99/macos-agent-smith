@@ -57,7 +57,7 @@ public struct RequestHelpTool: AgentTool {
         }
 
         // Idempotency: a task already submitted (for review or help) isn't a fresh escalation.
-        if task.status == .awaitingReview || task.status == .completed {
+        if task.status == .awaitingReview || task.status == .awaitingHelp || task.status == .completed {
             return .success("Already submitted — waiting for Smith.")
         }
 

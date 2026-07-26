@@ -457,7 +457,7 @@ struct TaskRowButton: View {
                 Label("Delete", systemImage: "trash")
             })
 
-        case .awaitingReview:
+        case .awaitingReview, .awaitingHelp:
             EmptyView()
 
         case .pending, .paused, .interrupted:

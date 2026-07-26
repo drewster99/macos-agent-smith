@@ -3,9 +3,9 @@ import Foundation
 @testable import AgentSmithKit
 
 /// Tests for the `request_help` ↔ `provide_help` round-trip — Brown's honest blocker-escalation
-/// path, mirroring `task_complete` ↔ `review_work`. A help request parks in `awaitingReview`
-/// (reusing the review wait machinery) but is flagged via `AgentTask.helpRequest`, so `review_work`
-/// refuses it and Smith answers via `provide_help`, which returns the task to running and wakes Brown.
+/// path. A help request parks in its own `awaitingHelp` state (Brown stays alive, holding its slot),
+/// flagged via `AgentTask.helpRequest`; Smith answers via `provide_help`, which returns the task to
+/// running and wakes Brown.
 @Suite("Help request round-trip")
 struct HelpRequestTests {
 
@@ -39,7 +39,7 @@ struct HelpRequestTests {
         )
     }
 
-    @Test("request_help parks the task in awaitingReview, flags it, and notifies Smith (no result set)")
+    @Test("request_help parks the task in awaitingHelp, flags it, and notifies Smith (no result set)")
     func requestHelpEscalates() async throws {
         let channel = MessageChannel()
         let taskStore = TaskStore()
@@ -59,7 +59,7 @@ struct HelpRequestTests {
         #expect(result.succeeded)
 
         let updated = try #require(await taskStore.task(id: task.id))
-        #expect(updated.status == .awaitingReview)
+        #expect(updated.status == .awaitingHelp)
         #expect(updated.helpRequest?.contains("transcript") == true)
         #expect(updated.result == nil)  // a blocker is NOT a result
 

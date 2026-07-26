@@ -158,12 +158,12 @@ struct RunTaskTool: AgentTool {
         let capacity = await context.workerCapacity()
         let slotHolders = allTasks.filter {
             $0.disposition == .active && $0.id != taskID &&
-            ($0.status == .starting || $0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
+            ($0.status == .starting || $0.status == .running || $0.status == .validating || $0.status == .awaitingReview || $0.status == .awaitingHelp)
         }
         if !task.isTemplate && slotHolders.count >= capacity {
             // Help requests and reviews deserve a pointed message — resolving one is
             // usually the fastest way to free a slot.
-            if let helpTask = slotHolders.first(where: { $0.status == .awaitingReview && $0.helpRequest != nil }) {
+            if let helpTask = slotHolders.first(where: { $0.status == .awaitingHelp }) {
                 return .failure("""
                     Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(helpTask.title)' \
                     has a blocker from Brown awaiting your help. Resolve it with `provide_help` to free a slot.
@@ -172,7 +172,7 @@ struct RunTaskTool: AgentTool {
             if let reviewTask = slotHolders.first(where: { $0.status == .awaitingReview }) {
                 return .failure("""
                     Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(reviewTask.title)' \
-                    is awaiting your review. Call review_work on it to free a slot.
+                    is awaiting your review. Resolve it to free a slot.
                     """)
             }
             let names = slotHolders.map { "'\($0.title)'" }.joined(separator: ", ")

@@ -39,11 +39,12 @@ struct MessageBrownTool: AgentTool {
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
-        // Defense-in-depth: reject if any task is awaiting review, even if the tool was
-        // presented from a stale definition cache. Smith should use review_work instead.
+        // Defense-in-depth: reject if any task is awaiting review or help, even if the tool was
+        // presented from a stale definition cache. Those submissions have their own resolution
+        // paths; message_brown is not one of them.
         let activeTasks = await context.taskStore.allTasks().filter { $0.disposition == .active }
-        if activeTasks.contains(where: { $0.status == .awaitingReview }) {
-            return .failure("Cannot message Brown while a task is awaiting review. Use `review_work` to accept or reject the submission first.")
+        if activeTasks.contains(where: { $0.status == .awaitingReview || $0.status == .awaitingHelp }) {
+            return .failure("Cannot message Brown while a task is awaiting review or help. Resolve the submission first (`provide_help` for a blocker).")
         }
 
         guard case .string(let message) = arguments["message"] else {

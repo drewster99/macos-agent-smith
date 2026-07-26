@@ -307,6 +307,7 @@ enum TaskStatusBadge {
         case .failed: return .red
         case .paused: return .indigo
         case .awaitingReview: return .orange
+        case .awaitingHelp: return .orange
         case .interrupted: return .yellow
         case .scheduled: return .purple
         case .validating: return .teal
@@ -322,6 +323,7 @@ enum TaskStatusBadge {
         case .failed: return "xmark.circle.fill"
         case .paused: return "pause.circle.fill"
         case .awaitingReview: return "eye.circle.fill"
+        case .awaitingHelp: return "questionmark.circle.fill"
         case .interrupted: return "exclamationmark.circle.fill"
         case .scheduled: return "clock.badge"
         case .validating: return "checklist"

@@ -185,6 +185,12 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         case failed
         case paused
         case awaitingReview
+        /// Brown hit a blocker it can't resolve and raised `request_help`; the worker stays ALIVE
+        /// (blocked, holding its slot) until Smith answers via `provide_help`, which returns it to
+        /// `.running`. Distinct from `.awaitingReview` — a help request happens MID-work, carries no
+        /// submitted result, and keeps its worker; `.awaitingReview` is a validator-park with the
+        /// worker already torn down.
+        case awaitingHelp
         /// The task was running when the app was interrupted (crash or force-quit).
         case interrupted
         /// The task is queued with a future `scheduledRunAt`. The auto-runner skips these,
@@ -219,6 +225,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             case .failed: return "Failed"
             case .paused: return "Paused"
             case .awaitingReview: return "Awaiting Review"
+            case .awaitingHelp: return "Awaiting Help"
             case .interrupted: return "Interrupted"
             case .scheduled: return "Scheduled"
             case .validating: return "Validating"
@@ -227,7 +234,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
 
         /// Whether this status represents work that is actively running — prevents archiving or deletion.
         public var isInProgress: Bool {
-            self == .starting || self == .running || self == .paused || self == .awaitingReview || self == .validating
+            self == .starting || self == .running || self == .paused || self == .awaitingReview || self == .awaitingHelp || self == .validating
         }
 
         /// Whether this status is a terminal outcome — the task's `UsageRecord`s
@@ -255,20 +262,22 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             switch self {
             case .pending, .paused, .interrupted, .scheduled, .completed, .failed:
                 return true
-            case .starting, .running, .awaitingReview, .validating:
+            case .starting, .running, .awaitingReview, .awaitingHelp, .validating:
                 return false
             }
         }
 
         /// Whether the user can edit the task's acceptance criteria and step list in
         /// this state — any state where no worker or validator is actively consuming
-        /// them. `awaitingReview` is included deliberately: fixing a wrong criterion is
-        /// exactly how a validation escalation gets resolved before work is sent back.
+        /// them. `awaitingReview` is included deliberately: it's a validator-park with no
+        /// live worker, and fixing a wrong criterion is exactly how it gets resolved before
+        /// re-validating. `awaitingHelp` is excluded: Brown is still alive there (blocked on a
+        /// help request) and owns its step list.
         public var isValidationContractEditable: Bool {
             switch self {
             case .pending, .paused, .interrupted, .scheduled, .failed, .awaitingReview:
                 return true
-            case .starting, .running, .validating, .completed:
+            case .starting, .running, .awaitingHelp, .validating, .completed:
                 return false
             }
         }

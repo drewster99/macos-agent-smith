@@ -711,7 +711,7 @@ public actor OrchestrationRuntime {
     private func dispatchAutoRunWake(taskID: UUID) async {
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let inFlight = activeTasks.first {
-            $0.status == .starting || $0.status == .running || $0.status == .awaitingReview || $0.status == .validating
+            $0.status == .starting || $0.status == .running || $0.status == .awaitingReview || $0.status == .awaitingHelp || $0.status == .validating
         }
 
         // A free worker slot means the scheduled task can start right now, no interrupt
@@ -1767,7 +1767,7 @@ public actor OrchestrationRuntime {
             // blocker precisely so its worker cycles out here (context saved first;
             // resume respawns from lastBrownContext).
             let occupiesSlot = workerTask.map {
-                ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview)
+                ($0.status == .running || $0.status == .validating || $0.status == .awaitingReview || $0.status == .awaitingHelp)
                     && $0.disposition == .active
             } ?? false
             guard !occupiesSlot else { continue }
@@ -2434,6 +2434,7 @@ public actor OrchestrationRuntime {
         } else {
             // Cold launch — gather all active tasks by status and surface everything to Smith.
             let awaitingReviewTasks = activeTasks.filter { $0.status == .awaitingReview }
+            let awaitingHelpTasks = activeTasks.filter { $0.status == .awaitingHelp }
             let validatingTasks = activeTasks.filter { $0.status == .validating }
             let interruptedTasks = activeTasks.filter { $0.status == .interrupted }
             // Templates are `.pending` launchers, not queued work — exclude them from the
@@ -2499,10 +2500,10 @@ public actor OrchestrationRuntime {
                     """)
             }
 
-            // A help request also parks in awaitingReview, but it's a blocker, not finished
-            // work — split it out so Smith is pointed at `provide_help`, not `review_work`.
-            let helpRequestTasks = awaitingReviewTasks.filter { $0.helpRequest != nil }
-            let reviewTasks = awaitingReviewTasks.filter { $0.helpRequest == nil }
+            // Help requests are their own `.awaitingHelp` state now — a blocker (Smith answers via
+            // `provide_help`), never a finished-work review. `.awaitingReview` is review-only.
+            let helpRequestTasks = awaitingHelpTasks
+            let reviewTasks = awaitingReviewTasks
             if !reviewTasks.isEmpty {
                 let taskList = reviewTasks.map { task in
                     var entry = "- \(task.title) (id: \(task.id.uuidString))"
@@ -4035,7 +4036,7 @@ Message:
         // woke Smith every 10 minutes into a "No action needed" text-only loop that the circuit
         // breaker eventually terminated. Smith's job in this state is to review, not to monitor.
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        if activeTasks.contains(where: { $0.status == .awaitingReview }) { return nil }
+        if activeTasks.contains(where: { $0.status == .awaitingReview || $0.status == .awaitingHelp }) { return nil }
         return await Self.assembleBrownActivityDigest(channel: channel, since: since)
     }
 

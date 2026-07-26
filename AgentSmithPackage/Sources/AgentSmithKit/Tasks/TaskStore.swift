@@ -647,7 +647,7 @@ public actor TaskStore {
     /// Tasks are sorted by `createdAt` ascending so the result is deterministic
     /// regardless of dictionary iteration order.
     public func taskForAgent(agentID: UUID) -> AgentTask? {
-        let actionableStatuses: Set<AgentTask.Status> = [.pending, .running, .paused, .awaitingReview, .interrupted]
+        let actionableStatuses: Set<AgentTask.Status> = [.pending, .running, .paused, .awaitingReview, .awaitingHelp, .interrupted]
         return tasks.values
             .filter { $0.assigneeIDs.contains(agentID) && actionableStatuses.contains($0.status) }
             .sorted { $0.createdAt < $1.createdAt }
@@ -718,10 +718,11 @@ public actor TaskStore {
         onChange?()
     }
 
-    /// Records a help-request escalation from Brown and parks the task in `.awaitingReview`,
-    /// reusing the review wait/slot machinery. `helpRequest` marks it as a blocker (not a
-    /// result), so `review_work` refuses it and Smith answers via `provide_help`. Deliberately
-    /// does NOT touch `result` — there is no completed work to deliver.
+    /// Records a help-request escalation from Brown and parks the task in `.awaitingHelp`, its own
+    /// state (Brown stays alive, blocked, holding its slot). `helpRequest` marks it as a blocker
+    /// (not a result); Smith answers via `provide_help`. Deliberately does NOT touch `result` —
+    /// there is no completed work to deliver, which is exactly why this is NOT `.awaitingReview`
+    /// (that state's invariant requires a result).
     // MARK: - Acceptance criteria (requester-owned)
 
     /// Replaces the task's acceptance criteria. Any criterion whose validation prompt,
@@ -980,7 +981,7 @@ public actor TaskStore {
     public func requestHelp(id: UUID, request: String) {
         guard var task = tasks[id] else { return }
         task.helpRequest = request
-        task.status = .awaitingReview
+        task.status = .awaitingHelp
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
@@ -1321,6 +1322,13 @@ public actor TaskStore {
     public func restore(_ persistedTasks: [AgentTask]) {
         for var task in persistedTasks {
             task.assigneeIDs.removeAll()
+            // Migration: help requests used to park in `.awaitingReview` alongside validator
+            // escalations. They now have their own `.awaitingHelp` state (no result requirement).
+            // A persisted `.awaitingReview` task carrying a `helpRequest` is an old help park —
+            // move it to the correct state so it isn't treated as a reviewable submission.
+            if task.status == .awaitingReview && task.helpRequest != nil {
+                task.status = .awaitingHelp
+            }
             tasks[task.id] = task
         }
         onChange?()

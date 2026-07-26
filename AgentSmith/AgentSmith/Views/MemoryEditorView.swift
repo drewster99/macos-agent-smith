@@ -686,6 +686,7 @@ struct MemoryEditorView: View {
         case .starting: return .cyan
         case .running: return .blue
         case .awaitingReview: return .orange
+        case .awaitingHelp: return .orange
         case .completed: return .green
         case .failed: return .red
         case .paused: return .secondary
