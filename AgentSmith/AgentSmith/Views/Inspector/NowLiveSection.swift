@@ -76,6 +76,7 @@ struct NowLiveSection: View {
                 title: task.title,
                 status: task.status,
                 brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance),
+                securityEvaluating: Self.securityEvaluating(for: task, processing: processing),
                 tools: Array((toolsByTask[task.id] ?? []).suffix(Self.maxToolRowsPerTask).reversed())
             )
         }
@@ -94,15 +95,24 @@ struct NowLiveSection: View {
         tools: [AgentInstanceRef: [String: Int]]
     ) -> String? {
         for id in task.assigneeIDs {
-            let ref = AgentInstanceRef(role: .brown, instanceID: id)
-            if let counts = tools[ref], !counts.isEmpty {
+            let brownRef = AgentInstanceRef(role: .brown, instanceID: id)
+            if let counts = tools[brownRef], !counts.isEmpty {
                 let names = counts.keys.sorted()
                 if names.count == 1, let only = names.first { return "running \(only)" }
                 return "running \(names.count) tools"
             }
-            if processing.contains(ref) { return "thinking" }
+            // Brown is blocked while the Security Agent reviews the call it just issued.
+            if processing.contains(AgentInstanceRef(role: .securityAgent, instanceID: id)) {
+                return "waiting on security"
+            }
+            if processing.contains(brownRef) { return "thinking" }
         }
         return nil
+    }
+
+    /// Whether the Security Agent is actively evaluating a call for this task's Brown.
+    private static func securityEvaluating(for task: AgentTask, processing: Set<AgentInstanceRef>) -> Bool {
+        task.assigneeIDs.contains { processing.contains(AgentInstanceRef(role: .securityAgent, instanceID: $0)) }
     }
 
     /// Most-recent tool calls shown per task before older ones fall off.
@@ -126,6 +136,11 @@ struct NowLiveSection: View {
         /// M2 re-key) and matched by the Brown instance id in the task's assignees — so two
         /// concurrent Browns no longer overwrite one shared indicator. Nil when idle.
         let brownState: String?
+        /// True while the Security Agent is actively evaluating a call for this task's Brown
+        /// (the 4–6 s LLM review). Drives the nested "Security · evaluating" row and Brown's
+        /// "waiting on security" state. Auto-approved read-only evidence never sets this —
+        /// it takes the no-LLM fast path, so there's genuinely no wait to show.
+        let securityEvaluating: Bool
         let tools: [ToolActivity]
     }
 
@@ -174,6 +189,18 @@ private struct LiveTaskRowView: View {
                 .padding(.leading, 12)
             }
 
+            if row.securityEvaluating {
+                HStack(spacing: 6) {
+                    Text("Security")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AppColors.color(for: .agent(.securityAgent)))
+                    Text("evaluating")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 28)
+            }
+
             ForEach(row.tools) { tool in
                 HStack(spacing: 6) {
                     Text(tool.name)
@@ -183,7 +210,7 @@ private struct LiveTaskRowView: View {
 
                     Spacer(minLength: 8)
 
-                    Text(tool.timestamp, style: .time)
+                    Text(tool.timestamp, style: .relative)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.tertiary)
                 }
