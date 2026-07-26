@@ -42,6 +42,8 @@ struct NowLiveSection: View {
         .task { recompute() }
         .onChange(of: taskSignature) { _, _ in recompute() }
         .onChange(of: viewModel.messages) { _, _ in recompute() }
+        .onChange(of: viewModel.processingInstances) { _, _ in recompute() }
+        .onChange(of: viewModel.toolExecutingByInstance) { _, _ in recompute() }
     }
 
     /// A cheap Equatable digest of the active tasks' identity + stage, so a status change
@@ -62,11 +64,18 @@ struct NowLiveSection: View {
             )
         }
 
+        // Per-instance live state (the M2 re-key payoff): each task reads ITS OWN Brown's
+        // thinking/tool state, matched by the Brown instance id in the task's assignees, so
+        // two concurrent Browns no longer clobber one shared role-level indicator.
+        let processing = viewModel.processingInstances
+        let toolsByInstance = viewModel.toolExecutingByInstance
+
         let next = live.map { task in
             LiveTaskRow(
                 id: task.id,
                 title: task.title,
                 status: task.status,
+                brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance),
                 tools: Array((toolsByTask[task.id] ?? []).suffix(Self.maxToolRowsPerTask).reversed())
             )
         }
@@ -75,6 +84,25 @@ struct NowLiveSection: View {
         DispatchQueue.main.async {
             if rows != next { rows = next }
         }
+    }
+
+    /// The live micro-state of the Brown assigned to `task`, read from the per-instance
+    /// telemetry (thinking / running a tool). Nil when that Brown isn't currently active.
+    private static func brownState(
+        for task: AgentTask,
+        processing: Set<AgentInstanceRef>,
+        tools: [AgentInstanceRef: [String: Int]]
+    ) -> String? {
+        for id in task.assigneeIDs {
+            let ref = AgentInstanceRef(role: .brown, instanceID: id)
+            if let counts = tools[ref], !counts.isEmpty {
+                let names = counts.keys.sorted()
+                if names.count == 1, let only = names.first { return "running \(only)" }
+                return "running \(names.count) tools"
+            }
+            if processing.contains(ref) { return "thinking" }
+        }
+        return nil
     }
 
     /// Most-recent tool calls shown per task before older ones fall off.
@@ -94,6 +122,10 @@ struct NowLiveSection: View {
         let id: UUID
         let title: String
         let status: AgentTask.Status
+        /// This task's Brown's live micro-state, read from the per-instance telemetry (the
+        /// M2 re-key) and matched by the Brown instance id in the task's assignees — so two
+        /// concurrent Browns no longer overwrite one shared indicator. Nil when idle.
+        let brownState: String?
         let tools: [ToolActivity]
     }
 
@@ -128,6 +160,19 @@ private struct LiveTaskRowView: View {
                     .background(stageColor.opacity(0.16), in: Capsule())
             }
             .padding(.horizontal, 12)
+
+            if let brownState = row.brownState {
+                HStack(spacing: 6) {
+                    Text("Brown")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AppColors.color(for: .agent(.brown)))
+                    Text(brownState)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.leading, 12)
+            }
 
             ForEach(row.tools) { tool in
                 HStack(spacing: 6) {
