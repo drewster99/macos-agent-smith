@@ -59,7 +59,7 @@ actor MonitoringTimer {
                     sender: .system,
                     content: "Task \"\(task.title)\" (ID: \(task.id.uuidString)) was marked `running` but had NO assigned worker for two consecutive monitor ticks — an orphaned status that would spin forever and block the queue. It has been marked `interrupted`. Call `run_task` on it when nothing else is running (never set `running` via `update_task`).",
                     metadata: [
-                        "messageKind": .string("task_update_guidance"),
+                        "messageKind": .kind(.taskUpdateGuidance),
                         "taskID": .string(task.id.uuidString),
                         "isWarning": .bool(true)
                     ]

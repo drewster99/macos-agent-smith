@@ -72,6 +72,18 @@ When adding session-scoped state, put it on `AppViewModel` (not `SharedAppState`
 
 The runtime fires `@Sendable` callbacks (`onAbort`, `onProcessingStateChange`, `onAgentStarted`, `onTurnRecorded`, `onEvaluationRecorded`, `onContextChanged`) so the SwiftUI layer can observe activity without poking into actor state.
 
+### Message kinds are typed, never bare strings
+
+Every structural `ChannelMessage` carries a `messageKind` discriminator in its metadata, and readers key both display AND control flow off it. **These are never written or compared as string literals.** Use `ChannelMessageKind` (`AgentSmithKit/Channel/ChannelMessageKind.swift`):
+
+- **Posting**: `metadata: ["messageKind": .kind(.toolRequest)]` — never `.string("tool_request")`.
+- **Reading**: `message.kind == .toolRequest` — never unwrap `metadata?["messageKind"]` by hand. `ChannelMessage.kind` is the single accessor; `ChannelMessage.swift` and `ChannelMessageKind.swift` are the only files exempt from that rule.
+- **Adding a kind**: add a static member to `ChannelMessageKind` and use it.
+
+`ChannelMessageKind` is a **`RawRepresentable` struct, not a `String`-backed enum**, and that is deliberate. Kinds are persisted in `channel_log.jsonl`, so a raw value is a storage format. A closed enum's `init(rawValue:)` returns nil for anything it doesn't know, which would make any kind missing from the enum decode as "no kind" — every reader comparing against it would silently take the wrong branch on real historical data, with nothing thrown and nothing logged. The enumeration cannot be trusted to be complete: this type was introduced after a grep-derived list missed `task_lifecycle`, and after finding that the test whose stated purpose was to "pin down the messageKind string surface" listed 18 kinds when there were 33. Unknown values therefore round-trip and compare by raw value, exactly as bare strings did, while every known kind gets a compile-checked name. Nothing switches exhaustively over kinds, so a closed enum would buy no exhaustiveness guarantee to trade against that risk. Same shape and rationale as `Notification.Name`.
+
+Two guard tests in `ChannelMessageKindTests.swift` enforce this: wire strings are asserted against an independent literal table (renaming a member is free, changing a `rawValue` is a build failure), and a source scan over **both** targets fails on any new bare `messageKind` literal or hand-rolled metadata unwrap. The type alone is a convenience; the guard is what keeps the antipattern from coming back.
+
 ### Tool model
 
 `AgentTool` is the protocol every tool implements. Each role gets a fixed tool list assembled in its `*Behavior.swift` file (`SmithBehavior`, `BrownBehavior`, `SecurityAgentBehavior`). When adding a tool:

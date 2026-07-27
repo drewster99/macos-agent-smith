@@ -175,7 +175,7 @@ struct ScheduleTaskActionTool: AgentTool {
                 sender: .system,
                 content: action.bannerHeadline(for: task),
                 metadata: [
-                    "messageKind": .string("task_action_scheduled"),
+                    "messageKind": .kind(.taskActionScheduled),
                     "actionKind": .string(action.rawValue),
                     "taskID": .string(task.id.uuidString),
                     "taskTitle": .string(task.title),

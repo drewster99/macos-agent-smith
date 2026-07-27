@@ -107,7 +107,7 @@ struct ProvideHelpTool: AgentTool {
             recipient: .agent(.brown),
             content: content,
             metadata: [
-                "messageKind": .string("help_provided"),
+                "messageKind": .kind(.helpProvided),
                 "taskTitle": .string(task.title)
             ]
         ))

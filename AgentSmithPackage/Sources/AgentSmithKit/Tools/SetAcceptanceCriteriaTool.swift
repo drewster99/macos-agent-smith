@@ -213,7 +213,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             sender: .agent(context.agentRole),
             content: "Acceptance criteria for \"\(task.title)\" (\(criteria.count)):\n\(rendered)",
             metadata: [
-                "messageKind": .string("criteria_updated"),
+                "messageKind": .kind(.criteriaUpdated),
                 "taskID": .string(taskID.uuidString),
                 "taskTitle": .string(task.title)
             ]
@@ -247,7 +247,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             sender: .agent(context.agentRole),
             content: "Acceptance criteria for \"\(updated.title)\" edited (\(summary)) — now \(updated.acceptanceCriteria.count):\n\(rendered)",
             metadata: [
-                "messageKind": .string("criteria_updated"),
+                "messageKind": .kind(.criteriaUpdated),
                 "taskID": .string(task.id.uuidString),
                 "taskTitle": .string(updated.title)
             ]

@@ -548,7 +548,7 @@ public actor OrchestrationRuntime {
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Automatic context maintenance: \(result)",
-            metadata: ["messageKind": .string("context_management")]
+            metadata: ["messageKind": .kind(.contextManagement)]
         ))
     }
 
@@ -778,7 +778,7 @@ public actor OrchestrationRuntime {
             sender: .system,
             content: "Scheduled task '\(scheduledTask.title)' fired while '\(blocker.title)' is \(blocker.status.rawValue). Queued — will run after the current task finishes.",
             metadata: [
-                "messageKind": .string("scheduled_run_deferred"),
+                "messageKind": .kind(.scheduledRunDeferred),
                 "scheduledTaskID": .string(taskID.uuidString),
                 "scheduledTaskTitle": .string(scheduledTask.title),
                 "blockingTaskID": .string(blocker.id.uuidString),
@@ -892,7 +892,7 @@ public actor OrchestrationRuntime {
         await channel.post(ChannelMessage(
             sender: .system,
             content: text,
-            metadata: ["messageKind": .string("task_update")],
+            metadata: ["messageKind": .kind(.taskUpdate)],
             taskID: taskID
         ))
     }
@@ -1768,7 +1768,7 @@ public actor OrchestrationRuntime {
             sender: .system,
             content: announced.title,
             metadata: [
-                "messageKind": .string("task_created"),
+                "messageKind": .kind(.taskCreated),
                 "taskID": .string(announced.id.uuidString),
                 "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
                 "clonedFromTemplate": .string(taskID.uuidString)
@@ -1850,7 +1850,7 @@ public actor OrchestrationRuntime {
                 sender: .system,
                 content: "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees.",
                 metadata: [
-                    "messageKind": .string("task_queued_at_capacity"),
+                    "messageKind": .kind(.taskQueuedAtCapacity),
                     "taskID": .string(taskID.uuidString)
                 ]
             ))
@@ -1936,7 +1936,7 @@ public actor OrchestrationRuntime {
             // A task-created banner means Smith already acted on the most recent user message
             // by turning it into a task; don't re-forward that message as prose (it would
             // double-process). Reached before any user message means the latest one is handled.
-            if case .string("task_created") = message.metadata?["messageKind"] {
+            if message.kind == .taskCreated {
                 return nil
             }
             if case .user = message.sender {
@@ -2082,7 +2082,7 @@ public actor OrchestrationRuntime {
                 return false
             }
             // Drop tool_request messages (Brown's approval requests).
-            if case .string(let kind) = message.metadata?["messageKind"], kind == "tool_request" {
+            if message.kind == .toolRequest {
                 return false
             }
             // Drop tool execution trace messages.
@@ -2093,8 +2093,7 @@ public actor OrchestrationRuntime {
             // agent lifecycle events (errors, termination), rate-limit notices, and
             // system guidance injected by tools (e.g., task_update_guidance).
             if case .system = message.sender {
-                if case .string(let kind) = message.metadata?["messageKind"],
-                   kind == "task_update_guidance" {
+                if message.kind == .taskUpdateGuidance {
                     // Always pass through — this is system guidance for Smith.
                 } else {
                     let c = message.content
@@ -2710,7 +2709,7 @@ public actor OrchestrationRuntime {
             sender: .system,
             content: "System online. Smith agent active.",
             metadata: [
-                "messageKind": .string("restart_chrome"),
+                "messageKind": .kind(.restartChrome),
                 "restartChromeKind": .string("system_online")
             ]
         ))
@@ -3111,7 +3110,7 @@ public actor OrchestrationRuntime {
             sender: .system,
             content: "All agents stopped.",
             metadata: [
-                "messageKind": .string("restart_chrome"),
+                "messageKind": .kind(.restartChrome),
                 "restartChromeKind": .string("agents_stopped")
             ]
         ))
@@ -3305,9 +3304,10 @@ public actor OrchestrationRuntime {
             // Drop tool_request and tool_output echo messages (posted for UI visibility
             // only), and context-management notices (Smith's compaction is none of the
             // worker's business).
-            if case .string(let kind) = message.metadata?["messageKind"],
-               kind == "tool_request" || kind == "tool_output" || kind == "context_management"
-                || kind == "validation_report" || kind == "validation_escalation" { return false }
+            let workerIrrelevantKinds: Set<ChannelMessageKind> = [
+                .toolRequest, .toolOutput, .contextManagement, .validationReport, .validationEscalation
+            ]
+            if let kind = message.kind, workerIrrelevantKinds.contains(kind) { return false }
             return true
         }
 
@@ -3351,7 +3351,7 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Preparing task — starting MCP servers and checking security policy…",
-                metadata: ["messageKind": .string("preparing")]
+                metadata: ["messageKind": .kind(.preparing)]
             ))
             if let host = mcpHost {
                 await host.waitUntilSettled(timeout: .seconds(5))
@@ -3396,7 +3396,7 @@ public actor OrchestrationRuntime {
                         await channel.post(ChannelMessage(
                             sender: .system,
                             content: "Task \"\(task.title)\" start cancelled.",
-                            metadata: ["messageKind": .string("preparing")]
+                            metadata: ["messageKind": .kind(.preparing)]
                         ))
                         return nil
                     }
@@ -3962,7 +3962,7 @@ Message:
             recipient: .agent(.smith),
             content: lines.joined(separator: "\n"),
             metadata: [
-                "messageKind": .string("inbound_user_message"),
+                "messageKind": .kind(.inboundUserMessage),
                 "source": .string(report.source),
                 "reportedByAgentID": .string(reportingAgentID.uuidString)
             ],
@@ -4123,19 +4123,19 @@ Message:
         for msg in recent {
             // Brown public/tool messages — count tool calls once per request (not also per output).
             if case .agent(let role) = msg.sender, role == .brown {
-                if case .string("tool_request") = msg.metadata?["messageKind"] {
+                if msg.kind == .toolRequest {
                     toolCallCount += 1
                     if case .string(let name) = msg.metadata?["tool"] {
                         toolBuckets[name, default: 0] += 1
                     }
                 } else if msg.metadata?["tool"] != nil {
                     // tool_output — already accounted for via tool_request, skip.
-                } else if case .string(let kind) = msg.metadata?["messageKind"] {
-                    if kind == "task_update" {
+                } else if let kind = msg.kind {
+                    if kind == .taskUpdate {
                         taskUpdateCount += 1
                         lastUpdate = msg.content
                         lastUpdateAt = msg.timestamp
-                    } else if kind == "task_complete" {
+                    } else if kind == .taskComplete {
                         msgFromBrownToSmith.append((msg.timestamp, "task_complete: " + String(msg.content.prefix(120))))
                     }
                 } else if msg.recipientID != nil {

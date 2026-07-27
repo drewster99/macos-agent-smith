@@ -53,14 +53,14 @@ struct ParkedWorkerResumeTests {
 
     private static func message(
         recipientID: UUID?,
-        kind: String?
+        kind: ChannelMessageKind?
     ) -> ChannelMessage {
         ChannelMessage(
             sender: .system,
             recipientID: recipientID,
             recipient: recipientID == nil ? nil : .agent(.brown),
             content: "test",
-            metadata: kind.map { ["messageKind": .string($0)] }
+            metadata: kind.map { ["messageKind": .kind($0)] }
         )
     }
 
@@ -69,7 +69,7 @@ struct ParkedWorkerResumeTests {
         let agentID = UUID()
         let notice = Self.message(
             recipientID: agentID,
-            kind: ChannelMessage.Kind.validationBlockedWorkerNotice
+            kind: .validationBlockedWorkerNotice
         )
         #expect(!AgentActor.resumesParkedWorker(notice, agentID: agentID))
     }
@@ -77,7 +77,7 @@ struct ParkedWorkerResumeTests {
     @Test("A validator punch list resumes the worker")
     func changesRequestedResumes() {
         let agentID = UUID()
-        let punchList = Self.message(recipientID: agentID, kind: "changes_requested")
+        let punchList = Self.message(recipientID: agentID, kind: .changesRequested)
         #expect(AgentActor.resumesParkedWorker(punchList, agentID: agentID))
     }
 
@@ -94,14 +94,14 @@ struct ParkedWorkerResumeTests {
     @Test("A message addressed to a different agent never resumes this one")
     func otherRecipientDoesNotResume() {
         let agentID = UUID()
-        let forSomeoneElse = Self.message(recipientID: UUID(), kind: "changes_requested")
+        let forSomeoneElse = Self.message(recipientID: UUID(), kind: .changesRequested)
         #expect(!AgentActor.resumesParkedWorker(forSomeoneElse, agentID: agentID))
     }
 
     @Test("A public broadcast never resumes a parked worker")
     func publicMessageDoesNotResume() {
         let agentID = UUID()
-        let banner = Self.message(recipientID: nil, kind: "validation_blocked")
+        let banner = Self.message(recipientID: nil, kind: .validationBlocked)
         #expect(!AgentActor.resumesParkedWorker(banner, agentID: agentID))
     }
 
@@ -112,7 +112,7 @@ struct ParkedWorkerResumeTests {
         // and silently restore the bug.
         #expect(!AgentActor.parkedWorkerInformationalMessageKinds.isEmpty)
         for kind in AgentActor.parkedWorkerInformationalMessageKinds {
-            #expect(!kind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            #expect(!kind.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 }

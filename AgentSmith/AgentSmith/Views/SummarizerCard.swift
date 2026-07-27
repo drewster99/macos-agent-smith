@@ -40,7 +40,7 @@ struct SummarizerCard: View {
         for message in messages {
             guard case .agent(.summarizer) = message.sender else { continue }
             filtered.append(message)
-            if case .string("task_summarized") = message.metadata?["messageKind"] {
+            if message.kind == .taskSummarized {
                 summaryCount += 1
             }
             if case .bool(true) = message.metadata?["isError"] {

@@ -88,7 +88,7 @@ struct SearchMemoryTool: AgentTool {
                 sender: .system,
                 content: query,
                 metadata: [
-                    "messageKind": .string("memory_searched"),
+                    "messageKind": .kind(.memorySearched),
                     "searchQuery": .string(query),
                     "memoryCount": .int(0),
                     "taskCount": .int(0)
@@ -151,7 +151,7 @@ struct SearchMemoryTool: AgentTool {
         }
 
         var bannerMetadata: [String: AnyCodable] = [
-            "messageKind": .string("memory_searched"),
+            "messageKind": .kind(.memorySearched),
             "searchQuery": .string(query),
             "memoryCount": .int(results.memories.count),
             "taskCount": .int(results.taskSummaries.count)

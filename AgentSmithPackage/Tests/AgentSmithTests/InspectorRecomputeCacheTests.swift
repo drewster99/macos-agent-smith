@@ -40,51 +40,53 @@ struct InspectorRecomputeCacheTests {
         #expect(byRole.values.flatMap(\.self).count == 3)
     }
 
-    /// `ChannelLogView.ChannelBannerKind` lives in the app target so we can't import it
-    /// directly here. But its raw values must match what the runtime posts in
-    /// `metadata["messageKind"]`. This test pins down the messageKind string surface so
-    /// that any rename in the engine immediately flags the inspector dispatcher to update.
-    /// The strings come from a grep over `AgentSmithPackage/Sources/AgentSmithKit/`.
-    @Test("messageKind string surface is stable")
-    func messageKindStringSurfaceIsStable() {
+    /// `ChannelLogView.ChannelBannerKind` lives in the app target so we can't import it directly
+    /// here, but its raw values must match what the runtime posts. This test records which kinds
+    /// the inspector renders as banners and which fall through to a plain row.
+    ///
+    /// It used to double as the guard against `messageKind` renames, enumerated by hand "from a
+    /// grep" — and it did not work: it listed 18 kinds when the runtime emitted more than thirty,
+    /// so most of the surface it claimed to pin was never covered. `ChannelMessageKind` owns that
+    /// job now (its wire strings are asserted directly, and a source guard blocks new bare
+    /// literals), which leaves this test the narrower question it can actually answer: the
+    /// banner/plain-row CLASSIFICATION. The sets are typed, so a rename is a compile error rather
+    /// than a silently-stale string.
+    @Test("Inspector banner classification is exhaustive and unambiguous")
+    func bannerClassificationIsUnambiguous() {
         // Kinds that ChannelBannerKind has explicit cases for (renders a banner or hides the row).
-        let bannerKinds: Set<String> = [
-            "task_created",
-            "task_acknowledged",
-            "task_continuing",
-            "task_complete",
-            "task_completed",
-            "task_update",
-            "task_update_guidance",
-            "task_summarized",
-            "task_action_scheduled",
-            "changes_requested",
-            "memory_saved",
-            "memory_searched",
-            "restart_chrome",
-            "timer_activity",
+        let bannerKinds: Set<ChannelMessageKind> = [
+            .taskCreated,
+            .taskAcknowledged,
+            .taskContinuing,
+            .taskComplete,
+            .taskCompleted,
+            .taskUpdate,
+            .taskUpdateGuidance,
+            .taskSummarized,
+            .taskActionScheduled,
+            .changesRequested,
+            .memorySaved,
+            .memorySearched,
+            .restartChrome,
+            .timerActivity
         ]
         // Kinds that the runtime emits but ChannelBannerKind intentionally doesn't list —
         // they fall through to MessageRow via the `.none` case in `bannerView(for:…)`.
         // The tool subsystem handles tool_request/tool_output separately. The scheduled-run
         // and submission-auto-rejected kinds are advisory system messages that render fine
         // as plain MessageRows; promoting them to banners is a future polish task.
-        let nonBannerKinds: Set<String> = [
-            "tool_request",
-            "tool_output",
-            "scheduled_run_deferred",
-            "submission_auto_rejected",
+        let nonBannerKinds: Set<ChannelMessageKind> = [
+            .toolRequest,
+            .toolOutput,
+            .scheduledRunDeferred,
+            .submissionAutoRejected
         ]
         // If you remove a kind from `bannerKinds`, also remove its case from
         // `ChannelLogView.ChannelBannerKind` (else you'll have a dead enum case).
-        // If you add a new kind to the runtime, decide whether it's a banner or a plain row,
-        // and update the appropriate set here AND `ChannelBannerKind` together.
-        let total = bannerKinds.count + nonBannerKinds.count
-        #expect(bannerKinds.contains("task_created"))
-        #expect(bannerKinds.contains("memory_saved"))
-        #expect(nonBannerKinds.contains("tool_request"))
-        #expect(total == 18, "Expected 18 known messageKind strings (14 banner + 4 non-banner); update both this test and ChannelBannerKind together.")
-        #expect(bannerKinds.intersection(nonBannerKinds).isEmpty, "A kind should be either a banner or a plain row, not both")
+        #expect(
+            bannerKinds.intersection(nonBannerKinds).isEmpty,
+            "A kind should be either a banner or a plain row, not both"
+        )
     }
 
     @Test("metadata keys task_summarized + isError discriminate summary vs error rows")

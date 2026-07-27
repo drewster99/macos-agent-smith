@@ -204,7 +204,7 @@ extension OrchestrationRuntime {
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Validating \"\(task.title)\": \(pending.count) criterion(s) to judge, \(settledOnTask) already settled.",
-            metadata: ["messageKind": .string("validation_report"), "taskID": .string(taskID.uuidString)]
+            metadata: ["messageKind": .kind(.validationReport), "taskID": .string(taskID.uuidString)]
         ))
 
         // Judge pending criteria in waves of `validationParallelism` (a wave barrier is
@@ -341,7 +341,7 @@ extension OrchestrationRuntime {
             sender: .system,
             content: "Task \"\(task.title)\" FAILED acceptance validation. \(reason)",
             metadata: [
-                "messageKind": .string("validation_failed"),
+                "messageKind": .kind(.validationFailed),
                 "taskID": .string(taskID.uuidString),
                 "isWarning": .bool(true)
             ]
@@ -683,7 +683,7 @@ extension OrchestrationRuntime {
                     sender: .validator,
                     content: "\(call.name): \(call.arguments.prefix(160))",
                     metadata: [
-                        "messageKind": .string("tool_request"),
+                        "messageKind": .kind(.toolRequest),
                         "requestID": .string(call.id),
                         "taskID": .string(gateTaskID),
                         "taskTitle": .string(gateTaskTitle),
@@ -1043,7 +1043,7 @@ extension OrchestrationRuntime {
         await channel.post(ChannelMessage(
             sender: .system,
             content: summary,
-            metadata: ["messageKind": .string("validation_report"), "taskID": .string(taskID.uuidString)]
+            metadata: ["messageKind": .kind(.validationReport), "taskID": .string(taskID.uuidString)]
         ))
     }
 
@@ -1075,7 +1075,7 @@ extension OrchestrationRuntime {
         // Reclaim the ephemeral scratch dir; the persistent evidence dir stays.
         taskWorkspace(for: taskID).cleanupTemporary()
         var bannerMetadata: [String: AnyCodable] = [
-            "messageKind": .string("task_completed"),
+            "messageKind": .kind(.taskCompleted),
             "taskID": .string(taskID.uuidString)
         ]
         if let startedAt = completed.startedAt, let completedAt = completed.completedAt {
@@ -1136,7 +1136,7 @@ extension OrchestrationRuntime {
                 sender: .system,
                 content: "Task \"\(task.title)\" needs rework (validation rejected \(rejected.count) criterion(s)) but all worker slots are busy — re-queued; it will restart when a slot frees.",
                 metadata: [
-                    "messageKind": .string("task_queued_at_capacity"),
+                    "messageKind": .kind(.taskQueuedAtCapacity),
                     "taskID": .string(taskID.uuidString)
                 ]
             ))
@@ -1179,7 +1179,7 @@ extension OrchestrationRuntime {
             recipient: .agent(.brown),
             content: parts.joined(separator: "\n\n"),
             metadata: [
-                "messageKind": .string("changes_requested"),
+                "messageKind": .kind(.changesRequested),
                 "taskTitle": .string(task.title),
                 "taskID": .string(taskID.uuidString)
             ]
@@ -1244,7 +1244,7 @@ extension OrchestrationRuntime {
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Task \"\(task.title)\" was failed by the user.",
-            metadata: ["messageKind": .string("task_failed"), "taskID": .string(taskID.uuidString), "isWarning": .bool(true)]
+            metadata: ["messageKind": .kind(.taskFailed), "taskID": .string(taskID.uuidString), "isWarning": .bool(true)]
         ))
     }
 
@@ -1291,7 +1291,7 @@ extension OrchestrationRuntime {
                 recipientID: brownID,
                 recipient: .agent(.brown),
                 content: "Results sent back — changes required on task '\(refreshed.title)': \(feedback)",
-                metadata: ["messageKind": .string("changes_requested"), "taskTitle": .string(refreshed.title), "taskID": .string(taskID.uuidString)]
+                metadata: ["messageKind": .kind(.changesRequested), "taskTitle": .string(refreshed.title), "taskID": .string(taskID.uuidString)]
             ))
         }
     }
@@ -1344,7 +1344,7 @@ extension OrchestrationRuntime {
             sender: .system,
             content: "\"\(task.title)\" is waiting on validator configuration: \(reason)",
             metadata: [
-                "messageKind": .string("validation_blocked"),
+                "messageKind": .kind(.validationBlocked),
                 "taskID": .string(taskID.uuidString),
                 "isWarning": .bool(true)
             ]
@@ -1368,7 +1368,7 @@ extension OrchestrationRuntime {
                     wrong with it. Do NOT resubmit, rework anything, or call request_help — STOP and \
                     wait. Validation resumes on its own once the configuration is fixed.
                     """,
-                metadata: ["messageKind": .string(ChannelMessage.Kind.validationBlockedWorkerNotice)]
+                metadata: ["messageKind": .kind(.validationBlockedWorkerNotice)]
             ))
         }
     }
@@ -1404,7 +1404,7 @@ extension OrchestrationRuntime {
             sender: .system,
             content: "\"\(task.title)\" needs your attention: acceptance validation could not reach a verdict — \(reason) Re-validate, accept, send it back, or fail it. It also re-validates automatically on the next restart.",
             metadata: [
-                "messageKind": .string("validation_escalation"),
+                "messageKind": .kind(.validationEscalation),
                 "taskID": .string(taskID.uuidString),
                 "isWarning": .bool(true)
             ]

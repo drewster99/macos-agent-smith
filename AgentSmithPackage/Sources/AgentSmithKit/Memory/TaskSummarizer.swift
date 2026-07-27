@@ -111,7 +111,7 @@ actor TaskSummarizer {
                     sender: .agent(.summarizer),
                     content: summary,
                     metadata: [
-                        "messageKind": .string("task_summarized"),
+                        "messageKind": .kind(.taskSummarized),
                         "taskID": .string(task.id.uuidString),
                         "taskTitle": .string(task.title),
                         "latencyMs": .int(latencyMs)

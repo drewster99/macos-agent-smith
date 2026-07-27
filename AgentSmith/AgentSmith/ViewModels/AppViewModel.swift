@@ -26,7 +26,7 @@ final class AppViewModel {
 
     /// The `requestID` of `message` if it is a `tool_request`, else nil.
     private func toolRequestID(of message: ChannelMessage) -> String? {
-        guard case .string(let kind)? = message.metadata?["messageKind"], kind == "tool_request",
+        guard message.kind == .toolRequest,
               case .string(let requestID)? = message.metadata?["requestID"] else { return nil }
         return requestID
     }
@@ -1166,7 +1166,7 @@ final class AppViewModel {
         if shared.showTimerActivityInTranscript, let runtime {
             let line = Self.transcriptLine(for: event)
             var meta: [String: AnyCodable] = [
-                "messageKind": .string("timer_activity"),
+                "messageKind": .kind(.timerActivity),
                 "timerEventID": .string(event.id.uuidString),
                 "timerEventKind": .string(event.kind.rawValue)
             ]
@@ -1912,7 +1912,7 @@ final class AppViewModel {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: content,
-                        metadata: ["messageKind": .string("mcp_status"), "isWarning": .bool(true)]
+                        metadata: ["messageKind": .kind(.mcpStatus), "isWarning": .bool(true)]
                     ))
                 }
             } else {

@@ -131,7 +131,7 @@ public struct TaskCompleteTool: AgentTool {
             content: message,
             attachments: attachments,
             metadata: [
-                "messageKind": .string("task_complete"),
+                "messageKind": .kind(.taskComplete),
                 "taskTitle": .string(task.title)
             ]
         ))
@@ -239,7 +239,7 @@ public struct TaskCompleteTool: AgentTool {
             sender: .system,
             content: "Auto-rejected `task_complete` submission: \(reason). Brown has been told to retry; task remains in its prior state.",
             metadata: [
-                "messageKind": .string("submission_auto_rejected"),
+                "messageKind": .kind(.submissionAutoRejected),
                 "reason": .string(reason)
             ]
         ))

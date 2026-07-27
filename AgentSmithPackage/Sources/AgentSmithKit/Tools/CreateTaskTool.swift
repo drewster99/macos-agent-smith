@@ -394,7 +394,7 @@ public struct CreateTaskTool: AgentTool {
 
         // Build metadata for the task_created channel message, including any retrieved context.
         var meta: [String: AnyCodable] = [
-            "messageKind": .string("task_created"),
+            "messageKind": .kind(.taskCreated),
             "taskID": .string(task.id.uuidString),
             "taskDescription": .string(description)
         ]

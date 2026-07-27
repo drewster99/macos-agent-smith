@@ -159,14 +159,14 @@ private struct ChannelGroupingIndex {
 
     init(_ messages: some Sequence<ChannelMessage>) {
         for message in messages {
-            let kind = message.stringMetadata("messageKind")
+            let kind = message.kind
             let requestID = message.stringMetadata("requestID")
-            if kind == "tool_request", let requestID { toolRequestIDs.insert(requestID) }
+            if kind == .toolRequest, let requestID { toolRequestIDs.insert(requestID) }
             if message.metadata?["securityDisposition"] != nil, let requestID {
                 securityReviewByRequestID[requestID] = message
             }
-            if kind == "tool_output", let requestID { toolOutputByRequestID[requestID] = message }
-            if kind == "task_created" || kind == "task_action_scheduled",
+            if kind == .toolOutput, let requestID { toolOutputByRequestID[requestID] = message }
+            if kind == .taskCreated || kind == .taskActionScheduled,
                let taskID = message.stringMetadata("taskID") {
                 taskIDsWithSchedulingBanner.insert(taskID)
             }
@@ -384,7 +384,7 @@ struct ChannelLogView: View, Equatable {
     private func isSuppressibleFollowUp(_ message: ChannelMessage) -> Bool {
         guard message.stringMetadata("requestID") != nil else { return false }
         return message.metadata?["securityDisposition"] != nil
-            || message.stringMetadata("messageKind") == "tool_output"
+            || message.kind == .toolOutput
     }
 
     /// Suppresses security reviews and tool outputs that are grouped into a parent tool_request row.
@@ -443,7 +443,9 @@ private struct ChannelMessageBanner: View {
     @Binding var selectedImageAttachment: Attachment?
     
     var body: some View {
-        let kind = message.stringMetadata("messageKind").flatMap(ChannelBannerKind.init(rawValue:))
+        // ChannelBannerKind is a display-side enum over the same wire strings, so it maps from
+        // the kind's rawValue. It deliberately covers only the kinds that render as banners.
+        let kind = message.kind.flatMap { ChannelBannerKind(rawValue: $0.rawValue) }
         switch kind {
         case .taskUpdateGuidance:
             // Internal coordination messages — never rendered.
@@ -738,13 +740,11 @@ private struct MessageRow: View, Equatable {
             return false
         }()
         let _shouldShowTimestamp: Bool = {
-            let messageKind = message.stringMetadata("messageKind")
-            let isToolRequest = messageKind == "tool_request"
-            if isToolRequest { return displayPrefs.toolCalls }
+            if message.kind == .toolRequest { return displayPrefs.toolCalls }
             if case .system = message.sender { return displayPrefs.systemMessages }
             return displayPrefs.messaging
         }()
-        let _isToolRequest: Bool = message.stringMetadata("messageKind") == "tool_request"
+        let _isToolRequest: Bool = message.kind == .toolRequest
         let _toolCallElapsedSeconds: TimeInterval? = {
             guard let output = toolOutputMessage else { return nil }
             let elapsed = output.timestamp.timeIntervalSince(message.timestamp)
@@ -806,7 +806,7 @@ private struct MessageRow: View, Equatable {
             text = text.replacingOccurrences(of: ", ,", with: ",")
             return text.trimmingCharacters(in: CharacterSet(charactersIn: ", "))
         }
-        let _isToolOutput = message.stringMetadata("messageKind") == "tool_output"
+        let _isToolOutput = message.kind == .toolOutput
         let _isSecurityReview = message.metadata?["securityDisposition"] != nil
         let _securityReviewColor: Color = {
             guard let review = securityReviewMessage,

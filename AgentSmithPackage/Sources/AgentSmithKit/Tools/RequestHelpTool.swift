@@ -85,7 +85,7 @@ public struct RequestHelpTool: AgentTool {
             recipient: .agent(.smith),
             content: message,
             metadata: [
-                "messageKind": .string("help_requested"),
+                "messageKind": .kind(.helpRequested),
                 "taskTitle": .string(task.title)
             ]
         ))

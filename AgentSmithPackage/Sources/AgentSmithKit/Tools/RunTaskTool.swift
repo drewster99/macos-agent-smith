@@ -259,7 +259,7 @@ struct RunTaskTool: AgentTool {
                 sender: .system,
                 content: announced.title,
                 metadata: [
-                    "messageKind": .string("task_created"),
+                    "messageKind": .kind(.taskCreated),
                     "taskID": .string(announced.id.uuidString),
                     "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
                     "clonedFromTemplate": .string(task.id.uuidString)

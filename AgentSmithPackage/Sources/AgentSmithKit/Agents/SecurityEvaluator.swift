@@ -1787,7 +1787,7 @@ actor SecurityEvaluator {
             sender: .agent(.securityAgent),
             content: "\(call.name): \(path)",
             metadata: [
-                "messageKind": .string("tool_request"),
+                "messageKind": .kind(.toolRequest),
                 "requestID": .string(call.id),
                 "tool": .string(call.name),
                 "params": .string(call.arguments),

@@ -1040,9 +1040,9 @@ public actor AgentActor {
         }
 
         // Drop UI-only notification messages that no agent needs to process.
-        if case .string(let kind) = message.metadata?["messageKind"] {
+        if let kind = message.kind {
             switch kind {
-            case "task_created", "memory_saved", "memory_searched":
+            case .taskCreated, .memorySaved, .memorySearched:
                 return false
             default:
                 break
@@ -1077,8 +1077,8 @@ public actor AgentActor {
         // digest clock so we don't fire an auto-digest seconds later that would just summarize
         // what Smith already saw via this message.
         if configuration.role == .smith,
-           case .string(let kind) = message.metadata?["messageKind"],
-           kind == "task_update" || kind == "task_complete" {
+           let kind = message.kind,
+           kind == .taskUpdate || kind == .taskComplete {
             lastSmithDigestAt = Date()
         }
 
@@ -2513,7 +2513,7 @@ public actor AgentActor {
             recipientID: smithID,
             recipient: .agent(.smith),
             content: content,
-            metadata: ["messageKind": .string(isContinuation ? "task_continuing" : "task_acknowledged")]
+            metadata: ["messageKind": .kind(isContinuation ? .taskContinuing : .taskAcknowledged)]
         ))
     }
 
@@ -2666,7 +2666,7 @@ public actor AgentActor {
         let toolParameterDefs = Self.formatToolParameterDefinitions(toolDef.parameters)
 
         var metadata: [String: AnyCodable] = [
-            "messageKind": .string("tool_request"),
+            "messageKind": .kind(.toolRequest),
             "requestID": .string(call.id),
             "agentID": .string(toolContext.agentID.uuidString),
             "tool": .string(call.name),
@@ -2802,7 +2802,7 @@ public actor AgentActor {
         let isTruncated = truncated != trimmedResult
         var outputMetadata: [String: AnyCodable] = [
             "requestID": .string(call.id),
-            "messageKind": .string("tool_output"),
+            "messageKind": .kind(.toolOutput),
             "tool": .string(call.name)
         ]
         if let taskTitle {
@@ -2896,8 +2896,8 @@ public actor AgentActor {
     /// list, a user send-back, `provide_help`, `amend_task`, Smith's `message_brown`), and a
     /// missed entry here only costs an extra turn. A missed entry in an ALLOWLIST would instead
     /// strand the worker parked forever, which is the worse failure — hence the exemption list.
-    static let parkedWorkerInformationalMessageKinds: Set<String> = [
-        ChannelMessage.Kind.validationBlockedWorkerNotice
+    static let parkedWorkerInformationalMessageKinds: Set<ChannelMessageKind> = [
+        .validationBlockedWorkerNotice
     ]
 
     /// Whether `message` should pull a parked worker (`awaitingTaskReview`) into a new LLM turn.
@@ -2912,7 +2912,7 @@ public actor AgentActor {
     /// narrated until a circuit breaker terminated it.
     static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID) -> Bool {
         guard message.recipientID == agentID else { return false }
-        guard let kind = message.messageKind else { return true }
+        guard let kind = message.kind else { return true }
         return !parkedWorkerInformationalMessageKinds.contains(kind)
     }
 
@@ -3198,7 +3198,7 @@ public actor AgentActor {
             return "\(pct) — \(result.summary.title) (id: \(result.summary.id.uuidString))\n\(result.summary.summary)"
         }
         var bannerMetadata: [String: AnyCodable] = [
-            "messageKind": .string("memory_searched"),
+            "messageKind": .kind(.memorySearched),
             "searchQuery": .string(query),
             "memoryCount": .int(results.memories.count),
             "taskCount": .int(results.taskSummaries.count),
@@ -3275,22 +3275,22 @@ public actor AgentActor {
             // Separate task_complete messages from the batch so they get their own LLM turn.
             // This prevents the review trigger from being buried in a merged text blob.
             let hasTaskComplete = pendingChannelMessages.contains { msg in
-                if case .string("task_complete") = msg.metadata?["messageKind"] { return true }
+                if msg.kind == .taskComplete { return true }
                 return false
             }
             let hasOtherMessages = pendingChannelMessages.contains { msg in
-                if case .string("task_complete") = msg.metadata?["messageKind"] { return false }
+                if msg.kind == .taskComplete { return false }
                 return true
             }
 
             if hasTaskComplete && hasOtherMessages {
                 // Split: defer task_complete messages, drain everything else now.
                 let taskCompleteMessages = pendingChannelMessages.filter { msg in
-                    if case .string("task_complete") = msg.metadata?["messageKind"] { return true }
+                    if msg.kind == .taskComplete { return true }
                     return false
                 }
                 pendingChannelMessages.removeAll { msg in
-                    if case .string("task_complete") = msg.metadata?["messageKind"] { return true }
+                    if msg.kind == .taskComplete { return true }
                     return false
                 }
                 deferredMessages.append(contentsOf: taskCompleteMessages)
@@ -3299,10 +3299,9 @@ public actor AgentActor {
             // Lifecycle messages are informational — drain them into history for context but
             // don't trigger a new LLM call. Only messages that require Smith's action (user
             // messages, task_complete, errors) should wake it.
-            let nonWakingKinds: Set<String> = ["task_lifecycle", "task_acknowledged"]
+            let nonWakingKinds: Set<ChannelMessageKind> = [.taskLifecycle, .taskAcknowledged]
             let hasActionableMessage = pendingChannelMessages.contains { msg in
-                if case .string(let kind) = msg.metadata?["messageKind"],
-                   nonWakingKinds.contains(kind) {
+                if let kind = msg.kind, nonWakingKinds.contains(kind) {
                     return false
                 }
                 return true

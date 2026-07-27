@@ -190,7 +190,7 @@ struct SaveMemoryTool: AgentTool {
             sender: .system,
             content: String(content.prefix(120)),
             metadata: [
-                "messageKind": .string("memory_saved"),
+                "messageKind": .kind(.memorySaved),
                 "memoryContent": .string(content),
                 "memoryTags": .string(tags.joined(separator: ", ")),
                 "memorySource": .string(source.rawValue),

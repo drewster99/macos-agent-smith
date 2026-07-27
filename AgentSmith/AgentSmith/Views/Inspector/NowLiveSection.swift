@@ -84,13 +84,19 @@ struct NowLiveSection: View {
         // never returned. Work genuinely still in flight is reported by `brownState` (which is
         // read from live telemetry, not timestamps), so a long-running call keeps its "running
         // <tool>" line even after its request row ages out.
+        // Walk newest-first and stop at the cutoff. `messages` is append-ordered, so everything
+        // past the first too-old message is older still. That matters because this now runs on a
+        // timer: the resident transcript is normally capped, but "restore full history" opts into
+        // holding the entire session log, and rescanning all of it every tick to find the last
+        // two minutes would be pure waste.
         let cutoff = Date().addingTimeInterval(-Self.activityWindowSeconds)
         var toolsByTask: [UUID: [ToolActivity]] = [:]
-        for message in viewModel.messages {
+        for message in viewModel.messages.reversed() {
+            guard message.timestamp >= cutoff else { break }
             guard let taskID = message.taskID,
-                  message.timestamp >= cutoff,
-                  message.messageKind == "tool_request",
+                  message.kind == .toolRequest,
                   case .string(let tool)? = message.metadata?["tool"] else { continue }
+            guard toolsByTask[taskID, default: []].count < Self.maxToolRowsPerTask else { continue }
             toolsByTask[taskID, default: []].append(
                 ToolActivity(id: message.id, name: tool, timestamp: message.timestamp)
             )
@@ -109,7 +115,8 @@ struct NowLiveSection: View {
                 status: task.status,
                 brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance),
                 securityEvaluating: Self.securityEvaluating(for: task, processing: processing),
-                tools: Array((toolsByTask[task.id] ?? []).suffix(Self.maxToolRowsPerTask).reversed())
+                // Already newest-first and already capped by the collecting loop above.
+                tools: toolsByTask[task.id] ?? []
             )
         }
 

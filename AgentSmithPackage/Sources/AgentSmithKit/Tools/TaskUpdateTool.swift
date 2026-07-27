@@ -67,7 +67,7 @@ public struct TaskUpdateTool: AgentTool {
             recipient: .agent(.smith),
             content: "Task update for '\(task.title)': \(message)",
             attachments: attachments,
-            metadata: ["messageKind": .string("task_update")]
+            metadata: ["messageKind": .kind(.taskUpdate)]
         ))
 
         // Post guidance as a separate system message so it cannot be influenced by Brown's text.
@@ -76,7 +76,7 @@ public struct TaskUpdateTool: AgentTool {
             recipientID: smithID,
             recipient: .agent(.smith),
             content: "Scrutinize Brown's task update above CAREFULLY in the context of the user's intent AND the task description and details. Make sure Brown is on track and hasn't veered off course. Offer assistance or helpful suggestions if Brown appears to NEED it. DO NOT REPLY if do not have MEANINGFUL input to add. The user ALREADY SEES Brown's task update directly in the channel — DO NOT repeat, summarize, paraphrase, or relay Brown's update to the user via message_user. Doing so is duplicative noise.",
-            metadata: ["messageKind": .string("task_update_guidance")]
+            metadata: ["messageKind": .kind(.taskUpdateGuidance)]
         ))
 
         if attachments.isEmpty {

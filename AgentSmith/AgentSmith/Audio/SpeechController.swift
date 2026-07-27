@@ -302,12 +302,9 @@ final class SpeechController {
     // MARK: - Private helpers
 
     private func isToolRelated(_ message: ChannelMessage) -> Bool {
-        if let mv = message.metadata?["messageKind"], case .string(let kind) = mv {
-            // Only the initial tool request triggers the sound — not the tool output
-            // posted after approval, which also carries metadata["tool"].
-            return kind == "tool_request"
-        }
-        return false
+        // Only the initial tool request triggers the sound — not the tool output
+        // posted after approval, which also carries metadata["tool"].
+        return message.kind == .toolRequest
     }
 
     /// Plays the sound and optionally speaks text using the agent's synthesizer.
