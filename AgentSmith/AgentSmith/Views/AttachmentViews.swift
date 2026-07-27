@@ -232,17 +232,18 @@ struct ToolNameChip: View {
 /// Renders a file path with the directory dimmed and the filename highlighted in bold cyan.
 struct ToolPathText: View {
     let path: String
+    private let directory: String
+    private let filename: String
+
+    init(path: String) {
+        self.path = path
+        let dir = (path as NSString).deletingLastPathComponent
+        self.directory = dir.hasSuffix("/") ? dir : dir + "/"
+        self.filename = (path as NSString).lastPathComponent
+    }
 
     var body: some View {
-        // Compute derived values inline - no computed properties
-        let directory: String = {
-            guard !path.isEmpty else { return "" }
-            let dir = (path as NSString).deletingLastPathComponent
-            return dir.hasSuffix("/") ? dir : dir + "/"
-        }()
-        let filename = (path as NSString).lastPathComponent
-        
-        return HStack(alignment: .firstTextBaseline, spacing: 0) {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
             Text(directory)
                 .font(AppFonts.channelBody)
                 .foregroundStyle(.secondary.opacity(0.7))
@@ -257,18 +258,18 @@ struct ToolPathText: View {
 
 struct FileWritePathView: View {
     let path: String
+    private let symlinkDestination: String?
+
+    init(path: String) {
+        self.path = path
+        let url = URL(fileURLWithPath: path)
+        let resolved = url.resolvingSymlinksInPath().path
+        let standardized = url.standardized.path
+        self.symlinkDestination = resolved != standardized ? resolved : nil
+    }
 
     var body: some View {
-        // Compute derived values inline - no computed properties
-        let symlinkDestination: String? = {
-            guard !path.isEmpty else { return nil }
-            let url = URL(fileURLWithPath: path)
-            let resolved = url.resolvingSymlinksInPath().path
-            let standardized = url.standardized.path
-            return resolved != standardized ? resolved : nil
-        }()
-        
-        return HStack(alignment: .firstTextBaseline, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
             ToolNameChip(name: "file_write")
             Button(action: { openInFinder() }, label: {
                 ToolPathText(path: path)

@@ -277,10 +277,17 @@ struct MarkdownText: View, Equatable {
     private struct RenderLineView: View {
         let line: String
         let baseFont: Font
+        private let parsed: LineParseResult
+        private let trimmed: String
+        
+        init(line: String, baseFont: Font) {
+            self.line = line
+            self.baseFont = baseFont
+            self.trimmed = line.trimmingCharacters(in: .whitespaces)
+            self.parsed = LineParser.parse(line, baseFont: baseFont)
+        }
         
         var body: some View {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
             if trimmed.hasPrefix("### ") {
                 InlineText.styled(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3)
             } else if trimmed.hasPrefix("## ") {
@@ -290,7 +297,6 @@ struct MarkdownText: View, Equatable {
             } else if trimmed.isEmpty {
                 Color.clear.frame(height: 6)
             } else {
-                let parsed = LineParser.parse(line, baseFont: baseFont)
                 if parsed.isList {
                     // Indent based on leading whitespace: 12pt base + 12pt per 2-space level
                     let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12

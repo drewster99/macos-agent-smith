@@ -108,18 +108,24 @@ func parseContextEntries(_ raw: String) -> [String] {
 /// Used by both `TaskCreatedBanner` (prior tasks) and `MemoryBanner` (search results).
 struct ContextEntryView: View {
     let entry: String
+    private let headerText: String
+    private let bodyText: String
+    
+    init(entry: String) {
+        self.entry = entry
+        let split = entry.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        self.headerText = split.first.map(String.init) ?? entry
+        self.bodyText = split.count > 1 ? String(split[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+    }
     
     var body: some View {
-        let split = entry.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-        let header = split.first.map(String.init) ?? entry
-        let body = split.count > 1 ? String(split[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
         VStack(alignment: .leading, spacing: 3) {
-            Text(header)
+            Text(headerText)
                 .font(AppFonts.inspectorBody.weight(.semibold))
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
-            if !body.isEmpty {
-                Text(body)
+            if !bodyText.isEmpty {
+                Text(bodyText)
                     .font(AppFonts.inspectorBody)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -375,25 +381,33 @@ struct TaskReadyForReviewBanner: View {
     let timestamp: Date
 
     @State private var isExpanded = false
-
+    private let headerText: String
+    private let bodyText: String?
     private let accentColor = AppColors.taskReadyForReviewAccent
 
-    var body: some View {
-        // Inline splitContent logic directly
+    init(taskTitle: String, content: String, senderName: String, recipientName: String?, timestamp: Date) {
+        self.taskTitle = taskTitle
+        self.content = content
+        self.senderName = senderName
+        self.recipientName = recipientName
+        self.timestamp = timestamp
+        // Parse content once at init time
         let lines = content.components(separatedBy: "\n")
         let resultIndex = lines.firstIndex(where: { $0.hasPrefix("Result:") })
-        let parts: (header: String, body: String?) = {
-            guard let resultIndex = resultIndex else {
-                return (content, nil)
-            }
+        if let resultIndex = resultIndex {
             let headerLines = lines[..<resultIndex]
             let bodyLines = lines[resultIndex...]
-            let header = headerLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            return (header, body.isEmpty ? nil : body)
-        }()
-        
-        return VStack(spacing: 0) {
+            self.headerText = headerLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let bodyStr = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            self.bodyText = bodyStr.isEmpty ? nil : bodyStr
+        } else {
+            self.headerText = content
+            self.bodyText = nil
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
             accentColor.frame(height: 1).opacity(0.4)
 
             HStack(spacing: 8) {
@@ -428,15 +442,15 @@ struct TaskReadyForReviewBanner: View {
                     .padding(.bottom, 2)
             }
 
-            if !parts.header.isEmpty {
-                MarkdownText(content: parts.header, baseFont: AppFonts.channelBody)
+            if !headerText.isEmpty {
+                MarkdownText(content: headerText, baseFont: AppFonts.channelBody)
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 10)
-                    .padding(.bottom, parts.body == nil ? 6 : 2)
+                    .padding(.bottom, bodyText == nil ? 6 : 2)
             }
 
-            if let body = parts.body {
+            if let body = bodyText {
                 Button(action: { isExpanded.toggle() }) {
                     Text(isExpanded ? "(hide result)" : "(show result)")
                         .font(.caption)
