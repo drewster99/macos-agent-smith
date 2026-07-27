@@ -12,12 +12,11 @@ import AgentSmithKit
 /// read-only evidence takes the no-LLM fast path, so it correctly shows no security wait.
 /// Nothing is faked — a state that isn't currently signalled is simply omitted.
 ///
-/// "Live" spans two different things and the distinction is load-bearing: a task that is
-/// WORKING, and a task that is PARKED and needs attention (`isLive` vs `isParked`). A parked
-/// task may have no worker at all — its Brown can be long gone — so it shows its stage chip
-/// and nothing else. Its last tool calls are history, and because each row is stamped with a
-/// `.relative` AGE, leaving them visible made a correctly-parked task look like a hung one:
-/// the final call before the worker went away sits there counting upward.
+/// Activity rows are age-bounded (`activityWindowSeconds`) and swept on a timer, because this
+/// section means "now" literally. Each row renders a `.relative` age, so anything left in it
+/// past its welcome counts upward and reads as a tool that never returned — which is exactly
+/// how a correctly-parked task came to look like a hang. A task keeps its title and stage chip
+/// for as long as its status is live; only the activity beneath it expires.
 struct NowLiveSection: View {
     let viewModel: AppViewModel
 
@@ -47,7 +46,18 @@ struct NowLiveSection: View {
                 }
             }
         }
-        .task { recompute() }
+        // Activity rows age out on a clock, so they have to be re-evaluated on one. Every other
+        // trigger here is change-driven, and in a quiet session (a task parked, or a worker
+        // thinking for minutes) none of them fire — an aged-out row would sit on screen until
+        // some unrelated change happened to force a recompute.
+        .task {
+            recompute()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.staleSweepIntervalSeconds))
+                guard !Task.isCancelled else { return }
+                recompute()
+            }
+        }
         .onChange(of: taskSignature) { _, _ in recompute() }
         .onChange(of: viewModel.messages) { _, _ in recompute() }
         .onChange(of: viewModel.processingInstances) { _, _ in recompute() }
@@ -67,9 +77,18 @@ struct NowLiveSection: View {
         // carry a `tool` metadata key, so bucketing on that key alone listed every call twice —
         // once when issued, once when it returned. Four visible rows were really two calls, and
         // the ~5-second request→result gap between each pair read as four separate events.
+        //
+        // Rows are also age-bounded. This section answers "what is happening now", and each row
+        // renders a `.relative` AGE — so without a cutoff the last few calls of a task that has
+        // gone quiet sit here indefinitely, counting upward, indistinguishable from a tool that
+        // never returned. Work genuinely still in flight is reported by `brownState` (which is
+        // read from live telemetry, not timestamps), so a long-running call keeps its "running
+        // <tool>" line even after its request row ages out.
+        let cutoff = Date().addingTimeInterval(-Self.activityWindowSeconds)
         var toolsByTask: [UUID: [ToolActivity]] = [:]
         for message in viewModel.messages {
             guard let taskID = message.taskID,
+                  message.timestamp >= cutoff,
                   message.messageKind == "tool_request",
                   case .string(let tool)? = message.metadata?["tool"] else { continue }
             toolsByTask[taskID, default: []].append(
@@ -83,23 +102,14 @@ struct NowLiveSection: View {
         let processing = viewModel.processingInstances
         let toolsByInstance = viewModel.toolExecutingByInstance
 
-        let next = live.map { task -> LiveTaskRow in
-            let brownState = Self.brownState(for: task, processing: processing, tools: toolsByInstance)
-            // A parked task with no live worker has no activity to show — only history. Rendering
-            // it anyway is what made a correctly-parked task read as a hang: the rows are stamped
-            // with `.relative` AGE, so the last call before the worker went away sits there
-            // counting upward ("23 min") and looks like a tool that never returned. The stage
-            // chip ("Awaiting Review") is the whole truth for these; stale rows only obscure it.
-            let showsActivity = brownState != nil || !Self.isParked(task.status)
-            return LiveTaskRow(
+        let next = live.map { task in
+            LiveTaskRow(
                 id: task.id,
                 title: task.title,
                 status: task.status,
-                brownState: brownState,
+                brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance),
                 securityEvaluating: Self.securityEvaluating(for: task, processing: processing),
-                tools: showsActivity
-                    ? Array((toolsByTask[task.id] ?? []).suffix(Self.maxToolRowsPerTask).reversed())
-                    : []
+                tools: Array((toolsByTask[task.id] ?? []).suffix(Self.maxToolRowsPerTask).reversed())
             )
         }
 
@@ -140,24 +150,20 @@ struct NowLiveSection: View {
     /// Most-recent tool calls shown per task before older ones fall off.
     private static let maxToolRowsPerTask = 4
 
+    /// How far back a tool call still counts as "now". Comfortably longer than a typical call
+    /// (most return in seconds) and short enough that nothing on screen reads as stale. A call
+    /// that outlives this is still represented — by `brownState`'s live "running <tool>" line,
+    /// which comes from telemetry rather than a timestamp and therefore can't go stale.
+    private static let activityWindowSeconds: TimeInterval = 120
+
+    /// How often the rows are re-evaluated so aged-out activity actually disappears. Well under
+    /// `activityWindowSeconds`, so a row is never visibly overdue by more than this.
+    private static let staleSweepIntervalSeconds: TimeInterval = 10
+
     /// Statuses that represent work happening — or needing attention — right now.
     static func isLive(_ status: AgentTask.Status) -> Bool {
         switch status {
         case .starting, .running, .validating, .awaitingReview, .awaitingHelp, .interrupted:
-            return true
-        default:
-            return false
-        }
-    }
-
-    /// Statuses where the task is waiting on someone else rather than progressing on its own.
-    /// These belong in the Live section (they need attention) but must not imply activity: a
-    /// parked task may have no worker at all, and the tool rows beneath it would be history.
-    /// Kept separate from `isLive` so the "needs attention" and "is working" questions stay
-    /// distinct — conflating them is what let a dead worker's last calls masquerade as live ones.
-    static func isParked(_ status: AgentTask.Status) -> Bool {
-        switch status {
-        case .awaitingReview, .awaitingHelp, .interrupted:
             return true
         default:
             return false

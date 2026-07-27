@@ -1853,7 +1853,14 @@ public actor AgentActor {
             // so it keeps working, up to `maxContinuationNudgesSinceProgress` of them without
             // forward progress. Past that the worker is narrating in place, and the honest
             // answer to "nothing left to do" is to idle, not to be nudged again.
-            if configuration.role == .brown && hasText {
+            //
+            // A PARKED worker is never nudged, no matter how it got woken. `awaitingTaskReview`
+            // means the work is submitted and control belongs to the validator; the run loop
+            // hands a parked Brown an EMPTY tool list (see the `toolDefinitions` override), so
+            // "Continue. Use your tools to make progress" asks for something it structurally
+            // cannot do — every such turn is guaranteed to come back as text and buy nothing.
+            // Idling is the correct response, and it costs one wasted turn instead of ten.
+            if configuration.role == .brown && hasText && !awaitingTaskReview {
                 continuationNudgesSinceProgress += 1
                 if continuationNudgesSinceProgress >= Self.maxContinuationNudgesSinceProgress {
                     await toolContext.post(ChannelMessage(
