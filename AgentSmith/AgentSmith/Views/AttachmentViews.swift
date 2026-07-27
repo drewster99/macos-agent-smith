@@ -230,6 +230,18 @@ struct ToolNameChip: View {
 }
 
 /// Renders a file path with the directory dimmed and the filename highlighted in bold cyan.
+///
+/// The two halves are NOT equal citizens when space runs out. Both texts previously took the
+/// default layout priority, so a narrow row truncated BOTH — which cost the filename its tail
+/// and produced the worst possible outcome: a path long enough to fill the row, ending in an
+/// ellipsis, identifying nothing. `attachments/` names are the pathological case, since they
+/// are a 36-character UUID followed by the only part a reader cares about.
+///
+/// So the filename claims the width it needs first and the directory absorbs whatever is left,
+/// and both truncate in the MIDDLE rather than the tail: a clipped directory keeps its root and
+/// its immediate parent (`/Users/…/attachments/`) instead of trailing off after `/Users/andrew/
+/// Library/Appl…`, and a filename too long even at full priority keeps both its distinguishing
+/// head and its extension. The untruncated path is always available as a tooltip.
 struct ToolPathText: View {
     let path: String
     private let directory: String
@@ -248,11 +260,15 @@ struct ToolPathText: View {
                 .font(AppFonts.channelBody)
                 .foregroundStyle(.secondary.opacity(0.7))
                 .lineLimit(1)
+                .truncationMode(.middle)
             Text(filename)
                 .font(AppFonts.channelBody.bold())
                 .foregroundStyle(AppColors.toolPathFilename)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
         }
+        .help(path)
     }
 }
 

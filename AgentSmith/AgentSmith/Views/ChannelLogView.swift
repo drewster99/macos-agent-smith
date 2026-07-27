@@ -1062,7 +1062,16 @@ private struct MessageRow: View, Equatable {
     }
 
     /// The tool call summary text with the primary path removed (for display alongside ToolPathText).
-    /// Returns nil if no path was extracted.
+    ///
+    /// The path is removed together with the KEY that introduced it. Stripping only the value —
+    /// which this used to do — left the key stranded holding nothing: `{"path": "", …}` in the
+    /// JSON form the validator posts, `…, path=` in the `key=value` form Brown's tools post.
+    /// Both read as "the caller passed an empty path" when in fact the path was lifted out and
+    /// is rendered in full by `ToolPathText` immediately to the left.
+    ///
+    /// Two shapes are handled because the two producers format differently, and a bare-path
+    /// fallback covers summaries that mention a path with no key at all. Anything that matches
+    /// none of them is left as-is rather than guessed at.
     private func remainderWithoutPath(_ displayText: String, path: String) -> String {
         let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
         var text = displayText
@@ -1071,12 +1080,28 @@ private struct MessageRow: View, Equatable {
             text = String(text.dropFirst(toolName.count))
             if text.hasPrefix(": ") { text = String(text.dropFirst(2)) }
         }
-        // Remove the path from the remaining text
+
+        let escapedPath = NSRegularExpression.escapedPattern(for: path)
+        for key in Self.pathKeys {
+            let escapedKey = NSRegularExpression.escapedPattern(for: key)
+            let keyedForms = [
+                #""\#(escapedKey)"\s*:\s*"\#(escapedPath)"\s*,?"#,    // "path": "/x/y",
+                #"\b\#(escapedKey)\s*=\s*"?\#(escapedPath)"?\s*,?"#   // path=/x/y,
+            ]
+            for form in keyedForms {
+                text = text.replacingOccurrences(of: form, with: "", options: [.regularExpression])
+            }
+        }
+        // Unkeyed fallback. A no-op when a keyed form already matched — the path is gone by then.
         text = text.replacingOccurrences(of: path, with: "")
-        // Clean up separators left behind (e.g. ", , " or leading ", ")
-        text = text.replacingOccurrences(of: ", ,", with: ",")
+
+        // Tidy the separators the removal leaves behind.
+        text = text.replacingOccurrences(of: #"\{\s*,"#, with: "{", options: [.regularExpression])
+        text = text.replacingOccurrences(of: #",\s*\}"#, with: "}", options: [.regularExpression])
+        text = text.replacingOccurrences(of: #",\s*,"#, with: ",", options: [.regularExpression])
         text = text.trimmingCharacters(in: CharacterSet(charactersIn: ", "))
-        return text
+        // The path was the only argument — an empty object is noise, not information.
+        return text == "{}" ? "" : text
     }
 
     // MARK: - Tool request consolidated block
