@@ -346,6 +346,7 @@ public actor MemoryStore {
     @discardableResult
     public func delete(id: UUID) -> Bool {
         guard memories.removeValue(forKey: id) != nil else { return false }
+        memoryTokenCache.removeValue(forKey: id)
         onChange?()
         return true
     }
@@ -433,6 +434,7 @@ public actor MemoryStore {
     /// deleted (it's gone forever) — distinct from recently-deleted, which only hides the summary.
     public func removeTaskSummary(id: UUID) {
         guard taskSummaries.removeValue(forKey: id) != nil else { return }
+        taskSummaryTokenCache.removeValue(forKey: id)
         excludedTaskSummaryIDs.remove(id)
         onChange?()
     }
@@ -614,11 +616,158 @@ public actor MemoryStore {
         return "Instruct: \(instruction)\nQuery: \(query)"
     }
 
-    private static func textScore(queryTokens: Set<String>, document: String) -> Double {
-        guard !queryTokens.isEmpty else { return 0.0 }
-        let documentTokens = Set(tokenize(document))
-        let matched = queryTokens.intersection(documentTokens)
-        return Double(matched.count) / Double(queryTokens.count)
+    /// BM25's term-saturation and length-normalization parameters, at the literature defaults.
+    /// Deliberately NOT tuned to this corpus: without a labeled relevance set, "tuning" would mean
+    /// fitting whichever values happen to reduce a proxy metric, which is fitting noise.
+    private static let bm25TermSaturation = 1.2
+    private static let bm25LengthNormalization = 0.75
+
+    /// Everything a lexical score needs beyond a single document's tokens: how rare each query token
+    /// is in the corpus being searched, how long a typical document runs, and which query tokens
+    /// each document actually contains.
+    ///
+    /// Computed per query rather than maintained as a persistent index. Only the QUERY's tokens need
+    /// document frequencies, so there is nothing to invalidate — and an inverted index would have to
+    /// be kept in step with sixteen mutation sites to save work that measures in single-digit
+    /// milliseconds.
+    private struct LexicalScoring {
+        let inverseDocumentFrequency: [String: Double]
+        let totalQueryWeight: Double
+        let averageDocumentLength: Double
+        /// Query tokens present in each document, positionally aligned with the `documents` argument.
+        let matchedTokensPerDocument: [Set<String>]
+    }
+
+    private static func lexicalScoring(
+        queryTokens: Set<String>,
+        documents: [Set<String>]
+    ) -> LexicalScoring {
+        var documentFrequency: [String: Int] = [:]
+        var matchedPerDocument: [Set<String>] = []
+        matchedPerDocument.reserveCapacity(documents.count)
+        var totalLength = 0
+
+        // ONE intersection per document produces both halves of what scoring needs: the query tokens
+        // this document contains, and — accumulated across documents — how many contain each token.
+        // Probing every query token against every document instead costs |query| x |corpus| lookups
+        // TWICE (once to count, once to score). On a task-context query that is title plus full
+        // description, `queryTokens` reaches ~780 distinct tokens, and that shape measured SLOWER
+        // than the per-query re-tokenization this cache exists to eliminate. `Set.intersection`
+        // walks the smaller set, so this pass is bounded by min(|query|, |document|) instead.
+        for tokens in documents {
+            let matched = queryTokens.intersection(tokens)
+            for token in matched { documentFrequency[token, default: 0] += 1 }
+            matchedPerDocument.append(matched)
+            totalLength += tokens.count
+        }
+
+        let count = Double(documents.count)
+        var idf: [String: Double] = [:]
+        var total = 0.0
+        // Only tokens that occur somewhere in the corpus contribute to the denominator. A query word
+        // that appears in no document cannot be matched by any of them, so counting it would scale
+        // every score down for the query's vocabulary rather than for the document's content — and
+        // BM25's IDF weights a zero-frequency term most heavily of all, so the distortion would be
+        // largest exactly where it is least deserved. `documentFrequency` holds precisely the
+        // present tokens, so iterating it is the filter.
+        for (token, frequency) in documentFrequency {
+            let containing = Double(frequency)
+            // BM25's IDF, in the +1 form that stays positive even for a token in every document.
+            let weight = log(1 + (count - containing + 0.5) / (containing + 0.5))
+            idf[token] = weight
+            total += weight
+        }
+
+        return LexicalScoring(
+            inverseDocumentFrequency: idf,
+            totalQueryWeight: total,
+            averageDocumentLength: documents.isEmpty ? 1 : Double(totalLength) / count,
+            matchedTokensPerDocument: matchedPerDocument
+        )
+    }
+
+    /// Lexical (keyword) half of the hybrid score: how much of the query's *distinctive* vocabulary
+    /// this document contains, damped for document length. Range [0, 1].
+    ///
+    /// This replaced a plain coverage ratio (`matched / queryTokens.count`), which had no notion of
+    /// either term rarity or document length. Both omissions pulled the same direction: a long
+    /// document contains more distinct tokens, so it matched more of any query, and every match
+    /// counted equally whether it was a unique identifier or a word in half the corpus. Measured
+    /// over 25 real user queries against the 404-summary corpus, that scored as roughly a length
+    /// proxy — Spearman +0.63 against document length, with the top-ranked document typically 9.9x
+    /// longer than the corpus median. Weighting by IDF and damping by length takes those to +0.40
+    /// and 0.7x, which is the behavior a lexical scorer is supposed to have: it exists to find rare
+    /// exact tokens (identifiers, error codes, version numbers) that embeddings blur away.
+    ///
+    /// Because the document side is a SET, term frequency is always 1 for a matched term, so BM25's
+    /// saturation term collapses to a per-document constant that depends only on length. Short
+    /// documents matching nearly all of the query's weight can push the product just past 1 (0.14%
+    /// of scores on the real corpus, never changing which document ranked first), so the result is
+    /// clamped to keep the [0, 1] contract the `threshold` comparison and the UI both assume.
+    private static func textScore(
+        matchedTokens: Set<String>,
+        documentLength: Int,
+        scoring: LexicalScoring
+    ) -> Double {
+        guard scoring.totalQueryWeight > 0, !matchedTokens.isEmpty else { return 0.0 }
+        var matchedWeight = 0.0
+        for token in matchedTokens {
+            matchedWeight += scoring.inverseDocumentFrequency[token] ?? 0
+        }
+        guard matchedWeight > 0 else { return 0.0 }
+
+        let saturation = Self.bm25TermSaturation
+        let normalization = Self.bm25LengthNormalization
+        let relativeLength = Double(documentLength) / max(scoring.averageDocumentLength, 1)
+        let lengthFactor = (saturation + 1)
+            / (1 + saturation * (1 - normalization + normalization * relativeLength))
+        return min(1.0, matchedWeight / scoring.totalQueryWeight * lengthFactor)
+    }
+
+    // MARK: - Lexical token cache
+
+    /// A document's tokenized form, kept alongside the exact text it was built from.
+    ///
+    /// Storing the source text is what makes the cache safe: entries are written from sixteen
+    /// different places in this file (adds, edits, retrieval-stat bumps, re-embeds, restore), and a
+    /// cache invalidated by hand at each of those would eventually be missed by a new one and serve
+    /// tokens for text that no longer exists. Validating against the current text instead means a
+    /// missed site can only cost a recompute, never a wrong answer.
+    private struct CachedTokens {
+        let sourceText: String
+        let tokens: Set<String>
+    }
+
+    private var memoryTokenCache: [UUID: CachedTokens] = [:]
+    private var taskSummaryTokenCache: [UUID: CachedTokens] = [:]
+
+    /// Tokens for a memory's lexical document, computing and caching them on first use.
+    ///
+    /// `textScore` used to tokenize every document on every query — a per-scalar walk over the full
+    /// text building a `Set` that was discarded immediately, for a result that cannot change while
+    /// the text doesn't. Measured on the real corpus that was 8.5ms for 223 memories and 302ms for
+    /// 404 task summaries (4.08 MB of text), against 0.05ms for all 627 dot products combined: the
+    /// scan was almost entirely re-tokenization, not vector math.
+    private func documentTokens(for entry: MemoryEntry) -> Set<String> {
+        let sourceText = entry.embeddingSourceText
+        if let cached = memoryTokenCache[entry.id], cached.sourceText == sourceText {
+            return cached.tokens
+        }
+        let tokens = Set(Self.tokenize(sourceText))
+        memoryTokenCache[entry.id] = CachedTokens(sourceText: sourceText, tokens: tokens)
+        return tokens
+    }
+
+    /// Tokens for a task summary's lexical document. See `documentTokens(for:)` above — this is the
+    /// corpus where it matters, since summaries are an order of magnitude longer than memories.
+    private func documentTokens(for entry: TaskSummaryEntry) -> Set<String> {
+        let sourceText = entry.embeddingSourceText
+        if let cached = taskSummaryTokenCache[entry.id], cached.sourceText == sourceText {
+            return cached.tokens
+        }
+        let tokens = Set(Self.tokenize(sourceText))
+        taskSummaryTokenCache[entry.id] = CachedTokens(sourceText: sourceText, tokens: tokens)
+        return tokens
     }
 
     private static func reciprocalRankFusion(
@@ -778,17 +927,32 @@ public actor MemoryStore {
         // every entry and then discarding all of it is pure waste — and `searchAll` skips the
         // matching query embedding on the same condition.
         guard limit > 0 else { return [] }
+        // Lexical scoring needs corpus-level context — how rare each query token is, and how long a
+        // typical document runs — so gather the cached token sets first and score in a second pass.
+        // The extra pass costs |query tokens| x |corpus| set lookups against sets that are already
+        // built, which is microseconds.
+        var documents: [(entry: MemoryEntry, tokens: Set<String>)] = []
+        documents.reserveCapacity(memories.count)
+        for entry in memories.values {
+            documents.append((entry, documentTokens(for: entry)))
+        }
+        let scoring = Self.lexicalScoring(queryTokens: queryTokens, documents: documents.map(\.tokens))
+
         var entryRefs: [MemoryEntry] = []
         var semanticScores: [Double] = []
         var textScores: [Double] = []
-        for entry in memories.values {
+        for (index, (entry, tokens)) in documents.enumerated() {
             let semantic: Double
             if entry.embedding.count == queryVector.count, !entry.embedding.isEmpty {
                 semantic = Double(VectorMath.dotProduct(queryVector, entry.embedding))
             } else {
                 semantic = 0
             }
-            let text = Self.textScore(queryTokens: queryTokens, document: entry.embeddingSourceText)
+            let text = Self.textScore(
+                matchedTokens: scoring.matchedTokensPerDocument[index],
+                documentLength: tokens.count,
+                scoring: scoring
+            )
             if max(semantic, text) >= threshold {
                 entryRefs.append(entry)
                 semanticScores.append(semantic)
@@ -873,21 +1037,34 @@ public actor MemoryStore {
         // See `searchMemoriesInternal`: limit 0 means "don't search this corpus at all",
         // not "score everything and return none of it".
         guard limit > 0 else { return [] }
-        var entryRefs: [TaskSummaryEntry] = []
-        var semanticScores: [Double] = []
-        var textScores: [Double] = []
         // When `excludeDeleted` is set (the pushed auto-context sites), skip summaries for
         // recently-deleted tasks — kept in the corpus so undelete restores them, but hidden from
         // unrequested context. Explicit `search_memory` pulls pass `excludeDeleted: false` so the
-        // agent that asked still sees deleted tasks. The check happens before any vector math.
+        // agent that asked still sees deleted tasks. The check happens before any vector math, and
+        // before the lexical statistics, so rarity and average length describe the corpus actually
+        // being searched rather than one the caller can't see.
+        var documents: [(entry: TaskSummaryEntry, tokens: Set<String>)] = []
+        documents.reserveCapacity(taskSummaries.count)
         for entry in taskSummaries.values where !(excludeDeleted && excludedTaskSummaryIDs.contains(entry.id)) {
+            documents.append((entry, documentTokens(for: entry)))
+        }
+        let scoring = Self.lexicalScoring(queryTokens: queryTokens, documents: documents.map(\.tokens))
+
+        var entryRefs: [TaskSummaryEntry] = []
+        var semanticScores: [Double] = []
+        var textScores: [Double] = []
+        for (index, (entry, tokens)) in documents.enumerated() {
             let semantic: Double
             if entry.embedding.count == queryVector.count, !entry.embedding.isEmpty {
                 semantic = Double(VectorMath.dotProduct(queryVector, entry.embedding))
             } else {
                 semantic = 0
             }
-            let text = Self.textScore(queryTokens: queryTokens, document: entry.embeddingSourceText)
+            let text = Self.textScore(
+                matchedTokens: scoring.matchedTokensPerDocument[index],
+                documentLength: tokens.count,
+                scoring: scoring
+            )
             if max(semantic, text) >= threshold {
                 entryRefs.append(entry)
                 semanticScores.append(semantic)
@@ -1088,6 +1265,8 @@ public actor MemoryStore {
     public func clear() {
         memories.removeAll()
         taskSummaries.removeAll()
+        memoryTokenCache.removeAll()
+        taskSummaryTokenCache.removeAll()
         onChange?()
     }
 }

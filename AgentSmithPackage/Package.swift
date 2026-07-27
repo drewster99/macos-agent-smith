@@ -19,7 +19,7 @@ let package = Package(
         // On-device semantic memory (MLX embeddings). 0.0.6 keeps Agent Smith on the
         // MLX Swift LM 2.x-compatible line while picking up the patched MLX Metal fix.
         // See the package CHANGELOG and ROADMAP. Package.resolved locks the commit.
-        .package(url: "https://github.com/drewster99/swift-semantic-search.git", from: "0.0.6"),
+        .package(url: "https://github.com/drewster99/swift-semantic-search.git", from: "0.0.7"),
         // Official Model Context Protocol Swift SDK. Provides the MCP client used to
         // talk to user-configured stdio MCP servers.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk", .upToNextMinor(from: "0.12.1"))
