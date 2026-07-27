@@ -506,6 +506,9 @@ public actor AgentActor {
         guard !pendingInjectedMessages.isEmpty, !lastTurnAwaitsToolResults else { return }
         conversationHistory.append(contentsOf: pendingInjectedMessages)
         pendingInjectedMessages.removeAll()
+        // Ensure the just-drained messages are actually processed this iteration — matters for
+        // the deferred path, where the enqueue's `hasUnprocessedInput` may already be consumed.
+        hasUnprocessedInput = true
         pushLiveContext()
     }
 
