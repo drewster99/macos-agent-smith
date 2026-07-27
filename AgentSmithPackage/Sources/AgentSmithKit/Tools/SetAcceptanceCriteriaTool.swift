@@ -143,6 +143,13 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         guard task.status != .completed else {
             return .failure("Task '\(task.title)' is completed — its acceptance criteria can no longer be changed.")
         }
+        // Same gate `manage_steps` has carried all along, and for a stronger reason: this tool edits
+        // the validation contract itself, so letting it land while a worker or validator is actively
+        // consuming that contract changes the rules mid-judgment. The store re-checks atomically —
+        // this one exists to fail early with an explanation rather than after parsing.
+        guard task.status.isValidationContractEditable else {
+            return .failure("Task '\(task.title)' is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active. Criteria are editable when the task is pending, paused, interrupted, scheduled, failed, or awaiting review.")
+        }
         let rawCriteria: [AnyCodable]? = { if case .array(let value) = arguments["criteria"] { return value }; return nil }()
         let rawActions: [AnyCodable]? = { if case .array(let value) = arguments["actions"] { return value }; return nil }()
         switch (rawCriteria, rawActions) {
@@ -186,7 +193,9 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             return AcceptanceCriterion(name: entry.name, validationPrompt: entry.validationPrompt, inputEnumeratorPrompt: entry.inputEnumeratorPrompt, waivable: entry.waivable, origin: .smith)
         }
 
-        await context.taskStore.setAcceptanceCriteria(id: taskID, criteria: criteria)
+        if let problem = await context.taskStore.setAcceptanceCriteria(id: taskID, criteria: criteria) {
+            return .failure(problem)
+        }
 
         let rendered = Self.renderCriteriaList(criteria)
 

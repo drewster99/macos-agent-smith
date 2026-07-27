@@ -1424,7 +1424,41 @@ final class AppViewModel {
             taskActionError = "Acceptance criteria can't be edited while the task is running, validating, or completed."
             return false
         }
-        await taskStore.setAcceptanceCriteria(id: id, criteria: criteria)
+        // The editor carries each existing row's id through, so its save is a DIFF, not a
+        // replacement: a row the user removed becomes an explicit `delete`, an edited row keeps its
+        // identity (and its verdict, if the contract text is unchanged), and a new row is an `add`.
+        // Saying it this way is what distinguishes the user DELIBERATELY removing a criterion from
+        // a replacement list that merely happens to be missing one — the store refuses the latter
+        // once the task carries validation evidence, and cannot tell them apart otherwise.
+        //
+        // Order is preserved exactly: updates hold their positions and adds append, which is also
+        // the only thing the editor can do (it has no reorder, and new rows are appended).
+        let existingIDs = Set(task.acceptanceCriteria.map(\.id))
+        let incomingIDs = Set(criteria.map(\.id))
+        var actions: [CriterionAction] = criteria.map { criterion in
+            existingIDs.contains(criterion.id)
+                ? .update(
+                    criterionID: criterion.id,
+                    name: criterion.name,
+                    validationPrompt: criterion.validationPrompt,
+                    inputEnumeratorPrompt: criterion.inputEnumeratorPrompt,
+                    waivable: criterion.waivable
+                )
+                : .add(
+                    name: criterion.name,
+                    validationPrompt: criterion.validationPrompt,
+                    inputEnumeratorPrompt: criterion.inputEnumeratorPrompt,
+                    waivable: criterion.waivable,
+                    origin: criterion.origin
+                )
+        }
+        actions += task.acceptanceCriteria
+            .filter { !incomingIDs.contains($0.id) }
+            .map { .delete(criterionID: $0.id) }
+        if let problem = await taskStore.applyCriterionActions(taskID: id, actions: actions) {
+            taskActionError = problem
+            return false
+        }
         return true
     }
 

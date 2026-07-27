@@ -733,12 +733,30 @@ public actor TaskStore {
     /// records stay in the audit ledger; only the "settled" reading resets, because the
     /// contract it was judged against no longer exists). Unchanged criteria keep their
     /// verdicts.
-    public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) {
-        guard var task = tasks[id] else { return }
+    ///
+    /// Gated on status AND evidence, HERE rather than at the tool layer: a tool reads the task and
+    /// mutates later, so its check is TOCTOU. Returns a human-readable refusal, or nil on success.
+    @discardableResult
+    public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) -> String? {
+        guard var task = tasks[id] else { return "Task not found." }
+        guard task.status.isValidationContractEditable else {
+            return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
+        }
+        guard task.canReplaceAcceptanceContract(with: criteria) else {
+            let dropped = task.acceptanceCriteria.filter { existing in !criteria.contains { $0.id == existing.id } }
+            return """
+                Task "\(task.title)" has already been validated, so its contract can't be replaced wholesale — \
+                this list drops \(dropped.count) criterion(s) that carry a verdict or rejection history \
+                (\(dropped.map { "\"\($0.name)\"" }.joined(separator: ", "))). \
+                Use `actions` with `update` (which keeps a criterion's id, and its verdict when the contract text \
+                is unchanged) and `delete` (which says so plainly) instead.
+                """
+        }
         writeAcceptanceContract(criteria, to: &task)
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
+        return nil
     }
 
     /// Applies a batch of per-criterion edits ATOMICALLY: every action is validated and applied to a
@@ -750,6 +768,9 @@ public actor TaskStore {
     @discardableResult
     public func applyCriterionActions(taskID: UUID, actions: [CriterionAction]) -> String? {
         guard var task = tasks[taskID] else { return "Task not found." }
+        guard task.status.isValidationContractEditable else {
+            return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
+        }
         guard !actions.isEmpty else { return "No criterion actions were given." }
         var criteria = task.acceptanceCriteria
         for action in actions {

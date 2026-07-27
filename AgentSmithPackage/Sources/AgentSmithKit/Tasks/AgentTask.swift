@@ -151,6 +151,38 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         isTemplate || (startedAt == nil && validation == nil)
     }
 
+    /// Whether this task has ever entered validation — the durable marker that its acceptance
+    /// contract has been judged, or was about to be.
+    ///
+    /// It is the LEDGER'S EXISTENCE, not its contents, because every finer-grained signal is erased
+    /// by the very action this guards. "A verdict exists" fails because a round increments BEFORE
+    /// anything is judged, so the ledger is legitimately empty mid-validation. "A round has begun"
+    /// fails because a contract edit resets `round` to 0 — so two edits in a row would find the
+    /// second one unguarded, which is precisely the sequence worth guarding. `validation` is only
+    /// ever created (by `beginValidationRound`) and only ever cleared by converting the task into a
+    /// template, which deliberately discards all run state.
+    public var hasValidationEvidence: Bool { validation != nil }
+
+    /// Whether `criteria` may replace this task's contract WHOLESALE.
+    ///
+    /// The harm a replace does is not "it changes things" — it is that a replacement list built by
+    /// matching on NAME mints a fresh UUID whenever a name changes, and a new UUID is a new
+    /// criterion whose predecessor's verdicts are silently retired. So the gate asks the precise
+    /// question: does this replacement still contain every criterion currently on the task? A
+    /// replace that RESTATES them all destroys no identity whatever else it edits — that is the
+    /// task-detail editor, which edits rows in place and carries their ids through. A replace that
+    /// DROPS one, once evidence exists, must instead say so through `delete`, where the intent is
+    /// stated rather than inferred from a list that happens to be missing something.
+    ///
+    /// Deliberately NOT parity with `isStepPlanPurgeable`, which additionally requires
+    /// `startedAt == nil`: a task that ran but was never validated has no acceptance evidence to
+    /// protect, and re-authoring its contract wholesale is exactly what a first draft needs.
+    public func canReplaceAcceptanceContract(with criteria: [AcceptanceCriterion]) -> Bool {
+        guard hasValidationEvidence else { return true }
+        let incoming = Set(criteria.map(\.id))
+        return acceptanceCriteria.allSatisfy { incoming.contains($0.id) }
+    }
+
     /// A single progress update recorded on a task.
     public struct TaskUpdate: Codable, Sendable, Equatable {
         public var date: Date

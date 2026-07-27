@@ -249,6 +249,49 @@ struct TaskValidationModelTests {
         #expect(validation.latestVerdict(for: criterionB.id) != nil, "unchanged criterion keeps its audit trail")
     }
 
+    @Test("Wholesale replace is refused once evidence exists — but only when it drops an identity")
+    func replaceAllGatedOnStatusAndEvidence() async {
+        let store = TaskStore()
+        let first = AcceptanceCriterion(name: "A", validationPrompt: "judge A", origin: .smith)
+        let task = await store.addTask(title: "t", description: "d")
+
+        // First-time authoring: no ledger, no evidence, replace freely.
+        #expect(await store.setAcceptanceCriteria(id: task.id, criteria: [first]) == nil)
+        #expect(await store.setAcceptanceCriteria(id: task.id, criteria: [first, AcceptanceCriterion(name: "B", validationPrompt: "judge B", origin: .smith)]) == nil)
+
+        // A round begins. verdictRecords is still EMPTY here — which is exactly why "no verdict
+        // exists" was rejected as the gate: the round increments before anything is judged.
+        let token = await store.beginValidationRound(id: task.id)!
+        let live = await store.task(id: task.id)!
+        #expect(live.validation?.verdictRecords.isEmpty == true)
+        #expect(live.hasValidationEvidence, "a round already begun IS evidence")
+
+        // Restating both criteria by id destroys no identity, so it is allowed — this is the
+        // task-detail editor's shape.
+        var editedFirst = first
+        editedFirst.validationPrompt = "judge A more strictly"
+        #expect(await store.setAcceptanceCriteria(id: task.id, criteria: [editedFirst, live.acceptanceCriteria[1]]) == nil)
+
+        // Dropping one is refused, and the refusal names it and points at the verb that says so.
+        let refused = await store.setAcceptanceCriteria(id: task.id, criteria: [editedFirst])
+        #expect(refused?.contains("\"B\"") == true)
+        #expect(refused?.contains("delete") == true)
+        #expect(await store.task(id: task.id)?.acceptanceCriteria.count == 2, "a refused replace changes nothing")
+
+        // The same drop, said plainly through the verb, is allowed — the user/Smith meant it.
+        let bID = await store.task(id: task.id)!.acceptanceCriteria[1].id
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [.delete(criterionID: bID)]) == nil)
+        #expect(await store.task(id: task.id)?.acceptanceCriteria.map(\.name) == ["A"])
+
+        // And the status half of the gate: nothing edits a contract a validator is consuming.
+        await store.updateStatus(id: task.id, status: .validating)
+        #expect(await store.setAcceptanceCriteria(id: task.id, criteria: [editedFirst]) != nil)
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [
+            .add(name: "C", validationPrompt: "judge C", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
+        ]) != nil)
+        _ = token
+    }
+
     @Test("update preserves criterion identity — and with it the verdict a replace-all would destroy")
     func criterionUpdatePreservesIdentity() async {
         let store = TaskStore()
@@ -352,7 +395,10 @@ struct TaskValidationModelTests {
         #expect(afterRound.rejectionHistory(for: kept.id).isEmpty)
 
         // Smith responds to the failure the way it always does: drop the criterion that rejected.
-        await store.setAcceptanceCriteria(id: task.id, criteria: [kept])
+        // Quietly, by re-sending the list without it, is refused now that the task has been judged;
+        // it has to say so.
+        #expect(await store.setAcceptanceCriteria(id: task.id, criteria: [kept]) != nil)
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [.delete(criterionID: doomed.id)]) == nil)
         let afterEdit = await store.task(id: task.id)!.validation!
         #expect(afterEdit.verdictRecords.contains { $0.criterionID == doomed.id } == false, "verdicts for a departed criterion are retired")
         #expect(afterEdit.rejectionHistory.count == 1, "the record of HAVING been rejected survives the criterion")
@@ -460,22 +506,22 @@ struct TaskValidationModelTests {
         let criterion = AcceptanceCriterion(name: "A", validationPrompt: "Reject unless A holds.", origin: .smith)
         let task = await store.addTask(title: "t", description: "d")
         await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
-        await store.updateStatus(id: task.id, status: .validating)
 
         let inFlight = await store.beginValidationRound(id: task.id)!
         // Authoring the contract before any ledger exists versions nothing — there is no round to
         // supersede. Version 0 is simply "the contract as it stood when it was first judged".
         #expect(inFlight == ValidationRoundToken(round: 1, contractVersion: 0))
 
-        // Smith rewrites the contract while the round is out at the validator. That resets the
-        // round counter — and the very next round is numbered 1 again, exactly like the one still
-        // in flight. Only the contract version tells them apart.
+        // The contract is rewritten while that round is still out at the validator. The rewrite
+        // resets the round counter — so the very next round is numbered 1 again, exactly like the
+        // one still in flight. Only the contract version tells them apart.
         var rewritten = criterion
         rewritten.validationPrompt = "Reject unless A holds, but only on Tuesdays."
-        await store.setAcceptanceCriteria(id: task.id, criteria: [rewritten])
+        #expect(await store.setAcceptanceCriteria(id: task.id, criteria: [rewritten]) == nil)
         let successor = await store.beginValidationRound(id: task.id)!
         #expect(successor.round == inFlight.round, "the round NUMBER is no longer distinguishing")
         #expect(successor.contractVersion > inFlight.contractVersion)
+        await store.updateStatus(id: task.id, status: .validating)
 
         // Every mutation the in-flight round would make is refused, on the actor that owns the truth.
         let write = await store.recordCriterionVerdicts(id: task.id, records: [
