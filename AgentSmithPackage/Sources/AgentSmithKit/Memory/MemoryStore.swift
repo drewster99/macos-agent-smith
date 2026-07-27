@@ -702,7 +702,10 @@ public actor MemoryStore {
         )
         let memorySearchMs = Int(Date().timeIntervalSince(searchStart) * 1000)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        memoryStoreLogger.notice("searchMemories [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.memories.count, privacy: .public) memories in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms, memory-scan \(memorySearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
+        // Embed cost is very nearly linear in the number of characters fed to the model, so the
+        // length is what makes `embedMs` interpretable. This path embeds the query verbatim — no
+        // instruction preamble — so embedded length IS the query length.
+        memoryStoreLogger.notice("searchMemories [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.memories.count, privacy: .public) memories in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(query.count, privacy: .public) chars, memory-scan \(memorySearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
         onQueryRecorded?(MemoryQueryRecord(
             timestamp: start,
             query: query,
@@ -843,7 +846,9 @@ public actor MemoryStore {
         )
         let taskSearchMs = Int(Date().timeIntervalSince(searchStart) * 1000)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        memoryStoreLogger.notice("searchTaskSummaries [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms, task-scan \(taskSearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
+        // See `searchMemories` — length is what makes `embedMs` interpretable, and this path also
+        // embeds the query verbatim, so embedded length IS the query length.
+        memoryStoreLogger.notice("searchTaskSummaries [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(query.count, privacy: .public) chars, task-scan \(taskSearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
         onQueryRecorded?(MemoryQueryRecord(
             timestamp: start,
             query: query,
@@ -997,8 +1002,15 @@ public actor MemoryStore {
         }
         if trackedAnyRetrieval { retrievalStatsDirty = true }
 
+        // Embed cost is very nearly linear in the characters fed to the model, so the length is what
+        // makes `embedMs` interpretable — and here the RAW query length understates it, typically by
+        // about 2x. Each pool wraps the query in its own instruction preamble (`instructed`), and both
+        // variants go through one batched forward pass, so the model sees the query roughly twice on
+        // a two-pool search and once when a pool is switched off with a zero limit.
+        let embeddedVariants = [memoryQuery, taskQuery].compactMap { $0 }
+        let embeddedChars = embeddedVariants.reduce(0) { $0 + $1.count }
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        memoryStoreLogger.notice("searchAll [\(source, privacy: .public)]: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms, memory-scan \(memorySearchMs, privacy: .public)ms over \(self.memories.count, privacy: .public), task-scan \(taskSearchMs, privacy: .public)ms over \(self.taskSummaries.count, privacy: .public)) (query: \(query.prefix(60), privacy: .public))")
+        memoryStoreLogger.notice("searchAll [\(source, privacy: .public)]: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(embeddedChars, privacy: .public) chars in \(embeddedVariants.count, privacy: .public) variant(s), memory-scan \(memorySearchMs, privacy: .public)ms over \(self.memories.count, privacy: .public), task-scan \(taskSearchMs, privacy: .public)ms over \(self.taskSummaries.count, privacy: .public)) (query: \(query.count, privacy: .public) chars: \(query.prefix(60), privacy: .public))")
         onQueryRecorded?(MemoryQueryRecord(
             timestamp: start,
             query: query,
@@ -1015,13 +1027,60 @@ public actor MemoryStore {
 
     // MARK: - Persistence Support
 
+    /// How far a stored vector's length may sit from 1 before it needs rescaling. Comfortably above
+    /// Float32 round-off (~1e-7) and far below the ~0.4% bfloat16 error this corrects, so a properly
+    /// normalized vector never trips it and a bfloat16-normalized one always does.
+    private static let unitLengthTolerance = 1e-5
+
+    /// Rescales `vector` to unit length, or returns nil when it is already unit-length (and so needs
+    /// no correction) or has no length to preserve.
+    ///
+    /// Scoring uses `VectorMath.dotProduct` as a stand-in for cosine, which is only valid when both
+    /// operands have length 1. Vectors embedded before the Float32 widening landed in the backend
+    /// were normalized in bfloat16 — 7 mantissa bits, ~0.4% relative precision — so their stored
+    /// lengths scatter across ±0.4% rather than sitting at 1. The resulting bias is systematic
+    /// rather than noise: an entry stored at length 1.004 scores ~0.4% high against EVERY query,
+    /// permanently. Accumulating in Double keeps the magnitude itself from being part of the error.
+    static func renormalizedIfNeeded(_ vector: [Float]) -> [Float]? {
+        let magnitude = (vector.reduce(0.0) { $0 + Double($1) * Double($1) }).squareRoot()
+        guard magnitude > 1e-12, abs(magnitude - 1.0) > Self.unitLengthTolerance else { return nil }
+        return vector.map { Float(Double($0) / magnitude) }
+    }
+
     /// Restores memories and task summaries from persisted data (e.g., on app launch).
+    ///
+    /// Rescales any restored embedding that is not unit-length (see `renormalizedIfNeeded`). This
+    /// corrects the whole persisted corpus in one pass at launch rather than re-embedding it:
+    /// normalization is direction-preserving, so rescaling recovers exactly the unit vector the
+    /// backend should have produced. The corrected values are deliberately NOT written back — the
+    /// pass is a few hundred thousand float operations, while persisting would rewrite a
+    /// multi-megabyte embedding file to change nothing a reader can observe.
     public func restore(memories: [MemoryEntry], taskSummaries: [TaskSummaryEntry]) {
         for memory in memories {
-            self.memories[memory.id] = memory
+            guard let corrected = Self.renormalizedIfNeeded(memory.embedding) else {
+                self.memories[memory.id] = memory
+                continue
+            }
+            self.memories[memory.id] = MemoryEntry(
+                id: memory.id, content: memory.content, embedding: corrected, source: memory.source,
+                tags: memory.tags, sourceTaskID: memory.sourceTaskID, createdAt: memory.createdAt,
+                lastRetrievedAt: memory.lastRetrievedAt, retrievalCount: memory.retrievalCount,
+                lastInjectedAt: memory.lastInjectedAt, injectionCount: memory.injectionCount,
+                lastUpdatedAt: memory.lastUpdatedAt, lastUpdatedBy: memory.lastUpdatedBy,
+                embeddingModelID: memory.embeddingModelID
+            )
         }
         for summary in taskSummaries {
-            self.taskSummaries[summary.id] = summary
+            guard let corrected = Self.renormalizedIfNeeded(summary.embedding) else {
+                self.taskSummaries[summary.id] = summary
+                continue
+            }
+            self.taskSummaries[summary.id] = TaskSummaryEntry(
+                id: summary.id, title: summary.title, summary: summary.summary,
+                embeddingSourceText: summary.embeddingSourceText, embedding: corrected,
+                status: summary.status, taskCreatedAt: summary.taskCreatedAt,
+                createdAt: summary.createdAt, embeddingModelID: summary.embeddingModelID
+            )
         }
     }
 

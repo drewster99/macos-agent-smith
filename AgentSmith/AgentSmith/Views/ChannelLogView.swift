@@ -1274,19 +1274,6 @@ private struct MessageRow: View, Equatable {
               case .int(let index) = message.metadata?["parallelIndex"] else { return nil }
         return "\(index + 1)/\(count)"
     }
-
-    /// Whether the collapsed view is hiding any output content that expanding would reveal.
-    /// Drives the "(show more)" affordance on the tool call line.
-    private var toolOutputHasMore: Bool {
-        guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
-        // When collapsed we show either nothing or a single error line. If that error
-        // line is the entire output, there is nothing more to reveal.
-        if let errorLine = collapsedErrorPreview(output.content) {
-            return output.content.count > errorLine.count
-        }
-        return true
-    }
-
     /// Whether this tool call is `file_read` — its output is raw file content that
     /// should stay collapsed by default.
     private var isFileRead: Bool {
@@ -1433,16 +1420,15 @@ private struct MessageRow: View, Equatable {
         @Binding var isExpanded: Bool
         let securityDispositionControl: () -> SecurityDispositionControlView
         
-        private var toolOutputHasMore: Bool {
-            guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
-            if let errorLine = collapsedErrorPreview(output.content) {
-                return output.content.count > errorLine.count
-            }
-            return true
-        }
-        
         var body: some View {
-            Button(action: { isExpanded.toggle() }, label: {
+            let _toolOutputHasMore: Bool = {
+                guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
+                if let errorLine = collapsedErrorPreview(output.content) {
+                    return output.content.count > errorLine.count
+                }
+                return true
+            }()
+            return Button(action: { isExpanded.toggle() }, label: {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     FileWritePathView(path: message.stringMetadata("fileWritePath") ?? "")
                     if let badge = parallelBadge {
@@ -1458,7 +1444,7 @@ private struct MessageRow: View, Equatable {
                         Text("(show less)")
                             .font(.caption)
                             .foregroundStyle(AppColors.disclosureToggle)
-                    } else if toolOutputHasMore {
+                    } else if _toolOutputHasMore {
                         Text("(show more)")
                             .font(.caption)
                             .foregroundStyle(AppColors.disclosureToggle)
@@ -1518,16 +1504,15 @@ private struct MessageRow: View, Equatable {
         @Binding var isExpanded: Bool
         let securityDispositionControl: () -> SecurityDispositionControlView
         
-        private var toolOutputHasMore: Bool {
-            guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
-            if let errorLine = collapsedErrorPreview(output.content) {
-                return output.content.count > errorLine.count
-            }
-            return true
-        }
-        
         var body: some View {
-            Button(action: { isExpanded.toggle() }, label: {
+            let _toolOutputHasMore: Bool = {
+                guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
+                if let errorLine = collapsedErrorPreview(output.content) {
+                    return output.content.count > errorLine.count
+                }
+                return true
+            }()
+            return Button(action: { isExpanded.toggle() }, label: {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     let displayText = isExpanded ? message.content : toolCallDisplayText
                     let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
@@ -1565,7 +1550,7 @@ private struct MessageRow: View, Equatable {
                         Text("(show less)")
                             .font(.caption)
                             .foregroundStyle(AppColors.disclosureToggle)
-                    } else if toolOutputHasMore {
+                    } else if _toolOutputHasMore {
                         Text("(show more)")
                             .font(.caption)
                             .foregroundStyle(AppColors.disclosureToggle)
