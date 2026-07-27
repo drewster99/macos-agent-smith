@@ -299,7 +299,7 @@ enum CapabilityEvalRunner {
             // Without the gate an unreachable model still costs a call here — a dead key or an
             // empty credit balance 400s every request, and the sweep would spend one per model
             // learning the same nothing the chat probe already learned.
-            if provider.apiType == .anthropic, profile.chat.value == true, profile.trailingSystemTurn == nil {
+            if provider.apiType == .anthropic, profile.chat.value == true, profile.trailingSystemMessage == nil {
                 let test = ModelProber.makeTrailingSystemTurnTest()
                 let forcedConfig = ModelConfiguration(
                     name: "probe:\(target.modelID):trailing-system", providerID: target.providerID,
@@ -323,7 +323,7 @@ enum CapabilityEvalRunner {
                     extraJSONOverrides: test.overrides
                 )
                 let forcedLLM = kit.makeProvider(configuration: forcedConfig, provider: provider)
-                profile.trailingSystemTurn = await ModelProber.probeTrailingSystemTurn(
+                profile.trailingSystemMessage = await ModelProber.probeTrailingSystemTurn(
                     llm: forcedLLM, test: test, modelID: target.modelID
                 )
                 profile.callCount += 1
@@ -429,8 +429,8 @@ enum CapabilityEvalRunner {
         line("pdfInput", p.pdfInput)
         // Optional (added after the first records were written), so absent on older profiles rather
         // than printing a misleading "-" that would read as "asked, no answer".
-        if let trailingSystemTurn = p.trailingSystemTurn {
-            line("trailingSystem", trailingSystemTurn)
+        if let trailingSystemMessage = p.trailingSystemMessage {
+            line("trailingSystem", trailingSystemMessage)
         }
         line("maxContextTokens", p.maxContextTokens)
         line("maxOutputTokens", p.maxOutputTokens)
@@ -524,7 +524,7 @@ enum CapabilityEvalRunner {
             ("vision",         { cell($0.vision) }),
             ("pdf-input",      { cell($0.pdfInput) }),
             ("temperature",    { cell($0.acceptsTemperature) }),
-            ("trailing-system", { $0.trailingSystemTurn.map(cell) ?? "-" }),
+            ("trailing-system", { $0.trailingSystemMessage.map(cell) ?? "-" }),
             // Established effort levels, shallow → deep. Spelled out rather than abbreviated: the
             // whole point is which ladder rungs this model actually accepts, and "med" or "xh"
             // makes that a guess. Absent levels were never attempted, not rejected.
