@@ -6,99 +6,108 @@ import SwiftLLMKit
 /// Every channel message that means something structural — a tool call, a task lifecycle event,
 /// a validation verdict — is tagged with one of these. Readers key display AND control flow off
 /// the tag, so it is a contract between the site that posts a message and every site that
-/// interprets one.
+/// interprets one. Never write or compare the raw string; use a case.
 ///
-/// ## Why a RawRepresentable struct and not `enum Kind: String`
+/// ## Completeness is a correctness requirement
 ///
-/// The obvious move is a closed `String`-backed enum. It is the wrong one here, for a reason
-/// that is specific to this type rather than a general preference:
+/// This is a closed enum, so `init(rawValue:)` returns nil for anything not listed here, and a
+/// missing case makes `ChannelMessage.kind` nil — every reader comparing against it would then
+/// silently take the wrong branch. Kinds are PERSISTED in `channel_log.jsonl`, so the set that
+/// matters is not "what the current code emits" but "what has ever been written to disk".
 ///
-/// A closed enum's `init(rawValue:)` returns nil for anything it doesn't know. Kinds are
-/// PERSISTED — every message in `channel_log.jsonl` carries its kind, and those logs are large
-/// and long-lived. Any kind absent from the enum would decode as "no kind at all", and every
-/// reader comparing against it would silently take the wrong branch on real historical data.
-/// That failure is invisible: nothing throws, nothing logs, a row just quietly renders as
-/// something else or a gate quietly stops matching.
+/// Those are different sets, and the gap is not small. Deriving the list by grepping the sources
+/// — the obvious approach, and what a prior test did — misses:
 ///
-/// And the enumeration genuinely cannot be trusted to be complete. This type was introduced
-/// after a grep-derived list missed `taskLifecycle` (it lives in a `Set` that never mentions
-/// `messageKind`), and after finding that `InspectorRecomputeCacheTests` — a test whose entire
-/// stated purpose is to "pin down the messageKind string surface" — enumerated 18 kinds when
-/// there were more than thirty. A design whose correctness depends on a grep being exhaustive
-/// is a design that will be wrong again.
+/// - kinds referenced in collections that never mention `messageKind` (`taskLifecycle` lives in
+///   a `Set` literal), and
+/// - RETIRED kinds, which no longer appear in any source file but are still sitting in the logs
+///   in quantity. `agentOnline` alone occurs about 4,000 times.
 ///
-/// So: unknown values round-trip losslessly and compare by raw value, exactly as the bare
-/// strings did, while every known kind gets a compile-checked static member. Nothing here is
-/// switched over exhaustively — kinds are compared and set-tested — so a closed enum would have
-/// bought no exhaustiveness guarantee to trade against that risk. This is the same shape Apple
-/// uses for `Notification.Name` and `NSAttributedString.Key`, and for the same reason.
+/// So this list was built by scanning the actual persisted corpus (~520 MB of `channel_log.jsonl`
+/// / `.json` / `.old` plus the backup and removed-session directories) on 2026-07-27, unioned
+/// with the kinds the current sources emit. `ChannelMessageKindTests` pins both halves.
 ///
 /// ## Adding a kind
 ///
-/// Add a static member here and use it. Never write the raw string at a post or read site —
-/// `ChannelMessageKindLiteralGuardTests` fails the build on new bare `"messageKind"` literals.
-public struct ChannelMessageKind: RawRepresentable, Hashable, Sendable, Codable {
-    public let rawValue: String
-
-    public init(rawValue: String) {
-        self.rawValue = rawValue
-    }
+/// Add a case here and use it. Never write the raw string at a post or read site — the guard
+/// tests in `ChannelMessageKindTests` fail the build on new bare `messageKind` literals.
+///
+/// ## Removing a kind
+///
+/// Don't. Retiring a kind from the code does NOT retire it from the logs. Move its case under
+/// the "Retired" section instead, so historical messages keep decoding.
+public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterable {
 
     // MARK: Tool calls
     /// A tool call being issued. Posted by workers, the Security Agent, and validators alike.
-    public static let toolRequest = ChannelMessageKind(rawValue: "tool_request")
+    case toolRequest = "tool_request"
     /// The result of a tool call. Pairs with a `toolRequest` by `requestID`.
-    public static let toolOutput = ChannelMessageKind(rawValue: "tool_output")
+    case toolOutput = "tool_output"
 
     // MARK: Task lifecycle
-    public static let taskCreated = ChannelMessageKind(rawValue: "task_created")
-    public static let taskAcknowledged = ChannelMessageKind(rawValue: "task_acknowledged")
-    public static let taskContinuing = ChannelMessageKind(rawValue: "task_continuing")
+    case taskCreated = "task_created"
+    case taskAcknowledged = "task_acknowledged"
+    case taskContinuing = "task_continuing"
     /// A worker submitting its work (`task_complete` the TOOL). Distinct from `taskCompleted`.
-    public static let taskComplete = ChannelMessageKind(rawValue: "task_complete")
+    case taskComplete = "task_complete"
     /// A task reaching the completed STATE. Distinct from `taskComplete`.
-    public static let taskCompleted = ChannelMessageKind(rawValue: "task_completed")
-    public static let taskFailed = ChannelMessageKind(rawValue: "task_failed")
-    public static let taskUpdate = ChannelMessageKind(rawValue: "task_update")
-    public static let taskUpdateGuidance = ChannelMessageKind(rawValue: "task_update_guidance")
-    public static let taskSummarized = ChannelMessageKind(rawValue: "task_summarized")
-    public static let taskActionScheduled = ChannelMessageKind(rawValue: "task_action_scheduled")
-    public static let taskQueuedAtCapacity = ChannelMessageKind(rawValue: "task_queued_at_capacity")
+    case taskCompleted = "task_completed"
+    case taskFailed = "task_failed"
+    case taskUpdate = "task_update"
+    case taskUpdateGuidance = "task_update_guidance"
+    case taskSummarized = "task_summarized"
+    case taskActionScheduled = "task_action_scheduled"
+    case taskQueuedAtCapacity = "task_queued_at_capacity"
     /// Informational lifecycle chatter. Deliberately does NOT wake an idle agent.
-    public static let taskLifecycle = ChannelMessageKind(rawValue: "task_lifecycle")
-    public static let scheduledRunDeferred = ChannelMessageKind(rawValue: "scheduled_run_deferred")
+    case taskLifecycle = "task_lifecycle"
+    case scheduledRunDeferred = "scheduled_run_deferred"
 
     // MARK: Validation
-    public static let changesRequested = ChannelMessageKind(rawValue: "changes_requested")
-    public static let criteriaUpdated = ChannelMessageKind(rawValue: "criteria_updated")
-    public static let validationReport = ChannelMessageKind(rawValue: "validation_report")
-    public static let validationFailed = ChannelMessageKind(rawValue: "validation_failed")
-    public static let validationEscalation = ChannelMessageKind(rawValue: "validation_escalation")
-    public static let submissionAutoRejected = ChannelMessageKind(rawValue: "submission_auto_rejected")
+    case changesRequested = "changes_requested"
+    case criteriaUpdated = "criteria_updated"
+    case validationReport = "validation_report"
+    case validationFailed = "validation_failed"
+    case validationEscalation = "validation_escalation"
+    case submissionAutoRejected = "submission_auto_rejected"
     /// The PUBLIC banner announcing that validation is blocked on a missing Validator model.
-    public static let validationBlocked = ChannelMessageKind(rawValue: "validation_blocked")
+    case validationBlocked = "validation_blocked"
     /// The PRIVATE notice telling a worker its submission is parked for the same reason.
     ///
     /// Load-bearing for control flow: `AgentActor.resumesParkedWorker` exempts this kind, and it
     /// is the only private-to-worker message that must NOT pull a worker out of
     /// `awaitingTaskReview`. Everything else addressed to a worker means "here is work back".
-    public static let validationBlockedWorkerNotice = ChannelMessageKind(rawValue: "validation_blocked_worker_notice")
+    case validationBlockedWorkerNotice = "validation_blocked_worker_notice"
 
     // MARK: Help
-    public static let helpRequested = ChannelMessageKind(rawValue: "help_requested")
-    public static let helpProvided = ChannelMessageKind(rawValue: "help_provided")
+    case helpRequested = "help_requested"
+    case helpProvided = "help_provided"
 
     // MARK: Memory
-    public static let memorySaved = ChannelMessageKind(rawValue: "memory_saved")
-    public static let memorySearched = ChannelMessageKind(rawValue: "memory_searched")
+    case memorySaved = "memory_saved"
+    case memorySearched = "memory_searched"
 
     // MARK: System / advisory
-    public static let inboundUserMessage = ChannelMessageKind(rawValue: "inbound_user_message")
-    public static let contextManagement = ChannelMessageKind(rawValue: "context_management")
-    public static let timerActivity = ChannelMessageKind(rawValue: "timer_activity")
-    public static let mcpStatus = ChannelMessageKind(rawValue: "mcp_status")
-    public static let restartChrome = ChannelMessageKind(rawValue: "restart_chrome")
-    public static let preparing = ChannelMessageKind(rawValue: "preparing")
+    case inboundUserMessage = "inbound_user_message"
+    case contextManagement = "context_management"
+    case timerActivity = "timer_activity"
+    case mcpStatus = "mcp_status"
+    case restartChrome = "restart_chrome"
+    case preparing = "preparing"
+
+    // MARK: Retired
+    //
+    // No longer emitted by any source file, but present in persisted logs — in the case of
+    // `agentOnline`, thousands of times. These cases exist so historical messages still decode
+    // to a kind rather than to nil. Do not delete them; the logs outlive the code that wrote them.
+
+    /// Agent-startup announcement from an older build.
+    case agentOnline = "agent_online"
+    /// Predecessor of the current validation park notices.
+    case validationWaitNotice = "validation_wait_notice"
+    /// Recorded a user overriding a validation verdict, before the current escalation actions.
+    case validationOverride = "validation_override"
+    /// Task interruption notice from an older lifecycle model.
+    case taskInterrupted = "task_interrupted"
 }
 
 extension ChannelMessageKind: CustomStringConvertible {

@@ -5,17 +5,20 @@ import SwiftLLMKit
 
 /// `ChannelMessageKind` is the typed replacement for the bare `messageKind` metadata strings.
 ///
-/// Two things need pinning, and they are different in character:
+/// Three things need pinning, and they fail in different ways:
 ///
-/// 1. The WIRE STRINGS. These are persisted in `channel_log.jsonl` and read back on every
-///    launch, so a raw value is a storage format, not an implementation detail. Renaming a
-///    Swift member is free; changing its `rawValue` silently orphans every historical message
-///    carrying the old spelling. The first test makes that a build failure instead.
+/// 1. The WIRE STRINGS. These are persisted in `channel_log.jsonl` and read back on every launch,
+///    so a raw value is a storage format, not an implementation detail. Renaming a Swift case is
+///    free; changing its `rawValue` silently orphans every historical message carrying the old
+///    spelling.
 ///
-/// 2. The ABSENCE of new bare literals. A type only removes an antipattern if the antipattern
-///    can't come back — and nothing stops the next `"messageKind": .string("whatever")` from
-///    being written by hand. The guard test is what actually enforces the rule; the type alone
-///    is just a convenience.
+/// 2. COMPLETENESS against the persisted corpus. The enum is closed, so any kind sitting in a log
+///    without a case here decodes to nil and every reader keyed on it takes the wrong branch. The
+///    set that matters is "what has ever been written to disk", which is strictly larger than
+///    "what the current sources emit".
+///
+/// 3. The ABSENCE of new bare literals. A type only removes an antipattern if the antipattern
+///    can't come back, and nothing stops the next hand-written `"messageKind": .string(…)`.
 @Suite("ChannelMessageKind")
 struct ChannelMessageKindTests {
 
@@ -57,7 +60,11 @@ struct ChannelMessageKindTests {
         (.timerActivity, "timer_activity"),
         (.mcpStatus, "mcp_status"),
         (.restartChrome, "restart_chrome"),
-        (.preparing, "preparing")
+        (.preparing, "preparing"),
+        (.agentOnline, "agent_online"),
+        (.validationWaitNotice, "validation_wait_notice"),
+        (.validationOverride, "validation_override"),
+        (.taskInterrupted, "task_interrupted")
     ]
 
     @Test("Wire strings are stable — they are a persisted storage format")
@@ -67,15 +74,42 @@ struct ChannelMessageKindTests {
         }
     }
 
-    @Test("An unrecognized kind round-trips instead of decoding as nil")
-    func unknownKindsSurvive() {
-        // The whole reason this is a RawRepresentable struct rather than a closed enum. A kind
-        // that exists only in historical logs must still compare correctly, not vanish — if it
-        // decoded as nil, every reader keyed on it would silently take the wrong branch.
-        let legacy = ChannelMessageKind(rawValue: "some_kind_retired_long_ago")
-        #expect(legacy.rawValue == "some_kind_retired_long_ago")
-        #expect(legacy != .toolRequest)
-        #expect(legacy == ChannelMessageKind(rawValue: "some_kind_retired_long_ago"))
+    @Test("Every case is covered by the wire-string table")
+    func wireStringTableIsExhaustive() {
+        // Without this, adding a case and forgetting to list it above would leave its raw value
+        // unpinned — free to be edited later with nothing failing.
+        let tabled = Set(Self.expectedWireStrings.map(\.0))
+        let missing = Set(ChannelMessageKind.allCases).subtracting(tabled)
+        #expect(missing.isEmpty, "cases missing from expectedWireStrings: \(missing.map(\.rawValue).sorted())")
+    }
+
+    /// Every distinct `messageKind` found in the persisted corpus on 2026-07-27: a scan of
+    /// ~520 MB across `channel_log.jsonl`, `channel_log.json`, the `.old`/`.old2` rotations, the
+    /// `backups/` directory, and `sessions_removed_backup-20260709/`.
+    ///
+    /// Four of these — `agent_online` (~4,000 occurrences), `validation_wait_notice`,
+    /// `validation_override`, `task_interrupted` — appear in NO source file. They are retired
+    /// kinds that only a corpus scan can find, and a closed enum without them decodes real
+    /// historical messages to nil. That is the failure this test exists to prevent recurring.
+    private static let kindsObservedOnDisk: [String] = [
+        "tool_request", "tool_output", "agent_online", "validation_report", "task_complete",
+        "restart_chrome", "task_update", "task_update_guidance", "task_summarized",
+        "task_completed", "preparing", "timer_activity", "memory_searched", "task_created",
+        "task_acknowledged", "changes_requested", "task_continuing", "memory_saved",
+        "task_lifecycle", "task_action_scheduled", "context_management", "validation_failed",
+        "criteria_updated", "scheduled_run_deferred", "validation_escalation",
+        "validation_wait_notice", "help_requested", "help_provided", "validation_override",
+        "mcp_status", "task_queued_at_capacity", "inbound_user_message", "task_interrupted",
+        "submission_auto_rejected", "validation_blocked_worker_notice", "validation_blocked"
+    ]
+
+    @Test("Every kind ever persisted still decodes to a case")
+    func historicalCorpusIsFullyDecodable() {
+        let undecodable = Self.kindsObservedOnDisk.filter { ChannelMessageKind(rawValue: $0) == nil }
+        #expect(
+            undecodable.isEmpty,
+            "these kinds exist in persisted logs but have no case — they would decode to nil: \(undecodable.sorted())"
+        )
     }
 
     @Test("The metadata accessor reads what the metadata factory writes")
@@ -143,7 +177,7 @@ struct ChannelMessageKindLiteralGuardTests {
                     guard !trimmed.hasPrefix("//") else { continue }
                     let range = NSRange(line.startIndex..., in: line)
                     if regex.firstMatch(in: line, range: range) != nil {
-                        hits.append("\(url.lastPathComponent):\(i + 1) — \(line.trimmingCharacters(in: .whitespaces))")
+                        hits.append("\(url.lastPathComponent):\(i + 1) — \(trimmed)")
                     }
                 }
             }
@@ -153,8 +187,9 @@ struct ChannelMessageKindLiteralGuardTests {
 
     @Test("No bare messageKind string literals are written")
     func noBareKindWrites() {
-        // Post sites must name the kind: `"messageKind": .kind(.toolRequest)`.
-        let hits = Self.scan(regex: #""messageKind"\s*:\s*\.string\("#)
+        // Covers both the dictionary-literal form and assignment into an existing metadata dict,
+        // so a post site can't sidestep the rule by building its metadata in two steps.
+        let hits = Self.scan(regex: #""messageKind"\]?\s*[:=]\s*\.string\("#)
         if !hits.isEmpty {
             let formatted = hits.joined(separator: "\n")
             Issue.record("Use `.kind(.someKind)` instead of a raw string:\n\(formatted)")
@@ -165,7 +200,7 @@ struct ChannelMessageKindLiteralGuardTests {
     func noBareKindReads() {
         // Read sites must use `message.kind == .someKind`, not a hand-rolled metadata unwrap
         // compared against a literal.
-        let hits = Self.scan(regex: #"metadata\?\["messageKind"\]"#)
+        let hits = Self.scan(regex: #"metadata\?\["messageKind"\]|stringMetadata\("messageKind"\)"#)
         if !hits.isEmpty {
             let formatted = hits.joined(separator: "\n")
             Issue.record("Use `message.kind` instead of unwrapping the metadata by hand:\n\(formatted)")
