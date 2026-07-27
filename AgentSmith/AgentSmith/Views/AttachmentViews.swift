@@ -40,7 +40,15 @@ struct AttachmentView: View {
                 bytesLoader: bytesLoader
             )
         } else {
-            FileBadge(filename: attachment.filename, formattedSize: attachment.formattedSize, iconName: iconName)
+            let _iconName: String = {
+                if attachment.isPDF { return "doc.richtext" }
+                if attachment.isImage { return "photo" }
+                if attachment.mimeType.hasPrefix("text/") { return "doc.text" }
+                if attachment.mimeType.hasPrefix("video/") { return "film" }
+                if attachment.mimeType.hasPrefix("audio/") { return "waveform" }
+                return "doc"
+            }()
+            FileBadge(filename: attachment.filename, formattedSize: attachment.formattedSize, iconName: _iconName)
         }
     }
     
@@ -54,10 +62,6 @@ struct AttachmentView: View {
         @Environment(\.attachmentBytesLoader) private var envBytesLoader
         @State private var loadedImage: NSImage?
         @State private var isLoadingImage = false
-        
-        private var imageLoadID: String {
-            "\(attachment.id.uuidString)-\(tier.rawValue)"
-        }
         
         private func setLoadedImage(_ image: NSImage?, isLoading: Bool) {
             DispatchQueue.main.async {
@@ -92,7 +96,7 @@ struct AttachmentView: View {
                         .frame(width: 60, height: 60)
                 }
             }
-            .task(id: imageLoadID) {
+            .task(id: "\(attachment.id.uuidString)-\(tier.rawValue)") {
                 let loader = bytesLoader ?? envBytesLoader
                 if let cached = ImageCache.shared.cachedImage(for: attachment, tier: tier) {
                     setLoadedImage(cached, isLoading: false)

@@ -6,16 +6,15 @@ import AgentSmithKit
 struct TaskCreatedBannerScheduledChip: View {
     let runAt: Date
 
-    private var scheduledAccent: Color { TaskStatusBadge.color(for: .scheduled) }
-
     var body: some View {
-        HStack(spacing: 4) {
+        let _scheduledAccent = TaskStatusBadge.color(for: .scheduled)
+        return HStack(spacing: 4) {
             Image(systemName: "clock")
                 .font(AppFonts.bannerIconSmall)
-                .foregroundStyle(scheduledAccent)
+                .foregroundStyle(_scheduledAccent)
             Text("Scheduled \(formatScheduledTime(runAt))")
                 .font(AppFonts.channelBody)
-                .foregroundStyle(scheduledAccent)
+                .foregroundStyle(_scheduledAccent)
             Spacer()
         }
         .padding(.horizontal, 10)

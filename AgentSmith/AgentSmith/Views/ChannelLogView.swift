@@ -95,17 +95,16 @@ struct ChannelTimestamp: View {
 
     @Environment(\.timestampPreferences) private var prefs
 
-    private var isVisible: Bool {
-        switch bucket {
-        case .taskBanner: return prefs.taskBanners
-        case .systemMessage: return prefs.systemMessages
-        case .messaging: return prefs.messaging
-        case .toolCall: return prefs.toolCalls
-        }
-    }
-
     var body: some View {
-        if isVisible {
+        let _isVisible: Bool = {
+            switch bucket {
+            case .taskBanner: return prefs.taskBanners
+            case .systemMessage: return prefs.systemMessages
+            case .messaging: return prefs.messaging
+            case .toolCall: return prefs.toolCalls
+            }
+        }()
+        if _isVisible {
             Text(sharedTimestampFormatter.string(from: timestamp))
                 .font(AppFonts.channelTimestamp)
                 .foregroundStyle(foregroundStyle)
@@ -1737,17 +1736,14 @@ private extension ChannelMessage {
 private struct LifecycleChromeBanner: View {
     let message: ChannelMessage
 
-    private var isStop: Bool {
-        message.stringMetadata("restartChromeKind") == "agents_stopped"
-    }
-
     var body: some View {
-        HStack(spacing: 8) {
+        let _isStop = message.stringMetadata("restartChromeKind") == "agents_stopped"
+        return HStack(spacing: 8) {
             Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
             HStack(spacing: 5) {
-                Image(systemName: isStop ? "moon.zzz.fill" : "bolt.horizontal.circle.fill")
+                Image(systemName: _isStop ? "moon.zzz.fill" : "bolt.horizontal.circle.fill")
                     .font(.caption2)
-                    .foregroundStyle(isStop ? Color.secondary : AppColors.smithAgent)
+                    .foregroundStyle(_isStop ? Color.secondary : AppColors.smithAgent)
                 Text(message.content)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
