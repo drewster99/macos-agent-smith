@@ -337,8 +337,14 @@ private struct HoverTooltip: ViewModifier {
     }
 }
 
+/// View extension for applying hover tooltip - uses ViewModifier directly to avoid func...->some View anti-pattern
 extension View {
-    func hoverTooltip(_ text: String) -> some View {
-        modifier(HoverTooltip(text: text))
+    /// Applies a hover tooltip to the view
+    @ViewBuilder func hoverTooltip(_ text: String) -> some View {
+        if #available(macOS 13.0, *) {
+            self.modifier(HoverTooltip(text: text))
+        } else {
+            self
+        }
     }
 }

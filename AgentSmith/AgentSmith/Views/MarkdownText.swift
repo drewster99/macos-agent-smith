@@ -20,16 +20,19 @@ struct MarkdownText: View, Equatable {
         lhs.content == rhs.content
     }
 
+    @State private var cachedBlocks: [ContentBlock] = []
+
     var body: some View {
-        // Parse markdown exactly once per body render. All content blocks are
-        // derived from `content` locally. The Equatable conformance prevents
-        // unnecessary body re-evaluations when content is unchanged.
-        let blocks = parseContentBlocks()
-        
         VStack(alignment: .leading, spacing: 1) {
-            ForEach(blocks) { block in
+            ForEach(cachedBlocks) { block in
                 RenderBlockView(block: block, baseFont: baseFont)
             }
+        }
+        .task {
+            await updateBlocks()
+        }
+        .onChange(of: content) { _, _ in
+            Task { await updateBlocks() }
         }
         .textSelection(.enabled)
         .environment(\.openURL, OpenURLAction { url in
@@ -57,6 +60,13 @@ struct MarkdownText: View, Equatable {
             }
             return .handled
         })
+    }
+
+    @Sendable private func updateBlocks() async {
+        let blocks = parseContentBlocks()
+        await MainActor.run {
+            cachedBlocks = blocks
+        }
     }
 
     // MARK: - Block model

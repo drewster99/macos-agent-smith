@@ -20,6 +20,10 @@ struct DiffView: View {
     var defaultVisibleLines: Int = 6
 
     @State private var isExpanded = false
+    @State private var cachedAllLines: [DiffLine] = []
+    @State private var cachedAddedCount: Int = 0
+    @State private var cachedRemovedCount: Int = 0
+    @State private var cachedNeedsTruncation: Bool = false
 
     init(oldContent: String, newContent: String, contextLines: Int = 2, defaultVisibleLines: Int = 6) {
         self.precomputedLines = nil
@@ -38,46 +42,29 @@ struct DiffView: View {
     }
 
     var body: some View {
-        // Compute the diff exactly once per body render. Both counts and the
-        // visible line slice are derived from `allLines` locally. When the
-        // diff was precomputed upstream (e.g. by AgentActor for file_write),
-        // we use it directly instead of re-running LCS.
-        let allLines: [DiffLine] = precomputedLines
-            ?? DiffGenerator.generate(
-                old: oldContent,
-                new: newContent,
-                contextLines: contextLines
-            )
-        if allLines.isEmpty {
-            EmptyView()
-        } else if allLines.count == 1, allLines[0].kind == .tooLarge {
-            // Oversized diff — show a compact summary line instead.
-            HStack(spacing: 4) {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(AppFonts.bannerIconSmall)
-                    .foregroundStyle(.secondary)
-                Text(allLines[0].text)
-                    .font(AppFonts.channelTimestamp)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.leading, 12)
-            .padding(.top, 2)
-        } else {
-            let addedCount = allLines.reduce(into: 0) { $0 += ($1.kind == .added ? 1 : 0) }
-            let removedCount = allLines.reduce(into: 0) { $0 += ($1.kind == .removed ? 1 : 0) }
-            let needsTruncation = allLines.count > defaultVisibleLines
-            let visibleLines = (isExpanded || !needsTruncation)
-                ? allLines
-                : Array(allLines.prefix(defaultVisibleLines))
-
-            VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
+            if cachedAllLines.isEmpty {
+                EmptyView()
+            } else if cachedAllLines.count == 1, cachedAllLines[0].kind == .tooLarge {
+                // Oversized diff — show a compact summary line instead.
+                HStack(spacing: 4) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(AppFonts.bannerIconSmall)
+                        .foregroundStyle(.secondary)
+                    Text(cachedAllLines[0].text)
+                        .font(AppFonts.channelTimestamp)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 12)
+                .padding(.top, 2)
+            } else {
                 Button(action: {
-                    if needsTruncation { isExpanded.toggle() }
+                    if cachedNeedsTruncation { isExpanded.toggle() }
                 }, label: {
                     HStack(spacing: 6) {
-                        Text("\(Text("+\(addedCount)").foregroundStyle(AppColors.diffAddedForeground))  \(Text("-\(removedCount)").foregroundStyle(AppColors.diffRemovedForeground))")
+                        Text("\(Text("+\(cachedAddedCount)").foregroundStyle(AppColors.diffAddedForeground))  \(Text("-\(cachedRemovedCount)").foregroundStyle(AppColors.diffRemovedForeground))")
                             .font(AppFonts.channelTimestamp.monospacedDigit())
-                        if needsTruncation {
+                        if cachedNeedsTruncation {
                             Text(isExpanded ? "(show less)" : "(show more)")
                                 .font(.caption)
                                 .foregroundStyle(AppColors.disclosureToggle)
@@ -88,17 +75,50 @@ struct DiffView: View {
                     .contentShape(Rectangle())
                 })
                 .buttonStyle(.plain)
-                .disabled(!needsTruncation)
+                .disabled(!cachedNeedsTruncation)
 
                 VStack(alignment: .leading, spacing: 0) {
+                    let visibleLines = (isExpanded || !cachedNeedsTruncation)
+                        ? cachedAllLines
+                        : Array(cachedAllLines.prefix(defaultVisibleLines))
                     ForEach(visibleLines) { line in
                         DiffLineView(line: line)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 3))
             }
-            .padding(.leading, 12)
-            .padding(.top, 2)
+        }
+        .padding(.leading, 12)
+        .padding(.top, 2)
+        .task {
+            await updateDiffCache()
+        }
+        .onChange(of: oldContent) { _, _ in
+            Task { await updateDiffCache() }
+        }
+        .onChange(of: newContent) { _, _ in
+            Task { await updateDiffCache() }
+        }
+        .onChange(of: contextLines) { _, _ in
+            Task { await updateDiffCache() }
+        }
+        .onChange(of: precomputedLines) { _, _ in
+            Task { await updateDiffCache() }
+        }
+    }
+
+    @Sendable private func updateDiffCache() async {
+        let allLines: [DiffLine] = precomputedLines
+            ?? DiffGenerator.generate(old: oldContent, new: newContent, contextLines: contextLines)
+        let added = allLines.reduce(into: 0) { $0 += ($1.kind == .added ? 1 : 0) }
+        let removed = allLines.reduce(into: 0) { $0 += ($1.kind == .removed ? 1 : 0) }
+        let needsTrunc = allLines.count > defaultVisibleLines
+        
+        await MainActor.run {
+            cachedAllLines = allLines
+            cachedAddedCount = added
+            cachedRemovedCount = removed
+            cachedNeedsTruncation = needsTrunc
         }
     }
 
