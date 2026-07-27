@@ -434,12 +434,19 @@ public enum TaskStepDestination: Sendable, Equatable {
 public struct TaskValidationState: Codable, Sendable, Equatable {
     public var round: Int
     public var verdictRecords: [CriterionVerdictRecord]
-    /// Consecutive rejection rounds in which NOTHING newly settled. This — not the
-    /// absolute round count — is the convergence test: 50 criteria may take many rounds
-    /// while progressing, but enough straight rounds with zero new acceptances means the
-    /// worker and validator disagree irreconcilably and the task FAILS (never parked on
-    /// Smith). Optional so records written before the field decode unchanged.
-    public var consecutiveStallRounds: Int?
+    /// Consecutive validation rounds in which NOTHING newly settled — no criterion reached ACCEPT
+    /// or WAIVE (a waive counts as an approval). This — not the absolute round count — is the
+    /// convergence test: 50 criteria may take many rounds while progressing, but enough straight
+    /// rounds with zero new approvals means the worker and validator disagree irreconcilably and the
+    /// task FAILS (never parked on Smith). Resets to zero the instant anything settles.
+    ///
+    /// Was `consecutiveStallRounds`, which never said what stalled. Persisted deliberately: it
+    /// measures that this worker and this validator cannot converge on this contract, which is
+    /// durable state — a cold-boot re-enqueue that reset it would let a crash loop keep a runaway
+    /// task alive forever. `resetValidationRound` remains the intentional escape hatch.
+    /// Optional so ledgers written before the field decode unchanged; read via
+    /// `validationsWithoutNewApprovals`.
+    public var consecutiveValidationsWithoutNewApprovals: Int?
     /// Append-only history of every rejection this task's criteria have earned, outliving the
     /// criteria themselves. Nothing prunes it: a criterion edit retires that criterion's VERDICTS
     /// (they were judged against a contract that no longer exists) but must never retire the
@@ -451,19 +458,37 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
     /// forward-compatible decoding; read via `contractVersion`.
     public var acceptanceContractVersion: Int?
 
+    /// Maps the renamed counter back to the key already written into every persisted ledger, so the
+    /// rename costs no data. The decoder stays SYNTHESIZED — this is a key mapping, not a
+    /// hand-written `init(from:)`.
+    ///
+    /// WARNING: with an explicit `CodingKeys`, a stored property that has a default value and is
+    /// missing a case here is silently not persisted. Any field added below must gain a case here.
+    private enum CodingKeys: String, CodingKey {
+        case round
+        case verdictRecords
+        case consecutiveValidationsWithoutNewApprovals = "consecutiveStallRounds"
+        case criterionRejections
+        case acceptanceContractVersion
+    }
+
     public init(
         round: Int = 0,
         verdictRecords: [CriterionVerdictRecord] = [],
-        consecutiveStallRounds: Int? = nil,
+        consecutiveValidationsWithoutNewApprovals: Int? = nil,
         criterionRejections: [CriterionRejection]? = nil,
         acceptanceContractVersion: Int? = nil
     ) {
         self.round = round
         self.verdictRecords = verdictRecords
-        self.consecutiveStallRounds = consecutiveStallRounds
+        self.consecutiveValidationsWithoutNewApprovals = consecutiveValidationsWithoutNewApprovals
         self.criterionRejections = criterionRejections
         self.acceptanceContractVersion = acceptanceContractVersion
     }
+
+    /// Consecutive validation rounds with nothing newly approved. The persistence-shaped optional
+    /// never escapes into the domain model.
+    public var validationsWithoutNewApprovals: Int { consecutiveValidationsWithoutNewApprovals ?? 0 }
 
     /// The version of the acceptance contract these verdicts were judged against. Ledgers written
     /// before the field read as 0, which is correct: they have never seen an edit this build tracked.

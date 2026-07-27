@@ -539,6 +539,29 @@ struct TaskValidationModelTests {
         #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: successor))
     }
 
+    @Test("Renaming the convergence counter kept its persisted key, so no ledger loses its budget")
+    func convergenceCounterKeepsItsPersistedKey() throws {
+        var task = AgentTask(title: "t", description: "d")
+        task.validation = TaskValidationState(round: 4, consecutiveValidationsWithoutNewApprovals: 6)
+        let object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(task)) as? [String: Any])
+        let ledger = try #require(object["validation"] as? [String: Any])
+        #expect(ledger["consecutiveStallRounds"] as? Int == 6,
+                "the property was renamed, the key was not — every persisted ledger already uses the old one")
+        #expect(ledger["consecutiveValidationsWithoutNewApprovals"] == nil)
+
+        // A ledger written by the pre-rename build keeps its counter, rather than silently
+        // restarting a runaway task's convergence budget at zero.
+        let legacy = """
+        {"round": 4, "verdictRecords": [], "consecutiveStallRounds": 6}
+        """
+        let decoded = try JSONDecoder().decode(TaskValidationState.self, from: Data(legacy.utf8))
+        #expect(decoded.validationsWithoutNewApprovals == 6)
+
+        // And absent still reads as zero.
+        let bare = try JSONDecoder().decode(TaskValidationState.self, from: Data(#"{"round": 0, "verdictRecords": []}"#.utf8))
+        #expect(bare.validationsWithoutNewApprovals == 0)
+    }
+
     @Test("A ledger written before the contract version decodes, and a no-op save doesn't invalidate a live round")
     func contractVersionDecodesForwardCompatibly() async throws {
         var task = AgentTask(title: "t", description: "d")

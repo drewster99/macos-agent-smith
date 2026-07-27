@@ -353,7 +353,7 @@ public actor OrchestrationRuntime {
     /// rounds that settle NOTHING new fail the task. The name is deliberately literal —
     /// this is not a total-round cap. Absolute round count is unbounded as long as rounds
     /// keep making progress (any criterion newly accepted or waived resets the counter).
-    var maxConsecutiveValidationRoundsWithoutProgress = 8
+    var maxConsecutiveValidationsWithoutNewApprovals = 8
     /// Per-report criterion parallelism cap.
     var validationParallelism = 8
     /// Per-task reentrancy guard for validation runs.
@@ -1504,11 +1504,11 @@ public actor OrchestrationRuntime {
 
     /// Updates the global tool-security configuration (user Settings). Applied to each Brown at its
     /// next spawn (the per-call flag and pre-flight flag are read at spawn; the global policy too).
-    /// Overrides the convergence budget (see `maxConsecutiveValidationRoundsWithoutProgress`).
+    /// Overrides the convergence budget (see `maxConsecutiveValidationsWithoutNewApprovals`).
     /// Exists so the budget is tunable without a rebuild — and so tests can drive the
     /// non-convergence path without scripting a full budget's worth of rejection rounds.
     public func setMaxConsecutiveValidationRoundsWithoutProgress(_ rounds: Int) {
-        maxConsecutiveValidationRoundsWithoutProgress = max(1, rounds)
+        maxConsecutiveValidationsWithoutNewApprovals = max(1, rounds)
     }
 
     public func setToolSecurity(preflightScoping: Bool, globalPolicy: [String: ToolPolicy]) async {

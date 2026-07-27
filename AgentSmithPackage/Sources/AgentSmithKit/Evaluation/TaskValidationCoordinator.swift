@@ -293,14 +293,14 @@ extension OrchestrationRuntime {
             // nil means the task or its ledger vanished under us, or an edit superseded this round —
             // abandon rather than act on a fabricated stall count or spend a round of the new
             // contract's budget, exactly like the world-moved guards above.
-            guard let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed, judgedInRound: token) else {
+            guard let withoutNewApprovals = await taskStore.updateValidationStall(id: taskID, progressed: progressed, judgedInRound: token) else {
                 validationLogger.warning("Validation round abandoned: the task, its ledger, or this round's contract moved before the stall update")
                 return
             }
-            if stallRounds >= maxConsecutiveValidationRoundsWithoutProgress {
+            if withoutNewApprovals >= maxConsecutiveValidationsWithoutNewApprovals {
                 await failValidation(
                     taskID: taskID,
-                    stallRounds: stallRounds,
+                    validationsWithoutNewApprovals: withoutNewApprovals,
                     stillRejected: rejected.count,
                     judgedInRound: token
                 )
@@ -314,13 +314,13 @@ extension OrchestrationRuntime {
     /// worker is torn down, and Smith/user are informed. `run_task` retries reset the
     /// counters (sticky accepts survive), and Smith may fix the criteria first with
     /// `set_acceptance_criteria` if they were the problem.
-    private func failValidation(taskID: UUID, stallRounds: Int, stillRejected: Int, judgedInRound token: ValidationRoundToken) async {
+    private func failValidation(taskID: UUID, validationsWithoutNewApprovals: Int, stillRejected: Int, judgedInRound token: ValidationRoundToken) async {
         // CAS: only fail if still validating AND this round's contract is still the live one — never
         // overwrite a pause/stop that landed after the coordinator's status snapshot, and never fail
         // a task for not converging on a contract that has since been rewritten.
         guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
         guard let task = await taskStore.task(id: taskID) else { return }
-        let reason = "No progress was made toward clearing any acceptance criterion for \(stallRounds) rounds in a row — \(stillRejected) criterion(s) still rejected."
+        let reason = "No acceptance criterion was newly approved for \(validationsWithoutNewApprovals) validation rounds in a row — \(stillRejected) criterion(s) still rejected."
         await taskStore.addUpdate(id: taskID, message: "Task FAILED validation: \(reason)")
         for agentID in task.assigneeIDs {
             _ = await terminateAgent(id: agentID)

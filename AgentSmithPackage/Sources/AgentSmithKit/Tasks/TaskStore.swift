@@ -556,7 +556,7 @@ public actor TaskStore {
         // is the exact sequence it exists to make visible, and this is its second step.
         if var validation = task.validation {
             validation.round = 0
-            validation.consecutiveStallRounds = 0
+            validation.consecutiveValidationsWithoutNewApprovals = 0
             validation.verdictRecords.removeAll()
             task.validation = validation
         }
@@ -590,7 +590,7 @@ public actor TaskStore {
         // verdicts earned by the old one. Pinned validator definitions are kept for the re-judge.
         if var validation = task.validation {
             validation.round = 0
-            validation.consecutiveStallRounds = 0
+            validation.consecutiveValidationsWithoutNewApprovals = 0
             validation.verdictRecords.removeAll()
             task.validation = validation
         }
@@ -851,7 +851,7 @@ public actor TaskStore {
             // version, so a no-op save can't invalidate a round that is judging correctly.
             if contractChanged {
                 validation.round = 0
-                validation.consecutiveStallRounds = 0
+                validation.consecutiveValidationsWithoutNewApprovals = 0
                 validation.bumpContractVersion()
             }
             task.validation = validation
@@ -1007,24 +1007,26 @@ public actor TaskStore {
         return (task.validation ?? TaskValidationState()).isCurrentRound(token)
     }
 
-    /// Resets the validation counters (round + stall) for a fresh rework cycle — a user
-    /// "send back to Brown"/re-validate, or `run_task`'s auto-reset of a failed task. Without this,
-    /// a resubmission would instantly re-fail on a stale stall counter. Sticky accepts,
-    /// the verdict ledger, and pinned definitions all survive — only the counters
-    /// refresh.
+    /// Resets the validation counters (round + consecutive-validations-without-new-approvals) for a
+    /// fresh rework cycle — a user "send back to Brown"/re-validate, or `run_task`'s auto-reset of a
+    /// failed task. Without this, a resubmission would instantly re-fail on a counter earned by the
+    /// previous cycle. Sticky accepts, the verdict ledger, and the rejection history all survive —
+    /// only the counters refresh. This is the deliberate escape hatch from an otherwise durable
+    /// convergence budget.
     public func resetValidationRound(id: UUID) {
         guard var task = tasks[id], var validation = task.validation else { return }
         validation.round = 0
-        validation.consecutiveStallRounds = 0
+        validation.consecutiveValidationsWithoutNewApprovals = 0
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
     }
 
-    /// Records whether a rejection round made progress (settled anything new). Returns
-    /// the updated consecutive-stall count: 0 after a progressing round, incremented
-    /// after a stalled one. The coordinator fails the task when this hits its limit.
+    /// Records whether a rejection round newly APPROVED anything (reached ACCEPT or WAIVE on any
+    /// criterion). Returns the updated count of consecutive validations without a new approval: 0
+    /// after a round that approved something, incremented after one that didn't. The coordinator
+    /// fails the task when this hits `maxConsecutiveValidationsWithoutNewApprovals`.
     ///
     /// `nil` when the task is gone (a Stop-then-Delete can land between the coordinator reading the
     /// task and this call), when it has no ledger, or when `judgedInRound` has been superseded — the
@@ -1036,11 +1038,11 @@ public actor TaskStore {
     public func updateValidationStall(id: UUID, progressed: Bool, judgedInRound token: ValidationRoundToken) -> Int? {
         guard var task = tasks[id], var validation = task.validation else { return nil }
         // Checked HERE, not from the caller's snapshot: an edit landing at any of the round's
-        // suspension points grants the NEW contract a fresh convergence budget, and incrementing the
-        // stall counter would spend a round of it on a contract we never judged.
+        // suspension points grants the NEW contract a fresh convergence budget, and incrementing
+        // this counter would spend a round of it on a contract we never judged.
         guard validation.isCurrentRound(token) else { return nil }
-        let updated = progressed ? 0 : (validation.consecutiveStallRounds ?? 0) + 1
-        validation.consecutiveStallRounds = updated
+        let updated = progressed ? 0 : validation.validationsWithoutNewApprovals + 1
+        validation.consecutiveValidationsWithoutNewApprovals = updated
         task.validation = validation
         tasks[id] = task
         onChange?()
