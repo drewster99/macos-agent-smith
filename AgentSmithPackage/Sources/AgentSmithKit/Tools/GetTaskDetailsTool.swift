@@ -124,8 +124,8 @@ struct GetTaskDetailsTool: AgentTool {
             parts.append("Missing required template inputs: \(missingRequiredInputs.joined(separator: ", "))")
         }
 
-        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: true, includePrompts: true) {
-            parts.append("Acceptance criteria (each judged independently; the number is stable):\n\(criteria)")
+        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: true, includePrompts: true, includeIDs: true) {
+            parts.append("Acceptance criteria (each judged independently; the number is stable; pass a criterion's id to set_acceptance_criteria's `actions` to edit or delete it):\n\(criteria)")
         }
 
         if let steps = task.renderedSteps(includeIDs: true) {

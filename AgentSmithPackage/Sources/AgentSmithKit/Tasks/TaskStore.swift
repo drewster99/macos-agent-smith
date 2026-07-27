@@ -735,6 +735,67 @@ public actor TaskStore {
     /// verdicts.
     public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) {
         guard var task = tasks[id] else { return }
+        writeAcceptanceContract(criteria, to: &task)
+        task.updatedAt = Date()
+        tasks[id] = task
+        onChange?()
+    }
+
+    /// Applies a batch of per-criterion edits ATOMICALLY: every action is validated and applied to a
+    /// working copy, and nothing is written unless all of them succeed. A half-applied contract edit
+    /// is the specific failure this shape exists to prevent — the contract is what the work is judged
+    /// against, so "three of your four edits landed" is not a state anyone can reason about.
+    ///
+    /// Returns a human-readable error, or nil on success.
+    @discardableResult
+    public func applyCriterionActions(taskID: UUID, actions: [CriterionAction]) -> String? {
+        guard var task = tasks[taskID] else { return "Task not found." }
+        guard !actions.isEmpty else { return "No criterion actions were given." }
+        var criteria = task.acceptanceCriteria
+        for action in actions {
+            switch action {
+            case .add(let name, let validationPrompt, let inputEnumeratorPrompt, let waivable, let origin):
+                criteria.append(AcceptanceCriterion(
+                    name: name,
+                    validationPrompt: validationPrompt,
+                    inputEnumeratorPrompt: inputEnumeratorPrompt,
+                    waivable: waivable,
+                    origin: origin
+                ))
+            case .update(let criterionID, let name, let validationPrompt, let inputEnumeratorPrompt, let waivable):
+                guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
+                    return "No acceptance criterion with id \(criterionID.uuidString)."
+                }
+                // id and origin are deliberately untouched: preserving identity across an edit is
+                // the whole reason this verb exists.
+                criteria[index].name = name
+                criteria[index].validationPrompt = validationPrompt
+                criteria[index].inputEnumeratorPrompt = inputEnumeratorPrompt
+                criteria[index].waivable = waivable
+            case .delete(let criterionID):
+                guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
+                    return "No acceptance criterion with id \(criterionID.uuidString)."
+                }
+                criteria.remove(at: index)
+            }
+        }
+        // Names must stay distinct: the replace-all path matches criteria BY NAME to preserve
+        // identity, so a duplicate would silently collapse two criteria into one there.
+        guard Set(criteria.map(\.name)).count == criteria.count else {
+            return "Duplicate criterion names — each display name must be distinct."
+        }
+        writeAcceptanceContract(criteria, to: &task)
+        task.updatedAt = Date()
+        tasks[taskID] = task
+        onChange?()
+        return nil
+    }
+
+    /// The SINGLE writer of a task's acceptance contract. Both authoring paths — a wholesale replace
+    /// and a batch of per-criterion actions — land here, so verdict retirement and contract
+    /// versioning cannot drift between them. Does not stamp `updatedAt` or notify; the caller owns
+    /// the write-back.
+    private func writeAcceptanceContract(_ criteria: [AcceptanceCriterion], to task: inout AgentTask) {
         let previousByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var changedIDs: Set<UUID> = []
         for criterion in criteria {
@@ -774,9 +835,6 @@ public actor TaskStore {
             }
             task.validation = validation
         }
-        task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
     }
 
     // MARK: - Steps (worker-owned, tombstone semantics)

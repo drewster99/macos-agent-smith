@@ -40,10 +40,45 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                     ]),
                     "required": .array([.string("name"), .string("validation_prompt")])
                 ]),
-                "description": .string("The COMPLETE list of acceptance criteria for the task, replacing any existing list.")
+                "description": .string("The COMPLETE list of acceptance criteria for the task, replacing any existing list. First-time authoring only — once the task has been validated, edit with 'actions' instead. Mutually exclusive with 'actions'.")
+            ]),
+            "actions": .dictionary([
+                "type": .string("array"),
+                "items": .dictionary([
+                    "type": .string("object"),
+                    "properties": .dictionary([
+                        "action": .dictionary([
+                            "type": .string("string"),
+                            "enum": .array([.string("add"), .string("update"), .string("delete")]),
+                            "description": .string("add = append a new criterion; update = restate an existing criterion by id, keeping its identity and any verdict it already earned; delete = remove it.")
+                        ]),
+                        "criterion_id": .dictionary([
+                            "type": .string("string"),
+                            "description": .string("UUID of the criterion to update or delete. Read current ids from get_task_details. Required for update and delete; ignored for add.")
+                        ]),
+                        "name": .dictionary([
+                            "type": .string("string"),
+                            "description": .string("Short display name. Display-only; not an LLM instruction. Required for add and update.")
+                        ]),
+                        "waivable": .dictionary([
+                            "type": .string("boolean"),
+                            "description": .string("Whether the validator may WAIVE this criterion as not applicable. Default false.")
+                        ]),
+                        "validation_prompt": .dictionary([
+                            "type": .string("string"),
+                            "description": .string("Required for add and update: the instructions for the LLM that judges this criterion.")
+                        ]),
+                        "input_enumerator_prompt": .dictionary([
+                            "type": .string("string"),
+                            "description": .string("Optional instructions for an LLM that MUST return a JSON array containing only strings. Each string is passed separately to the validation LLM together with validation_prompt; every item must pass.")
+                        ])
+                    ]),
+                    "required": .array([.string("action")])
+                ]),
+                "description": .string("Per-criterion edits applied as one atomic batch — either all of them land or none do. Mutually exclusive with 'criteria'.")
             ])
         ]),
-        "required": .array([.string("task_id"), .string("criteria")])
+        "required": .array([.string("task_id")])
     ]
 
     public init() {
@@ -66,10 +101,16 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             the data shows"). If the worker can do the task correctly and still fail the criterion as \
             written, the criterion is wrong; repeated no-progress rejections FAIL the task. \
             \
-            This REPLACES the task's whole criteria list: pass every criterion that should apply, \
-            not just new ones. Criteria whose name is unchanged keep their identity; criteria whose \
-            validation prompt, input enumerator prompt, or waivable flag changes are judged fresh \
-            (from the next round, if validation is mid-round). \
+            TWO MODES, and you must pass exactly one. `criteria` REPLACES the whole list and is for \
+            FIRST-TIME authoring — pass every criterion that should apply, not just new ones. Once a \
+            task has been validated, replace-all is refused, because rewriting the list mints new \
+            criterion ids and throws away every verdict and rejection recorded against the old ones. \
+            To change a contract after that, use `actions`: a batch of {action: add|update|delete} \
+            entries applied all-or-nothing, where `update` names a `criterion_id` and so keeps the \
+            criterion's identity, its sticky ACCEPT if the contract text is unchanged, and its \
+            rejection history. Read current criterion ids from `get_task_details`. \
+            Criteria whose validation prompt, input enumerator prompt, or waivable flag changes are \
+            judged fresh next round; unchanged ones keep their verdicts. \
             \
             `name` is display-only. `validation_prompt` is required and is the sole authored \
             instruction sent to the judging LLM. Optional `input_enumerator_prompt` must produce a \
@@ -102,7 +143,20 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         guard task.status != .completed else {
             return .failure("Task '\(task.title)' is completed — its acceptance criteria can no longer be changed.")
         }
-        guard case .array(let rawCriteria) = arguments["criteria"], !rawCriteria.isEmpty else {
+        let rawCriteria: [AnyCodable]? = { if case .array(let value) = arguments["criteria"] { return value }; return nil }()
+        let rawActions: [AnyCodable]? = { if case .array(let value) = arguments["actions"] { return value }; return nil }()
+        switch (rawCriteria, rawActions) {
+        case (nil, nil):
+            return .failure("Pass either 'criteria' (replace the whole list — first-time authoring) or 'actions' (per-criterion add/update/delete).")
+        case (.some, .some):
+            return .failure("Pass 'criteria' OR 'actions', not both: one replaces the whole list, the other edits criteria individually.")
+        case (nil, .some(let actions)):
+            return await applyActions(actions, to: task, context: context)
+        case (.some, nil):
+            break
+        }
+
+        guard let rawCriteria, !rawCriteria.isEmpty else {
             return .failure("'criteria' must be a non-empty array of {name, validation_prompt, input_enumerator_prompt?, waivable?} objects.")
         }
 
@@ -134,14 +188,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
 
         await context.taskStore.setAcceptanceCriteria(id: taskID, criteria: criteria)
 
-        let rendered = criteria.map { criterion -> String in
-            var line = "- \(criterion.name)"
-            var qualifiers: [String] = []
-            if criterion.waivable { qualifiers.append("waivable") }
-            if criterion.inputEnumeratorPrompt != nil { qualifiers.append("enumerated inputs") }
-            if !qualifiers.isEmpty { line += " (\(qualifiers.joined(separator: ", ")))" }
-            return line
-        }.joined(separator: "\n")
+        let rendered = Self.renderCriteriaList(criteria)
 
         await context.taskStore.addUpdate(id: taskID, message: "Acceptance criteria set (\(criteria.count)):\n\(rendered)")
         await context.post(ChannelMessage(
@@ -158,5 +205,64 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             ? " Validation is currently running — changes apply from the next round."
             : ""
         return .success("Acceptance criteria set for '\(task.title)' (\(criteria.count) criterion(s)).\(midRoundNote)")
+    }
+
+    /// The per-criterion path. The store applies the batch atomically, so a rejected action leaves
+    /// the contract exactly as it was — the caller never has to reason about a partial edit.
+    private func applyActions(_ rawActions: [AnyCodable], to task: AgentTask, context: ToolContext) async -> ToolExecutionResult {
+        guard !rawActions.isEmpty else {
+            return .failure("'actions' must be a non-empty array of {action, ...} objects.")
+        }
+        let actions: [CriterionAction]
+        switch CriterionArgumentParsing.parseActions(rawActions, origin: .smith) {
+        case .success(let parsed): actions = parsed
+        case .failure(let problem): return .failure(problem.message)
+        }
+        if let problem = await context.taskStore.applyCriterionActions(taskID: task.id, actions: actions) {
+            return .failure(problem)
+        }
+        guard let updated = await context.taskStore.task(id: task.id) else {
+            return .failure("Task \(task.id.uuidString) disappeared while its criteria were being edited.")
+        }
+
+        let summary = Self.describe(actions)
+        let rendered = Self.renderCriteriaList(updated.acceptanceCriteria)
+        await context.taskStore.addUpdate(id: task.id, message: "Acceptance criteria edited (\(summary)). Now \(updated.acceptanceCriteria.count):\n\(rendered)")
+        await context.post(ChannelMessage(
+            sender: .agent(context.agentRole),
+            content: "Acceptance criteria for \"\(updated.title)\" edited (\(summary)) — now \(updated.acceptanceCriteria.count):\n\(rendered)",
+            metadata: [
+                "messageKind": .string("criteria_updated"),
+                "taskID": .string(task.id.uuidString),
+                "taskTitle": .string(updated.title)
+            ]
+        ))
+        return .success("Acceptance criteria for '\(updated.title)' edited (\(summary)); the task now has \(updated.acceptanceCriteria.count) criterion(s).")
+    }
+
+    private static func describe(_ actions: [CriterionAction]) -> String {
+        var added = 0, updated = 0, deleted = 0
+        for action in actions {
+            switch action {
+            case .add: added += 1
+            case .update: updated += 1
+            case .delete: deleted += 1
+            }
+        }
+        return [(added, "added"), (updated, "updated"), (deleted, "deleted")]
+            .filter { $0.0 > 0 }
+            .map { "\($0.0) \($0.1)" }
+            .joined(separator: ", ")
+    }
+
+    private static func renderCriteriaList(_ criteria: [AcceptanceCriterion]) -> String {
+        criteria.map { criterion -> String in
+            var line = "- \(criterion.name)"
+            var qualifiers: [String] = []
+            if criterion.waivable { qualifiers.append("waivable") }
+            if criterion.inputEnumeratorPrompt != nil { qualifiers.append("enumerated inputs") }
+            if !qualifiers.isEmpty { line += " (\(qualifiers.joined(separator: ", ")))" }
+            return line
+        }.joined(separator: "\n")
     }
 }

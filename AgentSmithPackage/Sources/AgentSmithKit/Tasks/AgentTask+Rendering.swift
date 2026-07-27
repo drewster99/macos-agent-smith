@@ -49,7 +49,10 @@ extension AgentTask {
     /// than a `N. ` list prefix) so a criterion whose text is itself structured markdown — nested
     /// lists making "must be ONE of …" / "must include ALL of …" explicit — renders cleanly instead
     /// of colliding with the outer numbering.
-    func renderedAcceptanceCriteria(includeVerdicts: Bool, includePrompts: Bool = false) -> String? {
+    /// `includeIDs` prints each criterion's UUID, which `set_acceptance_criteria`'s per-criterion
+    /// `actions` need in order to target `update`/`delete` — the same reason `renderedSteps` carries
+    /// step ids for `manage_steps`. Without them the edit verbs have nothing to name.
+    func renderedAcceptanceCriteria(includeVerdicts: Bool, includePrompts: Bool = false, includeIDs: Bool = false) -> String? {
         guard !acceptanceCriteria.isEmpty else { return nil }
         let ledger = validation
         let blocks = acceptanceCriteria.enumerated().map { index, criterion -> String in
@@ -60,7 +63,8 @@ extension AgentTask {
             let verdict = includeVerdicts
                 ? (ledger?.latestVerdict(for: criterion.id)).map { " — \(OrchestrationRuntime.describeVerdict($0))" } ?? ""
                 : ""
-            var block = "**Criterion \(index + 1)**\(suffix)\(verdict)\n\(criterion.text)"
+            let identifier = includeIDs ? " (id: \(criterion.id.uuidString))" : ""
+            var block = "**Criterion \(index + 1)**\(identifier)\(suffix)\(verdict)\n\(criterion.text)"
             if includePrompts {
                 // A default-validated criterion carries no authored prompt (empty); its stance is
                 // the shipped default, so there's nothing to print here.

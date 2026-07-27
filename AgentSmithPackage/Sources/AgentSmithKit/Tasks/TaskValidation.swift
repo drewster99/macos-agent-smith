@@ -261,6 +261,29 @@ public extension CriterionVerdictRecord.Verdict {
     }
 }
 
+/// One mutation of a task's acceptance contract, dispatched through `TaskStore.applyCriterionActions`
+/// as a batch so a multi-criterion edit stays one call.
+///
+/// These exist because WHOLESALE REPLACE MINTS NEW UUIDs, and a new UUID is a new criterion: its
+/// verdicts are retired, its rejection history no longer points at anything live, and there is no
+/// way to diff what changed. `update` naming a `criterionID` is the entire point — identity survives
+/// the edit. (Not a concurrency argument: Smith is single-threaded and owns the criteria outright.)
+///
+/// There is deliberately no `insert` or `move`. Criteria are judged independently — nothing in
+/// `Evaluation/` sorts, indexes, or first-wins over `acceptanceCriteria` — so their order is
+/// display-only. If display ordering is ever wanted it becomes a field on the criterion, never a
+/// delete-and-re-add, which would destroy the identity these verbs exist to preserve.
+public enum CriterionAction: Sendable {
+    case add(name: String, validationPrompt: String, inputEnumeratorPrompt: String?, waivable: Bool, origin: TaskAuthorship)
+    /// Restates a criterion's content while PRESERVING its `criterionID` and `origin`. Whether the
+    /// restated content actually changed the contract is `statesSameContract(as:)`'s call, made once
+    /// in the store — an update that changes nothing keeps its sticky verdict.
+    case update(criterionID: UUID, name: String, validationPrompt: String, inputEnumeratorPrompt: String?, waivable: Bool)
+    /// Removes the criterion. Its verdicts go with it (they judged a contract that no longer
+    /// exists); its REJECTION HISTORY does not — that is task-level and append-only.
+    case delete(criterionID: UUID)
+}
+
 /// Identifies ONE validation round: which attempt it is, and which version of the acceptance
 /// contract it judged. Captured atomically when the round begins and handed to every store mutation
 /// that round makes, so each mutation can refuse if the world moved while the round awaited an LLM.

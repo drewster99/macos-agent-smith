@@ -249,6 +249,88 @@ struct TaskValidationModelTests {
         #expect(validation.latestVerdict(for: criterionB.id) != nil, "unchanged criterion keeps its audit trail")
     }
 
+    @Test("update preserves criterion identity — and with it the verdict a replace-all would destroy")
+    func criterionUpdatePreservesIdentity() async {
+        let store = TaskStore()
+        let criterion = AcceptanceCriterion(name: "coverage", validationPrompt: "Reject under 90%.", origin: .smith)
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+        let token = await store.beginValidationRound(id: task.id)!
+        _ = await store.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1)
+        ], judgedAgainst: [criterion], judgedInRound: token)
+        #expect(await store.task(id: task.id)?.validation?.settledCriterionIDs() == [criterion.id])
+
+        // A display-only rename through `update`: same id, same question to the judge, so the
+        // sticky ACCEPT survives. A wholesale replace would have minted a new UUID and lost it.
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [
+            .update(criterionID: criterion.id, name: "code coverage", validationPrompt: "Reject under 90%.", inputEnumeratorPrompt: nil, waivable: false)
+        ]) == nil)
+        var live = await store.task(id: task.id)!
+        #expect(live.acceptanceCriteria[0].id == criterion.id, "update MUST preserve the criterion id")
+        #expect(live.acceptanceCriteria[0].name == "code coverage")
+        #expect(live.acceptanceCriteria[0].origin == .smith, "origin is not the caller's to rewrite")
+        #expect(live.validation?.settledCriterionIDs() == [criterion.id], "an unchanged contract keeps its verdict")
+
+        // Moving the bar through the same verb does retire it — identity survives, stickiness doesn't.
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [
+            .update(criterionID: criterion.id, name: "code coverage", validationPrompt: "Reject under 60%.", inputEnumeratorPrompt: nil, waivable: false)
+        ]) == nil)
+        live = await store.task(id: task.id)!
+        #expect(live.acceptanceCriteria[0].id == criterion.id)
+        #expect(live.validation?.settledCriterionIDs().isEmpty == true, "a changed contract is judged fresh")
+    }
+
+    @Test("A batch of criterion actions is atomic — a bad action leaves the contract untouched")
+    func criterionActionBatchIsAtomic() async {
+        let store = TaskStore()
+        let first = AcceptanceCriterion(name: "A", validationPrompt: "judge A", origin: .smith)
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setAcceptanceCriteria(id: task.id, criteria: [first])
+
+        // add succeeds, then delete names an id that isn't there. Neither may land.
+        let problem = await store.applyCriterionActions(taskID: task.id, actions: [
+            .add(name: "B", validationPrompt: "judge B", inputEnumeratorPrompt: nil, waivable: false, origin: .smith),
+            .delete(criterionID: UUID())
+        ])
+        #expect(problem != nil)
+        #expect(await store.task(id: task.id)?.acceptanceCriteria.map(\.name) == ["A"],
+                "the successful add must be rolled back with the failed delete — a half-applied contract is unreasonable-about")
+
+        // A duplicate name is refused too: the replace-all path matches by name to preserve identity.
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [
+            .add(name: "A", validationPrompt: "judge A differently", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
+        ]) != nil)
+        #expect(await store.task(id: task.id)?.acceptanceCriteria.count == 1)
+
+        // The whole batch, all valid, lands at once.
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [
+            .add(name: "B", validationPrompt: "judge B", inputEnumeratorPrompt: nil, waivable: false, origin: .smith),
+            .add(name: "C", validationPrompt: "judge C", inputEnumeratorPrompt: nil, waivable: true, origin: .smith),
+            .delete(criterionID: first.id)
+        ]) == nil)
+        #expect(await store.task(id: task.id)?.acceptanceCriteria.map(\.name) == ["B", "C"])
+    }
+
+    @Test("delete drops the criterion and its verdicts, but never its rejection history")
+    func criterionDeleteKeepsRejectionHistory() async {
+        let store = TaskStore()
+        let criterion = AcceptanceCriterion(name: "A", validationPrompt: "judge A", origin: .smith)
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+        let token = await store.beginValidationRound(id: task.id)!
+        _ = await store.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "not done"), validatorName: "d", validatorHash: "h", round: 1)
+        ], judgedAgainst: [criterion], judgedInRound: token)
+
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [.delete(criterionID: criterion.id)]) == nil)
+        let live = await store.task(id: task.id)!
+        #expect(live.acceptanceCriteria.isEmpty)
+        #expect(live.validation?.verdictRecords.isEmpty == true, "verdicts judged a contract that no longer exists")
+        #expect(live.validation?.rejectionHistory.map(\.rejectionText) == ["not done"], "the rejection is task-level and survives")
+        #expect(live.validation?.contractVersion == 1, "deleting a criterion versions the contract")
+    }
+
     @Test("A rejection outlives the criterion that earned it, and never counts as one")
     func rejectionHistoryOutlivesItsCriterion() async {
         let store = TaskStore()

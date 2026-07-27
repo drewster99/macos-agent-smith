@@ -255,6 +255,67 @@ struct ValidationAgentSurfaceTests {
         #expect(posted.contains { if case .string("criteria_updated") = $0.metadata?["messageKind"] { return true }; return false })
     }
 
+    @Test("set_acceptance_criteria: the two modes are mutually exclusive, and `actions` edits by id")
+    func setCriteriaActionsMode() async throws {
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "t", description: "d")
+        let existing = AcceptanceCriterion(name: "keep me", validationPrompt: "judge it", origin: .smith)
+        await taskStore.setAcceptanceCriteria(id: task.id, criteria: [existing])
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+        let tool = SetAcceptanceCriteriaTool()
+
+        let neither = try await tool.execute(arguments: ["task_id": .string(task.id.uuidString)], context: context)
+        #expect(!neither.succeeded, "one of the two modes must be chosen")
+
+        let both = try await tool.execute(
+            arguments: [
+                "task_id": .string(task.id.uuidString),
+                "criteria": .array([.dictionary(["name": .string("x"), "validation_prompt": .string("p")])]),
+                "actions": .array([.dictionary(["action": .string("delete"), "criterion_id": .string(existing.id.uuidString)])])
+            ],
+            context: context
+        )
+        #expect(!both.succeeded, "replace-all and per-criterion edits are not combinable")
+        #expect(await taskStore.task(id: task.id)?.acceptanceCriteria.count == 1, "a refused call changes nothing")
+
+        // update by id, plus an add, in one batch.
+        let edited = try await tool.execute(
+            arguments: [
+                "task_id": .string(task.id.uuidString),
+                "actions": .array([
+                    .dictionary([
+                        "action": .string("update"),
+                        "criterion_id": .string(existing.id.uuidString),
+                        "name": .string("renamed"),
+                        "validation_prompt": .string("judge it")
+                    ]),
+                    .dictionary([
+                        "action": .string("add"),
+                        "name": .string("added"),
+                        "validation_prompt": .string("judge the new one"),
+                        "waivable": .bool(true)
+                    ])
+                ])
+            ],
+            context: context
+        )
+        #expect(edited.succeeded)
+        let criteria = await taskStore.task(id: task.id)?.acceptanceCriteria ?? []
+        #expect(criteria.map(\.name) == ["renamed", "added"])
+        #expect(criteria[0].id == existing.id, "update targets by id, so identity survives")
+        #expect(criteria[1].waivable)
+
+        // update/delete without a criterion_id can't name anything, and must say so.
+        let idless = try await tool.execute(
+            arguments: [
+                "task_id": .string(task.id.uuidString),
+                "actions": .array([.dictionary(["action": .string("delete")])])
+            ],
+            context: context
+        )
+        #expect(!idless.succeeded)
+    }
+
     @Test("set_acceptance_criteria works on a FAILED task (recovery) but not a COMPLETED one")
     func setCriteriaAllowedOnFailedBlockedOnCompleted() async throws {
         let taskStore = TaskStore()
