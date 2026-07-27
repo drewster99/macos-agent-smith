@@ -33,79 +33,102 @@ struct AttachmentView: View {
 
     var body: some View {
         if attachment.isImage {
-            imageView()
-                .task(id: imageLoadID) {
-                    if let cached = ImageCache.shared.cachedImage(for: attachment, tier: tier) {
-                        setLoadedImage(cached, isLoading: false)
-                        return
-                    }
-                    setLoadedImage(nil, isLoading: true)
-                    let image = await ImageCache.shared.image(for: attachment, tier: tier, bytesLoader: bytesLoader)
-                    guard !Task.isCancelled else { return }
-                    setLoadedImage(image, isLoading: false)
-                }
+            ImageView(
+                attachment: attachment,
+                tier: tier,
+                onTapImage: onTapImage,
+                bytesLoader: bytesLoader
+            )
         } else {
-            fileBadge()
+            FileBadge(filename: attachment.filename, formattedSize: attachment.formattedSize, iconName: iconName)
         }
     }
-
-    @ViewBuilder
-    private func imageView() -> some View {
-        Group {
-            if let nsImage = loadedImage {
-                Button(action: { onTapImage?() }, label: {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: tier == .small ? 200 : 400,
-                               maxHeight: tier == .small ? 150 : 300)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .contentShape(Rectangle())
-                })
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    if hovering { NSCursor.pointingHand.set() }
-                    else { NSCursor.arrow.set() }
+    
+    /// Nested View struct for image display (refactored from imageView())
+    private struct ImageView: View {
+        let attachment: Attachment
+        let tier: ImageCache.Tier
+        let onTapImage: (() -> Void)?
+        let bytesLoader: (@Sendable (UUID, String) async -> Data?)?
+        
+        @Environment(\.attachmentBytesLoader) private var envBytesLoader
+        @State private var loadedImage: NSImage?
+        @State private var isLoadingImage = false
+        
+        private var imageLoadID: String {
+            "\(attachment.id.uuidString)-\(tier.rawValue)"
+        }
+        
+        private func setLoadedImage(_ image: NSImage?, isLoading: Bool) {
+            DispatchQueue.main.async {
+                loadedImage = image
+                isLoadingImage = isLoading
+            }
+        }
+        
+        var body: some View {
+            Group {
+                if let nsImage = loadedImage {
+                    Button(action: { onTapImage?() }, label: {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: tier == .small ? 200 : 400,
+                                   maxHeight: tier == .small ? 150 : 300)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .contentShape(Rectangle())
+                    })
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        if hovering { NSCursor.pointingHand.set() }
+                        else { NSCursor.arrow.set() }
+                    }
+                } else if isLoadingImage {
+                    ProgressView()
+                        .frame(width: 60, height: 60)
+                } else {
+                    Image(systemName: "photo")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 60, height: 60)
                 }
-            } else if isLoadingImage {
-                ProgressView()
-                    .frame(width: 60, height: 60)
-            } else {
-                Image(systemName: "photo")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 60, height: 60)
+            }
+            .task(id: imageLoadID) {
+                let loader = bytesLoader ?? envBytesLoader
+                if let cached = ImageCache.shared.cachedImage(for: attachment, tier: tier) {
+                    setLoadedImage(cached, isLoading: false)
+                    return
+                }
+                setLoadedImage(nil, isLoading: true)
+                let image = await ImageCache.shared.image(for: attachment, tier: tier, bytesLoader: loader)
+                guard !Task.isCancelled else { return }
+                setLoadedImage(image, isLoading: false)
             }
         }
     }
-
-    private var imageLoadID: String {
-        "\(attachment.id.uuidString)-\(tier.rawValue)"
-    }
-
-    private func setLoadedImage(_ image: NSImage?, isLoading: Bool) {
-        DispatchQueue.main.async {
-            loadedImage = image
-            isLoadingImage = isLoading
-        }
-    }
-
-    @ViewBuilder
-    private func fileBadge() -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: iconName)
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(attachment.filename)
-                    .font(.caption)
-                    .lineLimit(1)
-                Text(attachment.formattedSize)
-                    .font(.caption2)
+    
+    /// Nested View struct for file badge display (refactored from fileBadge())
+    private struct FileBadge: View {
+        let filename: String
+        let formattedSize: String
+        let iconName: String
+        
+        var body: some View {
+            HStack(spacing: 6) {
+                Image(systemName: iconName)
                     .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(filename)
+                        .font(.caption)
+                        .lineLimit(1)
+                    Text(formattedSize)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .padding(8)
+            .background(.quaternary)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
-        .padding(8)
-        .background(.quaternary)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private var iconName: String {

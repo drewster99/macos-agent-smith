@@ -92,7 +92,7 @@ struct DiffView: View {
 
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(visibleLines) { line in
-                        diffLineView(line)
+                        DiffLineView(line: line)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 3))
@@ -102,9 +102,12 @@ struct DiffView: View {
         }
     }
 
-    @ViewBuilder
-    private func diffLineView(_ line: DiffLine) -> some View {
-        switch line.kind {
+    /// Nested View struct for diff line display (refactored from diffLineView(_:))
+    private struct DiffLineView: View {
+        let line: DiffLine
+        
+        var body: some View {
+            switch line.kind {
         case .context:
             HStack(spacing: 0) {
                 Text("  ")
@@ -146,5 +149,6 @@ struct DiffView: View {
             // Rendered separately in the main body; never reached here.
             EmptyView()
         }
+    }
     }
 }

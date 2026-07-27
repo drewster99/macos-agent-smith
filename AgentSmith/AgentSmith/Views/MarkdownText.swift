@@ -23,7 +23,7 @@ struct MarkdownText: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             ForEach(contentBlocks) { block in
-                renderBlock(block)
+                RenderBlockView(block: block, baseFont: baseFont)
             }
         }
         .textSelection(.enabled)
@@ -145,215 +145,7 @@ struct MarkdownText: View, Equatable {
         return cells.map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
-    // MARK: - Rendering
-
-    @ViewBuilder
-    private func renderBlock(_ block: ContentBlock) -> some View {
-        switch block {
-        case .line(_, let text):
-            renderLine(text)
-        case .table(_, let rows):
-            if let columnCount = rows.map(\.count).max(), columnCount > 0 {
-                tableView(rows: rows, columnCount: columnCount)
-            }
-        case .codeBlock(_, let language, let lines):
-            codeBlockView(language: language, lines: lines)
-        }
-    }
-
-    /// Renders a fenced code block with optional language label and a subtle background.
-    private func codeBlockView(language: String?, lines: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let language, !language.isEmpty {
-                Text(language)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.top, 6)
-                    .padding(.bottom, 2)
-            }
-            Text(lines.joined(separator: "\n"))
-                .font(baseFont)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppColors.codeBlockBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(AppColors.codeBlockBorder, lineWidth: 0.5)
-        )
-        .padding(.vertical, 4)
-    }
-
-    /// Renders a pipe-delimited table. Columns share width equally; the first row is bold.
-    private func tableView(rows: [[String]], columnCount: Int) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
-                let isHeader = rowIdx == 0
-                let cellFont = isHeader ? baseFont.weight(.semibold) : baseFont
-                let renderedCells: [Text] = (0..<columnCount).map { colIdx in
-                    let cell = colIdx < row.count ? row[colIdx] : ""
-                    return styledInlineText(cell, font: cellFont)
-                }
-                MarkdownTableRow(renderedCells: renderedCells, isHeader: isHeader)
-            }
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(AppColors.tableBorder, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .padding(.vertical, 4)
-    }
-
-    /// Parses a line's leading whitespace and bullet/number prefix, returning
-    /// the nesting depth (in spaces), whether it's a list item, and the content text.
-    private struct LineParse {
-        let indent: Int         // leading whitespace count
-        let isList: Bool        // true for bullet or numbered list items
-        let isNumbered: Bool    // true for "1." style lists
-        let numberPrefix: String // e.g. "1." — preserved for display
-        let content: String     // text after the prefix
-    }
-
-    private func parseLine(_ line: String) -> LineParse {
-        let stripped = line.drop(while: { $0 == " " || $0 == "\t" })
-        let indent = line.count - stripped.count
-
-        // Bullet markers: "* ", "- "
-        if stripped.hasPrefix("* ") || stripped.hasPrefix("- ") {
-            return LineParse(indent: indent, isList: true, isNumbered: false, numberPrefix: "", content: String(stripped.dropFirst(2)))
-        }
-        // Unicode bullet: "• " or "•" (some LLMs omit the trailing space)
-        if stripped.hasPrefix("•") {
-            let afterBullet = stripped.dropFirst(1).drop(while: { $0 == " " })
-            return LineParse(indent: indent, isList: true, isNumbered: false, numberPrefix: "", content: String(afterBullet))
-        }
-
-        // Numbered list: "1. ", "2) ", etc. — preserve the prefix for display
-        if let match = stripped.prefixMatch(of: /\d+[.)]\s+/) {
-            let prefix = String(stripped[match.range]).trimmingCharacters(in: .whitespaces)
-            return LineParse(indent: indent, isList: true, isNumbered: true, numberPrefix: prefix, content: String(stripped[match.range.upperBound...]))
-        }
-
-        return LineParse(indent: indent, isList: false, isNumbered: false, numberPrefix: "", content: String(stripped))
-    }
-
-    @ViewBuilder
-    private func renderLine(_ line: String) -> some View {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-        if trimmed.hasPrefix("### ") {
-            styledInlineText(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3)
-        } else if trimmed.hasPrefix("## ") {
-            styledInlineText(String(trimmed.dropFirst(3)), font: AppFonts.markdownH2)
-        } else if trimmed.hasPrefix("# ") {
-            styledInlineText(String(trimmed.dropFirst(2)), font: AppFonts.markdownH1)
-        } else if trimmed.isEmpty {
-            Color.clear.frame(height: 6)
-        } else {
-            let parsed = parseLine(line)
-            if parsed.isList {
-                // Indent based on leading whitespace: 12pt base + 12pt per 2-space level
-                let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
-                let marker = parsed.isNumbered ? parsed.numberPrefix : "•"
-                HStack(alignment: .top, spacing: 4) {
-                    Text(marker)
-                        .font(baseFont)
-                    styledInlineText(parsed.content, font: baseFont)
-                }
-                .padding(.leading, depthPadding)
-            } else if parsed.indent > 0 {
-                // Indented non-list text — preserve the indent
-                let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
-                styledInlineText(parsed.content, font: baseFont)
-                    .padding(.leading, depthPadding)
-            } else {
-                styledInlineText(line, font: baseFont)
-            }
-        }
-    }
-
     // MARK: - Inline code
-
-    private struct InlineSegment {
-        let text: String
-        let isCode: Bool
-    }
-
-    /// Splits text on single-backtick boundaries into code / non-code segments.
-    private func parseInlineCode(_ text: String) -> [InlineSegment] {
-        var segments: [InlineSegment] = []
-        var remaining = text[...]
-
-        while let backtickStart = remaining.firstIndex(of: "`") {
-            if backtickStart > remaining.startIndex {
-                segments.append(InlineSegment(text: String(remaining[remaining.startIndex..<backtickStart]), isCode: false))
-            }
-            let afterBacktick = remaining.index(after: backtickStart)
-            if afterBacktick < remaining.endIndex,
-               let backtickEnd = remaining[afterBacktick...].firstIndex(of: "`") {
-                segments.append(InlineSegment(text: String(remaining[afterBacktick..<backtickEnd]), isCode: true))
-                remaining = remaining[remaining.index(after: backtickEnd)...]
-            } else {
-                // No closing backtick — treat rest as plain text.
-                segments.append(InlineSegment(text: String(remaining[backtickStart...]), isCode: false))
-                remaining = remaining[remaining.endIndex...]
-            }
-        }
-        if !remaining.isEmpty {
-            segments.append(InlineSegment(text: String(remaining), isCode: false))
-        }
-        return segments
-    }
-
-    /// Builds a styled `Text` from an `AttributedString` so that markdown links produced
-    /// by `linkify` become real clickable Link spans on macOS — `Text(LocalizedStringKey:)`
-    /// renders the styling (blue, underlined) but does NOT produce activatable Link
-    /// semantics on macOS, so right-click shows only "Lookup" and clicks fall through to
-    /// text selection. `AttributedString(markdown:)` produces a real `.link` attribute
-    /// that `Text(_:AttributedString)` renders as a proper clickable Link, surviving
-    /// `.textSelection(.enabled)`.
-    private func styledInlineText(_ raw: String, font: Font) -> Text {
-        let segments = parseInlineCode(raw)
-        var combined = AttributedString()
-
-        for segment in segments {
-            // A backtick-wrapped segment whose entire content is a single path or URL
-            // is more useful as a clickable link than as colored inline code. One
-            // `standaloneLink(for:)` call covers both the decision and the wrapping,
-            // so paths get exactly one `FileManager.fileExists` hit per render.
-            if segment.isCode, let linked = PathLinkifier.standaloneLink(for: segment.text) {
-                combined += parseMarkdown(linked, fallback: segment.text)
-            } else if segment.isCode {
-                var part = AttributedString(segment.text)
-                part.foregroundColor = AppColors.inlineCode
-                combined += part
-            } else {
-                combined += parseMarkdown(PathLinkifier.linkify(segment.text), fallback: segment.text)
-            }
-        }
-        return Text(combined).font(font)
-    }
-
-    /// Parses inline-only markdown into an `AttributedString`, falling back to plain text
-    /// when the parse fails. `try?` — `AttributedString(markdown:)` returns nil for
-    /// malformed inline markdown (unbalanced `*`, stray brackets, etc.); user/agent-supplied
-    /// content can hit that path, and silently degrading to plain text is the desired
-    /// behavior.
-    private func parseMarkdown(_ markdown: String, fallback: String) -> AttributedString {
-        if let parsed = try? AttributedString(
-            markdown: Self.escapingPathTildes(markdown),
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace
-            )
-        ) {
-            return parsed
-        }
-        return AttributedString(fallback)
-    }
 
     /// GFM treats even single tildes as strikethrough delimiters, so two home-relative
     /// paths in one line ("check ~/cursor/a and ~/cursor/b") struck through everything
@@ -384,5 +176,233 @@ struct MarkdownText: View, Equatable {
             index = text.index(after: index)
         }
         return result
+    }
+    
+    // MARK: - Extracted View structs (refactored from func ... -> some View helpers)
+    
+    /// Nested View struct for rendering content blocks (refactored from renderBlock(_:)
+    private struct RenderBlockView: View {
+        let block: MarkdownText.ContentBlock
+        let baseFont: Font
+        
+        var body: some View {
+            switch block {
+            case .line(_, let text):
+                RenderLineView(line: text, baseFont: baseFont)
+            case .table(_, let rows):
+                if let columnCount = rows.map(\.count).max(), columnCount > 0 {
+                    TableView(rows: rows, columnCount: columnCount, baseFont: baseFont)
+                }
+            case .codeBlock(_, let language, let lines):
+                CodeBlockView(language: language, lines: lines, baseFont: baseFont)
+            }
+        }
+    }
+    
+    /// Nested View struct for rendering code blocks (refactored from codeBlockView(language:lines:))
+    private struct CodeBlockView: View {
+        let language: String?
+        let lines: [String]
+        let baseFont: Font
+        
+        var body: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                if let language, !language.isEmpty {
+                    Text(language)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 6)
+                        .padding(.bottom, 2)
+                }
+                Text(lines.joined(separator: "\n"))
+                    .font(baseFont)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppColors.codeBlockBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(AppColors.codeBlockBorder, lineWidth: 0.5)
+            )
+            .padding(.vertical, 4)
+        }
+    }
+    
+    /// Nested View struct for rendering tables (refactored from tableView(rows:columnCount:))
+    private struct TableView: View {
+        let rows: [[String]]
+        let columnCount: Int
+        let baseFont: Font
+        
+        var body: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
+                    let isHeader = rowIdx == 0
+                    let cellFont = isHeader ? baseFont.weight(.semibold) : baseFont
+                    let renderedCells: [Text] = (0..<columnCount).map { colIdx in
+                        let cell = colIdx < row.count ? row[colIdx] : ""
+                        return InlineText.styled(cell, font: cellFont)
+                    }
+                    MarkdownTableRow(renderedCells: renderedCells, isHeader: isHeader)
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(AppColors.tableBorder, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .padding(.vertical, 4)
+        }
+    }
+    
+    /// Nested View struct for rendering a single line (refactored from renderLine(_:)
+    private struct RenderLineView: View {
+        let line: String
+        let baseFont: Font
+        
+        var body: some View {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            if trimmed.hasPrefix("### ") {
+                InlineText.styled(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3)
+            } else if trimmed.hasPrefix("## ") {
+                InlineText.styled(String(trimmed.dropFirst(3)), font: AppFonts.markdownH2)
+            } else if trimmed.hasPrefix("# ") {
+                InlineText.styled(String(trimmed.dropFirst(2)), font: AppFonts.markdownH1)
+            } else if trimmed.isEmpty {
+                Color.clear.frame(height: 6)
+            } else {
+                let parsed = LineParser.parse(line, baseFont: baseFont)
+                if parsed.isList {
+                    // Indent based on leading whitespace: 12pt base + 12pt per 2-space level
+                    let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
+                    let marker = parsed.isNumbered ? parsed.numberPrefix : "•"
+                    HStack(alignment: .top, spacing: 4) {
+                        Text(marker)
+                            .font(baseFont)
+                        InlineText.styled(parsed.content, font: baseFont)
+                    }
+                    .padding(.leading, depthPadding)
+                } else if parsed.indent > 0 {
+                    // Indented non-list text — preserve the indent
+                    let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
+                    InlineText.styled(parsed.content, font: baseFont)
+                        .padding(.leading, depthPadding)
+                } else {
+                    InlineText.styled(line, font: baseFont)
+                }
+            }
+        }
+    }
+    
+    /// Helper struct for line parsing results
+    private struct LineParseResult {
+        let indent: Int
+        let isList: Bool
+        let isNumbered: Bool
+        let numberPrefix: String
+        let content: String
+    }
+    
+    /// Helper namespace for line parsing logic
+    private enum LineParser {
+        static func parse(_ line: String, baseFont: Font) -> LineParseResult {
+            let stripped = line.drop(while: { $0 == " " || $0 == "\t" })
+            let indent = line.count - stripped.count
+            
+            // Bullet markers: "* ", "- "
+            if stripped.hasPrefix("* ") || stripped.hasPrefix("- ") {
+                return LineParseResult(indent: indent, isList: true, isNumbered: false, numberPrefix: "", content: String(stripped.dropFirst(2)))
+            }
+            // Unicode bullet: "•" or "•" (some LLMs omit the trailing space)
+            if stripped.hasPrefix("•") {
+                let afterBullet = stripped.dropFirst(1).drop(while: { $0 == " " })
+                return LineParseResult(indent: indent, isList: true, isNumbered: false, numberPrefix: "", content: String(afterBullet))
+            }
+            
+            // Numbered list: "1. ", "2) ", etc. — preserve the prefix for display
+            if let match = stripped.prefixMatch(of: /\d+[.)]\s+/) {
+                let prefix = String(stripped[match.range]).trimmingCharacters(in: .whitespaces)
+                return LineParseResult(indent: indent, isList: true, isNumbered: true, numberPrefix: prefix, content: String(stripped[match.range.upperBound...]))
+            }
+            
+            return LineParseResult(indent: indent, isList: false, isNumbered: false, numberPrefix: "", content: String(stripped))
+        }
+    }
+    
+    /// Helper namespace for styled inline text (refactored from styledInlineText(_:font:))
+    private enum InlineText {
+        static func styled(_ raw: String, font: Font) -> Text {
+            let segments = InlineCodeParser.parse(raw)
+            var combined = AttributedString()
+            
+            for segment in segments {
+                // A backtick-wrapped segment whose entire content is a single path or URL
+                // is more useful as a clickable link than as colored inline code. One
+                // `standaloneLink(for:)` call covers both the decision and the wrapping,
+                // so paths get exactly one `FileManager.fileExists` hit per render.
+                if segment.isCode, let linked = PathLinkifier.standaloneLink(for: segment.text) {
+                    combined += MarkdownParser.parse(linked, fallback: segment.text)
+                } else if segment.isCode {
+                    var part = AttributedString(segment.text)
+                    part.foregroundColor = AppColors.inlineCode
+                    combined += part
+                } else {
+                    combined += MarkdownParser.parse(PathLinkifier.linkify(segment.text), fallback: segment.text)
+                }
+            }
+            return Text(combined).font(font)
+        }
+    }
+    
+    /// Helper namespace for inline code parsing
+    private enum InlineCodeParser {
+        struct InlineSegment {
+            let text: String
+            let isCode: Bool
+        }
+        
+        static func parse(_ text: String) -> [InlineSegment] {
+            var segments: [InlineSegment] = []
+            var remaining = text[...]
+            
+            while let backtickStart = remaining.firstIndex(of: "`") {
+                if backtickStart > remaining.startIndex {
+                    segments.append(InlineSegment(text: String(remaining[remaining.startIndex..<backtickStart]), isCode: false))
+                }
+                let afterBacktick = remaining.index(after: backtickStart)
+                if afterBacktick < remaining.endIndex,
+                   let backtickEnd = remaining[afterBacktick...].firstIndex(of: "`") {
+                    segments.append(InlineSegment(text: String(remaining[afterBacktick..<backtickEnd]), isCode: true))
+                    remaining = remaining[remaining.index(after: backtickEnd)...]
+                } else {
+                    // No closing backtick — treat rest as plain text.
+                    segments.append(InlineSegment(text: String(remaining[backtickStart...]), isCode: false))
+                    remaining = remaining[remaining.endIndex...]
+                }
+            }
+            if !remaining.isEmpty {
+                segments.append(InlineSegment(text: String(remaining), isCode: false))
+            }
+            return segments
+        }
+    }
+    
+    /// Helper namespace for markdown parsing
+    private enum MarkdownParser {
+        static func parse(_ markdown: String, fallback: String) -> AttributedString {
+            if let parsed = try? AttributedString(
+                markdown: MarkdownText.escapingPathTildes(markdown),
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            ) {
+                return parsed
+            }
+            return AttributedString(fallback)
+        }
     }
 }
