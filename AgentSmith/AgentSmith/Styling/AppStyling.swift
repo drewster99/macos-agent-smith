@@ -254,6 +254,22 @@ enum AppFonts {
     /// Body font for the AI Commentary inset.
     static let aiCommentaryBody = Font.callout
 
+    // MARK: Inspector "Live" section (NowLiveSection)
+    /// 11pt semibold — the "Live" section header.
+    static let liveSectionHeader = Font.system(size: 11, weight: .semibold)
+    /// 13pt semibold — a live task's title.
+    static let liveTaskTitle = Font.system(size: 13, weight: .semibold)
+    /// 10pt semibold — a live task's stage chip ("Running", "Awaiting Review").
+    static let liveTaskStageChip = Font.system(size: 10, weight: .semibold)
+    /// 11pt semibold — the agent-role label on a live task's sub-rows ("Brown", "Security").
+    static let liveAgentLabel = Font.system(size: 11, weight: .semibold)
+    /// 11pt — an agent's live micro-state beside its role label ("thinking", "evaluating").
+    static let liveAgentState = Font.system(size: 11)
+    /// 11pt monospaced — a tool name in a live task's recent-activity list.
+    static let liveToolName = Font.system(size: 11, design: .monospaced)
+    /// 10pt monospaced — the relative age beside a live task's recent tool call.
+    static let liveToolAge = Font.system(size: 10, design: .monospaced)
+
     // MARK: PDF export (TaskPDFDocumentView)
     // Fixed point sizes (not Dynamic Type styles) because these render into a fixed-size
     // PDF page via ImageRenderer, where the document layout must be deterministic.

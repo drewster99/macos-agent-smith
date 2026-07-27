@@ -95,6 +95,30 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// Whether this message targets a specific agent rather than the public channel.
     public var isPrivate: Bool { recipientID != nil }
 
+    /// Well-known values of the `messageKind` metadata key.
+    ///
+    /// Most kinds are written at their post site as literals and read as literals — including
+    /// widely-read ones like `tool_request`, which predates this namespace and is matched by
+    /// hand in roughly a dozen places. This is NOT a complete registry and shouldn't be read as
+    /// one; bulk-migrating the existing literals is a separate sweep, deliberately not done here.
+    ///
+    /// What lands here is a kind whose exact spelling is load-bearing for CONTROL FLOW that
+    /// would fail *silently* if the two sides drifted — where a reader that stops matching does
+    /// not throw or log, it just quietly resumes the old broken behavior. Add a kind when you
+    /// introduce that kind of coupling, and reference the constant from both sides.
+    public enum Kind {
+        /// Tells a worker its submission is parked because no Validator model is assigned.
+        /// Read by `AgentActor.resumesParkedWorker` — it is the one private-to-worker notice
+        /// that must NOT pull the worker out of `awaitingTaskReview`.
+        public static let validationBlockedWorkerNotice = "validation_blocked_worker_notice"
+    }
+
+    /// The `messageKind` metadata value, if this message carries one.
+    public var messageKind: String? {
+        guard case .string(let kind) = metadata?["messageKind"] else { return nil }
+        return kind
+    }
+
     public enum Sender: Codable, Sendable, Hashable {
         case agent(AgentRole)
         case user

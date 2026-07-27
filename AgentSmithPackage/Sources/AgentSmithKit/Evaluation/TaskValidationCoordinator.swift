@@ -1352,6 +1352,12 @@ extension OrchestrationRuntime {
         // Same reasoning as the escalation notice: without this the worker never learns why it
         // went quiet and will re-reason about the last round or call request_help into a parked
         // task. The public banner's messageKind is filtered out of the worker's feed.
+        //
+        // Unlike the escalation path below, this park KEEPS ITS WORKER ALIVE — so this notice is
+        // the one private-to-worker message that must not also WAKE it. `messageKind` is what
+        // exempts it (`AgentActor.resumesParkedWorker`); every other private message to a worker
+        // means "here is work back". Changing this kind string without changing that reader
+        // re-opens the 2026-07-27 spin (see the comment on `resumesParkedWorker`).
         if let workerID = task.assigneeIDs.first(where: { supervisor.role(of: $0) == .brown }) {
             await channel.post(ChannelMessage(
                 sender: .system,
@@ -1362,7 +1368,7 @@ extension OrchestrationRuntime {
                     wrong with it. Do NOT resubmit, rework anything, or call request_help — STOP and \
                     wait. Validation resumes on its own once the configuration is fixed.
                     """,
-                metadata: ["messageKind": .string("validation_blocked_worker_notice")]
+                metadata: ["messageKind": .string(ChannelMessage.Kind.validationBlockedWorkerNotice)]
             ))
         }
     }

@@ -5,12 +5,19 @@ import AgentSmithKit
 /// with its stage, its Brown's live micro-state, whether the Security Agent is reviewing
 /// one of its calls, and its most recent tool activity.
 ///
-/// Sources: recent tool calls are bucketed from the channel by `taskID`; the Brown state
-/// (`thinking` / `running <tool>` / `waiting on security`) and the nested `Security ·
-/// evaluating` row come from the per-instance telemetry (the M2 re-key), matched to a task
-/// via the Brown instance id in its `assigneeIDs`. Auto-approved read-only evidence takes
-/// the no-LLM fast path, so it correctly shows no security wait. Nothing is faked — a state
-/// that isn't currently signalled is simply omitted.
+/// Sources: recent tool calls are bucketed from the channel by `taskID` (request side only —
+/// see `recompute`); the Brown state (`thinking` / `running <tool>` / `waiting on security`)
+/// and the nested `Security · evaluating` row come from the per-instance telemetry (the M2
+/// re-key), matched to a task via the Brown instance id in its `assigneeIDs`. Auto-approved
+/// read-only evidence takes the no-LLM fast path, so it correctly shows no security wait.
+/// Nothing is faked — a state that isn't currently signalled is simply omitted.
+///
+/// "Live" spans two different things and the distinction is load-bearing: a task that is
+/// WORKING, and a task that is PARKED and needs attention (`isLive` vs `isParked`). A parked
+/// task may have no worker at all — its Brown can be long gone — so it shows its stage chip
+/// and nothing else. Its last tool calls are history, and because each row is stamped with a
+/// `.relative` AGE, leaving them visible made a correctly-parked task look like a hung one:
+/// the final call before the worker went away sits there counting upward.
 struct NowLiveSection: View {
     let viewModel: AppViewModel
 
@@ -23,7 +30,7 @@ struct NowLiveSection: View {
             if !rows.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Live")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppFonts.liveSectionHeader)
                         .textCase(.uppercase)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -56,9 +63,14 @@ struct NowLiveSection: View {
     private func recompute() {
         let live = viewModel.activeTaskList.filter { Self.isLive($0.status) }
 
+        // Only the REQUEST side of a call is one activity. Both `tool_request` and `tool_output`
+        // carry a `tool` metadata key, so bucketing on that key alone listed every call twice —
+        // once when issued, once when it returned. Four visible rows were really two calls, and
+        // the ~5-second request→result gap between each pair read as four separate events.
         var toolsByTask: [UUID: [ToolActivity]] = [:]
         for message in viewModel.messages {
             guard let taskID = message.taskID,
+                  message.messageKind == "tool_request",
                   case .string(let tool)? = message.metadata?["tool"] else { continue }
             toolsByTask[taskID, default: []].append(
                 ToolActivity(id: message.id, name: tool, timestamp: message.timestamp)
@@ -71,14 +83,23 @@ struct NowLiveSection: View {
         let processing = viewModel.processingInstances
         let toolsByInstance = viewModel.toolExecutingByInstance
 
-        let next = live.map { task in
-            LiveTaskRow(
+        let next = live.map { task -> LiveTaskRow in
+            let brownState = Self.brownState(for: task, processing: processing, tools: toolsByInstance)
+            // A parked task with no live worker has no activity to show — only history. Rendering
+            // it anyway is what made a correctly-parked task read as a hang: the rows are stamped
+            // with `.relative` AGE, so the last call before the worker went away sits there
+            // counting upward ("23 min") and looks like a tool that never returned. The stage
+            // chip ("Awaiting Review") is the whole truth for these; stale rows only obscure it.
+            let showsActivity = brownState != nil || !Self.isParked(task.status)
+            return LiveTaskRow(
                 id: task.id,
                 title: task.title,
                 status: task.status,
-                brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance),
+                brownState: brownState,
                 securityEvaluating: Self.securityEvaluating(for: task, processing: processing),
-                tools: Array((toolsByTask[task.id] ?? []).suffix(Self.maxToolRowsPerTask).reversed())
+                tools: showsActivity
+                    ? Array((toolsByTask[task.id] ?? []).suffix(Self.maxToolRowsPerTask).reversed())
+                    : []
             )
         }
 
@@ -129,6 +150,20 @@ struct NowLiveSection: View {
         }
     }
 
+    /// Statuses where the task is waiting on someone else rather than progressing on its own.
+    /// These belong in the Live section (they need attention) but must not imply activity: a
+    /// parked task may have no worker at all, and the tool rows beneath it would be history.
+    /// Kept separate from `isLive` so the "needs attention" and "is working" questions stay
+    /// distinct — conflating them is what let a dead worker's last calls masquerade as live ones.
+    static func isParked(_ status: AgentTask.Status) -> Bool {
+        switch status {
+        case .awaitingReview, .awaitingHelp, .interrupted:
+            return true
+        default:
+            return false
+        }
+    }
+
     struct LiveTaskRow: Identifiable, Equatable {
         let id: UUID
         let title: String
@@ -162,14 +197,14 @@ private struct LiveTaskRowView: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
                 Text(row.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(AppFonts.liveTaskTitle)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
 
                 Spacer(minLength: 8)
 
                 Text(row.status.displayName)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AppFonts.liveTaskStageChip)
                     .foregroundStyle(stageColor)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 1)
@@ -180,10 +215,10 @@ private struct LiveTaskRowView: View {
             if let brownState = row.brownState {
                 HStack(spacing: 6) {
                     Text("Brown")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppFonts.liveAgentLabel)
                         .foregroundStyle(AppColors.color(for: .agent(.brown)))
                     Text(brownState)
-                        .font(.system(size: 11))
+                        .font(AppFonts.liveAgentState)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -193,10 +228,10 @@ private struct LiveTaskRowView: View {
             if row.securityEvaluating {
                 HStack(spacing: 6) {
                     Text("Security")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppFonts.liveAgentLabel)
                         .foregroundStyle(AppColors.color(for: .agent(.securityAgent)))
                     Text("evaluating")
-                        .font(.system(size: 11))
+                        .font(AppFonts.liveAgentState)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.leading, 28)
@@ -205,14 +240,14 @@ private struct LiveTaskRowView: View {
             ForEach(row.tools) { tool in
                 HStack(spacing: 6) {
                     Text(tool.name)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(AppFonts.liveToolName)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
                     Spacer(minLength: 8)
 
                     Text(tool.timestamp, style: .relative)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(AppFonts.liveToolAge)
                         .foregroundStyle(.tertiary)
                 }
                 .padding(.leading, 28)

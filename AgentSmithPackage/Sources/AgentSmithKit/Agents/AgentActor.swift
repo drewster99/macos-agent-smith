@@ -270,6 +270,43 @@ public actor AgentActor {
     private static let toolFailureStreakWarnThreshold = 5
     private static let toolFailureStreakStopThreshold = 10
 
+    /// Brown-only. Counts the `Continue.` continuation nudges injected since the worker last
+    /// made forward progress, and bounds them.
+    ///
+    /// A text-only Brown turn does not go idle — it gets a synthetic "Continue. Use your tools"
+    /// user turn and the run loop immediately spins again (see `handleResponse`). That is right
+    /// for a worker thinking aloud mid-task and wrong for a worker that has genuinely run out of
+    /// work: narrating is the one thing it can do forever, so "keep nudging" has no natural end.
+    ///
+    /// The three existing breakers all miss this shape, because each is reset by the other's
+    /// signal: the text-only breaker resets on ANY tool call, the identical-call breaker resets
+    /// on ANY text-only turn, and the failure-streak breaker only counts failures. A worker
+    /// alternating narration with a succeeding read-only call defeats all three indefinitely —
+    /// 2026-07-27 measured 58 text-only turns and 23 byte-identical `get_task_details` calls
+    /// over 19 minutes before the text-only breaker happened to catch a clean run of six.
+    ///
+    /// So this counter deliberately does NOT reset on just any tool call. Progress means a tool
+    /// call whose signature DIFFERS from the previous one (`lastToolCallSignature`), or genuinely
+    /// new input arriving from outside. Re-reading the same thing and narrating about it is not
+    /// progress no matter how it is interleaved.
+    ///
+    /// Hitting the cap idles the worker rather than terminating it — "you have nothing to do" is
+    /// answered by waiting, and the silence nudge, a scheduled wake, or any inbound message can
+    /// still wake it. This is defense in depth: with the `resumesParkedWorker` fix a finished
+    /// worker should stay parked and never reach this path at all.
+    private var continuationNudgesSinceProgress = 0
+    /// Must stay ABOVE `textOnlyResponseLimit(for: .brown)`, which terminates on unrelieved
+    /// narration. Below it, this cap would fire first and silently convert that termination into
+    /// an idle — the two breakers are meant to cover different shapes, not race.
+    static let maxContinuationNudgesSinceProgress = 10
+
+    /// Consecutive text-only responses tolerated before the agent is treated as degenerate and
+    /// terminated. Brown is a tool-heavy worker, so unrelieved narration is diagnostic quickly;
+    /// Smith is conversational and legitimately answers many turns with prose alone.
+    static func textOnlyResponseLimit(for role: AgentRole) -> Int {
+        role == .smith ? 30 : 6
+    }
+
     /// Brown-only: time of the most recent task communication (first-turn acknowledgement,
     /// task_update, or task_complete). Used by the silence nudge. Initialized when the run loop starts.
     private var lastTaskCommunicationAt: Date?
@@ -547,6 +584,9 @@ public actor AgentActor {
         // Ensure the just-drained messages are actually processed this iteration — matters for
         // the deferred path, where the enqueue's `hasUnprocessedInput` may already be consumed.
         hasUnprocessedInput = true
+        // An injected message (spawn briefing, send-back feedback, amended task) is new material
+        // to act on, so the continuation-nudge budget starts over.
+        continuationNudgesSinceProgress = 0
         pushLiveContext()
     }
 
@@ -828,6 +868,7 @@ public actor AgentActor {
         toolFailureWarnedTools.removeAll()
         lastToolCallSignature = nil
         consecutiveIdenticalToolCalls = 0
+        continuationNudgesSinceProgress = 0
         pushLiveContext()
     }
 
@@ -1247,6 +1288,7 @@ public actor AgentActor {
                     toolCallsSinceTaskCommunication = 0
                     brownSilenceNudgeArmed = true
                     taskAcknowledged = true
+                    continuationNudgesSinceProgress = 0
                 }
                 pushLiveContext()
                 continue
@@ -1795,9 +1837,7 @@ public actor AgentActor {
 
             // Circuit breaker: if the model keeps returning text without tool calls,
             // it's likely degenerate (repetition loop or unable to use tools). Terminate.
-            // Brown (tool-heavy worker) triggers quickly at 6; Smith (conversational orchestrator) at 30.
-            let textOnlyLimit = configuration.role == .smith ? 30 : 6
-            if consecutiveTextOnlyResponses >= textOnlyLimit {
+            if consecutiveTextOnlyResponses >= Self.textOnlyResponseLimit(for: configuration.role) {
                 await toolContext.post(ChannelMessage(
                     sender: .system,
                     content: "Agent \(configuration.role.displayName) returned \(consecutiveTextOnlyResponses) consecutive text-only responses without calling any tools. Terminating — the model may be in a degenerate loop."
@@ -1810,8 +1850,24 @@ public actor AgentActor {
             // For orchestrator agents (Smith), a text-only response means "nothing to do" —
             // go idle until new messages arrive. For worker agents (Brown), text with no
             // tool calls means the model is thinking aloud — inject a continuation prompt
-            // so it keeps working.
+            // so it keeps working, up to `maxContinuationNudgesSinceProgress` of them without
+            // forward progress. Past that the worker is narrating in place, and the honest
+            // answer to "nothing left to do" is to idle, not to be nudged again.
             if configuration.role == .brown && hasText {
+                continuationNudgesSinceProgress += 1
+                if continuationNudgesSinceProgress >= Self.maxContinuationNudgesSinceProgress {
+                    await toolContext.post(ChannelMessage(
+                        sender: .system,
+                        content: "Agent \(configuration.role.displayName) has been nudged to continue \(continuationNudgesSinceProgress) times without making progress. Going idle — the agent will resume when new input arrives.",
+                        metadata: ["isWarning": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                    ))
+                    Self.agentLogger.warning(
+                        "Agent \(self.configuration.role.displayName, privacy: .public) hit the continuation-nudge cap (\(self.continuationNudgesSinceProgress, privacy: .public)) without progress — idling."
+                    )
+                    continuationNudgesSinceProgress = 0
+                    hasUnprocessedInput = false
+                    return
+                }
                 conversationHistory.append(.user("Continue. Use your tools to make progress on the task."))
             } else {
                 hasUnprocessedInput = false
@@ -2221,6 +2277,10 @@ public actor AgentActor {
             } else {
                 lastToolCallSignature = sig
                 consecutiveIdenticalToolCalls = 1
+                // A call that differs from the last one is the tool-side definition of forward
+                // progress. Repeating the SAME call deliberately does not clear the nudge budget
+                // — narrate-then-re-read-the-same-thing is the loop shape this bounds.
+                continuationNudgesSinceProgress = 0
             }
         } else {
             lastToolCallSignature = nil
@@ -2822,6 +2882,33 @@ public actor AgentActor {
         succeeded && handoffLifecycleTools.contains(toolName)
     }
 
+    /// Message kinds that are addressed privately to a parked worker but must NOT resume it.
+    ///
+    /// The default is deliberately "a private message resumes the worker": every other way a
+    /// message reaches a parked worker means somebody is handing work back (a validator punch
+    /// list, a user send-back, `provide_help`, `amend_task`, Smith's `message_brown`), and a
+    /// missed entry here only costs an extra turn. A missed entry in an ALLOWLIST would instead
+    /// strand the worker parked forever, which is the worse failure — hence the exemption list.
+    static let parkedWorkerInformationalMessageKinds: Set<String> = [
+        ChannelMessage.Kind.validationBlockedWorkerNotice
+    ]
+
+    /// Whether `message` should pull a parked worker (`awaitingTaskReview`) into a new LLM turn.
+    ///
+    /// Addressing alone is not sufficient, and assuming it was cost 19 minutes of spin on
+    /// 2026-07-27: a worker submitted correctly, parked, and in the SAME millisecond received
+    /// `validation_blocked_worker_notice` — the notice whose own text reads "Do NOT resubmit,
+    /// rework anything, or call request_help — STOP and wait." Because it was addressed to the
+    /// worker, the old `recipientID == id` test read it as revision feedback and un-parked the
+    /// agent it was sent to quiet. The notice had also just forbidden the only two tools that
+    /// re-park (`task_complete`, `request_help`), so the worker had no way back to idle and
+    /// narrated until a circuit breaker terminated it.
+    static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID) -> Bool {
+        guard message.recipientID == agentID else { return false }
+        guard let kind = message.messageKind else { return true }
+        return !parkedWorkerInformationalMessageKinds.contains(kind)
+    }
+
     private func updatePostCallFlags(call: LLMToolCall, result: String, succeeded: Bool, sentMessage: inout Bool, calledTaskComplete: inout Bool, calledCreateTask: inout Bool) {
         if call.name == "message_user" && result == "Message sent to user." { sentMessage = true }
         if call.name == "message_brown" && result == "Message sent to Brown." { sentMessage = true }
@@ -3163,14 +3250,18 @@ public actor AgentActor {
         // but still need to land in the conversation history for the next LLM turn).
         guard !pendingChannelMessages.isEmpty || !pendingStagedAttachments.isEmpty else { return }
 
-        // When awaiting task review, only wake if a private message addressed to this
-        // agent arrived (Smith sending revision feedback). Other messages (system banners,
-        // public notifications) are still drained into history but don't trigger a new LLM call.
+        // When awaiting task review, only wake if a message that actually hands work back
+        // arrived (revision feedback, an amended task, Smith poking the worker directly).
+        // Everything else — system banners, public notifications, and the park notice itself —
+        // still drains into history but doesn't trigger a new LLM call.
         if awaitingTaskReview {
-            let hasPrivateMessage = pendingChannelMessages.contains { $0.recipientID == id }
-            if hasPrivateMessage {
+            let hasResumeMessage = pendingChannelMessages.contains {
+                Self.resumesParkedWorker($0, agentID: id)
+            }
+            if hasResumeMessage {
                 awaitingTaskReview = false
                 hasUnprocessedInput = true
+                continuationNudgesSinceProgress = 0
             }
             // else: drain messages into history below, but leave hasUnprocessedInput as-is
         } else {
@@ -3211,6 +3302,9 @@ public actor AgentActor {
             }
             if hasActionableMessage {
                 hasUnprocessedInput = true
+                // Real input from outside is progress in the sense the nudge budget cares about:
+                // the worker now has something it did not have on the previous turn.
+                continuationNudgesSinceProgress = 0
             }
         }
 
