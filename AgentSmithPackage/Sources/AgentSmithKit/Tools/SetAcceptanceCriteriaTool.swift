@@ -1,10 +1,19 @@
 import Foundation
 
-/// Smith's authoring surface for a task's acceptance criteria — the contract the
-/// validation system judges submissions against. Replaces the task's full criteria list;
-/// criteria whose text is unchanged keep their identity (and any sticky ACCEPT), while
-/// changed or new criteria will be judged fresh. Mid-round edits apply from the next
-/// validation round.
+/// Smith's authoring surface for a task's acceptance criteria — the contract the validation system
+/// judges submissions against.
+///
+/// Two modes, exactly one per call. `criteria` replaces the whole list and is for FIRST-TIME
+/// authoring; once the task has been validated it is refused if it would drop a criterion, because
+/// a name-matched replacement mints a new UUID and silently retires the old criterion's verdicts.
+/// `actions` is a batch of per-criterion add/update/delete applied all-or-nothing, where `update`
+/// names a `criterion_id` and so preserves identity (and the sticky ACCEPT, when the contract text
+/// is unchanged).
+///
+/// Criteria can only be edited in a state where no worker or validator is consuming them
+/// (`Status.isValidationContractEditable`) — the same gate `manage_steps` has always had. There are
+/// no mid-round edits: changing the rules while a validator is judging against them is the race the
+/// gate exists to prevent.
 public struct SetAcceptanceCriteriaTool: AgentTool {
     public let name = "set_acceptance_criteria"
     public let toolDescription: String
@@ -210,10 +219,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             ]
         ))
 
-        let midRoundNote = task.status == .validating
-            ? " Validation is currently running — changes apply from the next round."
-            : ""
-        return .success("Acceptance criteria set for '\(task.title)' (\(criteria.count) criterion(s)).\(midRoundNote)")
+        return .success("Acceptance criteria set for '\(task.title)' (\(criteria.count) criterion(s)).")
     }
 
     /// The per-criterion path. The store applies the batch atomically, so a rejected action leaves

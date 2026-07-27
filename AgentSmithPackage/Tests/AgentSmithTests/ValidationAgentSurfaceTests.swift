@@ -316,6 +316,60 @@ struct ValidationAgentSurfaceTests {
         #expect(!idless.succeeded)
     }
 
+    @Test("set_acceptance_criteria is refused while a validator is consuming the contract")
+    func setCriteriaGatedWhileValidating() async throws {
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "t", description: "d")
+        let existing = AcceptanceCriterion(name: "A", validationPrompt: "judge A", origin: .smith)
+        await taskStore.setAcceptanceCriteria(id: task.id, criteria: [existing])
+        await taskStore.setResult(id: task.id, result: "done", commentary: nil, attachments: [])
+        await taskStore.updateStatus(id: task.id, status: .validating)
+        let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
+        let tool = SetAcceptanceCriteriaTool()
+
+        // Both modes are refused: changing the rules mid-judgment is the race the gate prevents.
+        let replaced = try await tool.execute(
+            arguments: [
+                "task_id": .string(task.id.uuidString),
+                "criteria": .array([.dictionary(["name": .string("A"), "validation_prompt": .string("judge A harder")])])
+            ],
+            context: context
+        )
+        #expect(!replaced.succeeded)
+        let edited = try await tool.execute(
+            arguments: [
+                "task_id": .string(task.id.uuidString),
+                "actions": .array([.dictionary([
+                    "action": .string("update"),
+                    "criterion_id": .string(existing.id.uuidString),
+                    "name": .string("A"),
+                    "validation_prompt": .string("judge A harder")
+                ])])
+            ],
+            context: context
+        )
+        #expect(!edited.succeeded)
+        #expect(await taskStore.task(id: task.id)?.acceptanceCriteria[0].validationPrompt == "judge A",
+                "the contract a validator is judging against is untouched")
+
+        // Back out of validation and the same edit lands — the gate is about the live validator,
+        // not about the task having been judged.
+        await taskStore.updateStatus(id: task.id, status: .awaitingReview)
+        let afterPark = try await tool.execute(
+            arguments: [
+                "task_id": .string(task.id.uuidString),
+                "actions": .array([.dictionary([
+                    "action": .string("update"),
+                    "criterion_id": .string(existing.id.uuidString),
+                    "name": .string("A"),
+                    "validation_prompt": .string("judge A harder")
+                ])])
+            ],
+            context: context
+        )
+        #expect(afterPark.succeeded, "fixing a wrong criterion is how an escalation gets resolved")
+    }
+
     @Test("set_acceptance_criteria works on a FAILED task (recovery) but not a COMPLETED one")
     func setCriteriaAllowedOnFailedBlockedOnCompleted() async throws {
         let taskStore = TaskStore()

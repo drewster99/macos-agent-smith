@@ -351,7 +351,13 @@ public struct CreateTaskTool: AgentTool {
         }
 
         if !seedCriteria.isEmpty {
-            await context.taskStore.setAcceptanceCriteria(id: task.id, criteria: seedCriteria)
+            // Unreachable today — a task is created `.pending` or `.scheduled`, both editable, with
+            // no ledger — but seeding a task's acceptance contract is not something to fail at
+            // quietly. A task that silently came into existence without the criteria Smith wrote
+            // for it would be judged by the implicit default instead, and nothing would say so.
+            if let problem = await context.taskStore.setAcceptanceCriteria(id: task.id, criteria: seedCriteria) {
+                return .failure("Task created but its acceptance criteria could not be saved: \(problem)")
+            }
         }
         if case .array(let rawSteps) = arguments["steps"] {
             let texts = rawSteps.compactMap { raw -> String? in

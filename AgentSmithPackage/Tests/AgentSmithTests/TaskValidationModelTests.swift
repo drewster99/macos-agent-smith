@@ -560,6 +560,41 @@ struct TaskValidationModelTests {
         #expect(reshuffled.map(\.criterionID) == ordered.map(\.criterionID))
     }
 
+    /// `TaskValidationState` carries an explicit `CodingKeys` for one reason — mapping
+    /// `consecutiveValidationsWithoutNewApprovals` back to the `consecutiveStallRounds` key already
+    /// on disk — and that mapping costs the type its synthesized key list. A stored property with a
+    /// default value (every optional has one) that is missing a case is then silently never
+    /// persisted, and every field this work added is exactly that shape.
+    ///
+    /// Reflection, not a round trip: an uncovered property is never encoded, decodes back to its
+    /// declared default, and compares equal to any fixture that also left it defaulted — which a
+    /// fixture written before that property existed always does. Comparing `Mirror`'s labels against
+    /// the encoded key set needs no fixture update, so it still fires years from now.
+    @Test("Every TaskValidationState property is covered by CodingKeys — checked by reflection")
+    func ledgerCodingKeyCoverage() throws {
+        let ledger = TaskValidationState(
+            round: 3,
+            verdictRecords: [CriterionVerdictRecord(criterionID: UUID(), verdict: .accepted, validatorName: "d", validatorHash: "h", round: 3)],
+            consecutiveValidationsWithoutNewApprovals: 2,
+            criterionRejections: [CriterionRejection(criterionID: UUID(), name: "n", recordedAt: Date(timeIntervalSince1970: 1), validationPrompt: "p", inputEnumeratorPrompt: "e", rejectionText: "r")],
+            acceptanceContractVersion: 5
+        )
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(ledger)) as? [String: Any]
+        )
+        // The single deliberate divergence between property name and persisted key.
+        let persistedKey = ["consecutiveValidationsWithoutNewApprovals": "consecutiveStallRounds"]
+        let expected = Set(Mirror(reflecting: ledger).children.compactMap(\.label).map { persistedKey[$0] ?? $0 })
+        let missing = expected.subtracting(object.keys).sorted()
+        #expect(missing.isEmpty, """
+            \(missing.joined(separator: ", ")) is a stored property with no CodingKeys case, so it is \
+            silently never persisted. Add it to TaskValidationState.CodingKeys.
+            """)
+
+        let decoded = try JSONDecoder().decode(TaskValidationState.self, from: JSONEncoder().encode(ledger))
+        #expect(decoded == ledger)
+    }
+
     @Test("Renaming the convergence counter kept its persisted key, so no ledger loses its budget")
     func convergenceCounterKeepsItsPersistedKey() throws {
         var task = AgentTask(title: "t", description: "d")

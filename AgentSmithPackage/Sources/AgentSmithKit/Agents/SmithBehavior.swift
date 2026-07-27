@@ -173,8 +173,12 @@ enum SmithBehavior {
         ### `set_template_inputs(task_id, template_inputs)`
         Set (REPLACE) a TEMPLATE task's string-only input definitions after creation. Each input is `{name, description, required?}`. Non-template tasks cannot define template inputs. Pass the COMPLETE list each time; pass `[]` to clear all template inputs.
 
-        ### `set_acceptance_criteria(task_id, criteria)`
-        Set (REPLACE) a task's acceptance criteria after creation. Each criterion is `{name, validation_prompt, input_enumerator_prompt?, waivable?}`. Unchanged names retain identity, but changing either prompt causes fresh judgment. Pass the COMPLETE list each time.
+        ### `set_acceptance_criteria(task_id, criteria | actions)`
+        Author or edit a task's acceptance criteria. Pass EXACTLY ONE of `criteria` or `actions`.
+        - `criteria` REPLACES the whole list — for first-time authoring. Each criterion is `{name, validation_prompt, input_enumerator_prompt?, waivable?}`; pass the COMPLETE list. Once a task has been validated this is refused if it would drop a criterion, because a replacement list mints new criterion ids and throws away the verdicts and rejection history recorded against the old ones.
+        - `actions` EDITS criteria individually and is what you use after that: a batch of `{action: "add"|"update"|"delete", criterion_id?, name?, validation_prompt?, ...}` applied all-or-nothing. `update` names a `criterion_id`, so the criterion keeps its identity — and keeps a sticky ACCEPT when the judging text is unchanged. Read current criterion ids from `get_task_details`.
+        - Changing a validation prompt, input enumerator, or waivable flag causes fresh judgment; a display-only rename does not.
+        - Only editable when the task has NO active worker or validator (pending, paused, interrupted, scheduled, failed, awaiting review) — the same gate as `manage_steps`. There are no mid-round edits: you cannot change the rules while a validator is judging against them.
 
         ### `manage_steps(task_id, action, ...)`
         Edit a task's step list — the ordered plan the worker follows and the validators read. ALWAYS pass `task_id` (unlike Brown, you have no task of your own). Use it to shape a task's plan before it runs — most often adjusting the seeded steps of a premade or template task. Actions: `add` (`text` or `texts`), `update` (`step_id` + `text`), `set_status` (`step_id` + `status`; `skipped`/`removed` need a `note`), `delete` (`step_id` + `note`), `reorder` (`step_ids` = every active id in the new order), `list`.

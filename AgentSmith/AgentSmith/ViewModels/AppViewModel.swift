@@ -1396,7 +1396,15 @@ final class AppViewModel {
             return false
         }
         if !acceptanceCriteria.isEmpty {
-            await taskStore.setAcceptanceCriteria(id: task.id, criteria: acceptanceCriteria)
+            // Unreachable today (a new task is `.pending`/`.scheduled` with no ledger), but a task
+            // that quietly came into existence without the criteria the user just wrote would be
+            // judged by the implicit default instead, with nothing saying so. Roll back rather than
+            // leave that behind, exactly as the title-template failure above does.
+            if let problem = await taskStore.setAcceptanceCriteria(id: task.id, criteria: acceptanceCriteria) {
+                _ = await taskStore.softDelete(id: task.id)
+                taskActionError = "Task could not be created — its acceptance criteria were rejected: \(problem)"
+                return false
+            }
         }
         if !steps.isEmpty {
             await taskStore.setSteps(id: task.id, steps: steps)
@@ -1468,6 +1476,12 @@ final class AppViewModel {
         actions += task.acceptanceCriteria
             .filter { !incomingIDs.contains($0.id) }
             .map { .delete(criterionID: $0.id) }
+        // Nothing to do is a SUCCESSFUL save, not an error. Opening the editor on a criteria-less
+        // task seeds one blank row, `built()` drops it for having no name, and the diff comes out
+        // empty — so a user who opens the editor and closes it via Save would otherwise be told
+        // "No criterion actions were given." The store is right to refuse an empty batch (a caller
+        // asking for nothing is a caller with a bug); the editor is right to send one.
+        guard !actions.isEmpty else { return true }
         if let problem = await taskStore.applyCriterionActions(taskID: id, actions: actions) {
             taskActionError = problem
             return false
