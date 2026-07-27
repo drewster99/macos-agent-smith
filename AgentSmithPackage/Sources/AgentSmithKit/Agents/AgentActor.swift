@@ -238,6 +238,18 @@ public actor AgentActor {
     private var consecutiveEmptyResponses = 0
     private static let maxConsecutiveEmptyResponses = 3
 
+    /// Content of the synthetic assistant message appended when a non-Brown agent returns an empty
+    /// completion (no text, no tool calls). It is a structural TURN BOUNDARY in `conversationHistory`
+    /// — it stops the next injection from merging into the still-open user turn and re-feeding a
+    /// stale prompt (the 2026-04-25 "wakes silently dropped" bug) — NOT a user-facing message, so it
+    /// is never posted to the channel. It stays visible in the raw conversation history / inspector.
+    ///
+    /// Because the marker lives in the model's own context, the model can PARROT it back as literal
+    /// text on a later turn. Such a response is semantically "nothing to say", so it is treated as
+    /// an empty response (see `handleResponse`): not counted as real text and never posted, which
+    /// also keeps the parrot from reinforcing itself in the channel.
+    public static let emptyResponseTurnMarker = "(no response)"
+
     /// Tracks consecutive identical tool calls (same name + same normalized arguments).
     /// Catches degenerate loops where the LLM repeatedly calls the same tool with the same
     /// arguments (e.g. task_update spam). Any different tool call or text-only response resets.
@@ -1612,9 +1624,16 @@ public actor AgentActor {
         isProcessingToolTurn = true
         defer { isProcessingToolTurn = false }
 
+        // The model can PARROT the synthetic empty-turn marker from its own history back as literal
+        // text. Such a response is "nothing to say": never post it, and treat it as empty below.
+        // Trim-tolerant so a whitespace-padded echo is caught too.
+        let isEmptyMarkerEcho = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.emptyResponseTurnMarker
+
         // Post text to channel unless this agent's raw LLM output is suppressed.
         // Suppressed text is still stored in conversationHistory and visible in the inspector.
-        if let text = response.text, !text.isEmpty, !configuration.suppressesRawTextToChannel {
+        if let text = response.text, !text.isEmpty,
+           !isEmptyMarkerEcho,
+           !configuration.suppressesRawTextToChannel {
             await toolContext.post(ChannelMessage(
                 sender: .agent(configuration.role),
                 content: text,
@@ -1630,6 +1649,7 @@ public actor AgentActor {
         var smithActionClaimPhrase: String?
         if configuration.role == .smith,
            response.toolCalls.isEmpty,
+           !isEmptyMarkerEcho,
            let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines),
            !text.isEmpty {
             await toolContext.post(ChannelMessage(
@@ -1662,7 +1682,10 @@ public actor AgentActor {
             lastToolCallSignature = nil
             consecutiveIdenticalToolCalls = 0
 
-            let hasText = response.text.map { !$0.isEmpty } ?? false
+            // A parroted empty-turn marker (see `isEmptyMarkerEcho`) is semantically an empty
+            // response — treat it as empty so it isn't recorded as a real text turn (and re-appended
+            // as content that primes the echo further).
+            let hasText = (response.text.map { !$0.isEmpty } ?? false) && !isEmptyMarkerEcho
 
             // --- Empty STOP handling (no text AND no tool calls) ---
             // Distinct from text-only: the model produced NOTHING. For Brown, escalate
@@ -1763,7 +1786,7 @@ public actor AgentActor {
                 // provider re-feeds the stale prompt back to the model — exactly how three of
                 // four task-scoped wakes silently dropped on 2026-04-25. Append a synthetic
                 // marker so each new injection starts a fresh turn.
-                conversationHistory.append(.assistant(from: LLMResponse(text: "(no response)")))
+                conversationHistory.append(.assistant(from: LLMResponse(text: Self.emptyResponseTurnMarker)))
                 pushLiveContext()
                 Self.agentLogger.debug(
                     "Agent \(self.configuration.role.displayName, privacy: .public) returned an empty response; closing turn with synthetic marker."
