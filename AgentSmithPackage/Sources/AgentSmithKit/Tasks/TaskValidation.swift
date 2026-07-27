@@ -261,6 +261,28 @@ public extension CriterionVerdictRecord.Verdict {
     }
 }
 
+/// Identifies ONE validation round: which attempt it is, and which version of the acceptance
+/// contract it judged. Captured atomically when the round begins and handed to every store mutation
+/// that round makes, so each mutation can refuse if the world moved while the round awaited an LLM.
+///
+/// Both halves are load-bearing and neither substitutes for the other. `round` catches a SECOND RUN
+/// on the same ledger (`performStopAll` clears the reentrancy guard without awaiting in-flight runs,
+/// and a restart re-enqueues every `.validating` task). `contractVersion` catches an EDIT to the
+/// criteria, which `round` cannot: `resetValidationRound` zeroes `round` while keeping the ledger on
+/// user Re-validate and Send-Back, so the same round number recurs at different times against
+/// different contracts.
+public struct ValidationRoundToken: Sendable, Equatable {
+    /// 1-based attempt number within the current convergence budget.
+    public let round: Int
+    /// The acceptance contract's version at round start. See `TaskValidationState.contractVersion`.
+    public let contractVersion: Int
+
+    public init(round: Int, contractVersion: Int) {
+        self.round = round
+        self.contractVersion = contractVersion
+    }
+}
+
 /// One criterion's rejection, captured as the validator saw it. Append-only and task-level, so it
 /// outlives the criterion: a criterion that is edited, replaced, or deleted takes its verdicts with
 /// it (deliberately — they were judged against a contract that no longer exists), and the record of
@@ -402,17 +424,42 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
     /// decode unchanged — Swift's synthesized decoder does not fall back to property defaults, and
     /// a hand-written one would have to remember every future field. Read via `rejectionHistory`.
     public var criterionRejections: [CriterionRejection]?
+    /// Monotonic counter bumped every time the acceptance criteria actually change. Optional for
+    /// forward-compatible decoding; read via `contractVersion`.
+    public var acceptanceContractVersion: Int?
 
     public init(
         round: Int = 0,
         verdictRecords: [CriterionVerdictRecord] = [],
         consecutiveStallRounds: Int? = nil,
-        criterionRejections: [CriterionRejection]? = nil
+        criterionRejections: [CriterionRejection]? = nil,
+        acceptanceContractVersion: Int? = nil
     ) {
         self.round = round
         self.verdictRecords = verdictRecords
         self.consecutiveStallRounds = consecutiveStallRounds
         self.criterionRejections = criterionRejections
+        self.acceptanceContractVersion = acceptanceContractVersion
+    }
+
+    /// The version of the acceptance contract these verdicts were judged against. Ledgers written
+    /// before the field read as 0, which is correct: they have never seen an edit this build tracked.
+    public var contractVersion: Int { acceptanceContractVersion ?? 0 }
+
+    /// The single mutation of `contractVersion` — called wherever the criteria actually change.
+    public mutating func bumpContractVersion() {
+        acceptanceContractVersion = contractVersion + 1
+    }
+
+    /// Whether `token` still identifies the live round. False means the caller has been superseded
+    /// and must not act on what it computed.
+    public func isCurrentRound(_ token: ValidationRoundToken) -> Bool {
+        round == token.round && contractVersion == token.contractVersion
+    }
+
+    /// The token identifying this ledger's current round.
+    public var currentRoundToken: ValidationRoundToken {
+        ValidationRoundToken(round: round, contractVersion: contractVersion)
     }
 
     /// Every rejection recorded on this task, oldest first. The persistence-shaped optional never

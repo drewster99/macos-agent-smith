@@ -98,10 +98,10 @@ struct TaskValidationCoordinatorTests {
         let criterion = AcceptanceCriterion(name: "the validator got this wrong", origin: .user)
         await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
         await store.setResult(id: task.id, result: "correct work", commentary: nil, attachments: [])
-        _ = await store.beginValidationRound(id: task.id)
+        let token = await store.beginValidationRound(id: task.id)!
         _ = await store.recordCriterionVerdicts(id: task.id, records: [
-            CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "wrongly rejected"), validatorName: "default", validatorHash: "x", round: 1)
-        ], judgedAgainst: [criterion], round: 1)
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "wrongly rejected"), validatorName: "default", validatorHash: "x", round: token.round)
+        ], judgedAgainst: [criterion], judgedInRound: token)
         await store.updateStatus(id: task.id, status: .awaitingReview)
         return (await store.task(id: task.id) ?? task, criterion)
     }

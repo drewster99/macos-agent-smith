@@ -187,7 +187,11 @@ extension OrchestrationRuntime {
             task = await taskStore.task(id: taskID) ?? task
         }
 
-        guard let round = await taskStore.beginValidationRound(id: taskID) else { return }
+        // Everything this round mutates is gated on this token, checked inside the store. Nothing
+        // below may re-derive "the current round" from a snapshot: the round awaits an LLM at every
+        // criterion, and both the round counter and the acceptance contract can move in that window.
+        guard let token = await taskStore.beginValidationRound(id: taskID) else { return }
+        let round = token.round
 
         let settled = task.validation?.settledCriterionIDs() ?? []
         let pending = task.acceptanceCriteria.filter { !settled.contains($0.id) }
@@ -237,7 +241,7 @@ extension OrchestrationRuntime {
         // Record against the snapshot we judged; any criterion whose contract changed mid-round is
         // dropped atomically inside the store — so `recorded` is what actually landed in the ledger.
         let recorded: [CriterionVerdictRecord]
-        switch await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria, round: round) {
+        switch await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria, judgedInRound: token) {
         case .superseded:
             // Another run owns this ledger now. Everything below — the round summary, the stall
             // counter, the punch list, the fail decision — would be that run's outcome attributed to
@@ -252,11 +256,11 @@ extension OrchestrationRuntime {
 
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard let judged = await taskStore.task(id: taskID), judged.status == .validating else { return }
-        // If a `set_acceptance_criteria` edit landed at a suspension point in this round, it reset
-        // the round counter to 0 and granted the edited contract a fresh convergence budget. Acting
-        // on this now-stale outcome would consume a round of that fresh budget against a contract we
-        // didn't judge. Bail; the next round judges the new contract cleanly.
-        guard (judged.validation?.round ?? 0) == round else { return }
+        // Cheap early bail on a snapshot: if a criteria edit already landed, stop before spending
+        // anything on a decision we can't act on. This is NOT the guard that makes the outcome safe
+        // — it reads ~30 lines before it mutates. Every mutation below re-checks `token` INSIDE the
+        // store, which is where the check is atomic against an edit landing in the gap.
+        guard judged.validation?.isCurrentRound(token) ?? false else { return }
         let ledger = judged.validation ?? TaskValidationState()
         let latestByCriterion = judged.acceptanceCriteria.compactMap { ledger.latestVerdict(for: $0.id) }
 
@@ -265,13 +269,13 @@ extension OrchestrationRuntime {
         let rejected = latestByCriterion.filter { if case .rejected = $0.verdict { return true }; return false }
 
         if unjudged == 0 && errored.isEmpty && rejected.isEmpty {
-            await completeValidatedTask(taskID: taskID)
+            await completeValidatedTask(taskID: taskID, judgedInRound: token)
         } else if !errored.isEmpty {
             let messages = errored.map { record -> String in
                 if case .error(let message) = record.verdict { return message }
                 return "unknown"
             }
-            await escalateValidation(taskID: taskID, reason: "Validation could not be completed: \(errored.count) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review.")
+            await escalateValidation(taskID: taskID, reason: "Validation could not be completed: \(errored.count) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review.", judgedInRound: token)
         } else if unjudged > 0 && rejected.isEmpty {
             // Smith added criteria mid-round (set_acceptance_criteria) — never-judged
             // criteria aren't errors OR rejections; they just need the next round.
@@ -288,20 +292,22 @@ extension OrchestrationRuntime {
             // criterion was edited mid-round) didn't settle anything, so counting it would wrongly
             // reset the stall counter and let a non-converging task spin.
             let progressed = recorded.contains { $0.verdict.isFinal }
-            // nil means the task or its ledger vanished under us — abandon the round rather than
-            // act on a fabricated stall count, exactly like the two world-moved guards above.
-            guard let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed) else {
-                validationLogger.warning("Validation round abandoned: task or ledger disappeared before the stall update")
+            // nil means the task or its ledger vanished under us, or an edit superseded this round —
+            // abandon rather than act on a fabricated stall count or spend a round of the new
+            // contract's budget, exactly like the world-moved guards above.
+            guard let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed, judgedInRound: token) else {
+                validationLogger.warning("Validation round abandoned: the task, its ledger, or this round's contract moved before the stall update")
                 return
             }
             if stallRounds >= maxConsecutiveValidationRoundsWithoutProgress {
                 await failValidation(
                     taskID: taskID,
                     stallRounds: stallRounds,
-                    stillRejected: rejected.count
+                    stillRejected: rejected.count,
+                    judgedInRound: token
                 )
             } else {
-                await returnRejectionsToWorker(taskID: taskID, rejected: rejected)
+                await returnRejectionsToWorker(taskID: taskID, rejected: rejected, judgedInRound: token)
             }
         }
     }
@@ -310,10 +316,11 @@ extension OrchestrationRuntime {
     /// worker is torn down, and Smith/user are informed. `run_task` retries reset the
     /// counters (sticky accepts survive), and Smith may fix the criteria first with
     /// `set_acceptance_criteria` if they were the problem.
-    private func failValidation(taskID: UUID, stallRounds: Int, stillRejected: Int) async {
-        // CAS: only fail if still validating — never overwrite a pause/stop that landed
-        // after the coordinator's status snapshot.
-        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating]) else { return }
+    private func failValidation(taskID: UUID, stallRounds: Int, stillRejected: Int, judgedInRound token: ValidationRoundToken) async {
+        // CAS: only fail if still validating AND this round's contract is still the live one — never
+        // overwrite a pause/stop that landed after the coordinator's status snapshot, and never fail
+        // a task for not converging on a contract that has since been rewritten.
+        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
         guard let task = await taskStore.task(id: taskID) else { return }
         let reason = "No progress was made toward clearing any acceptance criterion for \(stallRounds) rounds in a row — \(stillRejected) criterion(s) still rejected."
         await taskStore.addUpdate(id: taskID, message: "Task FAILED validation: \(reason)")
@@ -1033,11 +1040,21 @@ extension OrchestrationRuntime {
     /// passes `[.awaitingReview]` so it can NEVER complete a task a concurrent Re-validate moved to
     /// `.validating`. Returns whether it CLAIMED the transition — `acceptEscalatedTask` records its
     /// override verdicts only after this succeeds, so a lost race never orphans them.
+    ///
+    /// `judgedInRound` is the machine path's second gate and is nil for the user accept, which
+    /// belongs to no round. Without it, a criteria edit adding an unjudged criterion mid-round
+    /// leaves the task `.validating` — so the status CAS passes and an "all settled" decision
+    /// completes a task carrying a criterion no validator has ever seen.
     @discardableResult
-    private func completeValidatedTask(taskID: UUID, from allowedStatuses: Set<AgentTask.Status> = [.validating]) async -> Bool {
-        // CAS: only complete from an allowed state — a pause/stop/re-validate that landed after the
-        // caller's status snapshot must not be overwritten by this completion.
-        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses) else { return false }
+    private func completeValidatedTask(
+        taskID: UUID,
+        from allowedStatuses: Set<AgentTask.Status> = [.validating],
+        judgedInRound token: ValidationRoundToken? = nil
+    ) async -> Bool {
+        // CAS: only complete from an allowed state under the contract we judged — a pause/stop/
+        // re-validate or a criteria edit that landed after the caller's snapshot must not be
+        // overwritten by this completion.
+        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token) else { return false }
         guard let completed = await taskStore.task(id: taskID) else { return false }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
@@ -1069,7 +1086,7 @@ extension OrchestrationRuntime {
     /// Rejections with rounds remaining: the punch list goes DIRECTLY to the worker —
     /// Smith is not a relay. Mirrors review_work's reject path (status, clearResult,
     /// respawn fallback, private unparking message).
-    private func returnRejectionsToWorker(taskID: UUID, rejected: [CriterionVerdictRecord]) async {
+    private func returnRejectionsToWorker(taskID: UUID, rejected: [CriterionVerdictRecord], judgedInRound token: ValidationRoundToken) async {
         guard let task = await taskStore.task(id: taskID) else { return }
         // Criterion NUMBER is its 1-based position in the acceptance list — the same number
         // the briefing and get_task_details use, so "Criterion 5" means the same thing everywhere.
@@ -1094,11 +1111,12 @@ extension OrchestrationRuntime {
             // No worker and no free slot: re-queue as pending — the auto-run drain
             // restarts it when a slot frees, and the fresh worker's briefing carries
             // the punch list via the task updates recorded below.
-            // CAS: a pause/stop that landed after our snapshot must not be re-queued.
+            // CAS: a pause/stop that landed after our snapshot must not be re-queued, and neither
+            // must a punch list for a contract that was rewritten while we judged.
             // Status first, then clear: a `.pending` task with a stale result is
             // consistent; a `.validating` task with no result is the invariant-violating
             // shape observers must never see (agy review finding).
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating]) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Validation rejected \(rejected.count) criterion(s); no worker slot was free for the rework, so the task is re-queued:\n\(punchList)")
             await channel.post(ChannelMessage(
@@ -1112,9 +1130,9 @@ extension OrchestrationRuntime {
             return
         }
 
-        // CAS: if a pause/stop landed after our snapshot, don't flip to .running — and if we
-        // just spawned a worker for the rework, tear it back down so it doesn't orphan.
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating]) else {
+        // CAS: if a pause/stop or a criteria edit landed after our snapshot, don't flip to .running —
+        // and if we just spawned a worker for the rework, tear it back down so it doesn't orphan.
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
             return
         }
@@ -1184,7 +1202,10 @@ extension OrchestrationRuntime {
         guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
         let settled = task.validation?.settledCriterionIDs() ?? []
         let unsettled = task.acceptanceCriteria.filter { !settled.contains($0.id) }
-        let round = task.validation?.round ?? 0
+        // The user's override is not a validation round, so it does not own a round token — it
+        // borrows the ledger's current one, which is exactly what "record this against the contract
+        // as it stands right now" means. A criteria edit racing the click supersedes it, as it should.
+        let ledgerToken = task.validation?.currentRoundToken ?? TaskValidationState().currentRoundToken
         // Claim the completion (CAS from `.awaitingReview` ONLY) BEFORE writing any override verdict.
         // A lost race — a double-click, or a concurrent re-validate/send-back/fail that already moved
         // the task off `.awaitingReview` — returns false, so a sticky ACCEPT override can never land on
@@ -1194,8 +1215,8 @@ extension OrchestrationRuntime {
         if !unsettled.isEmpty {
             _ = await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
                 CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
-                                       validatorName: "user override", validatorHash: "-", round: round)
-            }, judgedAgainst: task.acceptanceCriteria, round: round)
+                                       validatorName: "user override", validatorHash: "-", round: ledgerToken.round)
+            }, judgedAgainst: task.acceptanceCriteria, judgedInRound: ledgerToken)
             await taskStore.addUpdate(id: taskID, message: "Accepted by the user, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).")
         }
     }
@@ -1327,12 +1348,16 @@ extension OrchestrationRuntime {
     /// to resolve (accept / send back / re-validate / fail), and its worker is torn down so it stops
     /// holding a slot: a park can sit indefinitely, and re-validation doesn't need Brown (it judges
     /// the persisted result). Brown's context is saved first so a user "send back" can respawn it.
-    private func escalateValidation(taskID: UUID, reason: String) async {
+    private func escalateValidation(taskID: UUID, reason: String, judgedInRound token: ValidationRoundToken) async {
         // Tear the worker down FIRST, while the task is still `.validating` — a state with NO user
         // row-actions — so the user can't fire a resolution (e.g. Send Back reusing the still-live
         // Brown) during the teardown window and strand a running task with no worker. Save context
         // first so a later Send Back can respawn from it.
-        guard let task = await taskStore.task(id: taskID), task.status == .validating else { return }
+        // The round check comes FIRST here, before the teardown: escalating destroys the worker, so a
+        // superseded round must find out while that is still cheap. The CAS below re-checks it
+        // atomically, for an edit that lands during the teardown itself.
+        guard let task = await taskStore.task(id: taskID), task.status == .validating,
+              task.validation?.isCurrentRound(token) ?? false else { return }
         if let brownHandle = liveWorkerHandle(for: task) {
             await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
         }
@@ -1341,7 +1366,7 @@ extension OrchestrationRuntime {
         }
         // Publish the park only after the worker is gone. CAS: a pause/stop that landed during
         // teardown must not be overwritten (such a transition tears Brown down anyway).
-        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating]) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
         // The freed slot isn't a terminal event, so `onTaskTerminated` won't fire the usual
         // auto-advance — kick it here so a pending task can take the slot.
         await advanceAfterFreedWorkerSlot()

@@ -765,10 +765,12 @@ public actor TaskStore {
             }
             // An edited contract gets a fresh convergence budget: rejections under the
             // OLD criteria must not count toward failing the task under the new ones
-            // (agy review finding). Unchanged lists keep their counters.
+            // (agy review finding). Unchanged lists keep their counters — including the
+            // version, so a no-op save can't invalidate a round that is judging correctly.
             if contractChanged {
                 validation.round = 0
                 validation.consecutiveStallRounds = 0
+                validation.bumpContractVersion()
             }
             task.validation = validation
         }
@@ -903,8 +905,11 @@ public actor TaskStore {
 
     // MARK: - Validation ledger
 
-    /// Begins the next validation round and returns its number (1-based).
-    public func beginValidationRound(id: UUID) -> Int? {
+    /// Begins the next validation round and returns the token identifying it — the round number AND
+    /// the contract version it will judge, captured together so they cannot disagree. The caller
+    /// hands this back to every mutation it makes for the rest of the round; each one refuses if the
+    /// world moved while the round was awaiting an LLM.
+    public func beginValidationRound(id: UUID) -> ValidationRoundToken? {
         guard var task = tasks[id] else { return nil }
         var validation = task.validation ?? TaskValidationState()
         validation.round += 1
@@ -912,7 +917,15 @@ public actor TaskStore {
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
-        return validation.round
+        return validation.currentRoundToken
+    }
+
+    /// Whether a round-scoped caller may still act on `task`. A nil token means the caller is making
+    /// no round-scoped claim (a pause, a stop, a user resolution — none of them belong to a round),
+    /// which is a different thing from a stale one.
+    private func validationRoundIsCurrent(_ token: ValidationRoundToken?, on task: AgentTask) -> Bool {
+        guard let token else { return true }
+        return (task.validation ?? TaskValidationState()).isCurrentRound(token)
     }
 
     /// Resets the validation counters (round + stall) for a fresh rework cycle — a user
@@ -935,12 +948,18 @@ public actor TaskStore {
     /// after a stalled one. The coordinator fails the task when this hits its limit.
     ///
     /// `nil` when the task is gone (a Stop-then-Delete can land between the coordinator reading the
-    /// task and this call) or when it has no ledger — the caller abandons the round rather than
-    /// acting on a fabricated number. Returning `0` for those meant returning the value that also
-    /// means "progress was made", and synthesizing a ledger meant a task with no validation history
-    /// acquired one whose entire content was a stall count.
-    public func updateValidationStall(id: UUID, progressed: Bool) -> Int? {
+    /// task and this call), when it has no ledger, or when `judgedInRound` has been superseded — the
+    /// caller abandons the round rather than acting on a fabricated number. Unlike
+    /// `recordCriterionVerdicts`, one nil for all three is honest here: every one of them means
+    /// "abandon", and none of them means "carry on". Returning `0` instead meant returning the value
+    /// that also means "progress was made", and synthesizing a ledger meant a task with no validation
+    /// history acquired one whose entire content was a stall count.
+    public func updateValidationStall(id: UUID, progressed: Bool, judgedInRound token: ValidationRoundToken) -> Int? {
         guard var task = tasks[id], var validation = task.validation else { return nil }
+        // Checked HERE, not from the caller's snapshot: an edit landing at any of the round's
+        // suspension points grants the NEW contract a fresh convergence budget, and incrementing the
+        // stall counter would spend a round of it on a contract we never judged.
+        guard validation.isCurrentRound(token) else { return nil }
         let updated = progressed ? 0 : (validation.consecutiveStallRounds ?? 0) + 1
         validation.consecutiveStallRounds = updated
         task.validation = validation
@@ -962,7 +981,7 @@ public actor TaskStore {
     /// owns the ledger — see `VerdictRecordingOutcome` for why those must not be the same answer.
     /// Deliberately NOT `@discardableResult`: ignoring the outcome is precisely the defect this
     /// return type exists to make impossible.
-    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord], judgedAgainst: [AcceptanceCriterion], round: Int) -> VerdictRecordingOutcome {
+    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord], judgedAgainst: [AcceptanceCriterion], judgedInRound token: ValidationRoundToken) -> VerdictRecordingOutcome {
         // A vanished task is not "nothing qualified" either — a Stop-then-Delete can land while the
         // caller awaits an LLM, and there is no ledger left to reason about.
         guard var task = tasks[id] else { return .superseded }
@@ -974,7 +993,7 @@ public actor TaskStore {
         // tasks) otherwise appends its stale verdict AFTER the live run's fresh one — and both
         // readers select by array position, so the stale record wins. Dropped records leave their
         // criteria unjudged and are re-judged next round; no evidence is lost.
-        guard round == (task.validation?.round ?? 0) else { return .superseded }
+        guard validationRoundIsCurrent(token, on: task) else { return .superseded }
         let judgedByID = Dictionary(judgedAgainst.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let currentByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let fresh = records.filter { record in
@@ -1008,6 +1027,12 @@ public actor TaskStore {
     public func materializeImplicitCriterion(id: UUID, criterion: AcceptanceCriterion) {
         guard var task = tasks[id], task.acceptanceCriteria.isEmpty else { return }
         task.acceptanceCriteria = [criterion]
+        // Materializing IS a criteria mutation, so it versions the contract like any other. It runs
+        // before the round begins, so the round's token already carries the bumped version.
+        if var validation = task.validation {
+            validation.bumpContractVersion()
+            task.validation = validation
+        }
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
@@ -1339,9 +1364,22 @@ public actor TaskStore {
     /// snapshot and its transition, and this prevents the transition from clobbering that.
     /// Atomic because the guard and the `updateStatus` call run with no actor suspension
     /// between them.
+    ///
+    /// `ifValidationRoundIs` adds the same atomicity for the OTHER thing that moves under a
+    /// validation round: the acceptance contract. Status alone is not enough — a criteria edit
+    /// leaves the task `.validating`, so a round that has been superseded still passes the status
+    /// gate and completes, escalates, or fails the task on a verdict about a contract that no longer
+    /// exists. Pass the round's token from every transition a validation round makes; leave it nil
+    /// when the caller does not belong to a round (pause, stop, a user resolution).
     @discardableResult
-    public func updateStatus(id: UUID, to newStatus: AgentTask.Status, ifCurrentlyIn allowed: Set<AgentTask.Status>) -> Bool {
+    public func updateStatus(
+        id: UUID,
+        to newStatus: AgentTask.Status,
+        ifCurrentlyIn allowed: Set<AgentTask.Status>,
+        ifValidationRoundIs token: ValidationRoundToken? = nil
+    ) -> Bool {
         guard let task = tasks[id], allowed.contains(task.status) else { return false }
+        guard validationRoundIsCurrent(token, on: task) else { return false }
         updateStatus(id: id, status: newStatus)
         return true
     }
