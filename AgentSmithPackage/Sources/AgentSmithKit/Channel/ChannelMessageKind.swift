@@ -10,9 +10,12 @@ import SwiftLLMKit
 ///
 /// ## Completeness is a correctness requirement
 ///
-/// This is a closed enum, so `init(rawValue:)` returns nil for anything not listed here, and a
-/// missing case makes `ChannelMessage.kind` nil — every reader comparing against it would then
-/// silently take the wrong branch. Kinds are PERSISTED in `channel_log.jsonl`, so the set that
+/// This is a closed enum, so `init(rawValue:)` returns nil for anything not listed here. Rather
+/// than let that nil propagate — which would silently send every reader down the wrong branch,
+/// reintroducing the exact failure this type exists to prevent — `ChannelMessage.kind` **traps**
+/// on an unrecognized kind. A missing case is a bug here, not a data condition to absorb.
+///
+/// That makes this list load-bearing. Kinds are PERSISTED in `channel_log.jsonl`, so the set that
 /// matters is not "what the current code emits" but "what has ever been written to disk".
 ///
 /// Those are different sets, and the gap is not small. Deriving the list by grepping the sources

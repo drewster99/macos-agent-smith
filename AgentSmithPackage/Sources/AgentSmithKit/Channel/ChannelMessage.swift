@@ -95,13 +95,50 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// Whether this message targets a specific agent rather than the public channel.
     public var isPrivate: Bool { recipientID != nil }
 
-    /// This message's `messageKind` discriminator, if it carries one. See `ChannelMessageKind`.
+    /// This message's `messageKind` discriminator. See `ChannelMessageKind`.
     ///
-    /// An unrecognized kind is returned as-is rather than discarded — the type is deliberately
-    /// open, so historical logs carrying a kind no longer named in code still compare correctly.
+    /// `nil` means exactly one thing: this message carries no `messageKind` at all — plenty of
+    /// messages don't (plain chat, most system notices). It does NOT mean "a kind we couldn't
+    /// place", because an unrecognized kind traps instead of returning nil.
+    ///
+    /// Trapping is the point. The alternative — quietly answering nil — is a silent default of
+    /// the worst sort: every `message.kind == .something` comparison downstream evaluates false,
+    /// so a tool row renders as plain chat, a gate stops matching, a filter stops filtering, and
+    /// nothing anywhere reports a problem. That is precisely the failure mode this type was
+    /// introduced to end, and it would have been reintroduced by the enum's own nil-on-unknown
+    /// behavior. A missing case is a bug in this file, not a data condition to tolerate.
+    ///
+    /// This should be unreachable from first-party writes: a post site can only name a case
+    /// (the compiler enforces that), and `ChannelMessageKindLiteralGuardTests` fails the build
+    /// on any hand-written `messageKind` string that could sneak past it. It fires for data
+    /// written by a build whose enum knew a kind this one doesn't, or hand-edited JSON.
     public var kind: ChannelMessageKind? {
         guard case .string(let raw) = metadata?["messageKind"] else { return nil }
-        return ChannelMessageKind(rawValue: raw)
+        guard let kind = ChannelMessageKind(rawValue: raw) else {
+            fatalError("""
+                Unknown messageKind "\(raw)" on ChannelMessage \(id).
+
+                Every kind must have a case in ChannelMessageKind — a missing one makes this \
+                accessor nil and silently sends every reader down the wrong branch.
+
+                Fix: add `case \(Self.suggestedCaseName(for: raw)) = "\(raw)"` to ChannelMessageKind, \
+                add it to `expectedWireStrings` in ChannelMessageKindTests, and if this kind is no \
+                longer emitted by any source file, put it under the `// MARK: Retired` section.
+
+                If this appeared after loading old logs, re-run the corpus scan described in \
+                ChannelMessageKind's doc comment — the case list is derived from persisted data, \
+                not from grepping the sources.
+                """)
+        }
+        return kind
+    }
+
+    /// Converts a wire string to the camelCase case name the enum would use, so the trap above
+    /// can print a line the developer can paste rather than a rule they have to apply.
+    private static func suggestedCaseName(for rawValue: String) -> String {
+        let parts = rawValue.split(separator: "_").map(String.init)
+        guard let first = parts.first else { return rawValue }
+        return first + parts.dropFirst().map { $0.capitalized }.joined()
     }
 
     public enum Sender: Codable, Sendable, Hashable {
