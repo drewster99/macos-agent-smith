@@ -720,18 +720,6 @@ private struct MessageRow: View, Equatable {
 
 
 
-    /// When collapsed, tool output preview is suppressed unless the first line starts
-    /// with "error" (case-insensitive). Returns that line for display, or nil.
-    private func collapsedErrorPreview(_ content: String) -> String? {
-        let firstLine = content.components(separatedBy: .newlines).first ?? content
-        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-        return trimmed.lowercased().hasPrefix("error") ? firstLine : nil
-    }
-
-
-
-
-
     var body: some View {
         // Compute all derived values INLINE at body start - no computed property accessors
         // Expensive ops use @State caches (cacheValid), simple ops compute directly
@@ -923,7 +911,6 @@ private struct MessageRow: View, Equatable {
                         dispositionComment: _dispositionComment,
                         dispositionCommentColor: _dispositionCommentColor,
                         effectiveDiffLines: _effectiveDiffLines,
-                        collapsedErrorPreview: collapsedErrorPreview,
                         isExpanded: $isExpanded
                     ) {
                         SecurityDispositionControlView(
@@ -946,7 +933,6 @@ private struct MessageRow: View, Equatable {
                         isFileRead: _isFileRead,
                         toolCallDisplayText: _toolCallDisplayText,
                         remainderWithoutPath: _remainderWithoutPath,
-                        collapsedErrorPreview: collapsedErrorPreview,
                         openFileOrFallback: openFileOrFallback,
                         isExpanded: $isExpanded
                     ) {
@@ -1248,15 +1234,18 @@ private struct MessageRow: View, Equatable {
         let dispositionComment: String?
         let dispositionCommentColor: Color
         let effectiveDiffLines: [DiffLine]?
-        let collapsedErrorPreview: (String) -> String?
         
         @Binding var isExpanded: Bool
         let securityDispositionControl: () -> SecurityDispositionControlView
         
         var body: some View {
+            // Inline collapsedErrorPreview logic - no helper function call
             let _toolOutputHasMore: Bool = {
                 guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
-                if let errorLine = collapsedErrorPreview(output.content) {
+                let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
+                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                let errorLine: String? = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
+                if let errorLine = errorLine {
                     return output.content.count > errorLine.count
                 }
                 return true
@@ -1307,13 +1296,19 @@ private struct MessageRow: View, Equatable {
                             .padding(.leading, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
-                    } else if let errorLine = collapsedErrorPreview(output.content) {
-                        Text(errorLine)
-                            .font(AppFonts.channelBody.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .padding(.leading, 12)
-                            .textSelection(.enabled)
+                    } else {
+                        // Inline collapsedErrorPreview logic
+                        let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
+                        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                        let errorLine = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
+                        if let errorLine = errorLine {
+                            Text(errorLine)
+                                .font(AppFonts.channelBody.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .padding(.leading, 12)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
             }
@@ -1333,16 +1328,19 @@ private struct MessageRow: View, Equatable {
         let isFileRead: Bool
         let toolCallDisplayText: String
         let remainderWithoutPath: (String, String) -> String
-        let collapsedErrorPreview: (String) -> String?
         let openFileOrFallback: (String) -> Void
         
         @Binding var isExpanded: Bool
         let securityDispositionControl: () -> SecurityDispositionControlView
         
         var body: some View {
+            // Inline collapsedErrorPreview logic - no helper function call
             let _toolOutputHasMore: Bool = {
                 guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
-                if let errorLine = collapsedErrorPreview(output.content) {
+                let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
+                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                let errorLine: String? = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
+                if let errorLine = errorLine {
                     return output.content.count > errorLine.count
                 }
                 return true
@@ -1423,13 +1421,19 @@ private struct MessageRow: View, Equatable {
                             .padding(.leading, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
-                    } else if !isFileRead, let errorLine = collapsedErrorPreview(output.content) {
-                        Text(errorLine)
-                            .font(AppFonts.channelBody.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .padding(.leading, 12)
-                            .textSelection(.enabled)
+                    } else if !isFileRead {
+                        // Inline collapsedErrorPreview logic
+                        let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
+                        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                        let errorLine = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
+                        if let errorLine = errorLine {
+                            Text(errorLine)
+                                .font(AppFonts.channelBody.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .padding(.leading, 12)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
             }

@@ -768,6 +768,19 @@ struct MemoryBanner: View {
         let source: String?
         let memoryResults: String?
         let taskResults: String?
+        private let memoryEntries: [String]
+        private let taskEntries: [String]
+        
+        init(kind: MemoryBanner.Kind, detail: String?, tags: String?, source: String?, memoryResults: String?, taskResults: String?) {
+            self.kind = kind
+            self.detail = detail
+            self.tags = tags
+            self.source = source
+            self.memoryResults = memoryResults
+            self.taskResults = taskResults
+            self.memoryEntries = memoryResults.map { parseContextEntries($0) } ?? []
+            self.taskEntries = taskResults.map { parseContextEntries($0) } ?? []
+        }
         
         var body: some View {
             switch kind {
@@ -793,21 +806,19 @@ struct MemoryBanner: View {
                 }
             case .searched:
                 VStack(alignment: .leading, spacing: 10) {
-                    if let memoryResults, !memoryResults.isEmpty {
+                    if !memoryEntries.isEmpty {
                         Text("Memories")
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
-                        let entries = parseContextEntries(memoryResults)
-                        ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
+                        ForEach(Array(memoryEntries.enumerated()), id: \.offset) { idx, entry in
                             ContextEntryDividedRow(entry: entry, showsDivider: idx > 0)
                         }
                     }
-                    if let taskResults, !taskResults.isEmpty {
+                    if !taskEntries.isEmpty {
                         Text("Prior Tasks")
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
-                        let entries = parseContextEntries(taskResults)
-                        ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
+                        ForEach(Array(taskEntries.enumerated()), id: \.offset) { idx, entry in
                             ContextEntryDividedRow(entry: entry, showsDivider: idx > 0)
                         }
                     }

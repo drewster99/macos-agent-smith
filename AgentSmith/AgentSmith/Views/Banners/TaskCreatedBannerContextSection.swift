@@ -8,6 +8,18 @@ struct TaskCreatedBannerContextSection: View {
     let contextMemories: String?
     let contextPriorTasks: String?
     @Binding var isExpanded: Bool
+    private let memoryEntries: [String]
+    private let taskEntries: [String]
+    
+    init(memoryCount: Int, priorTaskCount: Int, contextMemories: String?, contextPriorTasks: String?, isExpanded: Binding<Bool>) {
+        self.memoryCount = memoryCount
+        self.priorTaskCount = priorTaskCount
+        self.contextMemories = contextMemories
+        self.contextPriorTasks = contextPriorTasks
+        self._isExpanded = isExpanded
+        self.memoryEntries = contextMemories.map { parseContextEntries($0) } ?? []
+        self.taskEntries = contextPriorTasks.map { parseContextEntries($0) } ?? []
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,20 +58,18 @@ struct TaskCreatedBannerContextSection: View {
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 10) {
-                    if let contextMemories {
+                    if !memoryEntries.isEmpty {
                         Text("Memories")
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
-                        let memoryEntries = parseContextEntries(contextMemories)
                         ForEach(Array(memoryEntries.enumerated()), id: \.offset) { idx, entry in
                             ContextMemoryDividedRow(entry: entry, showsDivider: idx > 0)
                         }
                     }
-                    if let contextPriorTasks {
+                    if !taskEntries.isEmpty {
                         Text("Prior Tasks")
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
-                        let taskEntries = parseContextEntries(contextPriorTasks)
                         ForEach(Array(taskEntries.enumerated()), id: \.offset) { idx, entry in
                             ContextEntryDividedRow(entry: entry, showsDivider: idx > 0)
                         }
