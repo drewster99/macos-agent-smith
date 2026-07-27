@@ -975,9 +975,7 @@ private struct MessageRow: View, Equatable {
             if !isTruncatable || isExpanded { return message.content }
             return String(message.content.prefix(toolCallTruncationLimit)) + "…"
         }()
-        let _remainderWithoutPath: String = {
-            guard let path = _effectiveToolFilePath else { return "" }
-            let displayText = _toolCallDisplayText
+        let _remainderWithoutPath: (String, String) -> String = { displayText, path in
             let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
             var text = displayText
             if text.hasPrefix(toolName) {
@@ -987,7 +985,7 @@ private struct MessageRow: View, Equatable {
             text = text.replacingOccurrences(of: path, with: "")
             text = text.replacingOccurrences(of: ", ,", with: ",")
             return text.trimmingCharacters(in: CharacterSet(charactersIn: ", "))
-        }()
+        }
         let _isToolOutput = message.stringMetadata("messageKind") == "tool_output"
         let _isSecurityReview = message.metadata?["securityDisposition"] != nil
         let _securityReviewColor: Color = {
