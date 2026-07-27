@@ -303,11 +303,15 @@ struct ChannelLogView: View, Equatable {
 
                         ForEach(visibleMessages) { message in
                             if !shouldSuppress(message, toolRequestIDs: toolRequestIDs) {
-                                bannerView(
-                                    for: message,
+                                ChannelMessageBanner(
+                                    message: message,
                                     reviewLookup: index.securityReviewByRequestID,
                                     outputLookup: index.toolOutputByRequestID,
-                                    scheduledTaskBannerIDs: index.taskIDsWithSchedulingBanner
+                                    scheduledTaskBannerIDs: index.taskIDsWithSchedulingBanner,
+                                    displayPrefs: displayPrefs,
+                                    onExportTaskPDF: onExportTaskPDF,
+                                    onOpenMCPSettings: onOpenMCPSettings,
+                                    selectedImageAttachment: $selectedImageAttachment
                                 )
                                 .id(message.id)
                             }
@@ -425,13 +429,21 @@ struct ChannelLogView: View, Equatable {
     /// Renders the right banner / row for a single channel message. Replaces the
     /// 16-branch metadata-keyed ladder that used to live in `body`. Each `nil`-returning
     /// case represents an internal coordination message that's intentionally suppressed.
-    @ViewBuilder
-    private func bannerView(
-        for message: ChannelMessage,
-        reviewLookup: [String: ChannelMessage],
-        outputLookup: [String: ChannelMessage],
-        scheduledTaskBannerIDs: Set<String>
-    ) -> some View {
+}
+
+/// Renders a channel message as the appropriate banner or row based on its messageKind metadata.
+/// Replaces the `bannerView(for:reviewLookup:outputLookup:scheduledTaskBannerIDs:)` function.
+private struct ChannelMessageBanner: View {
+    let message: ChannelMessage
+    let reviewLookup: [String: ChannelMessage]
+    let outputLookup: [String: ChannelMessage]
+    let scheduledTaskBannerIDs: Set<String>
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+    
+    var body: some View {
         let kind = message.stringMetadata("messageKind").flatMap(ChannelBannerKind.init(rawValue:))
         switch kind {
         case .taskUpdateGuidance:
