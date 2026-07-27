@@ -234,10 +234,20 @@ extension OrchestrationRuntime {
         // the one that actually makes this safe.
         guard !Task.isCancelled else { return }
 
-        // Record against the snapshot we judged; any criterion whose contract changed mid-round, and
-        // any record from a superseded run, is dropped atomically inside the store — so `recorded` is
-        // what actually landed in the ledger.
-        let recorded = await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria, round: round)
+        // Record against the snapshot we judged; any criterion whose contract changed mid-round is
+        // dropped atomically inside the store — so `recorded` is what actually landed in the ledger.
+        let recorded: [CriterionVerdictRecord]
+        switch await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria, round: round) {
+        case .superseded:
+            // Another run owns this ledger now. Everything below — the round summary, the stall
+            // counter, the punch list, the fail decision — would be that run's outcome attributed to
+            // ours: we would report verdicts that were never written and spend a round of a
+            // convergence budget granted to a contract we never judged.
+            validationLogger.notice("Validation round \(round) abandoned: superseded before its verdicts could land")
+            return
+        case .recorded(let landed):
+            recorded = landed
+        }
         await postRoundSummary(taskID: taskID, records: recorded)
 
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
@@ -1182,7 +1192,7 @@ extension OrchestrationRuntime {
         // we never complete a task that a concurrent Re-validate put back into `.validating`.
         guard await completeValidatedTask(taskID: taskID, from: [.awaitingReview]) else { return }
         if !unsettled.isEmpty {
-            await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
+            _ = await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
                 CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
                                        validatorName: "user override", validatorHash: "-", round: round)
             }, judgedAgainst: task.acceptanceCriteria, round: round)

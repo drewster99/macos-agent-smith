@@ -949,10 +949,17 @@ public actor TaskStore {
     /// record produced by the now-stale validator would otherwise settle the edited criterion on an
     /// obsolete verdict and skip the new validator. The check runs HERE, on the actor that owns the
     /// live criteria, so it's atomic against a concurrent edit. Dropped criteria stay unjudged and are
-    /// re-judged against the new contract next round. Returns the records actually recorded.
-    @discardableResult
-    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord], judgedAgainst: [AcceptanceCriterion], round: Int) -> [CriterionVerdictRecord] {
-        guard var task = tasks[id], !records.isEmpty else { return [] }
+    /// re-judged against the new contract next round.
+    ///
+    /// Returns `.recorded` with the records that landed, or `.superseded` when this run no longer
+    /// owns the ledger — see `VerdictRecordingOutcome` for why those must not be the same answer.
+    /// Deliberately NOT `@discardableResult`: ignoring the outcome is precisely the defect this
+    /// return type exists to make impossible.
+    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord], judgedAgainst: [AcceptanceCriterion], round: Int) -> VerdictRecordingOutcome {
+        // A vanished task is not "nothing qualified" either — a Stop-then-Delete can land while the
+        // caller awaits an LLM, and there is no ledger left to reason about.
+        guard var task = tasks[id] else { return .superseded }
+        guard !records.isEmpty else { return .recorded([]) }
         // Round guard, checked HERE for the same reason the contract filter below is: this actor
         // owns the truth, so the check is atomic against whatever moved while the caller was awaiting
         // an LLM. A validation run that was cancelled and superseded (performStopAll clears the
@@ -960,21 +967,21 @@ public actor TaskStore {
         // tasks) otherwise appends its stale verdict AFTER the live run's fresh one — and both
         // readers select by array position, so the stale record wins. Dropped records leave their
         // criteria unjudged and are re-judged next round; no evidence is lost.
-        guard round == (task.validation?.round ?? 0) else { return [] }
+        guard round == (task.validation?.round ?? 0) else { return .superseded }
         let judgedByID = Dictionary(judgedAgainst.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let currentByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let fresh = records.filter { record in
             guard let judged = judgedByID[record.criterionID], let current = currentByID[record.criterionID] else { return false }
             return current.statesSameContract(as: judged)
         }
-        guard !fresh.isEmpty else { return [] }
+        guard !fresh.isEmpty else { return .recorded([]) }
         var validation = task.validation ?? TaskValidationState()
         validation.verdictRecords.append(contentsOf: fresh)
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
-        return fresh
+        return .recorded(fresh)
     }
 
     /// Materializes the implicit default criterion for a criterion-less task at first

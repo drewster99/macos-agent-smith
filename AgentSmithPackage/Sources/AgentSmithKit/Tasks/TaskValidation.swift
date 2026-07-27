@@ -261,6 +261,23 @@ public extension CriterionVerdictRecord.Verdict {
     }
 }
 
+/// What `TaskStore.recordCriterionVerdicts` did with a wave of verdicts. The two outcomes are
+/// distinct because they demand OPPOSITE things of the caller, and a bare `[]` meant both: a
+/// validation run that has been superseded must ABANDON its round, while a run that simply had
+/// every record filtered out is still the live run and continues into stall accounting. Conflating
+/// them let a zombie run burn a round of the LIVE run's convergence budget on a contract it never
+/// judged.
+public enum VerdictRecordingOutcome: Sendable, Equatable {
+    /// The write was made by the run that owns the ledger. The payload is what actually LANDED —
+    /// possibly empty, when every record's criterion was edited mid-round and dropped by the
+    /// contract-match filter. Progress is measured from this, never from the records offered.
+    case recorded([CriterionVerdictRecord])
+    /// This run no longer owns the task's ledger: another run has moved it on (or an edit reset
+    /// its counters), or the task is gone. NOTHING was written, and the caller must return
+    /// immediately rather than draw any conclusion from the round it just ran.
+    case superseded
+}
+
 /// One mutation of a task's step list, dispatched through `TaskStore.applyStepAction`.
 /// Issued by the worker (Brown) on its own task, or by the orchestrator (Smith) on a task
 /// with no active worker. Removal and skipping demand a note — the validator reads it.

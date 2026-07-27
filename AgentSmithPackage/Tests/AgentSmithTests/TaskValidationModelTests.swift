@@ -228,7 +228,7 @@ struct TaskValidationModelTests {
         await store.setAcceptanceCriteria(id: task.id, criteria: [criterionA, criterionB])
 
         _ = await store.beginValidationRound(id: task.id)
-        await store.recordCriterionVerdicts(id: task.id, records: [
+        _ = await store.recordCriterionVerdicts(id: task.id, records: [
             CriterionVerdictRecord(criterionID: criterionA.id, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1),
             CriterionVerdictRecord(criterionID: criterionB.id, verdict: .rejected(reason: "nope"), validatorName: "d", validatorHash: "h", round: 1)
         ], judgedAgainst: [criterionA, criterionB], round: 1)
@@ -247,6 +247,74 @@ struct TaskValidationModelTests {
         validation = await store.task(id: task.id)!.validation!
         #expect(validation.settledCriterionIDs().isEmpty)
         #expect(validation.latestVerdict(for: criterionB.id) != nil, "unchanged criterion keeps its audit trail")
+    }
+
+    @Test("A superseded run is told so distinctly — it never reads as 'nothing qualified'")
+    func supersededRunIsDistinctFromNothingRecorded() async {
+        let store = TaskStore()
+        let criterion = AcceptanceCriterion(name: "A", origin: .user)
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+
+        _ = await store.beginValidationRound(id: task.id)   // round 1 — the run that will go stale
+        _ = await store.beginValidationRound(id: task.id)   // round 2 — the live run took over
+
+        let stale = await store.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .error(message: "zombie"), validatorName: "d", validatorHash: "h", round: 1)
+        ], judgedAgainst: [criterion], round: 1)
+        #expect(stale == .superseded, "a round the store has moved past must say so, not report an empty write")
+        #expect(await store.task(id: task.id)?.validation?.verdictRecords.isEmpty == true)
+
+        // The live run's own write, with every record dropped by the contract-match filter, is the
+        // OTHER outcome: it still owns the ledger and must carry on into stall accounting.
+        var edited = criterion
+        edited.validationPrompt = "A, but stricter"
+        await store.setAcceptanceCriteria(id: task.id, criteria: [edited])
+        _ = await store.beginValidationRound(id: task.id)
+        let filtered = await store.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1)
+        ], judgedAgainst: [criterion], round: 1)
+        #expect(filtered == .recorded([]), "an edited-out verdict is a live run recording nothing, not a superseded one")
+
+        // A vanished task (Stop-then-Delete landing while the caller awaited an LLM) is nobody's
+        // ledger to write to either.
+        let gone = await store.recordCriterionVerdicts(id: UUID(), records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1)
+        ], judgedAgainst: [criterion], round: 1)
+        #expect(gone == .superseded)
+    }
+
+    /// Pins the round guard AND the deliberate absence of ledger sorting. `resetValidationRound`
+    /// zeroes `round` while KEEPING the records (user Re-validate / Send-Back), so round numbers
+    /// recur: sorting by `max(round)` would resolve this ledger to the round-2 ERROR and re-escalate
+    /// a task on a verdict it already superseded. Array position is the only correct order.
+    @Test("r1-REJECT, r2-ERROR, r1-ACCEPT resolves to ACCEPT — recurring round numbers are not an order")
+    func recurringRoundNumbersResolveByPosition() async {
+        let store = TaskStore()
+        let criterion = AcceptanceCriterion(name: "A", origin: .user)
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+
+        func record(_ verdict: CriterionVerdictRecord.Verdict, round: Int) async -> VerdictRecordingOutcome {
+            await store.recordCriterionVerdicts(id: task.id, records: [
+                CriterionVerdictRecord(criterionID: criterion.id, verdict: verdict, validatorName: "d", validatorHash: "h", round: round)
+            ], judgedAgainst: [criterion], round: round)
+        }
+
+        #expect(await store.beginValidationRound(id: task.id) == 1)
+        _ = await record(.rejected(reason: "r1"), round: 1)
+        #expect(await store.beginValidationRound(id: task.id) == 2)
+        _ = await record(.error(message: "r2"), round: 2)
+
+        // The user sends it back / re-validates: counters reset, ledger survives, round 1 recurs.
+        await store.resetValidationRound(id: task.id)
+        #expect(await store.beginValidationRound(id: task.id) == 1)
+        _ = await record(.accepted, round: 1)
+
+        let ledger = await store.task(id: task.id)?.validation
+        #expect(ledger?.verdictRecords.count == 3, "every round is kept — the ledger is the audit trail")
+        #expect(ledger?.latestVerdict(for: criterion.id)?.verdict == .accepted)
+        #expect(ledger?.settledCriterionIDs() == [criterion.id])
     }
 
     @Test("Latest verdict wins in the ledger")
