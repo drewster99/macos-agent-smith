@@ -1396,14 +1396,17 @@ final class AppViewModel {
             return false
         }
         if !acceptanceCriteria.isEmpty {
-            // Unreachable today (a new task is `.pending`/`.scheduled` with no ledger), but a task
-            // that quietly came into existence without the criteria the user just wrote would be
-            // judged by the implicit default instead, with nothing saying so. Roll back rather than
-            // leave that behind, exactly as the title-template failure above does.
+            // Unreachable today (a new task is `.pending`/`.scheduled` with no ledger). Reported
+            // rather than discarded — but deliberately NOT rolled back, unlike the half-built
+            // template above. The state left behind here is an ordinary task: title, description
+            // and steps intact, just without criteria, which is a supported shape that validation
+            // judges with its default stance. Deleting what the user just typed to avoid a valid
+            // state is the worse outcome, and the acceptance editor fixes it in place.
+            //
+            // The task DID get created, so this returns true: reporting failure would leave the
+            // editor open over a task that now exists, and the user would create a second one.
             if let problem = await taskStore.setAcceptanceCriteria(id: task.id, criteria: acceptanceCriteria) {
-                _ = await taskStore.softDelete(id: task.id)
-                taskActionError = "Task could not be created — its acceptance criteria were rejected: \(problem)"
-                return false
+                taskActionError = "Task created, but its acceptance criteria were rejected: \(problem)"
             }
         }
         if !steps.isEmpty {
