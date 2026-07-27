@@ -330,6 +330,12 @@ public actor AgentActor {
     /// call) splicing here was the cause of the "tool_call_id did not have response messages" 400s.
     private var pendingInjectedMessages: [LLMMessage] = []
 
+    /// A `/clear` that arrived mid-tool-turn is deferred to the run loop boundary (see
+    /// `resetConversationHistory`) so it can't wipe an in-flight assistant `tool_calls` turn and
+    /// orphan the results appended after it.
+    private var pendingResetRequested = false
+    private var pendingResetOrientation: String?
+
     /// When true, the agent acknowledges its assigned task on its first turn — as a runtime
     /// side effect, WITHOUT an LLM round-trip and WITHOUT a callable tool. Acknowledgement moves
     /// the task to `.running`, bumps the ack counter, and privately notifies Smith.
@@ -762,6 +768,20 @@ public actor AgentActor {
     /// Pending/deferred channel messages are deliberately KEPT — undelivered user input
     /// must never be a casualty of a display-adjacent action.
     public func resetConversationHistory(orientation: String?) {
+        // Single-writer: a `/clear` that arrives mid-tool-turn (reentrant, while the run loop is
+        // parked in a tool `await`) would wipe the in-flight assistant `tool_calls` and orphan the
+        // tool results appended after it — the same 400 class as the injection splice. Defer to
+        // the run loop's next boundary, where the turn is complete. Undelivered channel input is
+        // untouched here, same as before.
+        guard !lastTurnAwaitsToolResults else {
+            pendingResetOrientation = orientation
+            pendingResetRequested = true
+            return
+        }
+        performReset(orientation: orientation)
+    }
+
+    private func performReset(orientation: String?) {
         pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
         conversationHistory = [.system(configuration.systemPrompt)]
         // Drop queued injections that belonged to the pre-clear context.
@@ -775,6 +795,16 @@ public actor AgentActor {
         lastToolCallSignature = nil
         consecutiveIdenticalToolCalls = 0
         pushLiveContext()
+    }
+
+    /// Applies a `/clear` that was deferred because it arrived mid-tool-turn. Called by the run
+    /// loop at the top of the iteration, where the previous turn is complete.
+    private func applyDeferredHistoryReset() {
+        guard pendingResetRequested else { return }
+        pendingResetRequested = false
+        let orientation = pendingResetOrientation
+        pendingResetOrientation = nil
+        performReset(orientation: orientation)
     }
 
     /// Splices the conversation down to `[system prompt] + [summary marker] + recent
@@ -1095,8 +1125,13 @@ public actor AgentActor {
                 await injectAutoMemoryContextIfNeeded()
             }
 
-            drainPendingMessages()
+            // A `/clear` that arrived while a tool turn was open was deferred to here (the turn
+            // is now complete), so it can't orphan tool results.
+            applyDeferredHistoryReset()
+            // Injected messages first: a spawn briefing enqueued before `start()` must precede
+            // any channel message that raced in, so it stays Brown's first context entry.
             drainPendingInjectedMessages()
+            drainPendingMessages()
             await drainQueuedNotifications()
             checkBrownSilenceNudge()
             await checkSmithDigest()
