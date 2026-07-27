@@ -536,13 +536,14 @@ struct TaskSummarizedBanner: View {
 
     @State private var isExpanded = false
 
-    private var displayTitle: String {
-        if taskTitle.count <= Self.maxTitleLength { return taskTitle }
-        return String(taskTitle.prefix(Self.maxTitleLength)) + "…"
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        // Inline displayTitle logic
+        let displayTitle: String = {
+            if taskTitle.count <= Self.maxTitleLength { return taskTitle }
+            return String(taskTitle.prefix(Self.maxTitleLength)) + "…"
+        }()
+        
+        return VStack(alignment: .leading, spacing: 0) {
             Button(action: { isExpanded.toggle() }, label: {
                 HStack(spacing: 6) {
                     Image(systemName: "doc.text.magnifyingglass")
@@ -656,7 +657,41 @@ struct MemoryBanner: View {
     private let accentColor: Color = .green
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        // Inline all computed properties
+        let headerText: String = {
+            switch kind {
+            case .saved: return "Memory Saved"
+            case .consolidated: return "Memory Consolidated"
+            case .searched:
+                if memoryCount == 0 && taskCount == 0 {
+                    return "Memory Search — no results"
+                }
+                var parts: [String] = []
+                if memoryCount > 0 { parts.append("\(memoryCount) memor\(memoryCount == 1 ? "y" : "ies")") }
+                if taskCount > 0 { parts.append("\(taskCount) task\(taskCount == 1 ? "" : "s")") }
+                return "Memory Search — \(parts.joined(separator: ", "))"
+            }
+        }()
+        let iconName: String = {
+            switch kind {
+            case .saved: return "brain.head.profile"
+            case .consolidated: return "arrow.triangle.merge"
+            case .searched: return "magnifyingglass"
+            }
+        }()
+        let summaryPreview = summary
+        let hasExpandableContent: Bool = {
+            switch kind {
+            case .saved, .consolidated:
+                return detail != nil && !(detail ?? "").isEmpty
+            case .searched:
+                let hasMemories = !(memoryResults?.isEmpty ?? true)
+                let hasTasks = !(taskResults?.isEmpty ?? true)
+                return hasMemories || hasTasks
+            }
+        }()
+        
+        return VStack(alignment: .leading, spacing: 0) {
             accentColor.frame(height: 1).opacity(0.3)
 
             Button(action: {
@@ -710,46 +745,6 @@ struct MemoryBanner: View {
         .background(accentColor.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 3))
         .padding(.vertical, 1)
-    }
-
-    private var headerText: String {
-        switch kind {
-        case .saved: return "Memory Saved"
-        case .consolidated: return "Memory Consolidated"
-        case .searched:
-            if memoryCount == 0 && taskCount == 0 {
-                return "Memory Search — no results"
-            }
-            var parts: [String] = []
-            if memoryCount > 0 { parts.append("\(memoryCount) memor\(memoryCount == 1 ? "y" : "ies")") }
-            if taskCount > 0 { parts.append("\(taskCount) task\(taskCount == 1 ? "" : "s")") }
-            return "Memory Search — \(parts.joined(separator: ", "))"
-        }
-    }
-
-    private var iconName: String {
-        switch kind {
-        case .saved: return "brain.head.profile"
-        case .consolidated: return "arrow.triangle.merge"
-        case .searched: return "magnifyingglass"
-        }
-    }
-
-    /// Single-line preview shown next to the header. Returns the full summary so SwiftUI's
-    /// `.lineLimit(1)` can truncate to fit the available width — no arbitrary char cap.
-    private var summaryPreview: String {
-        summary
-    }
-
-    private var hasExpandableContent: Bool {
-        switch kind {
-        case .saved, .consolidated:
-            return detail != nil && !(detail ?? "").isEmpty
-        case .searched:
-            let hasMemories = !(memoryResults?.isEmpty ?? true)
-            let hasTasks = !(taskResults?.isEmpty ?? true)
-            return hasMemories || hasTasks
-        }
     }
 
     private struct ExpandedBody: View {
