@@ -280,7 +280,6 @@ struct FileWritePathView: View {
 
     var body: some View {
         // Compute derived values once at body start
-        let _url = url
         let _symlinkDestination = symlinkDestination
         
         return HStack(alignment: .firstTextBaseline, spacing: 4) {
