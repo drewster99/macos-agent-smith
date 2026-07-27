@@ -745,6 +745,25 @@ hard kill for the shell path. Flagged by codex in the 2026-07-15 July-1→today 
 - **Rejected — a `>50%`-of-criteria heuristic for resetting stall counters.** Arbitrary, and unnecessary once the counter is understood as a progress measure: see the no-reset rule in CLAUDE.md.
 - **Partially confirmed and escalated:** agy hypothesised a race where a verdict lands mid-edit. Checking the code found something worse and pre-existing — `SetAcceptanceCriteriaTool` has no `isValidationContractEditable` gate at all, while `ManageStepsTool:159` does. The steps tool guards the validation contract; the tool that edits the validation contract does not.
 
+### Acceptance contract — the settled build plan (2026-07-27)
+
+The design simplified substantially on 2026-07-27: a **rejection history replaces the entire archived-verdict design**. Deleted from the plan as unnecessary — `archivedVerdicts`, its distinct wrapper type, the live-vs-archived display-rules table, the archive size policy, and the separate criterion revision log. A rejection record carries the prompts and name *at rejection time*, which is what weakening detection actually needs, at a few hundred bytes instead of ~52KB. Read the CLAUDE.md section, not the superseded parts of the entries below.
+
+**Ordered. Items 1–3 are the substance; 4–8 are small and independent.**
+
+1. **Rejection history.** Task-level append-only `[CriterionRejection]` keyed by criterion ID: `criterionID`, `name`, `recordedAt`, `validationPrompt`, `inputEnumeratorPrompt`, `rejectionText`. Written wherever a REJECT verdict is recorded. Survives `delete` and replace-all by construction. Optional-and-synthesized for forward-compatible decoding.
+2. **Fix the staleness signal — this is a live bug I introduced in `96a4075`.** `recordCriterionVerdicts` returns `[]` for both "nothing qualified" and "you are superseded", so a stale run proceeds into stall accounting and burns a round of the LIVE run's budget. Return a distinct outcome; the caller must bail immediately rather than continue.
+3. **Contract-version token.** Monotonic `contractVersion: Int` on `TaskValidationState`, bumped on every criteria mutation, captured by the coordinator at round start, passed to every store call in that round, checked inside the store. Replaces `round` as the staleness signal — `round` cannot serve, because `resetValidationRound` zeroes it while keeping the ledger on user Re-validate and Send-Back. Closes the non-atomic guard for the mutations the `96a4075` round guard does not cover (`updateValidationStall`, `returnRejectionsToWorker`, `failValidation`).
+4. **Per-criterion verbs** — `add` / `update` / `delete` via a batch `[CriterionAction]` array; `update` preserves `criterionID`; no `insert`/`move`.
+5. **`settledCriterionIDs(in criteria:)`** — intersect with the current contract so N ≤ M by construction; update call sites.
+6. **Gate wholesale replace inside `TaskStore`** — status *and* evidence, atomically. Not at the tool layer (TOCTOU), and not on "no verdict exists" alone (a round increments before judging). While here, give `SetAcceptanceCriteriaTool` the `isValidationContractEditable` gate `ManageStepsTool` already has.
+7. **Renames.** `consecutiveStallRounds` → `consecutiveValidationsWithoutNewApprovals` plus `maxConsecutiveValidationRoundsWithoutProgress` → `maxConsecutiveValidationsWithoutNewApprovals`; keep it a persisted `Int?` read through a computed `validationsWithoutNewApprovals: Int`. Separately, kit-side: `ModelProfile.trailingSystemTurn` → `trailingSystemMessage` and the planned `BehaviorFlags.supportsMidConversationSystem` → `supportsTrailingSystemMessage` — identical wording in both, with forward-compatible decoding for existing `profiles.json`.
+8. **`postRoundSummary` sorts by criterion position** before rendering, matching `formatRejectionPunchList` right beside it, so a round reads the same every run.
+
+**Tests that are the point of the exercise:** archive/history survives a criterion delete; the settled count is unchanged by history records; `r1-REJECT, r2-ERROR, r1-ACCEPT` resolves to ACCEPT (fails loudly if anyone reintroduces round-sorting); a legacy-JSON round-trip for every new optional field.
+
+**Explicitly on hold:** the `systemReminder` feature itself, and the OpenAI-compatible trailing-system probe (whose before/after design was shown not to work — a hoisted turn passes a nonce echo and a contradiction test alike, and no discriminator has been found).
+
 ### Validation-ledger defects found while designing the acceptance contract (/stupid sweep, 2026-07-26)
 
 Three parallel analyzers over `TaskStore` / `TaskValidation` / `TaskValidationCoordinator` / `SetAcceptanceCriteriaTool`, run after agy and codex had already reviewed the *design*. These are defects in the **existing code the design builds on**, not in the design. Two are live. Verify line numbers before editing.
