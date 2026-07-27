@@ -141,10 +141,11 @@ struct TaskActionScheduledBanner: View {
     let scheduledRunAt: Date
     let timestamp: Date
 
-    private var accentColor: Color { TaskStatusBadge.color(for: .scheduled) }
-
     var body: some View {
-        VStack(spacing: 0) {
+        // Inline computed properties directly
+        let accentColor = TaskStatusBadge.color(for: .scheduled)
+        
+        return VStack(spacing: 0) {
             accentColor.frame(height: 1).opacity(0.4)
 
             HStack(spacing: 8) {
@@ -377,25 +378,22 @@ struct TaskReadyForReviewBanner: View {
 
     private let accentColor = AppColors.taskReadyForReviewAccent
 
-    /// Splits the banner's `content` into (header, body). The header is everything
-    /// before the first line that starts with "Result:"; the body is that line and
-    /// everything after it. If no "Result:" marker is present, the full content is
-    /// treated as the header and the body is nil.
-    private var splitContent: (header: String, body: String?) {
-        let lines = content.components(separatedBy: "\n")
-        guard let resultIndex = lines.firstIndex(where: { $0.hasPrefix("Result:") }) else {
-            return (content, nil)
-        }
-        let headerLines = lines[..<resultIndex]
-        let bodyLines = lines[resultIndex...]
-        let header = headerLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return (header, body.isEmpty ? nil : body)
-    }
-
     var body: some View {
-        let parts = splitContent
-        VStack(spacing: 0) {
+        // Inline splitContent logic directly
+        let lines = content.components(separatedBy: "\n")
+        let resultIndex = lines.firstIndex(where: { $0.hasPrefix("Result:") })
+        let parts: (header: String, body: String?) = {
+            guard let resultIndex = resultIndex else {
+                return (content, nil)
+            }
+            let headerLines = lines[..<resultIndex]
+            let bodyLines = lines[resultIndex...]
+            let header = headerLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            return (header, body.isEmpty ? nil : body)
+        }()
+        
+        return VStack(spacing: 0) {
             accentColor.frame(height: 1).opacity(0.4)
 
             HStack(spacing: 8) {
