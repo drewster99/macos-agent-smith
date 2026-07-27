@@ -135,14 +135,6 @@ struct AttachmentView: View {
         }
     }
 
-    private var iconName: String {
-        if attachment.isPDF { return "doc.richtext" }
-        if attachment.isImage { return "photo" }
-        if attachment.mimeType.hasPrefix("text/") { return "doc.text" }
-        if attachment.mimeType.hasPrefix("video/") { return "film" }
-        if attachment.mimeType.hasPrefix("audio/") { return "waveform" }
-        return "doc"
-    }
 }
 
 /// Full-screen overlay that displays an image at its original resolution.
