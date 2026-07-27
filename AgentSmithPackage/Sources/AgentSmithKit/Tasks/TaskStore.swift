@@ -552,6 +552,8 @@ public actor TaskStore {
         // dropped, so every criterion is re-judged against the NEW result rather than inheriting
         // an accept earned against the old one. A criterion is a reusable contract; a re-run is a
         // new run. (Pinned definitions are kept so the re-judge uses the same validator bodies.)
+        // The REJECTION HISTORY survives untouched: "the criteria were weakened and then retried"
+        // is the exact sequence it exists to make visible, and this is its second step.
         if var validation = task.validation {
             validation.round = 0
             validation.consecutiveStallRounds = 0
@@ -753,6 +755,11 @@ public actor TaskStore {
             // longer on the task — orphaned records otherwise haunt every settled-count
             // ("4 of 3 settled", observed 2026-07-09 after Smith rewrote a criterion,
             // which mints new IDs and strands the old IDs' accepts in the ledger).
+            //
+            // `criterionRejections` is deliberately NOT pruned alongside them. It is the record of
+            // what a criterion was rejected for BEFORE this edit, which is precisely what makes an
+            // edit that follows a failure auditable — pruning it by the same rule would erase the
+            // evidence with the action most likely to warrant it.
             validation.verdictRecords.removeAll {
                 changedIDs.contains($0.criterionID) || !currentIDs.contains($0.criterionID)
             }
@@ -977,6 +984,18 @@ public actor TaskStore {
         guard !fresh.isEmpty else { return .recorded([]) }
         var validation = task.validation ?? TaskValidationState()
         validation.verdictRecords.append(contentsOf: fresh)
+        // Every rejection also lands in the append-only history, captured from the criterion AS
+        // JUDGED (`judgedByID`) rather than its current state — the point of the record is what the
+        // validator was actually asked. Written here because this is the sole producer of verdict
+        // records, so the history cannot fall out of step with the ledger.
+        let rejections = fresh.compactMap { record -> CriterionRejection? in
+            guard case .rejected(let reason) = record.verdict,
+                  let judged = judgedByID[record.criterionID] else { return nil }
+            return CriterionRejection(judged: judged, rejectionText: reason, recordedAt: record.recordedAt)
+        }
+        if !rejections.isEmpty {
+            validation.criterionRejections = validation.rejectionHistory + rejections
+        }
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task

@@ -249,6 +249,92 @@ struct TaskValidationModelTests {
         #expect(validation.latestVerdict(for: criterionB.id) != nil, "unchanged criterion keeps its audit trail")
     }
 
+    @Test("A rejection outlives the criterion that earned it, and never counts as one")
+    func rejectionHistoryOutlivesItsCriterion() async {
+        let store = TaskStore()
+        let doomed = AcceptanceCriterion(name: "no TODOs left", validationPrompt: "Reject if any TODO remains.", origin: .smith)
+        let kept = AcceptanceCriterion(name: "builds", validationPrompt: "Reject unless it builds.", origin: .smith)
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setAcceptanceCriteria(id: task.id, criteria: [doomed, kept])
+
+        _ = await store.beginValidationRound(id: task.id)
+        _ = await store.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: doomed.id, verdict: .rejected(reason: "3 TODOs in Parser.swift"), validatorName: "d", validatorHash: "h", round: 1),
+            CriterionVerdictRecord(criterionID: kept.id, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1)
+        ], judgedAgainst: [doomed, kept], round: 1)
+
+        let afterRound = await store.task(id: task.id)!.validation!
+        #expect(afterRound.rejectionHistory.count == 1, "only the rejection is historied — an accept is not a rejection")
+        #expect(afterRound.rejectionHistory(for: doomed.id).first?.rejectionText == "3 TODOs in Parser.swift")
+        #expect(afterRound.rejectionHistory(for: doomed.id).first?.name == "no TODOs left", "the name at rejection time")
+        #expect(afterRound.rejectionHistory(for: kept.id).isEmpty)
+
+        // Smith responds to the failure the way it always does: drop the criterion that rejected.
+        await store.setAcceptanceCriteria(id: task.id, criteria: [kept])
+        let afterEdit = await store.task(id: task.id)!.validation!
+        #expect(afterEdit.verdictRecords.contains { $0.criterionID == doomed.id } == false, "verdicts for a departed criterion are retired")
+        #expect(afterEdit.rejectionHistory.count == 1, "the record of HAVING been rejected survives the criterion")
+        #expect(afterEdit.rejectionHistory[0].criterionID == doomed.id)
+
+        // And it stays out of every settled reading — it is not a verdict record and cannot be counted as one.
+        #expect(afterEdit.settledCriterionIDs() == [kept.id])
+        #expect(afterEdit.latestVerdict(for: doomed.id) == nil)
+    }
+
+    @Test("A weakened criterion is detectable by diffing its rejection against its current text")
+    func rejectionHistoryMakesWeakeningDetectable() async {
+        let store = TaskStore()
+        var criterion = AcceptanceCriterion(name: "coverage", validationPrompt: "Reject unless coverage is at least 90%.", origin: .smith)
+        let task = await store.addTask(title: "t", description: "d")
+        await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+
+        _ = await store.beginValidationRound(id: task.id)
+        _ = await store.recordCriterionVerdicts(id: task.id, records: [
+            CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "coverage is 61%"), validatorName: "d", validatorHash: "h", round: 1)
+        ], judgedAgainst: [criterion], round: 1)
+
+        let rejection = await store.task(id: task.id)!.validation!.rejectionHistory[0]
+        #expect(rejection.statesSameContract(as: criterion), "unedited, the bar is where it was")
+
+        // The pattern the history exists to expose: lower the bar, keep the ID, retry.
+        criterion.validationPrompt = "Reject unless coverage is at least 60%."
+        await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
+        let edited = await store.task(id: task.id)!.acceptanceCriteria[0]
+        #expect(!rejection.statesSameContract(as: edited), "the criterion no longer asks what it was rejected for")
+        #expect(rejection.validationPrompt == "Reject unless coverage is at least 90%.", "the history keeps the bar as it stood")
+
+        // Step three of the same pattern: retry. The retry drops the sticky verdicts on purpose —
+        // the history is what remains to show the bar moved between attempts.
+        await store.updateStatus(id: task.id, status: .failed)
+        #expect(await store.resetFailedTask(id: task.id))
+        let afterRetry = await store.task(id: task.id)!.validation!
+        #expect(afterRetry.verdictRecords.isEmpty)
+        #expect(afterRetry.rejectionHistory == [rejection], "a retry re-runs the work, it does not un-reject the past")
+    }
+
+    @Test("A ledger written before the rejection history still decodes, and round-trips once written")
+    func rejectionHistoryDecodesForwardCompatibly() throws {
+        var task = AgentTask(title: "t", description: "d")
+        task.validation = TaskValidationState(round: 2)
+
+        // A ledger from a build that predates the field: the key is simply absent.
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task)) as! [String: Any]
+        var ledger = json["validation"] as! [String: Any]
+        ledger.removeValue(forKey: "criterionRejections")
+        json["validation"] = ledger
+        let decoded = try JSONDecoder().decode(AgentTask.self, from: JSONSerialization.data(withJSONObject: json))
+        #expect(decoded.validation?.round == 2)
+        #expect(decoded.validation?.rejectionHistory.isEmpty == true, "absent reads as no history, not a decode failure")
+
+        var written = task
+        written.validation?.criterionRejections = [
+            CriterionRejection(judged: AcceptanceCriterion(name: "n", validationPrompt: "p", origin: .smith),
+                               rejectionText: "nope", recordedAt: Date(timeIntervalSince1970: 1))
+        ]
+        let roundTripped = try JSONDecoder().decode(AgentTask.self, from: JSONEncoder().encode(written))
+        #expect(roundTripped.validation?.rejectionHistory == written.validation?.rejectionHistory)
+    }
+
     @Test("A superseded run is told so distinctly — it never reads as 'nothing qualified'")
     func supersededRunIsDistinctFromNothingRecorded() async {
         let store = TaskStore()

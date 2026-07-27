@@ -261,6 +261,71 @@ public extension CriterionVerdictRecord.Verdict {
     }
 }
 
+/// One criterion's rejection, captured as the validator saw it. Append-only and task-level, so it
+/// outlives the criterion: a criterion that is edited, replaced, or deleted takes its verdicts with
+/// it (deliberately — they were judged against a contract that no longer exists), and the record of
+/// having been rejected would go with them.
+///
+/// This is what makes criteria-WEAKENING detectable. Smith's standing habit after a validation
+/// failure is to loosen the criteria and retry; diffing a rejection's captured prompts against the
+/// criterion's current text says whether the bar moved. No separate revision log is needed, because
+/// the interesting edits are exactly the ones that follow a rejection.
+///
+/// Deliberately NOT a `CriterionVerdictRecord`: a distinct type structurally cannot leak into
+/// settled counts, sticky resolution, or the "N of M" display. It is also two orders of magnitude
+/// smaller than a verdict record (which carries the rendered prompts and the full response log
+/// — ~52KB apiece against an `inactive_tasks.json` already in the tens of megabytes).
+public struct CriterionRejection: Codable, Sendable, Equatable {
+    public let criterionID: UUID
+    /// The criterion's name AT REJECTION TIME. Captured because for a default-validated criterion
+    /// the name IS the judging instruction (`composeValidatorSystemPrompt` renders `criterion.text`
+    /// as the validation instructions), so a rename can weaken the bar on its own.
+    public let name: String
+    public let recordedAt: Date
+    /// The judging instructions as given, so a later edit can be diffed against them.
+    public let validationPrompt: String
+    public let inputEnumeratorPrompt: String?
+    /// The validator's stated reason for rejecting.
+    public let rejectionText: String
+
+    public init(
+        criterionID: UUID,
+        name: String,
+        recordedAt: Date,
+        validationPrompt: String,
+        inputEnumeratorPrompt: String?,
+        rejectionText: String
+    ) {
+        self.criterionID = criterionID
+        self.name = name
+        self.recordedAt = recordedAt
+        self.validationPrompt = validationPrompt
+        self.inputEnumeratorPrompt = inputEnumeratorPrompt
+        self.rejectionText = rejectionText
+    }
+
+    /// The rejection a criterion earned, as the judged contract. Built from what the validator was
+    /// actually shown, never from the criterion's current state.
+    public init(judged criterion: AcceptanceCriterion, rejectionText: String, recordedAt: Date) {
+        self.init(
+            criterionID: criterion.id,
+            name: criterion.name,
+            recordedAt: recordedAt,
+            validationPrompt: criterion.validationPrompt,
+            inputEnumeratorPrompt: criterion.inputEnumeratorPrompt,
+            rejectionText: rejectionText
+        )
+    }
+
+    /// Whether `criterion` still puts the same question to the judge as it did when this rejection
+    /// was recorded. `false` means the contract moved after a rejection — the edit worth looking at.
+    public func statesSameContract(as criterion: AcceptanceCriterion) -> Bool {
+        validationPrompt == criterion.validationPrompt
+            && inputEnumeratorPrompt == criterion.inputEnumeratorPrompt
+            && (!criterion.usesDefaultValidator || name == criterion.name)
+    }
+}
+
 /// What `TaskStore.recordCriterionVerdicts` did with a wave of verdicts. The two outcomes are
 /// distinct because they demand OPPOSITE things of the caller, and a bare `[]` meant both: a
 /// validation run that has been superseded must ABANDON its round, while a run that simply had
@@ -330,11 +395,33 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
     /// worker and validator disagree irreconcilably and the task FAILS (never parked on
     /// Smith). Optional so records written before the field decode unchanged.
     public var consecutiveStallRounds: Int?
+    /// Append-only history of every rejection this task's criteria have earned, outliving the
+    /// criteria themselves. Nothing prunes it: a criterion edit retires that criterion's VERDICTS
+    /// (they were judged against a contract that no longer exists) but must never retire the
+    /// evidence that it was rejected before the edit. Optional so ledgers written before the field
+    /// decode unchanged — Swift's synthesized decoder does not fall back to property defaults, and
+    /// a hand-written one would have to remember every future field. Read via `rejectionHistory`.
+    public var criterionRejections: [CriterionRejection]?
 
-    public init(round: Int = 0, verdictRecords: [CriterionVerdictRecord] = [], consecutiveStallRounds: Int? = nil) {
+    public init(
+        round: Int = 0,
+        verdictRecords: [CriterionVerdictRecord] = [],
+        consecutiveStallRounds: Int? = nil,
+        criterionRejections: [CriterionRejection]? = nil
+    ) {
         self.round = round
         self.verdictRecords = verdictRecords
         self.consecutiveStallRounds = consecutiveStallRounds
+        self.criterionRejections = criterionRejections
+    }
+
+    /// Every rejection recorded on this task, oldest first. The persistence-shaped optional never
+    /// escapes into the domain model.
+    public var rejectionHistory: [CriterionRejection] { criterionRejections ?? [] }
+
+    /// The rejections one criterion has earned, oldest first.
+    public func rejectionHistory(for criterionID: UUID) -> [CriterionRejection] {
+        rejectionHistory.filter { $0.criterionID == criterionID }
     }
 
     /// The live verdict for a criterion (latest record wins).
