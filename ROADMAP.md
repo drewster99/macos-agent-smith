@@ -745,7 +745,15 @@ hard kill for the shell path. Flagged by codex in the 2026-07-15 July-1→today 
 - **Rejected — a `>50%`-of-criteria heuristic for resetting stall counters.** Arbitrary, and unnecessary once the counter is understood as a progress measure: see the no-reset rule in CLAUDE.md.
 - **Partially confirmed and escalated:** agy hypothesised a race where a verdict lands mid-edit. Checking the code found something worse and pre-existing — `SetAcceptanceCriteriaTool` has no `isValidationContractEditable` gate at all, while `ManageStepsTool:159` does. The steps tool guards the validation contract; the tool that edits the validation contract does not.
 
-### Acceptance contract — the settled build plan (2026-07-27)
+### ✅ Acceptance contract — the settled build plan (2026-07-27, BUILT 2026-07-27)
+
+**All eight items landed, one commit each** (`f8218ce`, `157fa88`, `f3a61b7`, `9fe7e4f`, `c3e1246`, `6717c0b`, `b692539`, `c8f0df3`), in the order 2 → 1 → 3 → 4 → 5 → 6 → 7 → 8. Read the CLAUDE.md section for the three places the build deliberately departs from the plan below (the narrower replace-all gate, `hasValidationEvidence` being the ledger's existence, and the editor saving as a diff), plus the one residual gap the contract-version token does not close.
+
+**Item 7 is HALF done.** The agent-smith renames landed; the kit-side pair did not. `SwiftLLMKit.ModelProfile.trailingSystemTurn` → `trailingSystemMessage` needs a swift-llm-kit change + tag + version bump here, and is a source-breaking rename of a public field with `profiles.json` files already carrying the old key (so it needs `decodeIfPresent` migration). Its sibling `BehaviorFlags.supportsMidConversationSystem` does not exist yet — nothing to rename until the on-hold trailing-system work resumes.
+
+**Two extras the plan didn't ask for, both required to make item 4 usable:** `get_task_details` now prints criterion ids (the edit verbs have nothing to name otherwise, exactly as `renderedSteps` prints step ids for `manage_steps`), and item 8's ordering was applied to the LEDGER WRITE as well as the summary — appending TaskGroup completion order to an append-only audit trail makes the trail's own order a record of nothing.
+
+
 
 The design simplified substantially on 2026-07-27: a **rejection history replaces the entire archived-verdict design**. Deleted from the plan as unnecessary — `archivedVerdicts`, its distinct wrapper type, the live-vs-archived display-rules table, the archive size policy, and the separate criterion revision log. A rejection record carries the prompts and name *at rejection time*, which is what weakening detection actually needs, at a few hundred bytes instead of ~52KB. Read the CLAUDE.md section, not the superseded parts of the entries below.
 
