@@ -160,17 +160,33 @@ struct ChannelMessageKindLiteralGuardTests {
         "ChannelMessage.swift"
     ]
 
-    private static func scan(regex pattern: String) -> [String] {
-        let regex = try! NSRegularExpression(pattern: pattern)
+    /// Scans both source roots, returning `(hits, scannedFileCount)`.
+    ///
+    /// Every failure mode here is fatal rather than skipped. A guard test that quietly ignores a
+    /// root it couldn't enumerate, or a file it couldn't read, reports "no violations" for a
+    /// codebase it never looked at — the most expensive kind of green.
+    private static func scan(regex pattern: String) throws -> (hits: [String], filesScanned: Int) {
+        let regex = try NSRegularExpression(pattern: pattern)
         var hits: [String] = []
+        var filesScanned = 0
         for root in sourceRoots {
             guard let e = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-            ) else { continue }
+            ) else {
+                Issue.record("Could not enumerate \(root.path) — the scan below covers less than it claims.")
+                continue
+            }
             for case let url as URL in e {
                 guard url.pathExtension == "swift",
-                      !exemptFileNames.contains(url.lastPathComponent),
-                      let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                      !exemptFileNames.contains(url.lastPathComponent) else { continue }
+                let text: String
+                do {
+                    text = try String(contentsOf: url, encoding: .utf8)
+                } catch {
+                    Issue.record("Could not read \(url.lastPathComponent): \(error). Unscanned files hide violations.")
+                    continue
+                }
+                filesScanned += 1
                 for (i, line) in text.components(separatedBy: .newlines).enumerated() {
                     // Comments may quote the old shape while explaining why it's gone.
                     let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -182,14 +198,17 @@ struct ChannelMessageKindLiteralGuardTests {
                 }
             }
         }
-        return hits
+        // A scan that found no files is not a passing scan — it means the paths are wrong and
+        // the guards below would report clean for a codebase nobody looked at.
+        #expect(filesScanned > 100, "only \(filesScanned) files scanned; source roots are likely wrong")
+        return (hits, filesScanned)
     }
 
     @Test("No bare messageKind string literals are written")
-    func noBareKindWrites() {
+    func noBareKindWrites() throws {
         // Covers both the dictionary-literal form and assignment into an existing metadata dict,
         // so a post site can't sidestep the rule by building its metadata in two steps.
-        let hits = Self.scan(regex: #""messageKind"\]?\s*[:=]\s*\.string\("#)
+        let (hits, _) = try Self.scan(regex: #""messageKind"\]?\s*[:=]\s*\.string\("#)
         if !hits.isEmpty {
             let formatted = hits.joined(separator: "\n")
             Issue.record("Use `.kind(.someKind)` instead of a raw string:\n\(formatted)")
@@ -197,10 +216,10 @@ struct ChannelMessageKindLiteralGuardTests {
     }
 
     @Test("No bare messageKind string literals are compared")
-    func noBareKindReads() {
+    func noBareKindReads() throws {
         // Read sites must use `message.kind == .someKind`, not a hand-rolled metadata unwrap
         // compared against a literal.
-        let hits = Self.scan(regex: #"metadata\?\["messageKind"\]|stringMetadata\("messageKind"\)"#)
+        let (hits, _) = try Self.scan(regex: #"metadata\?\["messageKind"\]|stringMetadata\("messageKind"\)"#)
         if !hits.isEmpty {
             let formatted = hits.joined(separator: "\n")
             Issue.record("Use `message.kind` instead of unwrapping the metadata by hand:\n\(formatted)")

@@ -113,7 +113,19 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// on any hand-written `messageKind` string that could sneak past it. It fires for data
     /// written by a build whose enum knew a kind this one doesn't, or hand-edited JSON.
     public var kind: ChannelMessageKind? {
-        guard case .string(let raw) = metadata?["messageKind"] else { return nil }
+        // Absent key: the message genuinely has no kind. This is the ONLY thing nil may mean.
+        guard let stored = metadata?["messageKind"] else { return nil }
+        // Present but not a string. Folding this into the nil above would conflate "no kind"
+        // with "the kind is corrupt" — two conditions that demand opposite responses, one of
+        // them silently. Whatever wrote a non-string here is broken and should be found.
+        guard case .string(let raw) = stored else {
+            fatalError("""
+                messageKind on ChannelMessage \(id) is \(stored), not a string.
+
+                The slot is written exclusively by `.kind(_:)`, which always stores `.string`. \
+                A different type here means something bypassed it — find that writer.
+                """)
+        }
         guard let kind = ChannelMessageKind(rawValue: raw) else {
             fatalError("""
                 Unknown messageKind "\(raw)" on ChannelMessage \(id).
@@ -135,10 +147,12 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
 
     /// Converts a wire string to the camelCase case name the enum would use, so the trap above
     /// can print a line the developer can paste rather than a rule they have to apply.
+    ///
+    /// Total by construction: an empty or all-underscore input yields an empty string, which is
+    /// visibly wrong in the trap message rather than quietly substituted with something plausible.
     private static func suggestedCaseName(for rawValue: String) -> String {
         let parts = rawValue.split(separator: "_").map(String.init)
-        guard let first = parts.first else { return rawValue }
-        return first + parts.dropFirst().map { $0.capitalized }.joined()
+        return (parts.first ?? "") + parts.dropFirst().map { $0.capitalized }.joined()
     }
 
     public enum Sender: Codable, Sendable, Hashable {

@@ -2912,6 +2912,9 @@ public actor AgentActor {
     /// narrated until a circuit breaker terminated it.
     static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID) -> Bool {
         guard message.recipientID == agentID else { return false }
+        // No kind is a POSITIVE answer here, not a fallback: the private messages that hand work
+        // back — `message_brown`, `amend_task` — carry no `messageKind` at all. "Addressed to this
+        // worker and not on the exemption list" IS the rule, and an unkinded message satisfies it.
         guard let kind = message.kind else { return true }
         return !parkedWorkerInformationalMessageKinds.contains(kind)
     }
