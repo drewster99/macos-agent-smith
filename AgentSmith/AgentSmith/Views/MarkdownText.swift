@@ -21,8 +21,13 @@ struct MarkdownText: View, Equatable {
     }
 
     var body: some View {
+        // Parse markdown exactly once per body render. All content blocks are
+        // derived from `content` locally. The Equatable conformance prevents
+        // unnecessary body re-evaluations when content is unchanged.
+        let blocks = parseContentBlocks()
+        
         VStack(alignment: .leading, spacing: 1) {
-            ForEach(contentBlocks) { block in
+            ForEach(blocks) { block in
                 RenderBlockView(block: block, baseFont: baseFont)
             }
         }
@@ -72,7 +77,7 @@ struct MarkdownText: View, Equatable {
         }
     }
 
-    private var contentBlocks: [ContentBlock] {
+    private func parseContentBlocks() -> [ContentBlock] {
         let lines = content.components(separatedBy: "\n")
         var result: [ContentBlock] = []
         var i = 0
