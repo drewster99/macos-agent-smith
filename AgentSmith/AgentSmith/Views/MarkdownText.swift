@@ -219,6 +219,14 @@ struct MarkdownText: View, Equatable {
         let language: String?
         let lines: [String]
         let baseFont: Font
+        private let joinedCode: String
+        
+        init(language: String?, lines: [String], baseFont: Font) {
+            self.language = language
+            self.lines = lines
+            self.baseFont = baseFont
+            self.joinedCode = lines.joined(separator: "\n")
+        }
         
         var body: some View {
             VStack(alignment: .leading, spacing: 0) {
@@ -230,7 +238,7 @@ struct MarkdownText: View, Equatable {
                         .padding(.top, 6)
                         .padding(.bottom, 2)
                 }
-                Text(lines.joined(separator: "\n"))
+                Text(joinedCode)
                     .font(baseFont)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
@@ -251,17 +259,28 @@ struct MarkdownText: View, Equatable {
         let rows: [[String]]
         let columnCount: Int
         let baseFont: Font
+        private let renderedRows: [(isHeader: Bool, cells: [Text])]
+        
+        init(rows: [[String]], columnCount: Int, baseFont: Font) {
+            self.rows = rows
+            self.columnCount = columnCount
+            self.baseFont = baseFont
+            // Pre-compute all rendered cells at init time
+            self.renderedRows = rows.enumerated().map { rowIdx, row in
+                let isHeader = rowIdx == 0
+                let cellFont = isHeader ? baseFont.weight(.semibold) : baseFont
+                let renderedCells: [Text] = (0..<columnCount).map { colIdx in
+                    let cell = colIdx < row.count ? row[colIdx] : ""
+                    return InlineText.styled(cell, font: cellFont)
+                }
+                return (isHeader: isHeader, cells: renderedCells)
+            }
+        }
         
         var body: some View {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
-                    let isHeader = rowIdx == 0
-                    let cellFont = isHeader ? baseFont.weight(.semibold) : baseFont
-                    let renderedCells: [Text] = (0..<columnCount).map { colIdx in
-                        let cell = colIdx < row.count ? row[colIdx] : ""
-                        return InlineText.styled(cell, font: cellFont)
-                    }
-                    MarkdownTableRow(renderedCells: renderedCells, isHeader: isHeader)
+                ForEach(Array(renderedRows.enumerated()), id: \.offset) { idx, row in
+                    MarkdownTableRow(renderedCells: row.cells, isHeader: row.isHeader)
                 }
             }
             .overlay(
@@ -279,42 +298,65 @@ struct MarkdownText: View, Equatable {
         let baseFont: Font
         private let parsed: LineParseResult
         private let trimmed: String
+        private let h1Text: Text?
+        private let h2Text: Text?
+        private let h3Text: Text?
+        private let listMarkerText: Text?
+        private let listContentText: Text?
+        private let indentedText: Text?
+        private let plainText: Text?
         
         init(line: String, baseFont: Font) {
             self.line = line
             self.baseFont = baseFont
             self.trimmed = line.trimmingCharacters(in: .whitespaces)
             self.parsed = LineParser.parse(line, baseFont: baseFont)
+            // Pre-compute all styled text variants at init time
+            self.h1Text = trimmed.hasPrefix("# ") ? InlineText.styled(String(trimmed.dropFirst(2)), font: AppFonts.markdownH1) : nil
+            self.h2Text = trimmed.hasPrefix("## ") ? InlineText.styled(String(trimmed.dropFirst(3)), font: AppFonts.markdownH2) : nil
+            self.h3Text = trimmed.hasPrefix("### ") ? InlineText.styled(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3) : nil
+            if parsed.isList {
+                self.listMarkerText = Text(parsed.isNumbered ? parsed.numberPrefix : "•").font(baseFont)
+                self.listContentText = InlineText.styled(parsed.content, font: baseFont)
+                self.indentedText = nil
+                self.plainText = nil
+            } else if parsed.indent > 0 {
+                self.listMarkerText = nil
+                self.listContentText = nil
+                self.indentedText = InlineText.styled(parsed.content, font: baseFont)
+                self.plainText = nil
+            } else {
+                self.listMarkerText = nil
+                self.listContentText = nil
+                self.indentedText = nil
+                self.plainText = InlineText.styled(line, font: baseFont)
+            }
         }
         
         var body: some View {
-            if trimmed.hasPrefix("### ") {
-                InlineText.styled(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3)
-            } else if trimmed.hasPrefix("## ") {
-                InlineText.styled(String(trimmed.dropFirst(3)), font: AppFonts.markdownH2)
-            } else if trimmed.hasPrefix("# ") {
-                InlineText.styled(String(trimmed.dropFirst(2)), font: AppFonts.markdownH1)
+            if let h3Text = h3Text {
+                h3Text
+            } else if let h2Text = h2Text {
+                h2Text
+            } else if let h1Text = h1Text {
+                h1Text
             } else if trimmed.isEmpty {
                 Color.clear.frame(height: 6)
-            } else {
-                if parsed.isList {
-                    // Indent based on leading whitespace: 12pt base + 12pt per 2-space level
-                    let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
-                    let marker = parsed.isNumbered ? parsed.numberPrefix : "•"
-                    HStack(alignment: .top, spacing: 4) {
-                        Text(marker)
-                            .font(baseFont)
-                        InlineText.styled(parsed.content, font: baseFont)
-                    }
-                    .padding(.leading, depthPadding)
-                } else if parsed.indent > 0 {
-                    // Indented non-list text — preserve the indent
-                    let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
-                    InlineText.styled(parsed.content, font: baseFont)
-                        .padding(.leading, depthPadding)
-                } else {
-                    InlineText.styled(line, font: baseFont)
+            } else if let listMarkerText = listMarkerText, let listContentText = listContentText {
+                // Indent based on leading whitespace: 12pt base + 12pt per 2-space level
+                let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
+                HStack(alignment: .top, spacing: 4) {
+                    listMarkerText
+                    listContentText
                 }
+                .padding(.leading, depthPadding)
+            } else if let indentedText = indentedText {
+                // Indented non-list text — preserve the indent
+                let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
+                indentedText
+                    .padding(.leading, depthPadding)
+            } else if let plainText = plainText {
+                plainText
             }
         }
     }
