@@ -792,9 +792,9 @@ private struct MessageRow: View, Equatable {
             default: return .secondary
             }
         }()
-        let _effectiveDiffLines: [DiffLine]? = cacheValid ? cachedDiffLines : Self.extractPrecomputedDiffLines(from: message)
-        let _effectiveToolFilePath: String? = cacheValid ? cachedToolFilePath : Self.extractToolFilePath(from: message)
-        let _effectiveFileEditStrings: FileEditStrings? = cacheValid ? cachedFileEditStrings : Self.extractFileEditStrings(from: message)
+        let _effectiveDiffLines: [DiffLine]? = cachedDiffLines
+        let _effectiveToolFilePath: String? = cachedToolFilePath
+        let _effectiveFileEditStrings: FileEditStrings? = cachedFileEditStrings
         let _fileEditFailed: Bool = {
             guard let output = toolOutputMessage else { return false }
             let content = output.content.trimmingCharacters(in: .whitespaces)
@@ -843,7 +843,7 @@ private struct MessageRow: View, Equatable {
             if isSmithToBrown || isBrown { return 5 }
             return nil
         }()
-        let _effectiveSplitLines = cacheValid ? cachedSplitLines : message.content.components(separatedBy: "\n")
+        let _effectiveSplitLines = cachedSplitLines
         let _isSummarizerMessage = message.sender == .agent(.summarizer)
         let _attachmentTier: ImageCache.Tier = message.sender == .user ? .small : .medium
         let _isErrorMessage: Bool = {
