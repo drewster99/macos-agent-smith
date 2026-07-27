@@ -1234,22 +1234,38 @@ private struct MessageRow: View, Equatable {
         let dispositionComment: String?
         let dispositionCommentColor: Color
         let effectiveDiffLines: [DiffLine]?
+        private let collapsedErrorPreview: String?
+        private let toolOutputHasMore: Bool
+        
+        init(message: ChannelMessage, toolOutputMessage: ChannelMessage?, parallelBadge: String?, dispositionComment: String?, dispositionCommentColor: Color, effectiveDiffLines: [DiffLine]?, isExpanded: Binding<Bool>, securityDispositionControl: @escaping () -> SecurityDispositionControlView) {
+            self.message = message
+            self.toolOutputMessage = toolOutputMessage
+            self.parallelBadge = parallelBadge
+            self.dispositionComment = dispositionComment
+            self.dispositionCommentColor = dispositionCommentColor
+            self.effectiveDiffLines = effectiveDiffLines
+            self._isExpanded = isExpanded
+            self.securityDispositionControl = securityDispositionControl
+            // Compute collapsedErrorPreview and toolOutputHasMore once at init time
+            if let output = toolOutputMessage, !output.content.isEmpty {
+                let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
+                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                self.collapsedErrorPreview = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
+                if let errorLine = self.collapsedErrorPreview {
+                    self.toolOutputHasMore = output.content.count > errorLine.count
+                } else {
+                    self.toolOutputHasMore = true
+                }
+            } else {
+                self.collapsedErrorPreview = nil
+                self.toolOutputHasMore = false
+            }
+        }
         
         @Binding var isExpanded: Bool
         let securityDispositionControl: () -> SecurityDispositionControlView
         
         var body: some View {
-            // Inline collapsedErrorPreview logic - no helper function call
-            let _toolOutputHasMore: Bool = {
-                guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
-                let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
-                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-                let errorLine: String? = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
-                if let errorLine = errorLine {
-                    return output.content.count > errorLine.count
-                }
-                return true
-            }()
             VStack(alignment: .leading, spacing: 0) {
                 Button(action: { isExpanded.toggle() }, label: {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -1267,7 +1283,7 @@ private struct MessageRow: View, Equatable {
                             Text("(show less)")
                                 .font(.caption)
                                 .foregroundStyle(AppColors.disclosureToggle)
-                        } else if _toolOutputHasMore {
+                        } else if toolOutputHasMore {
                             Text("(show more)")
                                 .font(.caption)
                                 .foregroundStyle(AppColors.disclosureToggle)
@@ -1296,19 +1312,13 @@ private struct MessageRow: View, Equatable {
                             .padding(.leading, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
-                    } else {
-                        // Inline collapsedErrorPreview logic
-                        let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
-                        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-                        let errorLine = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
-                        if let errorLine = errorLine {
-                            Text(errorLine)
-                                .font(AppFonts.channelBody.monospaced())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .padding(.leading, 12)
-                                .textSelection(.enabled)
-                        }
+                    } else if let errorLine = collapsedErrorPreview {
+                        Text(errorLine)
+                            .font(AppFonts.channelBody.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .padding(.leading, 12)
+                            .textSelection(.enabled)
                     }
                 }
             }
@@ -1329,22 +1339,44 @@ private struct MessageRow: View, Equatable {
         let toolCallDisplayText: String
         let remainderWithoutPath: (String, String) -> String
         let openFileOrFallback: (String) -> Void
+        private let collapsedErrorPreview: String?
+        private let toolOutputHasMore: Bool
+        
+        init(message: ChannelMessage, toolOutputMessage: ChannelMessage?, parallelBadge: String?, effectiveToolFilePath: String?, dispositionComment: String?, dispositionCommentColor: Color, effectiveFileEditStrings: FileEditStrings?, fileEditFailed: Bool, isFileRead: Bool, toolCallDisplayText: String, remainderWithoutPath: @escaping (String, String) -> String, openFileOrFallback: @escaping (String) -> Void, isExpanded: Binding<Bool>, securityDispositionControl: @escaping () -> SecurityDispositionControlView) {
+            self.message = message
+            self.toolOutputMessage = toolOutputMessage
+            self.parallelBadge = parallelBadge
+            self.effectiveToolFilePath = effectiveToolFilePath
+            self.dispositionComment = dispositionComment
+            self.dispositionCommentColor = dispositionCommentColor
+            self.effectiveFileEditStrings = effectiveFileEditStrings
+            self.fileEditFailed = fileEditFailed
+            self.isFileRead = isFileRead
+            self.toolCallDisplayText = toolCallDisplayText
+            self.remainderWithoutPath = remainderWithoutPath
+            self.openFileOrFallback = openFileOrFallback
+            self._isExpanded = isExpanded
+            self.securityDispositionControl = securityDispositionControl
+            // Compute collapsedErrorPreview and toolOutputHasMore once at init time
+            if let output = toolOutputMessage, !output.content.isEmpty {
+                let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
+                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                self.collapsedErrorPreview = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
+                if let errorLine = self.collapsedErrorPreview {
+                    self.toolOutputHasMore = output.content.count > errorLine.count
+                } else {
+                    self.toolOutputHasMore = true
+                }
+            } else {
+                self.collapsedErrorPreview = nil
+                self.toolOutputHasMore = false
+            }
+        }
         
         @Binding var isExpanded: Bool
         let securityDispositionControl: () -> SecurityDispositionControlView
         
         var body: some View {
-            // Inline collapsedErrorPreview logic - no helper function call
-            let _toolOutputHasMore: Bool = {
-                guard let output = toolOutputMessage, !output.content.isEmpty else { return false }
-                let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
-                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-                let errorLine: String? = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
-                if let errorLine = errorLine {
-                    return output.content.count > errorLine.count
-                }
-                return true
-            }()
             VStack(alignment: .leading, spacing: 0) {
                 Button(action: { isExpanded.toggle() }, label: {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -1384,7 +1416,7 @@ private struct MessageRow: View, Equatable {
                             Text("(show less)")
                                 .font(.caption)
                                 .foregroundStyle(AppColors.disclosureToggle)
-                        } else if _toolOutputHasMore {
+                        } else if toolOutputHasMore {
                             Text("(show more)")
                                 .font(.caption)
                                 .foregroundStyle(AppColors.disclosureToggle)
@@ -1421,19 +1453,13 @@ private struct MessageRow: View, Equatable {
                             .padding(.leading, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
-                    } else if !isFileRead {
-                        // Inline collapsedErrorPreview logic
-                        let firstLine = output.content.components(separatedBy: .newlines).first ?? output.content
-                        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-                        let errorLine = trimmed.lowercased().hasPrefix("error") ? firstLine : nil
-                        if let errorLine = errorLine {
-                            Text(errorLine)
-                                .font(AppFonts.channelBody.monospaced())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .padding(.leading, 12)
-                                .textSelection(.enabled)
-                        }
+                    } else if !isFileRead, let errorLine = collapsedErrorPreview {
+                        Text(errorLine)
+                            .font(AppFonts.channelBody.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .padding(.leading, 12)
+                            .textSelection(.enabled)
                     }
                 }
             }
