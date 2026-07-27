@@ -1403,10 +1403,20 @@ final class AppViewModel {
             // judges with its default stance. Deleting what the user just typed to avoid a valid
             // state is the worse outcome, and the acceptance editor fixes it in place.
             //
-            // The task DID get created, so this returns true: reporting failure would leave the
-            // editor open over a task that now exists, and the user would create a second one.
+            // Returns FALSE, which is what actually reaches the user: `TaskEditorSheet` renders
+            // `taskActionError` in-sheet only on the failure path, and on success it closes and
+            // leaves the message to a sidebar alert that was never presented while the sheet
+            // covered it. Returning true here would have made this the one thing worse than a
+            // rollback — a task created without the criteria just written for it, silently.
+            //
+            // The duplicate-Create risk that argues for closing is handled by SAYING the task
+            // exists, rather than by hiding the problem.
             if let problem = await taskStore.setAcceptanceCriteria(id: task.id, criteria: acceptanceCriteria) {
-                taskActionError = "Task created, but its acceptance criteria were rejected: \(problem)"
+                taskActionError = """
+                    The task "\(task.title)" WAS created, but its acceptance criteria were rejected: \(problem)
+                    Don't create it again — close this and add the criteria from the task's detail view.
+                    """
+                return false
             }
         }
         if !steps.isEmpty {
