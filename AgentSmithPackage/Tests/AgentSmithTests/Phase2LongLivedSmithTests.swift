@@ -78,9 +78,13 @@ struct Phase2LongLivedSmithTests {
         #expect(!transcript.contains { $0.content == "All agents stopped." },
                 "worker cycling must not tear down the world")
 
-        // Smith was informed in-context rather than rebuilt.
-        let smithContext = await runtime.contextSnapshot(for: .smith)
-        #expect(smithContext?.contains { $0.content.textValue?.contains("has been started") == true } == true)
+        // Smith was informed in-context rather than rebuilt. The notification is queued and
+        // drained on Smith's next loop turn (single-writer invariant), so poll rather than read once.
+        let informed = await waitUntil {
+            let ctx = await runtime.contextSnapshot(for: .smith)
+            return ctx?.contains { $0.content.textValue?.contains("has been started") == true } == true
+        }
+        #expect(informed, "Smith must be told in-context that the task has been started")
 
         await runtime.stopAll()
     }
@@ -310,8 +314,12 @@ struct Phase2LongLivedSmithTests {
         let after = await store.task(id: task.id)
         #expect(after?.status == .failed)
         #expect(await runtime.agentIDForRole(.smith) == smithBefore, "Smith survives the failure too")
-        let smithContext = await runtime.contextSnapshot(for: .smith)
-        #expect(smithContext?.contains { $0.content.textValue?.contains("could not be started") == true } == true)
+        // Queued injection drains on Smith's next loop turn — poll rather than read once.
+        let informed = await waitUntil {
+            let ctx = await runtime.contextSnapshot(for: .smith)
+            return ctx?.contains { $0.content.textValue?.contains("could not be started") == true } == true
+        }
+        #expect(informed, "Smith must be told in-context that the worker could not be started")
 
         await runtime.stopAll()
     }

@@ -610,13 +610,17 @@ public actor OrchestrationRuntime {
         guard let summary = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty else {
             return "Compaction failed — the summary came back empty. Smith's context is unchanged."
         }
-        guard let counts = await smith.compactConversationHistory(
+        switch await smith.compactConversationHistory(
             summaryText: summary,
             keepingRecentTurns: Self.compactionRecentTurnsKept
-        ) else {
+        ) {
+        case .compacted(let before, let after):
+            return "Smith's context compacted: \(before) → \(after) messages."
+        case .tooSmall:
             return "Smith's context is already compact — nothing was changed."
+        case .toolTurnInFlight:
+            return "Smith is mid-task — compaction was skipped to avoid corrupting an in-flight tool call. Try /compact again once Smith is idle."
         }
-        return "Smith's context compacted: \(counts.before) → \(counts.after) messages."
     }
 
     /// A short re-briefing injected after `/clear` so Smith isn't amnesiac about live

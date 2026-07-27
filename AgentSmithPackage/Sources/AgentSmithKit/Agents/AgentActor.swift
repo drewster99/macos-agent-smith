@@ -336,6 +336,17 @@ public actor AgentActor {
     private var pendingResetRequested = false
     private var pendingResetOrientation: String?
 
+    /// True for exactly the span of `handleResponse` — from just before the assistant turn is
+    /// appended, through the last `tool_result`. A tool turn is NOT one atomic actor entry: the
+    /// assistant `tool_calls` message and its results are appended across several actor entries
+    /// separated by `await`s (each tool executes at a suspension point). At any of those
+    /// suspensions a reentrant external writer (`resetConversationHistory`, `compactConversationHistory`)
+    /// could wipe or splice the history and orphan the results appended when the loop resumes.
+    /// `lastTurnAwaitsToolResults` is too narrow to catch this — mid-segment the last message is a
+    /// `.tool` result, not an open assistant — so those writers gate on THIS flag instead. The run
+    /// loop is sequential (one `handleResponse` at a time, never nested), so a plain bool suffices.
+    private var isProcessingToolTurn = false
+
     /// When true, the agent acknowledges its assigned task on its first turn — as a runtime
     /// side effect, WITHOUT an LLM round-trip and WITHOUT a callable tool. Acknowledgement moves
     /// the task to `.running`, bumps the ack counter, and privately notifies Smith.
@@ -446,6 +457,10 @@ public actor AgentActor {
         // The run loop drains this at a turn boundary; `pushLiveContext` happens on drain.
         pendingInjectedMessages.append(.user(text))
         hasUnprocessedInput = true
+        // Wake an idle loop so the injection is drained and processed promptly rather than waiting
+        // out the poll interval — parity with `ingestChannelMessage`. A no-op mid-tool-turn (the
+        // idle sleep task is nil), so it can't disturb an in-flight turn.
+        interruptIdleSleep()
     }
 
     /// Same as `appendUserMessage(_:)` but also injects image attachments as inline
@@ -491,6 +506,7 @@ public actor AgentActor {
             pendingInjectedMessages.append(.user(body, images: assembled.images, documents: assembled.documents))
         }
         hasUnprocessedInput = true
+        interruptIdleSleep()
     }
 
     /// True when the last message is an assistant carrying `tool_calls` whose `tool_result`s
@@ -508,7 +524,11 @@ public actor AgentActor {
     /// the top of the iteration, where the previous turn is complete. The tool-results guard is
     /// belt-and-suspenders: at the loop top the last message is never an unanswered assistant
     /// tool-call, but if that ever changes, defer to the next iteration rather than splice.
-    private func drainPendingInjectedMessages() {
+    ///
+    /// Package-internal (not private) so white-box tests can simulate the loop-boundary drain
+    /// deterministically without spinning the whole run loop; the only production caller is the
+    /// run loop.
+    func drainPendingInjectedMessages() {
         guard !pendingInjectedMessages.isEmpty, !lastTurnAwaitsToolResults else { return }
         conversationHistory.append(contentsOf: pendingInjectedMessages)
         pendingInjectedMessages.removeAll()
@@ -770,10 +790,12 @@ public actor AgentActor {
     public func resetConversationHistory(orientation: String?) {
         // Single-writer: a `/clear` that arrives mid-tool-turn (reentrant, while the run loop is
         // parked in a tool `await`) would wipe the in-flight assistant `tool_calls` and orphan the
-        // tool results appended after it — the same 400 class as the injection splice. Defer to
-        // the run loop's next boundary, where the turn is complete. Undelivered channel input is
-        // untouched here, same as before.
-        guard !lastTurnAwaitsToolResults else {
+        // tool results appended when the turn resumes — the same 400 class as the injection splice.
+        // Gate on `isProcessingToolTurn`, NOT `lastTurnAwaitsToolResults`: mid-segment (after the
+        // first of several results is appended) the last message is a `.tool` result, so the
+        // narrower predicate would miss it and let a 2-call turn orphan its tail. Defer to the run
+        // loop's next boundary, where the turn is complete. Undelivered channel input is untouched.
+        guard !isProcessingToolTurn else {
             pendingResetOrientation = orientation
             pendingResetRequested = true
             return
@@ -807,17 +829,33 @@ public actor AgentActor {
         performReset(orientation: orientation)
     }
 
+    /// Result of a `compactConversationHistory` splice attempt.
+    public enum CompactionOutcome: Sendable, Equatable {
+        /// History was spliced. Carries the message counts before and after.
+        case compacted(before: Int, after: Int)
+        /// History is already at or below the compaction floor — nothing worth splicing.
+        case tooSmall
+        /// A tool turn is in flight (the run loop is parked between an assistant `tool_calls`
+        /// message and its results). Splicing now could drop the in-flight assistant turn and
+        /// orphan the results appended when the loop resumes — the same 400 class the
+        /// single-writer invariant exists to prevent. The caller should retry once Smith is idle.
+        case toolTurnInFlight
+    }
+
     /// Splices the conversation down to `[system prompt] + [summary marker] + recent
     /// tail` — the user-facing `/compact`. The summary text is produced by the caller
     /// (runtime → summarizer LLM); this method is a deterministic actor-local splice.
     /// The tail start skips leading `.tool` results so a tool_use/tool_result pair is
     /// never separated (both halves land in the compacted region together).
-    /// Returns (before, after) message counts, or nil when the history is too small for
-    /// compaction to help.
-    public func compactConversationHistory(summaryText: String, keepingRecentTurns: Int) -> (before: Int, after: Int)? {
+    public func compactConversationHistory(summaryText: String, keepingRecentTurns: Int) -> CompactionOutcome {
+        // Single-writer: never splice while the run loop is mid-tool-turn. The caller reaches this
+        // after an `await` (its summarizer LLM call), by which point Smith may have started a new
+        // tool turn; splicing then could orphan results appended when that turn resumes.
+        guard !isProcessingToolTurn else { return .toolTurnInFlight }
+
         let count = conversationHistory.count
         // system + summary + tail must actually shrink the history to be worth it.
-        guard count > keepingRecentTurns + 3 else { return nil }
+        guard count > keepingRecentTurns + 3 else { return .tooSmall }
 
         var tailStart = max(1, count - keepingRecentTurns)
         while tailStart < count, conversationHistory[tailStart].role == .tool {
@@ -830,13 +868,13 @@ public actor AgentActor {
             \(summaryText)
             """))
         compacted.append(contentsOf: conversationHistory[tailStart...])
-        guard compacted.count < count else { return nil }
+        guard compacted.count < count else { return .tooSmall }
 
         pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
         conversationHistory = compacted
         lastTurnMessageCount = conversationHistory.count
         pushLiveContext()
-        return (before: count, after: compacted.count)
+        return .compacted(before: count, after: compacted.count)
     }
 
     /// Marks the agent stopped WITHOUT cancelling or awaiting run-loop exit. For teardown
@@ -1541,6 +1579,14 @@ public actor AgentActor {
     }
 
     private func handleResponse(_ response: LLMResponse) async throws {
+        // Mark the whole append span in-flight so a reentrant `/clear` or `/compact` (which arrive
+        // as external actor calls at any of this method's `await` suspension points) defers rather
+        // than wiping/splicing history and orphaning results appended when this method resumes.
+        // Sequential run loop → never nested → a plain bool is correct. The `defer` clears it on
+        // every exit path (normal, thrown, self-terminate).
+        isProcessingToolTurn = true
+        defer { isProcessingToolTurn = false }
+
         // Post text to channel unless this agent's raw LLM output is suppressed.
         // Suppressed text is still stored in conversationHistory and visible in the inspector.
         if let text = response.text, !text.isEmpty, !configuration.suppressesRawTextToChannel {

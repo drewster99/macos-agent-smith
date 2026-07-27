@@ -277,10 +277,12 @@ struct SmithContextManagementTests {
         for index in 1...12 {
             await agent.appendUserMessage("message \(index)")
         }
+        // `appendUserMessage` now enqueues (single-writer invariant); drain at the loop boundary
+        // the way the run loop would, so the 12 messages are actually in history to compact.
+        await agent.drainPendingInjectedMessages()
 
-        let counts = await agent.compactConversationHistory(summaryText: "THE SUMMARY", keepingRecentTurns: 3)
-        #expect(counts?.before == 13)
-        #expect(counts?.after == 5, "system + summary + 3 recent turns")
+        let outcome = await agent.compactConversationHistory(summaryText: "THE SUMMARY", keepingRecentTurns: 3)
+        #expect(outcome == .compacted(before: 13, after: 5), "system + summary + 3 recent turns")
 
         let snapshot = await agent.contextSnapshot()
         #expect(snapshot[0].role == .system)
@@ -293,8 +295,9 @@ struct SmithContextManagementTests {
     func compactDeclinesSmallHistory() async {
         let agent = makeTestAgent()
         await agent.appendUserMessage("only one")
-        let counts = await agent.compactConversationHistory(summaryText: "S", keepingRecentTurns: 6)
-        #expect(counts == nil)
+        await agent.drainPendingInjectedMessages()
+        let outcome = await agent.compactConversationHistory(summaryText: "S", keepingRecentTurns: 6)
+        #expect(outcome == .tooSmall)
     }
 
     @Test("clearSmithContext resets a live Smith and re-briefs task state")
