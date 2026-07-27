@@ -18,13 +18,13 @@ struct TaskCreatedBanner: View {
     @State private var isContextExpanded = false
 
     private let accentColor = AppColors.taskCreatedAccent
-    private var hasContext: Bool { memoryCount > 0 || priorTaskCount > 0 }
-    private var hasScheduled: Bool { scheduledRunAt != nil }
-    /// Color used for the scheduled chip — matches the task list's `.scheduled` styling.
-    private var scheduledAccent: Color { TaskStatusBadge.color(for: .scheduled) }
 
     var body: some View {
-        VStack(spacing: 0) {
+        // Compute derived values once at body start
+        let _hasContext = memoryCount > 0 || priorTaskCount > 0
+        let _hasScheduled = scheduledRunAt != nil
+        
+        return VStack(spacing: 0) {
             // Top rule
             accentColor.frame(height: 1).opacity(0.4)
 
@@ -50,14 +50,14 @@ struct TaskCreatedBanner: View {
                 .foregroundStyle(.primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
-                .padding(.bottom, (description != nil || hasContext || hasScheduled) ? 2 : 6)
+                .padding(.bottom, (description != nil || _hasContext || _hasScheduled) ? 2 : 6)
 
             if let description {
                 MarkdownText(content: description, baseFont: AppFonts.channelBody.italic())
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 10)
-                    .padding(.bottom, (hasContext || hasScheduled) ? 2 : 6)
+                    .padding(.bottom, (_hasContext || _hasScheduled) ? 2 : 6)
             }
 
             // Scheduled-fire chip. Lives in its own band when there's no Context row;
@@ -67,7 +67,7 @@ struct TaskCreatedBanner: View {
             }
 
             // Semantic context retrieved at task creation
-            if hasContext {
+            if _hasContext {
                 TaskCreatedBannerContextSection(
                     memoryCount: memoryCount,
                     priorTaskCount: priorTaskCount,

@@ -248,12 +248,16 @@ struct ToolPathText: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Text(directory)
+        // Compute derived values once at body start
+        let _directory = directory
+        let _filename = filename
+        
+        return HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Text(_directory)
                 .font(AppFonts.channelBody)
                 .foregroundStyle(.secondary.opacity(0.7))
                 .lineLimit(1)
-            Text(filename)
+            Text(_filename)
                 .font(AppFonts.channelBody.bold())
                 .foregroundStyle(AppColors.toolPathFilename)
                 .lineLimit(1)
@@ -275,7 +279,11 @@ struct FileWritePathView: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
+        // Compute derived values once at body start
+        let _url = url
+        let _symlinkDestination = symlinkDestination
+        
+        return HStack(alignment: .firstTextBaseline, spacing: 4) {
             ToolNameChip(name: "file_write")
             Button(action: { openInFinder() }, label: {
                 ToolPathText(path: path)
@@ -283,7 +291,7 @@ struct FileWritePathView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Reveal \(path) in Finder")
 
-            if let dest = symlinkDestination {
+            if let dest = _symlinkDestination {
                 Text(" \u{2192} ")
                     .font(AppFonts.channelBody)
                     .foregroundStyle(.secondary)
