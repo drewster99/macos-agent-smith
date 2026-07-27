@@ -321,6 +321,15 @@ public actor AgentActor {
     /// Used to ensure task_complete messages get their own focused LLM turn.
     private var deferredMessages: [ChannelMessage] = []
 
+    /// External / asynchronous `.user` injections (`appendUserMessage`) are queued here rather
+    /// than appended straight to `conversationHistory`. The run loop is the SOLE writer of
+    /// `conversationHistory`; it drains this queue at the top of the loop — a boundary where the
+    /// previous turn is always complete — so an injection can never land between an assistant
+    /// `tool_calls` message and its `tool_result`s. A concurrent writer (e.g. the
+    /// TaskValidationCoordinator informing Smith while he was parked in a long `save_memory`
+    /// call) splicing here was the cause of the "tool_call_id did not have response messages" 400s.
+    private var pendingInjectedMessages: [LLMMessage] = []
+
     /// When true, the agent acknowledges its assigned task on its first turn — as a runtime
     /// side effect, WITHOUT an LLM round-trip and WITHOUT a callable tool. Acknowledgement moves
     /// the task to `.running`, bumps the ack counter, and privately notifies Smith.
@@ -427,9 +436,10 @@ public actor AgentActor {
     /// transcript row, and stays symmetric with `rebuildContextFromTask` (which already
     /// seeds Brown's history from the task store on the rebuild path).
     public func appendUserMessage(_ text: String) {
-        conversationHistory.append(.user(text))
+        // Single-writer invariant: enqueue, never splice directly (see `pendingInjectedMessages`).
+        // The run loop drains this at a turn boundary; `pushLiveContext` happens on drain.
+        pendingInjectedMessages.append(.user(text))
         hasUnprocessedInput = true
-        pushLiveContext()
     }
 
     /// Same as `appendUserMessage(_:)` but also injects image attachments as inline
@@ -470,11 +480,32 @@ public actor AgentActor {
             body += "\n" + assembled.referenceLines.joined(separator: "\n")
         }
         if assembled.images.isEmpty && assembled.documents.isEmpty {
-            conversationHistory.append(.user(body))
+            pendingInjectedMessages.append(.user(body))
         } else {
-            conversationHistory.append(.user(body, images: assembled.images, documents: assembled.documents))
+            pendingInjectedMessages.append(.user(body, images: assembled.images, documents: assembled.documents))
         }
         hasUnprocessedInput = true
+    }
+
+    /// True when the last message is an assistant carrying `tool_calls` whose `tool_result`s
+    /// haven't been appended yet — splicing anything after it would orphan the tool call.
+    private var lastTurnAwaitsToolResults: Bool {
+        guard let last = conversationHistory.last else { return false }
+        switch last.content {
+        case .toolCalls: return true
+        case .mixed(_, let calls): return !calls.isEmpty
+        default: return false
+        }
+    }
+
+    /// Drains queued external injections into `conversationHistory`. Called by the run loop at
+    /// the top of the iteration, where the previous turn is complete. The tool-results guard is
+    /// belt-and-suspenders: at the loop top the last message is never an unanswered assistant
+    /// tool-call, but if that ever changes, defer to the next iteration rather than splice.
+    private func drainPendingInjectedMessages() {
+        guard !pendingInjectedMessages.isEmpty, !lastTurnAwaitsToolResults else { return }
+        conversationHistory.append(contentsOf: pendingInjectedMessages)
+        pendingInjectedMessages.removeAll()
         pushLiveContext()
     }
 
@@ -730,6 +761,8 @@ public actor AgentActor {
     public func resetConversationHistory(orientation: String?) {
         pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
         conversationHistory = [.system(configuration.systemPrompt)]
+        // Drop queued injections that belonged to the pre-clear context.
+        pendingInjectedMessages.removeAll()
         if let orientation, !orientation.isEmpty {
             conversationHistory.append(.user(orientation))
         }
@@ -1060,6 +1093,7 @@ public actor AgentActor {
             }
 
             drainPendingMessages()
+            drainPendingInjectedMessages()
             await drainQueuedNotifications()
             checkBrownSilenceNudge()
             await checkSmithDigest()
