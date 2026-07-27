@@ -227,9 +227,17 @@ extension OrchestrationRuntime {
             }
         }
 
-        // Record against the snapshot we judged; any criterion whose contract changed mid-round is
-        // dropped atomically inside the store, so `recorded` is what actually landed in the ledger.
-        let recorded = await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria)
+        // A cancelled run must not write at all. `EvaluationRunner` surfaces cancellation as a
+        // RETURNED value rather than a throw, so the loop above happily built real `.error` records
+        // for a run that no longer owns this task; the `Task.isCancelled` guard below sits after the
+        // write and is too late to help. Cheap first line of defence — the store's round guard is
+        // the one that actually makes this safe.
+        guard !Task.isCancelled else { return }
+
+        // Record against the snapshot we judged; any criterion whose contract changed mid-round, and
+        // any record from a superseded run, is dropped atomically inside the store — so `recorded` is
+        // what actually landed in the ledger.
+        let recorded = await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria, round: round)
         await postRoundSummary(taskID: taskID, records: recorded)
 
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
@@ -270,7 +278,12 @@ extension OrchestrationRuntime {
             // criterion was edited mid-round) didn't settle anything, so counting it would wrongly
             // reset the stall counter and let a non-converging task spin.
             let progressed = recorded.contains { $0.verdict.isFinal }
-            let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed)
+            // nil means the task or its ledger vanished under us — abandon the round rather than
+            // act on a fabricated stall count, exactly like the two world-moved guards above.
+            guard let stallRounds = await taskStore.updateValidationStall(id: taskID, progressed: progressed) else {
+                validationLogger.warning("Validation round abandoned: task or ledger disappeared before the stall update")
+                return
+            }
             if stallRounds >= maxConsecutiveValidationRoundsWithoutProgress {
                 await failValidation(
                     taskID: taskID,
@@ -1172,7 +1185,7 @@ extension OrchestrationRuntime {
             await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
                 CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
                                        validatorName: "user override", validatorHash: "-", round: round)
-            }, judgedAgainst: task.acceptanceCriteria)
+            }, judgedAgainst: task.acceptanceCriteria, round: round)
             await taskStore.addUpdate(id: taskID, message: "Accepted by the user, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).")
         }
     }

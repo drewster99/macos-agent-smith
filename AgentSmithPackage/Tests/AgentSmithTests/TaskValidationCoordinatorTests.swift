@@ -101,7 +101,7 @@ struct TaskValidationCoordinatorTests {
         _ = await store.beginValidationRound(id: task.id)
         await store.recordCriterionVerdicts(id: task.id, records: [
             CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "wrongly rejected"), validatorName: "default", validatorHash: "x", round: 1)
-        ], judgedAgainst: [criterion])
+        ], judgedAgainst: [criterion], round: 1)
         await store.updateStatus(id: task.id, status: .awaitingReview)
         return (await store.task(id: task.id) ?? task, criterion)
     }

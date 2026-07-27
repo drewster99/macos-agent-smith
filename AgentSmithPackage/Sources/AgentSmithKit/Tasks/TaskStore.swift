@@ -737,9 +737,7 @@ public actor TaskStore {
         var changedIDs: Set<UUID> = []
         for criterion in criteria {
             if let previous = previousByID[criterion.id] {
-                if previous.validationPrompt != criterion.validationPrompt
-                    || previous.inputEnumeratorPrompt != criterion.inputEnumeratorPrompt
-                    || previous.waivable != criterion.waivable {
+                if !criterion.statesSameContract(as: previous) {
                     changedIDs.insert(criterion.id)
                 }
             } else {
@@ -928,9 +926,14 @@ public actor TaskStore {
     /// Records whether a rejection round made progress (settled anything new). Returns
     /// the updated consecutive-stall count: 0 after a progressing round, incremented
     /// after a stalled one. The coordinator fails the task when this hits its limit.
-    public func updateValidationStall(id: UUID, progressed: Bool) -> Int {
-        guard var task = tasks[id] else { return 0 }
-        var validation = task.validation ?? TaskValidationState()
+    ///
+    /// `nil` when the task is gone (a Stop-then-Delete can land between the coordinator reading the
+    /// task and this call) or when it has no ledger — the caller abandons the round rather than
+    /// acting on a fabricated number. Returning `0` for those meant returning the value that also
+    /// means "progress was made", and synthesizing a ledger meant a task with no validation history
+    /// acquired one whose entire content was a stall count.
+    public func updateValidationStall(id: UUID, progressed: Bool) -> Int? {
+        guard var task = tasks[id], var validation = task.validation else { return nil }
         let updated = progressed ? 0 : (validation.consecutiveStallRounds ?? 0) + 1
         validation.consecutiveStallRounds = updated
         task.validation = validation
@@ -948,15 +951,21 @@ public actor TaskStore {
     /// live criteria, so it's atomic against a concurrent edit. Dropped criteria stay unjudged and are
     /// re-judged against the new contract next round. Returns the records actually recorded.
     @discardableResult
-    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord], judgedAgainst: [AcceptanceCriterion]) -> [CriterionVerdictRecord] {
+    public func recordCriterionVerdicts(id: UUID, records: [CriterionVerdictRecord], judgedAgainst: [AcceptanceCriterion], round: Int) -> [CriterionVerdictRecord] {
         guard var task = tasks[id], !records.isEmpty else { return [] }
+        // Round guard, checked HERE for the same reason the contract filter below is: this actor
+        // owns the truth, so the check is atomic against whatever moved while the caller was awaiting
+        // an LLM. A validation run that was cancelled and superseded (performStopAll clears the
+        // reentrancy guard without awaiting in-flight runs, and a restart re-enqueues .validating
+        // tasks) otherwise appends its stale verdict AFTER the live run's fresh one — and both
+        // readers select by array position, so the stale record wins. Dropped records leave their
+        // criteria unjudged and are re-judged next round; no evidence is lost.
+        guard round == (task.validation?.round ?? 0) else { return [] }
         let judgedByID = Dictionary(judgedAgainst.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let currentByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let fresh = records.filter { record in
             guard let judged = judgedByID[record.criterionID], let current = currentByID[record.criterionID] else { return false }
-            return current.validationPrompt == judged.validationPrompt
-                && current.inputEnumeratorPrompt == judged.inputEnumeratorPrompt
-                && current.waivable == judged.waivable
+            return current.statesSameContract(as: judged)
         }
         guard !fresh.isEmpty else { return [] }
         var validation = task.validation ?? TaskValidationState()

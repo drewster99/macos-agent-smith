@@ -72,10 +72,18 @@ struct TaskDetailWindow: View {
             origin = .user
         }
 
+        /// `nil` only when the row carries no name — a genuinely empty row the user never filled in.
+        ///
+        /// An empty `validationPrompt` is NOT a reason to drop the row: that is exactly the shape of
+        /// the implicit criterion materialized for a criterion-less task, and dropping it meant
+        /// opening this editor on such a task and saving WITHOUT CHANGING ANYTHING silently deleted
+        /// the criterion — which then wiped the entire verdict ledger via `setAcceptanceCriteria`'s
+        /// no-longer-present filter, and reset the round and stall counters. Preserving the empty
+        /// prompt round-trips the criterion unchanged and keeps it on the default validator.
         func built() -> AcceptanceCriterion? {
             let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty else { return nil }
             let trimmedValidationPrompt = validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedName.isEmpty, !trimmedValidationPrompt.isEmpty else { return nil }
             let trimmedEnumeratorPrompt = inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             return AcceptanceCriterion(
                 id: id,

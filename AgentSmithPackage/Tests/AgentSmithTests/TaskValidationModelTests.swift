@@ -231,7 +231,7 @@ struct TaskValidationModelTests {
         await store.recordCriterionVerdicts(id: task.id, records: [
             CriterionVerdictRecord(criterionID: criterionA.id, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1),
             CriterionVerdictRecord(criterionID: criterionB.id, verdict: .rejected(reason: "nope"), validatorName: "d", validatorHash: "h", round: 1)
-        ], judgedAgainst: [criterionA, criterionB])
+        ], judgedAgainst: [criterionA, criterionB], round: 1)
 
         var validation = await store.task(id: task.id)!.validation!
         #expect(validation.settledCriterionIDs() == [criterionA.id])

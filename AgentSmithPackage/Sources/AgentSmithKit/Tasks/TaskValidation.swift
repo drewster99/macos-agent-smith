@@ -34,6 +34,24 @@ public struct AcceptanceCriterion: Codable, Sendable, Equatable, Identifiable {
     public var inputEnumeratorPrompt: String?
     /// The active enumerator instruction. Nil, empty, and whitespace-only values all
     /// mean that this criterion is a single validation check.
+    /// Whether `other` puts the SAME question to the judge — the single definition of "this
+    /// criterion changed", shared by `setAcceptanceCriteria` (which verdicts to retire) and
+    /// `recordCriterionVerdicts` (which mid-round verdicts may land). Those were two hand-copied
+    /// three-field comparisons 200 lines apart that had to agree forever.
+    ///
+    /// `name` counts ONLY for a default-validated criterion, because that is exactly when the name
+    /// IS the judging instruction — `composeValidatorSystemPrompt` renders `criterion.text` as the
+    /// validation instructions for the default validator, while an authored prompt is told the name
+    /// is display-only. Comparing it unconditionally would discard a sticky ACCEPT on a cosmetic
+    /// rename, and `validatorHash` cannot catch the default-validator case because the shipped
+    /// definition's hash is identical across renames.
+    public func statesSameContract(as other: AcceptanceCriterion) -> Bool {
+        validationPrompt == other.validationPrompt
+            && inputEnumeratorPrompt == other.inputEnumeratorPrompt
+            && waivable == other.waivable
+            && (!usesDefaultValidator || name == other.name)
+    }
+
     public var effectiveInputEnumeratorPrompt: String? {
         guard let trimmed = inputEnumeratorPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else { return nil }
@@ -291,7 +309,7 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
     public var verdictRecords: [CriterionVerdictRecord]
     /// Consecutive rejection rounds in which NOTHING newly settled. This — not the
     /// absolute round count — is the convergence test: 50 criteria may take many rounds
-    /// while progressing, but three straight rounds with zero new acceptances means the
+    /// while progressing, but enough straight rounds with zero new acceptances means the
     /// worker and validator disagree irreconcilably and the task FAILS (never parked on
     /// Smith). Optional so records written before the field decode unchanged.
     public var consecutiveStallRounds: Int?
