@@ -901,75 +901,110 @@ private struct MessageRow: View, Equatable {
     }
 
     var body: some View {
+        // Compute all derived values once at the start of body, before any View construction.
+        // This ensures expensive operations happen exactly once per body evaluation, not
+        // repeatedly during View tree construction. The @State caches with cacheValid flag
+        // prevent recomputation when message is unchanged between renders.
+        let _senderColor = senderColor
+        let _recipientColor = recipientColor
+        let _hidesPrivateRecipientAnnotation = hidesPrivateRecipientAnnotation
+        let _shouldShowTimestamp = shouldShowTimestamp
+        let _isToolRequest = isToolRequest
+        let _toolCallElapsedSeconds = toolCallElapsedSeconds
+        let _isFileWrite = isFileWrite
+        let _parallelBadge = parallelBadge
+        let _dispositionComment = dispositionComment
+        let _dispositionCommentColor = dispositionCommentColor
+        let _effectiveDiffLines = effectiveDiffLines
+        let _effectiveToolFilePath = effectiveToolFilePath
+        let _effectiveFileEditStrings = effectiveFileEditStrings
+        let _fileEditFailed = fileEditFailed
+        let _isFileRead = isFileRead
+        let _toolCallDisplayText = toolCallDisplayText
+        let _remainderWithoutPath = remainderWithoutPath
+        let _isToolOutput = isToolOutput
+        let _isSecurityReview = isSecurityReview
+        let _securityReviewColor = securityReviewColor
+        let _defaultMaxLines = defaultMaxLines
+        let _effectiveSplitLines = effectiveSplitLines
+        let _isSummarizerMessage = isSummarizerMessage
+        let _attachmentTier = attachmentTier
+        let _isErrorMessage = isErrorMessage
+        let _isSmithToUser = isSmithToUser
+        let _securityDisposition = securityDisposition
+        let _dispositionIndicator = dispositionIndicator
+        let _dispositionTooltipText = dispositionTooltipText
+        let _securityReviewPopoverText = securityReviewPopoverText
+        
         VStack(alignment: .leading, spacing: 2) {
             MessageRowSenderHeader(
                 message: message,
-                senderColor: senderColor,
-                recipientColor: recipientColor,
-                hidesPrivateRecipientAnnotation: hidesPrivateRecipientAnnotation,
-                shouldShowTimestamp: shouldShowTimestamp,
-                isToolRequest: isToolRequest,
+                senderColor: _senderColor,
+                recipientColor: _recipientColor,
+                hidesPrivateRecipientAnnotation: _hidesPrivateRecipientAnnotation,
+                shouldShowTimestamp: _shouldShowTimestamp,
+                isToolRequest: _isToolRequest,
                 displayPrefs: displayPrefs,
-                toolCallElapsedSeconds: toolCallElapsedSeconds
+                toolCallElapsedSeconds: _toolCallElapsedSeconds
             )
 
-            if isToolRequest {
-                if isFileWrite {
+            if _isToolRequest {
+                if _isFileWrite {
                     FileWriteRequestBodyView(
                         message: message,
                         toolOutputMessage: toolOutputMessage,
-                        parallelBadge: parallelBadge,
-                        dispositionComment: dispositionComment,
-                        dispositionCommentColor: dispositionCommentColor,
-                        effectiveDiffLines: effectiveDiffLines,
+                        parallelBadge: _parallelBadge,
+                        dispositionComment: _dispositionComment,
+                        dispositionCommentColor: _dispositionCommentColor,
+                        effectiveDiffLines: _effectiveDiffLines,
                         collapsedErrorPreview: collapsedErrorPreview,
                         isExpanded: $isExpanded
                     ) {
                         SecurityDispositionControlView(
-                            dispositionIndicator: dispositionIndicator,
-                            dispositionTooltipText: dispositionTooltipText,
-                            dispositionCommentColor: dispositionCommentColor,
-                            securityReviewPopoverText: securityReviewPopoverText
+                            dispositionIndicator: _dispositionIndicator,
+                            dispositionTooltipText: _dispositionTooltipText,
+                            dispositionCommentColor: _dispositionCommentColor,
+                            securityReviewPopoverText: _securityReviewPopoverText
                         )
                     }
                 } else {
                     GenericToolRequestBodyView(
                         message: message,
                         toolOutputMessage: toolOutputMessage,
-                        parallelBadge: parallelBadge,
-                        effectiveToolFilePath: effectiveToolFilePath,
-                        dispositionComment: dispositionComment,
-                        dispositionCommentColor: dispositionCommentColor,
-                        effectiveFileEditStrings: effectiveFileEditStrings,
-                        fileEditFailed: fileEditFailed,
-                        isFileRead: isFileRead,
-                        toolCallDisplayText: toolCallDisplayText,
-                        remainderWithoutPath: remainderWithoutPath,
+                        parallelBadge: _parallelBadge,
+                        effectiveToolFilePath: _effectiveToolFilePath,
+                        dispositionComment: _dispositionComment,
+                        dispositionCommentColor: _dispositionCommentColor,
+                        effectiveFileEditStrings: _effectiveFileEditStrings,
+                        fileEditFailed: _fileEditFailed,
+                        isFileRead: _isFileRead,
+                        toolCallDisplayText: _toolCallDisplayText,
+                        remainderWithoutPath: _remainderWithoutPath,
                         collapsedErrorPreview: collapsedErrorPreview,
                         openFileOrFallback: openFileOrFallback,
                         isExpanded: $isExpanded
                     ) {
                         SecurityDispositionControlView(
-                            dispositionIndicator: dispositionIndicator,
-                            dispositionTooltipText: dispositionTooltipText,
-                            dispositionCommentColor: dispositionCommentColor,
-                            securityReviewPopoverText: securityReviewPopoverText
+                            dispositionIndicator: _dispositionIndicator,
+                            dispositionTooltipText: _dispositionTooltipText,
+                            dispositionCommentColor: _dispositionCommentColor,
+                            securityReviewPopoverText: _securityReviewPopoverText
                         )
                     }
                 }
-            } else if isToolOutput {
+            } else if _isToolOutput {
                 // Standalone tool output (no parent tool_request found — edge case)
                 StandaloneToolOutputView(message: message, isExpanded: $isExpanded)
-            } else if isSecurityReview {
+            } else if _isSecurityReview {
                 // Standalone security review (no parent tool_request found — edge case)
                 MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
-                    .foregroundStyle(securityReviewColor)
-            } else if let maxLines = defaultMaxLines {
+                    .foregroundStyle(_securityReviewColor)
+            } else if let maxLines = _defaultMaxLines {
                 CollapsibleMessageBodyView(
                     message: message,
-                    effectiveSplitLines: effectiveSplitLines,
+                    effectiveSplitLines: _effectiveSplitLines,
                     isExpanded: isExpanded,
-                    isSummarizerMessage: isSummarizerMessage,
+                    isSummarizerMessage: _isSummarizerMessage,
                     maxLines: maxLines,
                     isExpandedBinding: $isExpanded
                 )
@@ -982,7 +1017,7 @@ private struct MessageRow: View, Equatable {
                 ForEach(message.attachments) { attachment in
                     AttachmentView(
                         attachment: attachment,
-                        tier: attachmentTier,
+                        tier: _attachmentTier,
                         onTapImage: {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 selectedImageAttachment = attachment
@@ -996,9 +1031,9 @@ private struct MessageRow: View, Equatable {
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background({
-            if isErrorMessage { return AppColors.errorBackground }
-            if isSmithToUser { return AppColors.smithToUserBackground }
-            switch securityDisposition {
+            if _isErrorMessage { return AppColors.errorBackground }
+            if _isSmithToUser { return AppColors.smithToUserBackground }
+            switch _securityDisposition {
             case "warning", "denied": return AppColors.warningRowBackground
             case "abort": return AppColors.errorBackground
             default: break
