@@ -901,40 +901,176 @@ private struct MessageRow: View, Equatable {
     }
 
     var body: some View {
-        // Compute all derived values once at the start of body, before any View construction.
-        // This ensures expensive operations happen exactly once per body evaluation, not
-        // repeatedly during View tree construction. The @State caches with cacheValid flag
-        // prevent recomputation when message is unchanged between renders.
-        let _senderColor = senderColor
-        let _recipientColor = recipientColor
-        let _hidesPrivateRecipientAnnotation = hidesPrivateRecipientAnnotation
-        let _shouldShowTimestamp = shouldShowTimestamp
-        let _isToolRequest = isToolRequest
-        let _toolCallElapsedSeconds = toolCallElapsedSeconds
-        let _isFileWrite = isFileWrite
-        let _parallelBadge = parallelBadge
-        let _dispositionComment = dispositionComment
-        let _dispositionCommentColor = dispositionCommentColor
-        let _effectiveDiffLines = effectiveDiffLines
-        let _effectiveToolFilePath = effectiveToolFilePath
-        let _effectiveFileEditStrings = effectiveFileEditStrings
-        let _fileEditFailed = fileEditFailed
-        let _isFileRead = isFileRead
-        let _toolCallDisplayText = toolCallDisplayText
-        let _remainderWithoutPath = remainderWithoutPath
-        let _isToolOutput = isToolOutput
-        let _isSecurityReview = isSecurityReview
-        let _securityReviewColor = securityReviewColor
-        let _defaultMaxLines = defaultMaxLines
-        let _effectiveSplitLines = effectiveSplitLines
-        let _isSummarizerMessage = isSummarizerMessage
-        let _attachmentTier = attachmentTier
-        let _isErrorMessage = isErrorMessage
-        let _isSmithToUser = isSmithToUser
-        let _securityDisposition = securityDisposition
-        let _dispositionIndicator = dispositionIndicator
-        let _dispositionTooltipText = dispositionTooltipText
-        let _securityReviewPopoverText = securityReviewPopoverText
+        // Compute all derived values INLINE at body start - no computed property accessors
+        // Expensive ops use @State caches (cacheValid), simple ops compute directly
+        
+        let _senderColor = AppColors.color(for: message.sender)
+        let _recipientColor: Color = {
+            guard let recipient = message.recipient else { return .secondary }
+            switch recipient {
+            case .agent(let role): return AppColors.color(for: .agent(role))
+            case .user: return AppColors.color(for: .user)
+            }
+        }()
+        let _hidesPrivateRecipientAnnotation: Bool = {
+            if case .user = message.sender { return true }
+            if case .user = message.recipient { return true }
+            return false
+        }()
+        let _shouldShowTimestamp: Bool = {
+            let messageKind = message.stringMetadata("messageKind")
+            let isToolRequest = messageKind == "tool_request"
+            if isToolRequest { return displayPrefs.toolCalls }
+            if case .system = message.sender { return displayPrefs.systemMessages }
+            return displayPrefs.messaging
+        }()
+        let _isToolRequest: Bool = message.stringMetadata("messageKind") == "tool_request"
+        let _toolCallElapsedSeconds: TimeInterval? = {
+            guard let output = toolOutputMessage else { return nil }
+            let elapsed = output.timestamp.timeIntervalSince(message.timestamp)
+            return elapsed >= 0 ? elapsed : nil
+        }()
+        let _isFileWrite = message.stringMetadata("tool") == "file_write"
+        let _parallelBadge: String? = {
+            guard case .int(let count) = message.metadata?["parallelCount"], count > 1,
+                  case .int(let index) = message.metadata?["parallelIndex"] else { return nil }
+            return "\(index + 1)/\(count)"
+        }()
+        let _dispositionComment: String? = {
+            guard let review = securityReviewMessage,
+                  case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
+            switch d {
+            case "autoApproved": return nil
+            case "warning", "denied", "abort":
+                if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
+                    return msg
+                }
+                return nil
+            default: return nil
+            }
+        }()
+        let _dispositionCommentColor: Color = {
+            guard let review = securityReviewMessage,
+                  case .string(let d) = review.metadata?["securityDisposition"] else { return .secondary }
+            switch d {
+            case "autoApproved": return AppColors.securityApproved
+            case "warning": return AppColors.securityWarning
+            case "denied": return AppColors.securityDenied
+            case "abort": return AppColors.securityAbort
+            default: return .secondary
+            }
+        }()
+        let _effectiveDiffLines: [DiffLine]? = cacheValid ? cachedDiffLines : Self.extractPrecomputedDiffLines(from: message)
+        let _effectiveToolFilePath: String? = cacheValid ? cachedToolFilePath : Self.extractToolFilePath(from: message)
+        let _effectiveFileEditStrings: FileEditStrings? = cacheValid ? cachedFileEditStrings : Self.extractFileEditStrings(from: message)
+        let _fileEditFailed: Bool = {
+            guard let output = toolOutputMessage else { return false }
+            let content = output.content.trimmingCharacters(in: .whitespaces)
+            return !content.hasPrefix("Successfully")
+        }()
+        let _isFileRead = message.stringMetadata("tool") == "file_read"
+        let _toolCallDisplayText: String = {
+            let toolCallTruncationLimit = 200
+            let isTruncatable = message.content.count > toolCallTruncationLimit
+            if !isTruncatable || isExpanded { return message.content }
+            return String(message.content.prefix(toolCallTruncationLimit)) + "…"
+        }()
+        let _remainderWithoutPath: String = {
+            guard let path = _effectiveToolFilePath else { return "" }
+            let displayText = _toolCallDisplayText
+            let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
+            var text = displayText
+            if text.hasPrefix(toolName) {
+                text = String(text.dropFirst(toolName.count))
+                if text.hasPrefix(": ") { text = String(text.dropFirst(2)) }
+            }
+            text = text.replacingOccurrences(of: path, with: "")
+            text = text.replacingOccurrences(of: ", ,", with: ",")
+            return text.trimmingCharacters(in: CharacterSet(charactersIn: ", "))
+        }()
+        let _isToolOutput = message.stringMetadata("messageKind") == "tool_output"
+        let _isSecurityReview = message.metadata?["securityDisposition"] != nil
+        let _securityReviewColor: Color = {
+            guard let review = securityReviewMessage,
+                  case .string(let disposition) = review.metadata?["securityDisposition"] else { return .secondary }
+            switch disposition {
+            case "approved", "autoApproved": return AppColors.securityApproved
+            case "warning": return AppColors.securityWarning
+            case "denied": return AppColors.securityDenied
+            case "abort": return AppColors.securityAbort
+            default: return .secondary
+            }
+        }()
+        let _defaultMaxLines: Int? = {
+            let isSummarizer = message.sender == .agent(.summarizer)
+            let isSmithToBrown: Bool = {
+                guard case .agent(.smith) = message.sender else { return false }
+                guard case .agent(.brown) = message.recipient else { return false }
+                return true
+            }()
+            let isBrown: Bool = message.sender == .agent(.brown)
+            if isSummarizer { return 2 }
+            if isSmithToBrown || isBrown { return 5 }
+            return nil
+        }()
+        let _effectiveSplitLines = cacheValid ? cachedSplitLines : message.content.components(separatedBy: "\n")
+        let _isSummarizerMessage = message.sender == .agent(.summarizer)
+        let _attachmentTier: ImageCache.Tier = message.sender == .user ? .small : .medium
+        let _isErrorMessage: Bool = {
+            if case .bool(let value) = message.metadata?["isError"] { return value }
+            return false
+        }()
+        let _isSmithToUser: Bool = {
+            guard case .agent(.smith) = message.sender else { return false }
+            guard case .user = message.recipient else { return false }
+            return true
+        }()
+        let _securityDisposition: String? = {
+            guard let review = securityReviewMessage,
+                  case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
+            return d
+        }()
+        let _dispositionIndicator: String? = {
+            guard let review = securityReviewMessage,
+                  case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
+            switch d {
+            case "approved": return "\u{2705}"
+            case "autoApproved": return "\u{2699}\u{FE0F}"
+            case "warning": return "\u{26A0}\u{FE0F}"
+            case "denied": return "\u{1F6AB}"
+            case "abort": return "\u{1F6D1}"
+            case "cancelled": return nil
+            default: return nil
+            }
+        }()
+        let _dispositionTooltipText: String? = {
+            guard let review = securityReviewMessage,
+                  case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
+            switch d {
+            case "approved": return "Safety: Approved"
+            case "autoApproved":
+                if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
+                    return "Safety: Auto-approved — \(msg)"
+                }
+                return "Safety: Auto-approved"
+            case "warning": return "Safety: Warning"
+            case "denied": return "Safety: Denied"
+            case "abort": return "Safety: Abort triggered"
+            default: return nil
+            }
+        }()
+        let _securityReviewPopoverText: String? = {
+            guard let review = securityReviewMessage else { return nil }
+            if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
+                return msg
+            }
+            let content = review.content
+            if let colon = content.range(of: ": ") {
+                let tail = String(content[colon.upperBound...])
+                return tail.isEmpty ? content : tail
+            }
+            return content.isEmpty ? nil : content
+        }()
         
         VStack(alignment: .leading, spacing: 2) {
             MessageRowSenderHeader(
