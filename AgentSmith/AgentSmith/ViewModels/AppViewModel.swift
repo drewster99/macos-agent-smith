@@ -699,6 +699,8 @@ final class AppViewModel {
         // Worker-pool capacity ("Max simultaneous tasks" in Settings): applied at start
         // and pushed live on change.
         await newRuntime.setWorkerCapacity(shared.maxSimultaneousTasks)
+        // Compaction-diff debug capture (Debug menu toggle): applied at start, pushed live on change.
+        await newRuntime.setCompactionDiffCapture(enabled: shared.captureCompactionDiffs)
         // Apply later Settings changes to this session immediately (no restart). Re-registering on
         // each start() replaces any prior closure for this session.
         shared.registerToolSecurityObserver(session.id) { [weak self] in
@@ -708,6 +710,11 @@ final class AppViewModel {
             guard let self else { return }
             let capacity = self.shared.maxSimultaneousTasks
             Task { await self.runtime?.setWorkerCapacity(capacity) }
+        }
+        shared.registerCompactionDiffCaptureObserver(session.id) { [weak self] in
+            guard let self else { return }
+            let enabled = self.shared.captureCompactionDiffs
+            Task { await self.runtime?.setCompactionDiffCapture(enabled: enabled) }
         }
         // Auto-archive policy: push Settings changes to this session's store immediately (no
         // restart). The next task creation (or the next launch) then sweeps at the new cutoff.
@@ -880,6 +887,12 @@ final class AppViewModel {
         await newRuntime.setOnEvaluationRecorded { [weak self] record in
             Task { @MainActor [weak self] in
                 self?.inspectorStore.appendEvaluation(record)
+            }
+        }
+
+        await newRuntime.setOnCompactionCaptured { [weak self] capture in
+            Task { @MainActor [weak self] in
+                self?.appendCompactionCapture(capture)
             }
         }
 
@@ -1975,6 +1988,33 @@ final class AppViewModel {
         }
         let result = await runtime.compactSmithContext()
         // Local append for the same reason as clearConversation.
+        appendLocalSystemMessage(result)
+    }
+
+    // MARK: - Compaction diff capture (debug)
+
+    /// Captured compaction before/after snapshots for the Compaction Diff window — session-scoped,
+    /// newest last, capped. Populated only while the Debug capture toggle is on or after a forced
+    /// compaction. Kept in memory only (a debug aid, not persisted).
+    private(set) var compactionCaptures: [CompactionDiffCapture] = []
+    private static let compactionCaptureCap = 20
+
+    private func appendCompactionCapture(_ capture: CompactionDiffCapture) {
+        compactionCaptures.append(capture)
+        if compactionCaptures.count > Self.compactionCaptureCap {
+            compactionCaptures.removeFirst(compactionCaptures.count - Self.compactionCaptureCap)
+        }
+    }
+
+    /// Debug one-shot (Debug menu → "Compact Smith Now & Show Diff"): force a compaction now and
+    /// capture its diff regardless of the passive toggle. Returns once the capture has landed so
+    /// the caller can open the window on the freshest entry.
+    func forceCompactForDebug() async {
+        guard let runtime else {
+            appendLocalSystemMessage("System is not running — there is no agent context to compact.")
+            return
+        }
+        let result = await runtime.forceCompactSmithContextForDebug()
         appendLocalSystemMessage(result)
     }
 

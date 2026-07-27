@@ -176,6 +176,28 @@ struct AgentSmithApp: App {
                     "Show Timer Activity in Transcript",
                     isOn: Bindable(shared).showTimerActivityInTranscript
                 )
+
+                Toggle(
+                    "Capture Compaction Diffs (Debug)",
+                    isOn: Bindable(shared).captureCompactionDiffs
+                )
+
+                Button("Compaction Diffs\u{2026}") {
+                    if let id = shared.focusedSessionID ?? sessionManager.sessions.first?.id {
+                        openWindow(id: "compaction-diff", value: id)
+                    }
+                }
+                .disabled(sessionManager.sessions.isEmpty)
+
+                Button("Compact Smith Now & Show Diff") {
+                    guard let id = shared.focusedSessionID ?? sessionManager.sessions.first?.id,
+                          let vm = sessionManager.viewModel(for: id) else { return }
+                    Task { @MainActor in
+                        await vm.forceCompactForDebug()
+                        openWindow(id: "compaction-diff", value: id)
+                    }
+                }
+                .disabled(!sessionManager.isAnyRunning)
             }
         }
 
@@ -260,6 +282,19 @@ struct AgentSmithApp: App {
             }
         }
         .defaultSize(width: 720, height: 520)
+
+        WindowGroup("Compaction Diff", id: "compaction-diff", for: UUID.self) { $sessionID in
+            if let id = sessionID, let vm = sessionManager.viewModel(for: id) {
+                CompactionDiffWindow(viewModel: vm)
+            } else {
+                ContentUnavailableView(
+                    "Session Closed",
+                    systemImage: "questionmark.circle",
+                    description: Text("Open a session and try again.")
+                )
+            }
+        }
+        .defaultSize(width: 1120, height: 760)
 
         Settings {
             SettingsView(shared: shared, sessionManager: sessionManager)

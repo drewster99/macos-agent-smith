@@ -842,12 +842,27 @@ public actor AgentActor {
         case toolTurnInFlight
     }
 
+    /// Full before/after message arrays from the most recent compaction, stashed only when
+    /// `compactConversationHistory(…, captureSnapshots: true)` requested it (compaction-diff
+    /// debugging). Read-and-cleared by `takeLastCompactionSnapshots()`. Nil the rest of the time
+    /// so the debug artifact never lingers in a normal run's memory.
+    private var lastCompactionSnapshots: (before: [LLMMessage], after: [LLMMessage])?
+
     /// Splices the conversation down to `[system prompt] + [summary marker] + recent
     /// tail` — the user-facing `/compact`. The summary text is produced by the caller
     /// (runtime → summarizer LLM); this method is a deterministic actor-local splice.
     /// The tail start skips leading `.tool` results so a tool_use/tool_result pair is
     /// never separated (both halves land in the compacted region together).
-    public func compactConversationHistory(summaryText: String, keepingRecentTurns: Int) -> CompactionOutcome {
+    ///
+    /// When `captureSnapshots` is true, stashes the exact pre- and post-splice histories for
+    /// `takeLastCompactionSnapshots()`. Capturing HERE (not from a caller-side snapshot) is what
+    /// makes a compaction-diff accurate: the caller's earlier snapshot goes stale across its
+    /// summarizer `await`, during which the agent may append more turns.
+    public func compactConversationHistory(
+        summaryText: String,
+        keepingRecentTurns: Int,
+        captureSnapshots: Bool = false
+    ) -> CompactionOutcome {
         // Single-writer: never splice while the run loop is mid-tool-turn. The caller reaches this
         // after an `await` (its summarizer LLM call), by which point Smith may have started a new
         // tool turn; splicing then could orphan results appended when that turn resumes.
@@ -870,11 +885,21 @@ public actor AgentActor {
         compacted.append(contentsOf: conversationHistory[tailStart...])
         guard compacted.count < count else { return .tooSmall }
 
+        if captureSnapshots {
+            lastCompactionSnapshots = (before: conversationHistory, after: compacted)
+        }
         pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
         conversationHistory = compacted
         lastTurnMessageCount = conversationHistory.count
         pushLiveContext()
         return .compacted(before: count, after: compacted.count)
+    }
+
+    /// Returns and clears the snapshots stashed by the most recent `captureSnapshots: true`
+    /// compaction. Nil if none is pending.
+    public func takeLastCompactionSnapshots() -> (before: [LLMMessage], after: [LLMMessage])? {
+        defer { lastCompactionSnapshots = nil }
+        return lastCompactionSnapshots
     }
 
     /// Marks the agent stopped WITHOUT cancelling or awaiting run-loop exit. For teardown

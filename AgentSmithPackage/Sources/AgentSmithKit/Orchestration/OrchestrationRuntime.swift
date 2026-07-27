@@ -158,6 +158,14 @@ public actor OrchestrationRuntime {
     private var onEvaluationRecorded: (@Sendable (EvaluationRecord) -> Void)?
     /// Callback fired when an agent's conversation history changes, for live inspector updates.
     private var onContextChanged: (@Sendable (AgentInstanceRef, [LLMMessage]) -> Void)?
+    /// When true, every compaction stashes its exact pre-/post-splice histories and emits a
+    /// `CompactionDiffCapture` through `onCompactionCaptured`. A debug-only aid, off by default;
+    /// a forced compaction captures regardless. Set from the app's Debug → "Capture compaction
+    /// diffs" toggle via `setCompactionDiffCapture(enabled:)`.
+    private var captureCompactionDiffsEnabled = false
+    /// Fired when a compaction is captured (see `captureCompactionDiffsEnabled`). The app layer
+    /// appends the capture to the session's Compaction Diff window buffer.
+    private var onCompactionCaptured: (@Sendable (CompactionDiffCapture) -> Void)?
     /// Optional hook the app layer wires to surface timer events as system messages in the
     /// channel transcript when the user has the Debug → Show Timer Activity toggle on. Async
     /// because the app layer may need to hop to MainActor to read the user-defaults flag.
@@ -535,7 +543,7 @@ public actor OrchestrationRuntime {
         guard let smithAgent = supervisor.firstHandle(role: .smith)?.agent else { return }
         let messageCount = await smithAgent.contextSnapshot().count
         guard messageCount > Self.smithAutoCompactMessageThreshold else { return }
-        let result = await compactSmithContext()
+        let result = await compactSmithContext(trigger: .auto)
         stopLogger.notice("Auto-compact after task termination: \(result, privacy: .public)")
         await channel.post(ChannelMessage(
             sender: .system,
@@ -549,10 +557,15 @@ public actor OrchestrationRuntime {
     /// Uses the Summarizer's provider when configured (a compaction summary is exactly
     /// its job, and it's typically a cheaper model), falling back to Smith's own.
     /// Returns a user-facing result line for the transcript.
-    public func compactSmithContext() async -> String {
+    ///
+    /// `trigger` records what initiated the compaction for the debug capture. When
+    /// compaction-diff capture is enabled (or the trigger is `.forcedDebug`), the exact
+    /// pre-/post-splice histories are emitted through `onCompactionCaptured`.
+    public func compactSmithContext(trigger: CompactionDiffCapture.Trigger = .manual) async -> String {
         guard let smith = supervisor.firstHandle(role: .smith)?.agent else {
             return "System is not running — there is no agent context to compact."
         }
+        let captureThisCompaction = captureCompactionDiffsEnabled || trigger == .forcedDebug
         let snapshot = await smith.contextSnapshot()
         guard snapshot.count > Self.compactionRecentTurnsKept + 3 else {
             return "Smith's context is only \(snapshot.count) message(s) — nothing to compact."
@@ -612,15 +625,33 @@ public actor OrchestrationRuntime {
         }
         switch await smith.compactConversationHistory(
             summaryText: summary,
-            keepingRecentTurns: Self.compactionRecentTurnsKept
+            keepingRecentTurns: Self.compactionRecentTurnsKept,
+            captureSnapshots: captureThisCompaction
         ) {
         case .compacted(let before, let after):
+            if captureThisCompaction, let snapshots = await smith.takeLastCompactionSnapshots() {
+                onCompactionCaptured?(CompactionDiffCapture(
+                    id: UUID(),
+                    capturedAt: Date(),
+                    agentRole: .smith,
+                    trigger: trigger,
+                    before: snapshots.before,
+                    after: snapshots.after
+                ))
+            }
             return "Smith's context compacted: \(before) → \(after) messages."
         case .tooSmall:
             return "Smith's context is already compact — nothing was changed."
         case .toolTurnInFlight:
             return "Smith is mid-task — compaction was skipped to avoid corrupting an in-flight tool call. Try /compact again once Smith is idle."
         }
+    }
+
+    /// Debug one-shot: force a compaction of Smith's context right now and capture its diff,
+    /// regardless of the passive capture toggle. Surfaced via the Debug menu. Returns the same
+    /// user-facing result line as `/compact` (including the "mid-task, skipped" case).
+    public func forceCompactSmithContextForDebug() async -> String {
+        await compactSmithContext(trigger: .forcedDebug)
     }
 
     /// A short re-briefing injected after `/clear` so Smith isn't amnesiac about live
@@ -1570,6 +1601,17 @@ public actor OrchestrationRuntime {
 
     public func setOnLearnedModelOutputLimit(_ handler: @escaping @Sendable (String, String, Int) -> Void) {
         onLearnedModelOutputLimit = handler
+    }
+
+    /// Enables/disables passive compaction-diff capture (Debug menu). A forced compaction
+    /// captures regardless of this flag.
+    public func setCompactionDiffCapture(enabled: Bool) {
+        captureCompactionDiffsEnabled = enabled
+    }
+
+    /// Registers a callback fired when a compaction is captured for the diff window.
+    public func setOnCompactionCaptured(_ handler: @escaping @Sendable (CompactionDiffCapture) -> Void) {
+        onCompactionCaptured = handler
     }
 
     /// Registers a callback fired when a security evaluation is recorded.

@@ -13,6 +13,8 @@ enum AppColors {
     static let systemMessage = Color.gray
     static let background = Color(.windowBackgroundColor)
     static let secondaryBackground = Color(.controlBackgroundColor)
+    /// Selection tint for list rows in secondary/utility windows.
+    static let selectedRowBackground = Color.accentColor.opacity(0.15)
 
     // Structured result deliverables (task detail)
     static let deliverableCardBackground = Color(.controlBackgroundColor)

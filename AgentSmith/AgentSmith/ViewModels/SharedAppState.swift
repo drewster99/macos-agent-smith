@@ -44,6 +44,19 @@ final class SharedAppState {
         didSet { UserDefaults.standard.set(showTimerActivityInTranscript, forKey: "debugShowTimerActivityInTranscript") }
     }
 
+    /// Debug: when on, every compaction (manual `/compact` and task-boundary auto-compact)
+    /// captures its exact before/after history into the session's Compaction Diff window.
+    /// Off by default; persisted across launches. A forced one-shot compaction captures
+    /// regardless of this flag.
+    var captureCompactionDiffs: Bool = {
+        UserDefaults.standard.bool(forKey: "debugCaptureCompactionDiffs")
+    }() {
+        didSet {
+            UserDefaults.standard.set(captureCompactionDiffs, forKey: "debugCaptureCompactionDiffs")
+            notifyCompactionDiffCaptureChanged()
+        }
+    }
+
     /// When true, task lifecycle banners (created / acknowledged / ready for review /
     /// completed / etc.) show their inline timestamp. Default true.
     var showTimestampsOnTaskBanners: Bool = SharedAppState.boolDefault(key: "showTimestampsOnTaskBanners", default: true) {
@@ -105,6 +118,20 @@ final class SharedAppState {
     }
     private func notifyWorkerCapacityChanged() {
         for observer in workerCapacityObservers.values { observer() }
+    }
+
+    /// Per-session observers for the compaction-diff capture toggle (same shape as the
+    /// worker-capacity observers): each session pushes the new value to its runtime so the
+    /// toggle takes effect without a restart.
+    private var compactionDiffCaptureObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerCompactionDiffCaptureObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        compactionDiffCaptureObservers[id] = observer
+    }
+    func unregisterCompactionDiffCaptureObserver(_ id: UUID) {
+        compactionDiffCaptureObservers.removeValue(forKey: id)
+    }
+    private func notifyCompactionDiffCaptureChanged() {
+        for observer in compactionDiffCaptureObservers.values { observer() }
     }
 
     /// When true, completed tasks whose completion is older than `autoArchiveCutoffHours` are
