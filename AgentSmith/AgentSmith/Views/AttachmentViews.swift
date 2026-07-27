@@ -237,27 +237,21 @@ struct ToolNameChip: View {
 struct ToolPathText: View {
     let path: String
 
-    private var directory: String {
-        guard !path.isEmpty else { return "" }
-        let dir = (path as NSString).deletingLastPathComponent
-        return dir.hasSuffix("/") ? dir : dir + "/"
-    }
-
-    private var filename: String {
-        (path as NSString).lastPathComponent
-    }
-
     var body: some View {
-        // Compute derived values once at body start
-        let _directory = directory
-        let _filename = filename
+        // Compute derived values inline - no computed properties
+        let directory: String = {
+            guard !path.isEmpty else { return "" }
+            let dir = (path as NSString).deletingLastPathComponent
+            return dir.hasSuffix("/") ? dir : dir + "/"
+        }()
+        let filename = (path as NSString).lastPathComponent
         
         return HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Text(_directory)
+            Text(directory)
                 .font(AppFonts.channelBody)
                 .foregroundStyle(.secondary.opacity(0.7))
                 .lineLimit(1)
-            Text(_filename)
+            Text(filename)
                 .font(AppFonts.channelBody.bold())
                 .foregroundStyle(AppColors.toolPathFilename)
                 .lineLimit(1)
@@ -268,19 +262,15 @@ struct ToolPathText: View {
 struct FileWritePathView: View {
     let path: String
 
-    private var url: URL { URL(fileURLWithPath: path) }
-
-    /// If the path is a symlink (or contains symlinks), returns the resolved destination.
-    private var symlinkDestination: String? {
-        guard !path.isEmpty else { return nil }
-        let resolved = url.resolvingSymlinksInPath().path
-        let standardized = url.standardized.path
-        return resolved != standardized ? resolved : nil
-    }
-
     var body: some View {
-        // Compute derived values once at body start
-        let _symlinkDestination = symlinkDestination
+        // Compute derived values inline - no computed properties
+        let symlinkDestination: String? = {
+            guard !path.isEmpty else { return nil }
+            let url = URL(fileURLWithPath: path)
+            let resolved = url.resolvingSymlinksInPath().path
+            let standardized = url.standardized.path
+            return resolved != standardized ? resolved : nil
+        }()
         
         return HStack(alignment: .firstTextBaseline, spacing: 4) {
             ToolNameChip(name: "file_write")
@@ -290,7 +280,7 @@ struct FileWritePathView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Reveal \(path) in Finder")
 
-            if let dest = _symlinkDestination {
+            if let dest = symlinkDestination {
                 Text(" \u{2192} ")
                     .font(AppFonts.channelBody)
                     .foregroundStyle(.secondary)
