@@ -238,8 +238,18 @@ extension OrchestrationRuntime {
 
         // Record against the snapshot we judged; any criterion whose contract changed mid-round is
         // dropped atomically inside the store — so `recorded` is what actually landed in the ledger.
+        //
+        // Sorted first: the wave finished in whatever order the validators' models answered, and
+        // appending THAT to an append-only audit trail makes the ledger's own order a record of
+        // nothing. Ordering by criterion position here makes the ledger, the round summary, and the
+        // punch list all agree, and is safe because a criterion is judged at most once per round —
+        // so intra-round order can never change which record `latestVerdict` returns.
+        let ordered = Self.orderedByCriterionPosition(
+            records,
+            numberByID: Dictionary(uniqueKeysWithValues: taskSnapshot.acceptanceCriteria.enumerated().map { ($0.element.id, $0.offset + 1) })
+        )
         let recorded: [CriterionVerdictRecord]
-        switch await taskStore.recordCriterionVerdicts(id: taskID, records: records, judgedAgainst: taskSnapshot.acceptanceCriteria, judgedInRound: token) {
+        switch await taskStore.recordCriterionVerdicts(id: taskID, records: ordered, judgedAgainst: taskSnapshot.acceptanceCriteria, judgedInRound: token) {
         case .superseded:
             // Another run owns this ledger now. Everything below — the round summary, the stall
             // counter, the punch list, the fail decision — would be that run's outcome attributed to
@@ -1000,6 +1010,11 @@ extension OrchestrationRuntime {
         guard let task = await taskStore.task(id: taskID) else { return }
         let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let numberByID = Dictionary(uniqueKeysWithValues: task.acceptanceCriteria.enumerated().map { ($0.element.id, $0.offset + 1) })
+        // Ordered by criterion position, exactly as `formatRejectionPunchList` does, so the same
+        // round reads the same every run. Unsorted, these arrive in TaskGroup COMPLETION order —
+        // whichever validator's LLM answered first — so re-running an identical round produced a
+        // differently-ordered report and two reports of one round could not be diffed.
+        let records = Self.orderedByCriterionPosition(records, numberByID: numberByID)
         // Verdict FIRST (bolded), then the criterion by number + its first line only. A
         // criterion's body can be multi-paragraph and may itself contain the word "FAILS" (as
         // part of its own conditional logic) — appending the verdict at the very end buried it
@@ -1286,13 +1301,24 @@ extension OrchestrationRuntime {
     /// reason (which — per the validator prompt — states both what is missing and the
     /// concrete next steps toward acceptance). Ordered by criterion number so the list
     /// reads the same every round.
+    /// Verdict records in the criteria's own display order, with anything no longer on the contract
+    /// parked at the end. The single definition of "the order a round is reported in", shared by the
+    /// round summary, the punch list, and the ledger write — a round judged concurrently has no
+    /// inherent order, so one has to be imposed, in one place.
+    static func orderedByCriterionPosition(
+        _ records: [CriterionVerdictRecord],
+        numberByID: [UUID: Int]
+    ) -> [CriterionVerdictRecord] {
+        records.sorted { (numberByID[$0.criterionID] ?? .max) < (numberByID[$1.criterionID] ?? .max) }
+    }
+
     static func formatRejectionPunchList(
         rejected: [CriterionVerdictRecord],
         task: AgentTask,
         numberByID: [UUID: Int]
     ) -> String {
         let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let ordered = rejected.sorted { (numberByID[$0.criterionID] ?? .max) < (numberByID[$1.criterionID] ?? .max) }
+        let ordered = orderedByCriterionPosition(rejected, numberByID: numberByID)
         return ordered.enumerated().map { index, record -> String in
             let number = numberByID[record.criterionID]
             let label = number.map { "Criterion \($0)" } ?? "Criterion"

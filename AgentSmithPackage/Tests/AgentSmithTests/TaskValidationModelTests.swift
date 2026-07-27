@@ -539,6 +539,27 @@ struct TaskValidationModelTests {
         #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: successor))
     }
 
+    @Test("A round is ordered by criterion position, not by whichever validator answered first")
+    func roundOrderingIsDeterministic() {
+        let criteria = (1...4).map { AcceptanceCriterion(name: "C\($0)", validationPrompt: "judge C\($0)", origin: .smith) }
+        let numberByID = Dictionary(uniqueKeysWithValues: criteria.enumerated().map { ($0.element.id, $0.offset + 1) })
+        let departed = UUID()
+
+        // The shape a TaskGroup hands back: completion order, plus a record for a criterion that
+        // left the contract mid-round.
+        let asCompleted = [criteria[2], criteria[0], criteria[3], criteria[1]].map {
+            CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1)
+        } + [CriterionVerdictRecord(criterionID: departed, verdict: .accepted, validatorName: "d", validatorHash: "h", round: 1)]
+
+        let ordered = OrchestrationRuntime.orderedByCriterionPosition(asCompleted, numberByID: numberByID)
+        #expect(ordered.map(\.criterionID) == criteria.map(\.id) + [departed],
+                "criteria in their display order, with anything no longer on the contract parked at the end")
+
+        // Same records, a different completion order — same report.
+        let reshuffled = OrchestrationRuntime.orderedByCriterionPosition(asCompleted.reversed(), numberByID: numberByID)
+        #expect(reshuffled.map(\.criterionID) == ordered.map(\.criterionID))
+    }
+
     @Test("Renaming the convergence counter kept its persisted key, so no ledger loses its budget")
     func convergenceCounterKeepsItsPersistedKey() throws {
         var task = AgentTask(title: "t", description: "d")
