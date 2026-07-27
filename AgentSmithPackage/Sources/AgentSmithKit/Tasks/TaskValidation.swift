@@ -499,13 +499,21 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
         verdictRecords.last { $0.criterionID == criterionID }
     }
 
-    /// Criteria whose latest verdict is sticky-final (accepted/waived).
-    public func settledCriterionIDs() -> Set<UUID> {
+    /// Criteria in `criteria` whose latest verdict is sticky-final (accepted/waived).
+    ///
+    /// It takes the contract it is counting against ON PURPOSE. The old no-argument version returned
+    /// a bare set with no reference to the live criteria, so a record for a criterion that had since
+    /// been edited or removed still counted — which is how "4 of 3 settled" reached the UI on
+    /// 2026-07-09, after Smith rewrote a criterion and stranded the old id's ACCEPT in the ledger.
+    /// Intersecting HERE, rather than asking every caller to remember, makes N ≤ M arithmetically
+    /// impossible to violate instead of merely prevented at four call sites.
+    public func settledCriterionIDs(in criteria: [AcceptanceCriterion]) -> Set<UUID> {
+        let live = Set(criteria.map(\.id))
         var settled: Set<UUID> = []
         var seen: Set<UUID> = []
         for record in verdictRecords.reversed() where !seen.contains(record.criterionID) {
             seen.insert(record.criterionID)
-            if record.verdict.isFinal { settled.insert(record.criterionID) }
+            if record.verdict.isFinal && live.contains(record.criterionID) { settled.insert(record.criterionID) }
         }
         return settled
     }

@@ -314,8 +314,7 @@ struct TaskOverlayColumn: View {
     @ViewBuilder
     private func footer() -> some View {
         if entry.showsCriteria && !task.acceptanceCriteria.isEmpty {
-            let settledIDs = task.validation?.settledCriterionIDs() ?? []
-            let settled = task.acceptanceCriteria.filter { settledIDs.contains($0.id) }.count
+            let settled = (task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []).count
             Text("acceptance · \(settled) of \(task.acceptanceCriteria.count) settled")
                 .font(.caption2)
                 .foregroundStyle(task.status == .failed ? AppColors.verdictRejected : Color.secondary.opacity(0.6))

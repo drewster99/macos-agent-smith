@@ -113,7 +113,7 @@ struct TaskValidationCoordinatorTests {
         await runtime.acceptEscalatedTask(taskID: task.id)
         let final = await runtime.taskStore.task(id: task.id)
         #expect(final?.status == .completed)
-        #expect(final?.validation?.settledCriterionIDs() == [criterion.id], "the override settles the criterion")
+        #expect(final?.validation?.settledCriterionIDs(in: final?.acceptanceCriteria ?? []) == [criterion.id], "the override settles the criterion")
         #expect(final?.validation?.verdictRecords.last?.validatorName == "user override")
         #expect(final?.updates.contains { $0.message.contains("overriding acceptance validation") } == true)
     }
@@ -207,7 +207,7 @@ struct TaskValidationCoordinatorTests {
         #expect(afterRound1 == .running, "a rejection must return the task to the worker, not escalate")
 
         let midTask = await runtime.taskStore.task(id: task.id)
-        #expect(midTask?.validation?.settledCriterionIDs().count == 1, "the accepted criterion is sticky")
+        #expect(midTask?.validation?.settledCriterionIDs(in: midTask?.acceptanceCriteria ?? []).count == 1, "the accepted criterion is sticky")
         #expect(midTask?.result == nil, "the result is cleared for resubmission")
 
         // The worker "fixes and resubmits".

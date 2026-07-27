@@ -193,15 +193,13 @@ extension OrchestrationRuntime {
         guard let token = await taskStore.beginValidationRound(id: taskID) else { return }
         let round = token.round
 
-        let settled = task.validation?.settledCriterionIDs() ?? []
+        let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
         let pending = task.acceptanceCriteria.filter { !settled.contains($0.id) }
         guard !pending.isEmpty else {
-            await completeValidatedTask(taskID: taskID)
+            await completeValidatedTask(taskID: taskID, judgedInRound: token)
             return
         }
 
-        // Count settled AGAINST the current criteria — the raw ledger can hold records
-        // for criteria that were since edited/removed ("4 of 3 settled").
         let settledOnTask = task.acceptanceCriteria.count - pending.count
         await channel.post(ChannelMessage(
             sender: .system,
@@ -1200,7 +1198,7 @@ extension OrchestrationRuntime {
     /// Reuses the shared completion path (`completeValidatedTask`).
     public func acceptEscalatedTask(taskID: UUID) async {
         guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
-        let settled = task.validation?.settledCriterionIDs() ?? []
+        let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
         let unsettled = task.acceptanceCriteria.filter { !settled.contains($0.id) }
         // The user's override is not a validation round, so it does not own a round token — it
         // borrows the ledger's current one, which is exactly what "record this against the contract
