@@ -668,19 +668,6 @@ private struct MessageRow: View, Equatable {
     /// the first render shows the correct decoration / truncation state.
     @State private var cacheValid: Bool = false
 
-    private var effectiveToolFilePath: String? {
-        cacheValid ? cachedToolFilePath : Self.extractToolFilePath(from: message)
-    }
-    private var effectiveDiffLines: [DiffLine]? {
-        cacheValid ? cachedDiffLines : Self.extractPrecomputedDiffLines(from: message)
-    }
-    private var effectiveFileEditStrings: FileEditStrings? {
-        cacheValid ? cachedFileEditStrings : Self.extractFileEditStrings(from: message)
-    }
-    private var effectiveSplitLines: [String] {
-        cacheValid ? cachedSplitLines : message.content.components(separatedBy: "\n")
-    }
-
     /// Skips body re-evaluation when the row's source data is unchanged. Without this,
     /// every existing row re-evaluates whenever `ChannelLogView` re-runs (i.e. on every
     /// appended message), which fans out the per-row JSON decoding / line-splitting
@@ -693,185 +680,45 @@ private struct MessageRow: View, Equatable {
         && lhs.displayPrefs == rhs.displayPrefs
     }
 
-    /// Image tier for this message's attachments — user messages get small, others get medium.
-    private var attachmentTier: ImageCache.Tier {
-        message.sender == .user ? .small : .medium
-    }
 
-    private var senderColor: Color {
-        AppColors.color(for: message.sender)
-    }
 
-    private var recipientColor: Color {
-        guard let recipient = message.recipient else { return .secondary }
-        switch recipient {
-        case .agent(let role): return AppColors.color(for: .agent(role))
-        case .user: return AppColors.color(for: .user)
-        }
-    }
 
-    private var messageKind: String? {
-        message.stringMetadata("messageKind")
-    }
 
-    private var isToolRequest: Bool {
-        messageKind == "tool_request"
-    }
 
-    /// Elapsed seconds between the tool request and its output, if both timestamps are
-    /// available. Used by the "show elapsed time on tool calls" display toggle. Returns nil
-    /// for in-flight calls (no output yet) or when the output predates the request (clock
-    /// skew, replay).
-    private var toolCallElapsedSeconds: TimeInterval? {
-        guard let output = toolOutputMessage else { return nil }
-        let elapsed = output.timestamp.timeIntervalSince(message.timestamp)
-        return elapsed >= 0 ? elapsed : nil
-    }
 
-    private var isToolOutput: Bool {
-        messageKind == "tool_output"
-    }
 
-    private var isSecurityReview: Bool {
-        message.metadata?["securityDisposition"] != nil
-    }
 
-    private var isErrorMessage: Bool {
-        if case .bool(let value) = message.metadata?["isError"] { return value }
-        return false
-    }
 
-    /// The security disposition string for this tool request's review, if any.
-    private var securityDisposition: String? {
-        guard let review = securityReviewMessage,
-              case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
-        return d
-    }
 
-    /// True when Smith sends a private message directly to the user — these deserve visual emphasis.
-    private var isSmithToUser: Bool {
-        guard case .agent(.smith) = message.sender else { return false }
-        guard case .user = message.recipient else { return false }
-        return true
-    }
 
-    /// True when Smith sends a private message to Brown.
-    private var isSmithToBrown: Bool {
-        guard case .agent(.smith) = message.sender else { return false }
-        guard case .agent(.brown) = message.recipient else { return false }
-        return true
-    }
 
-    /// True for any message sent by Brown (public or private).
-    private var isBrownMessage: Bool {
-        guard case .agent(.brown) = message.sender else { return false }
-        return true
-    }
 
-    /// True for any message sent by the Summarizer agent.
-    private var isSummarizerMessage: Bool {
-        guard case .agent(.summarizer) = message.sender else { return false }
-        return true
-    }
 
-    /// Default max visible lines for this message type. Nil means show all.
-    private var defaultMaxLines: Int? {
-        if isSummarizerMessage { return 2 }
-        if isSmithToBrown || isBrownMessage { return 5 }
-        return nil
-    }
 
-    // MARK: - Tool request grouping
 
-    private var dispositionIndicator: String? {
-        guard let review = securityReviewMessage,
-              case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
-        switch d {
-        case "approved": return "\u{2705}"   // checkmark
-        // A gear, NOT a checkmark: the green tick means a Security Agent read this call and judged
-        // it; this means a hardcoded rule cleared it and no one looked. Both are "approved", but
-        // they carry different amounts of assurance, and the glyph is the only place a reader can
-        // see which they got. (Unicode has no real "automatic" mark — the camera convention is a
-        // bare "A", whose circled form reads as the anarchy symbol.)
-        case "autoApproved": return "\u{2699}\u{FE0F}"  // gear — cleared by rule, not judged
-        case "warning": return "\u{26A0}\u{FE0F}" // warning
-        case "denied": return "\u{1F6AB}"    // prohibited
-        case "abort": return "\u{1F6D1}"     // stop sign
-        case "cancelled": return nil
-        default: return nil
-        }
-    }
 
-    /// The Security Agent's verdict rationale, shown in the popover when the disposition
-    /// indicator is clicked. Prefers the parsed `dispositionMessage`; falls back to the review
-    /// message content with the "Security Agent → Role: " routing prefix stripped.
-    private var securityReviewPopoverText: String? {
-        guard let review = securityReviewMessage else { return nil }
-        if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
-            return msg
-        }
-        let content = review.content
-        if let colon = content.range(of: ": ") {
-            let tail = String(content[colon.upperBound...])
-            return tail.isEmpty ? content : tail
-        }
-        return content.isEmpty ? nil : content
-    }
 
-    /// Human-readable tooltip text describing what the safety monitor determined.
-    private var dispositionTooltipText: String? {
-        guard let review = securityReviewMessage,
-              case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
-        switch d {
-        case "approved": return "Safety: Approved"
-        // Carries the detail the removed banner used to show, so the reason is still one hover away.
-        case "autoApproved":
-            if case .string(let msg) = securityReviewMessage?.metadata?["dispositionMessage"], !msg.isEmpty {
-                return "Safety: Auto-approved — \(msg)"
-            }
-            return "Safety: Auto-approved"
-        case "warning": return "Safety: Warning"
-        case "denied": return "Safety: Denied"
-        case "abort": return "Safety: Abort triggered"
-        default: return nil
-        }
-    }
 
-    private var dispositionComment: String? {
-        guard let review = securityReviewMessage,
-              case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
-        switch d {
-        case "autoApproved":
-            // No banner. Auto-approvals are now the common case — every pre-cleared tool call
-            // produces one — and a line of explanatory text under each is more noise than signal.
-            // The plain ✔️ carries the meaning, and hovering it still shows the full reason via
-            // `dispositionTooltip`, so nothing is lost except the vertical space.
-            return nil
-        case "warning", "denied", "abort":
-            // Use the full disposition message from metadata (includes retry instruction for WARN)
-            if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
-                return msg
-            }
-            return nil
-        default:
-            return nil
-        }
-    }
 
-    private var dispositionCommentColor: Color {
-        guard let review = securityReviewMessage,
-              case .string(let d) = review.metadata?["securityDisposition"] else { return .secondary }
-        switch d {
-        case "autoApproved": return AppColors.securityApproved
-        case "warning": return AppColors.securityWarning
-        case "denied": return AppColors.securityDenied
-        case "abort": return AppColors.securityAbort
-        default: return .secondary
-        }
-    }
 
-    /// Maximum characters for tool output before the view layer truncates.
-    private static let outputTruncationLimit = 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     /// When collapsed, tool output preview is suppressed unless the first line starts
     /// with "error" (case-insensitive). Returns that line for display, or nil.
@@ -881,23 +728,9 @@ private struct MessageRow: View, Equatable {
         return trimmed.lowercased().hasPrefix("error") ? firstLine : nil
     }
 
-    /// True when this row involves the human (sender == user OR recipient == user). The
-    /// header drops the lock + arrow + recipient annotation in that case — when Smith
-    /// addresses Drew, "Smith → Drew" reads as redundant clutter; same for Drew's input.
-    private var hidesPrivateRecipientAnnotation: Bool {
-        if case .user = message.sender { return true }
-        if case .user = message.recipient { return true }
-        return false
-    }
 
-    /// Whether this row should render its timestamp, given the current display prefs.
-    /// Tool calls, system messages, and agent↔agent / agent↔user messaging each have
-    /// their own toggle so the user can mute the categories they don't want.
-    private var shouldShowTimestamp: Bool {
-        if isToolRequest { return displayPrefs.toolCalls }
-        if case .system = message.sender { return displayPrefs.systemMessages }
-        return displayPrefs.messaging
-    }
+
+
 
     var body: some View {
         // Compute all derived values INLINE at body start - no computed property accessors
@@ -1428,58 +1261,60 @@ private struct MessageRow: View, Equatable {
                 }
                 return true
             }()
-            return Button(action: { isExpanded.toggle() }, label: {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    FileWritePathView(path: message.stringMetadata("fileWritePath") ?? "")
-                    if let badge = parallelBadge {
-                        Text("⚡\(badge)")
-                            .font(.caption2.bold())
-                            .foregroundStyle(AppColors.cyanBadgeForeground)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(AppColors.cyanBadgeBackground)
-                            .clipShape(Capsule())
+            VStack(alignment: .leading, spacing: 0) {
+                Button(action: { isExpanded.toggle() }, label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        FileWritePathView(path: message.stringMetadata("fileWritePath") ?? "")
+                        if let badge = parallelBadge {
+                            Text("⚡\(badge)")
+                                .font(.caption2.bold())
+                                .foregroundStyle(AppColors.cyanBadgeForeground)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(AppColors.cyanBadgeBackground)
+                                .clipShape(Capsule())
+                        }
+                        if isExpanded {
+                            Text("(show less)")
+                                .font(.caption)
+                                .foregroundStyle(AppColors.disclosureToggle)
+                        } else if _toolOutputHasMore {
+                            Text("(show more)")
+                                .font(.caption)
+                                .foregroundStyle(AppColors.disclosureToggle)
+                        }
+                        securityDispositionControl()
                     }
-                    if isExpanded {
-                        Text("(show less)")
-                            .font(.caption)
-                            .foregroundStyle(AppColors.disclosureToggle)
-                    } else if _toolOutputHasMore {
-                        Text("(show more)")
-                            .font(.caption)
-                            .foregroundStyle(AppColors.disclosureToggle)
-                    }
-                    securityDispositionControl()
+                    .contentShape(Rectangle())
+                })
+                .buttonStyle(.plain)
+                
+                if let comment = dispositionComment {
+                    MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
+                        .foregroundStyle(dispositionCommentColor)
+                        .padding(.leading, 12)
                 }
-                .contentShape(Rectangle())
-            })
-            .buttonStyle(.plain)
-            
-            if let comment = dispositionComment {
-                MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
-                    .foregroundStyle(dispositionCommentColor)
-                    .padding(.leading, 12)
-            }
-            
-            if let diffLines = effectiveDiffLines {
-                DiffView(lines: diffLines)
-            }
-            
-            if let output = toolOutputMessage {
-                if isExpanded {
-                    Text(output.content)
-                        .font(AppFonts.channelBody.monospaced())
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                } else if let errorLine = collapsedErrorPreview(output.content) {
-                    Text(errorLine)
-                        .font(AppFonts.channelBody.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .padding(.leading, 12)
-                        .textSelection(.enabled)
+                
+                if let diffLines = effectiveDiffLines {
+                    DiffView(lines: diffLines)
+                }
+                
+                if let output = toolOutputMessage {
+                    if isExpanded {
+                        Text(output.content)
+                            .font(AppFonts.channelBody.monospaced())
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    } else if let errorLine = collapsedErrorPreview(output.content) {
+                        Text(errorLine)
+                            .font(AppFonts.channelBody.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .padding(.leading, 12)
+                            .textSelection(.enabled)
+                    }
                 }
             }
         }
@@ -1512,88 +1347,90 @@ private struct MessageRow: View, Equatable {
                 }
                 return true
             }()
-            return Button(action: { isExpanded.toggle() }, label: {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    let displayText = isExpanded ? message.content : toolCallDisplayText
-                    let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
-                    ToolNameChip(name: toolName)
-                    if let path = effectiveToolFilePath {
-                        Button(action: { openFileOrFallback(path) }, label: {
-                            ToolPathText(path: path)
-                        })
-                        .buttonStyle(.plain)
-                        let extra = remainderWithoutPath(displayText, path)
-                        if !extra.isEmpty {
-                            Text(extra)
+            VStack(alignment: .leading, spacing: 0) {
+                Button(action: { isExpanded.toggle() }, label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        let displayText = isExpanded ? message.content : toolCallDisplayText
+                        let toolName = message.stringMetadata("tool") ?? displayText.prefix(while: { $0 != ":" }).description
+                        ToolNameChip(name: toolName)
+                        if let path = effectiveToolFilePath {
+                            Button(action: { openFileOrFallback(path) }, label: {
+                                ToolPathText(path: path)
+                            })
+                            .buttonStyle(.plain)
+                            let extra = remainderWithoutPath(displayText, path)
+                            if !extra.isEmpty {
+                                Text(extra)
+                                    .font(AppFonts.channelBody)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(isExpanded ? nil : 1)
+                            }
+                        } else {
+                            let remainder = displayText.hasPrefix(toolName) ? String(displayText.dropFirst(toolName.count)) : ": \(displayText)"
+                            let cleanRemainder = remainder.hasPrefix(": ") ? String(remainder.dropFirst(2)) : remainder
+                            Text(cleanRemainder)
                                 .font(AppFonts.channelBody)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(isExpanded ? nil : 1)
                         }
-                    } else {
-                        let remainder = displayText.hasPrefix(toolName) ? String(displayText.dropFirst(toolName.count)) : ": \(displayText)"
-                        let cleanRemainder = remainder.hasPrefix(": ") ? String(remainder.dropFirst(2)) : remainder
-                        Text(cleanRemainder)
-                            .font(AppFonts.channelBody)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(isExpanded ? nil : 1)
-                    }
-                    if let badge = parallelBadge {
-                        Text("⚡\(badge)")
-                            .font(.caption2.bold())
-                            .foregroundStyle(AppColors.cyanBadgeForeground)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(AppColors.cyanBadgeBackground)
-                            .clipShape(Capsule())
-                    }
-                    if isExpanded {
-                        Text("(show less)")
-                            .font(.caption)
-                            .foregroundStyle(AppColors.disclosureToggle)
-                    } else if _toolOutputHasMore {
-                        Text("(show more)")
-                            .font(.caption)
-                            .foregroundStyle(AppColors.disclosureToggle)
-                    }
-                    securityDispositionControl()
-                }
-                .contentShape(Rectangle())
-            })
-            .buttonStyle(.plain)
-            
-            if let comment = dispositionComment {
-                MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
-                    .foregroundStyle(dispositionCommentColor)
-                    .padding(.leading, 12)
-            }
-            
-            if message.stringMetadata("tool") == "file_edit",
-               !fileEditFailed,
-               let strings = effectiveFileEditStrings {
-                DiffView(oldContent: strings.oldString, newContent: strings.newString)
-            }
-            
-            if let output = toolOutputMessage {
-                if isExpanded {
-                    let fullText: String = {
-                        if case .string(let expanded) = output.metadata?["expandedContent"] {
-                            return expanded
+                        if let badge = parallelBadge {
+                            Text("⚡\(badge)")
+                                .font(.caption2.bold())
+                                .foregroundStyle(AppColors.cyanBadgeForeground)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(AppColors.cyanBadgeBackground)
+                                .clipShape(Capsule())
                         }
-                        return output.content
-                    }()
-                    Text(fullText)
-                        .font(AppFonts.channelBody.monospaced())
-                        .foregroundStyle(.secondary)
+                        if isExpanded {
+                            Text("(show less)")
+                                .font(.caption)
+                                .foregroundStyle(AppColors.disclosureToggle)
+                        } else if _toolOutputHasMore {
+                            Text("(show more)")
+                                .font(.caption)
+                                .foregroundStyle(AppColors.disclosureToggle)
+                        }
+                        securityDispositionControl()
+                    }
+                    .contentShape(Rectangle())
+                })
+                .buttonStyle(.plain)
+                
+                if let comment = dispositionComment {
+                    MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
+                        .foregroundStyle(dispositionCommentColor)
                         .padding(.leading, 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                } else if !isFileRead, let errorLine = collapsedErrorPreview(output.content) {
-                    Text(errorLine)
-                        .font(AppFonts.channelBody.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .padding(.leading, 12)
-                        .textSelection(.enabled)
+                }
+                
+                if message.stringMetadata("tool") == "file_edit",
+                   !fileEditFailed,
+                   let strings = effectiveFileEditStrings {
+                    DiffView(oldContent: strings.oldString, newContent: strings.newString)
+                }
+                
+                if let output = toolOutputMessage {
+                    if isExpanded {
+                        let fullText: String = {
+                            if case .string(let expanded) = output.metadata?["expandedContent"] {
+                                return expanded
+                            }
+                            return output.content
+                        }()
+                        Text(fullText)
+                            .font(AppFonts.channelBody.monospaced())
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    } else if !isFileRead, let errorLine = collapsedErrorPreview(output.content) {
+                        Text(errorLine)
+                            .font(AppFonts.channelBody.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .padding(.leading, 12)
+                            .textSelection(.enabled)
+                    }
                 }
             }
         }
