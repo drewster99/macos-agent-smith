@@ -1117,33 +1117,6 @@ public actor OrchestrationRuntime {
             parts.append("## Last Working State\n\(brownContext)")
         }
 
-        // Messages Smith addressed to this task's worker before one existed. Drained here — the
-        // briefing IS the delivery — so each is handed over exactly once and cannot resurface on a
-        // later restart. Placed last so it reads as instruction arriving on top of the task, which
-        // is what it is.
-        let queued = await taskStore.takePendingWorkerMessages(taskID: task.id)
-        if !queued.isEmpty {
-            let formatter = ISO8601DateFormatter()
-            var rendered: [String] = []
-            for message in queued {
-                rendered.append("- (queued \(formatter.string(from: message.queuedAt))) \(message.text)")
-                // `message_brown` takes `attachment_ids`, so a queued message can carry files. They
-                // have to be rendered as reachable markdown links exactly like the task's own
-                // attachments — rendering only the text would accept an attachment at the call site
-                // and then silently drop it somewhere the sender never sees.
-                for attachment in message.attachments {
-                    rendered.append("    - \(await attachmentMarkdownLine(attachment))")
-                }
-            }
-            parts.append("""
-                ## Messages from Agent Smith
-                These were sent to you before you started, and are waiting for you now. Treat them as \
-                instructions about this task.
-
-                \(rendered.joined(separator: "\n"))
-                """)
-        }
-
         return parts.joined(separator: "\n\n")
     }
 

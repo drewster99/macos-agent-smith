@@ -52,6 +52,20 @@ Always build via the drews-xcode-mcp tools — never `xcodebuild`, `swift build`
   - To run a subset, use `--filter`, e.g. `swift test --filter GhToolArgsFilterTests`.
 - After non-trivial changes, follow the smoke-test pattern noted in user memory (run app ~15s, screenshot, check logs).
 
+## Where to look when you need to know what an agent actually saw
+
+**LLM request/response logs: `$TMPDIR/AgentSmith-LLM-Logs/`** — on this machine `/var/folders/…/T/AgentSmith-LLM-Logs/`. One JSON file per call, named `<timestamp>-<seq>_<provider>_<model>_{request,response}.json`. The request file contains the **full message array as the model received it**, so it is the only place that shows what was actually in an agent's context.
+
+Written by `LLMRequestLogger` (SwiftLLMKit), configured in `SharedAppState` — **DEBUG builds only**, since the bodies contain everything: user messages, file contents, tool I/O, anything pasted. The model in the filename identifies the agent (Smith and Brown normally run different models), which makes "did X reach Smith or only Brown?" a `grep -l` away.
+
+This matters because several things are **never persisted anywhere else**:
+
+- **Task briefings.** Not in `channel_log.jsonl`, not in `tasks.json`. Searching those for briefing content returns zero hits whether or not delivery worked — a check that cannot fail is not a check. (Verified 2026-07-27: `## Your working directories`, present in every briefing, appears 0 times in both files.)
+- **Injected system corrections** and anything else appended straight to an agent's conversation.
+- **Which agent actually received a message.** A public message from Brown is posted to the channel — so it appears in the transcript and in the UI — but `smithMessageFilter` drops it before Smith's context. The channel log shows it; Smith never saw it. Only the request logs distinguish these.
+
+Other runtime state, for completeness: `~/Library/Application Support/AgentSmith/sessions/<uuid>/channel_log.jsonl` (the transcript as posted), `tasks.json` (task records), and `~/Library/Application Support/SwiftLLMKit/com.nuclearcyborg.AgentSmith/` (model catalog/config, not per-call).
+
 ## Architecture: the parts you must understand
 
 ### Per-session isolation (multi-window/tabs)

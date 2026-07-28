@@ -307,6 +307,12 @@ public actor AgentActor {
         role == .smith ? 30 : 6
     }
 
+    /// Brown-only: whether the queued-message handover has already run for this worker.
+    ///
+    /// Queued messages are delivered ONCE, on the turn after the briefing — see
+    /// `deliverQueuedTaskMessagesIfDue`.
+    private var hasDeliveredQueuedTaskMessages = false
+
     /// Brown-only: time of the most recent task communication (first-turn acknowledgement,
     /// task_update, or task_complete). Used by the silence nudge. Initialized when the run loop starts.
     private var lastTaskCommunicationAt: Date?
@@ -1093,6 +1099,41 @@ public actor AgentActor {
         return true
     }
 
+    /// Hands over messages Smith addressed to this worker's task before the worker existed —
+    /// on the turn AFTER the briefing, never folded into it.
+    ///
+    /// The distinction is the point. A queued message is a MESSAGE, not task content: it comes
+    /// from Smith, it may ask for something, and it should arrive the way any other message from
+    /// Smith arrives. Appending it to the briefing instead made it read as part of the task
+    /// description — and the briefing's own framing ("instructions about this task") invites a
+    /// task-focused worker to discard anything that isn't task work. Delivering it a turn later
+    /// also means the worker has already oriented on the task before being asked anything.
+    ///
+    /// Runs at most once per worker: the drain is read-and-clear, and the flag stops a second
+    /// pass even if the drain came back empty.
+    private func deliverQueuedTaskMessagesIfDue() async {
+        guard configuration.role == .brown, !hasDeliveredQueuedTaskMessages else { return }
+        // "After the briefing turn" means literally that — at least one LLM turn has completed,
+        // so the worker has seen the task before it sees anything said about it.
+        guard !llmTurns.isEmpty else { return }
+        guard let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) else { return }
+
+        let queued = await toolContext.taskStore.takePendingWorkerMessages(taskID: task.id)
+        hasDeliveredQueuedTaskMessages = true
+        guard !queued.isEmpty else { return }
+
+        let formatter = ISO8601DateFormatter()
+        let rendered = queued.map { "- (sent \(formatter.string(from: $0.queuedAt))) \($0.text)" }
+        let attachments = queued.flatMap(\.attachments)
+        appendUserMessage("""
+            [Messages from Agent Smith] These were sent to you before you started and were held \
+            until now. They are messages from your supervisor, not part of the task description — \
+            respond to them as you would to anything else Smith says to you.
+
+            \(rendered.joined(separator: "\n"))
+            """, attachments: attachments)
+    }
+
     /// Whether the agent is currently running.
     public var running: Bool {
         isRunning
@@ -1293,6 +1334,8 @@ public actor AgentActor {
                 pushLiveContext()
                 continue
             }
+
+            await deliverQueuedTaskMessagesIfDue()
 
             do {
                 let activeTasks = await toolContext.taskStore.allTasks().filter { $0.disposition == .active }
