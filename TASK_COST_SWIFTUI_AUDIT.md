@@ -158,13 +158,14 @@ The following best practices and sources guided this audit:
 
 ### Fix 8: Eliminate final body-time computations in Task Cost hierarchy
 
-**Issue IDs:** C10-C12 (remaining body-time values)  
-**Problem:** HeaderSection had computed properties resolvedTitle/resolvedStatus; ToolUsageSection computed maxCount in body; CostBreakdownSection used ForEach with indices.  
+**Issue IDs:** C10-C13 (remaining body-time values)  
+**Problem:** HeaderSection had computed properties resolvedTitle/resolvedStatus; ToolUsageSection computed maxCount in body; CostBreakdownSection used ForEach with indices; TaskCostDetailSheet.body computed values inline for subview arguments.  
 **Fix:** 
+- TaskCostDetailSheet: Added @State for resolvedTitle, resolvedStatus, durationText, toolMaxCount, displayedTurnStartOffset - all computed in updateCachedData()
 - HeaderSection: Now receives resolvedTitle, resolvedStatus, durationText as pre-computed parameters
 - ToolUsageSection: Now receives maxCount as pre-computed parameter  
 - CostBreakdownSection: Uses TokenBreakdownRow (Identifiable) for stable ForEach iteration instead of indices
-**Commit:** e17e68a38aea321a1545efc555313f7c7b03df32
+**Commit:** 64d9d4e2d5c655e0de9dbe178cb0b9bb6a62276b
 
 ---
 
@@ -191,24 +192,26 @@ The following best practices and sources guided this audit:
     7. https://www.avanderlee.com/swiftui/observable-macro-performance-increase-observableobject/
     8. https://www.hackingwithswift.com/books/ios-swiftui/sharing-swiftui-state-with-observable
 - **Apple Official Source Count:** 4
-- **Issues Fixed:** 25 total
-  - 12 computed properties/derived data cached or pre-computed (C1-C12)
+- **Issues Fixed:** 26 total
+  - 13 computed properties/derived data cached or pre-computed (C1-C13)
   - 12 helper functions extracted to View structs (H1-H12)
   - 1 behavioral regression fixed (TurnDisclosureControls binding)
   - Note: Equatable conformance added to UsageRecord.swift as supporting change
-- **Commits Made:** 7 total for this task (on top of base a8ea5d9)
-  1. 152ed0d: Update audit log with commit hash and build results
-  2. c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Complete extraction of all remaining -> some View helpers
-  3. 206acc2: Update audit log with complete fix list and final commit hashes
-  4. 7f1d5ae: Fix TurnDisclosureControls binding and TurnTimelineSection parameters
-  5. df14b89: Update audit log with all commits and complete source list
-  6. dda4ac866573848756d7ce761477c9b159826c00: Complete caching refactor - all derived data pre-computed
-  7. e17e68a38aea321a1545efc555313f7c7b03df32: Eliminate final body-time computations (HeaderSection params, ToolUsageSection maxCount, TokenBreakdownRow)
+- **Commits Made:** 8 total for this task (on top of base a8ea5d9)
+  **Code-changing commits:**
+  1. c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Extract all -> some View helpers to View structs
+  2. 7f1d5ae: Fix TurnDisclosureControls binding
+  3. dda4ac866573848756d7ce761477c9b159826c00: Complete caching refactor
+  4. e17e68a38aea321a1545efc555313f7c7b03df32: Eliminate body-time computations (HeaderSection params, ToolUsageSection maxCount, TokenBreakdownRow)
+  5. 64d9d4e2d5c655e0de9dbe178cb0b9bb6a62276b: Move ALL remaining body-time computations to @State (resolvedTitle, resolvedStatus, durationText, toolMaxCount, displayedTurnStartOffset)
+  6. 97c6900c513ef953a41a67ca7008e059fb94a2e9: Add C5-C12 to audit log Section 2
+  **Audit-log-only commits:** 152ed0d, 206acc2, df14b89, 071eca1
 - **Build Status:** BUILD SUCCEEDED (clean build)
 - **Remaining Concerns:** NONE
   - Grep verification (TaskCostDetailSheet.swift): No remaining `var ...: some View` except `body` (exit code 1 = none found)
   - Grep verification (TaskCostDetailSheet.swift): No remaining `func ... -> some View` (exit code 1 = none found)
-  - File-by-file verification: All Task Cost child views (HeaderSection, CostBreakdownSection, EfficiencySection, ToolUsageSection, ConfigurationSection, TurnTimelineSection, TurnDisclosureControls, CardView, HeaderStat, MiniStat, CostRow, TokenRow) checked - no non-body `var ...: some View` or `func ... -> some View`
+  - File-by-file verification: All Task Cost child views checked - no non-body `var ...: some View` or `func ... -> some View`
+  - Body verification: TaskCostDetailSheet.body contains ZERO derived computations - all values passed to subviews are @State properties populated in updateCachedData()
   - Behavioral verification: TurnDisclosureControls correctly updates parent turnDisplayLimit via @Binding
   - Behavioral verification: Per-turn costs display real values (computeTurnCost uses aggregator.pricingLookup)
   - Cache invalidation: Uses `.onChange(of: records)` which tracks array identity; parent dashboard provides new array instances when content changes
