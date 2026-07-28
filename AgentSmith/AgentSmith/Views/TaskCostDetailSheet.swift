@@ -33,6 +33,13 @@ struct TaskCostDetailSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var showingVsAvgInfo = false
+    /// How many of the newest turns the Turn-by-Turn table renders. Capped by default because the
+    /// table is inside a plain `VStack` (this project avoids the lazy stacks), so every row is
+    /// built and laid out whether or not it is on screen — and a long task runs to thousands of
+    /// turns, each ~7 `Text` views. Raised in steps by the buttons below rather than by one
+    /// all-or-nothing switch, so asking for more never costs a multi-second stall you didn't
+    /// choose. `Int.max` means "all".
+    @State private var turnDisplayLimit = TaskCostDetailSheet.initialTurnDisplayLimit
 
     private var summary: UsageSummary {
         aggregator.summarize(records, scopeLabel: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown")
@@ -365,14 +372,15 @@ struct TaskCostDetailSheet: View {
     private func turnTimelineSection() -> some View {
         card(title: "Turn-by-Turn (\(records.count) calls)") {
             let sorted = records.sorted { $0.timestamp < $1.timestamp }
-            let displayedTurns = Array(sorted.suffix(100))
+            let displayedTurns = Array(sorted.suffix(turnDisplayLimit))
             let startOffset = sorted.count - displayedTurns.count
 
-            if sorted.count > 100 {
-                Text("Showing last 100 of \(sorted.count) turns")
+            if startOffset > 0 {
+                Text("Showing last \(displayedTurns.count) of \(sorted.count) turns")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            turnDisclosureControls(totalTurns: sorted.count, shownTurns: displayedTurns.count)
 
             // Header
             HStack(spacing: 0) {
@@ -400,6 +408,37 @@ struct TaskCostDetailSheet: View {
                     toolNames: (record.toolCallNames ?? []).joined(separator: ", ")
                 )
             }
+        }
+    }
+
+    /// How many turns the table shows before any button is pressed.
+    static let initialTurnDisplayLimit = 100
+    /// How many more each "Show more" reveals. Big enough to be worth a click, small enough that
+    /// the layout pass stays imperceptible on the tasks that have this many turns at all.
+    static let turnDisplayIncrement = 500
+
+    /// Reveal / collapse controls for the turn table. Absent entirely when everything already
+    /// fits, so a short task shows no chrome it doesn't need.
+    @ViewBuilder
+    private func turnDisclosureControls(totalTurns: Int, shownTurns: Int) -> some View {
+        if totalTurns > Self.initialTurnDisplayLimit {
+            HStack(spacing: 12) {
+                if shownTurns < totalTurns {
+                    Button("Show \(min(Self.turnDisplayIncrement, totalTurns - shownTurns)) more") {
+                        turnDisplayLimit = shownTurns + Self.turnDisplayIncrement
+                    }
+                    Button("Show all \(totalTurns)") {
+                        turnDisplayLimit = .max
+                    }
+                }
+                if shownTurns > Self.initialTurnDisplayLimit {
+                    Button("Show last \(Self.initialTurnDisplayLimit)") {
+                        turnDisplayLimit = Self.initialTurnDisplayLimit
+                    }
+                }
+            }
+            .font(.caption2)
+            .buttonStyle(.link)
         }
     }
 
