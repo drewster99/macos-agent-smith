@@ -59,6 +59,14 @@ The following best practices and sources guided this audit:
 | C2 | Low | TaskCostDetailSheet.swift | 227 | `contextResets` computed inline in efficiencySection body via `records.filter()` |
 | C3 | Low | TaskCostDetailSheet.swift | 374-376 | `sorted` and `displayedTurns` computed in turnTimelineSection body via `records.sorted()` and `Array(suffix())` |
 | C4 | Low | TaskCostDetailSheet.swift | 490-495 | `toolFrequency(records)` called in toolUsageSection body, iterates all records |
+| C5 | Low | TaskCostDetailSheet.swift | 268-273 | CostBreakdownSection body computes `byAgent = aggregator.byAgent(records).sorted(...)` on every body recalculation |
+| C6 | Low | TaskCostDetailSheet.swift | 292-296 | CostBreakdownSection body computes token breakdown from summary on every recalculation |
+| C7 | Low | TaskCostDetailSheet.swift | 317-326 | EfficiencySection body computes metrics from summary on every recalculation |
+| C8 | Low | TaskCostDetailSheet.swift | 389-403 | ConfigurationSection has `private var configRows` computed property feeding body |
+| C9 | Low | TaskCostDetailSheet.swift | 530-538 | TurnTimelineSection body computes per-row costs via `computeTurnCost(record)` inline |
+| C10 | Low | TaskCostDetailSheet.swift | 323-328 | HeaderSection has `private var resolvedTitle` computed property feeding body |
+| C11 | Low | TaskCostDetailSheet.swift | 489 | ToolUsageSection body computes `let maxCount = toolCounts.first?.count ?? 1` on every recalculation |
+| C12 | Low | TaskCostDetailSheet.swift | 423-424 | CostBreakdownSection uses `ForEach(tokenBreakdown.indices, id: \.self)` causing potential List invalidation |
 
 ### Category H: Helper Functions Returning `-> some View` (Should be View Structs)
 
