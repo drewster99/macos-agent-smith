@@ -1081,12 +1081,17 @@ public actor OrchestrationRuntime {
             screenshots into the user's directories — use these two directories instead.**
             """)
 
-        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: task.acknowledgmentCount > 0) {
+        // Full contract, not just the names (2026-07-28, user decision): the validation prompt IS
+        // the evidence spec the judge applies, so the first submission should be composed against
+        // it rather than against a display name — with the full text one `get_task_details` call
+        // away only for workers diligent enough to fetch it.
+        if let criteria = task.renderedAcceptanceCriteria(includeVerdicts: task.acknowledgmentCount > 0, includePrompts: true) {
             parts.append("""
                 ## Acceptance criteria — the contract your submission is judged against
                 Each is judged independently, on evidence. Your `task_complete` is accepted only when \
-                EVERY criterion below is satisfied (or waived). Provide the specific evidence each one asks \
-                for. These numbers are stable — a rejection referring to "Criterion 3" means this list's #3.
+                EVERY criterion below is satisfied (or waived). Each "Validation prompt" is the exact \
+                instruction the judge follows — provide the specific evidence it asks for. These numbers \
+                are stable — a rejection referring to "Criterion 3" means this list's #3.
                 \(criteria)
                 """)
         }
