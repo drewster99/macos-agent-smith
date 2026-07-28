@@ -42,28 +42,37 @@ public enum PathLinkifier {
     /// click handler validates existence lazily when the link is actually opened.
     public static func standaloneLink(for text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let target = standaloneLinkTarget(for: trimmed) else { return nil }
+        // The link **text** keeps the original trimmed form (e.g. `~/...`) so users
+        // see what they typed.
+        return "[\(trimmed)](\(target.absoluteString))"
+    }
+
+    /// The URL that `standaloneLink(for:)` would link to, for callers that set the
+    /// `.link` attribute on already-parsed text instead of injecting markdown syntax.
+    /// Same classification, same nil cases; the two cannot drift because the markdown
+    /// variant is built from this one.
+    public static func standaloneLinkTarget(for text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               !trimmed.contains(where: { $0.isWhitespace }) else { return nil }
 
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
             || trimmed.hasPrefix("file://") || trimmed.hasPrefix("mailto:") {
-            guard URL(string: trimmed) != nil else { return nil }
-            return "[\(trimmed)](\(trimmed))"
+            return URL(string: trimmed)
         }
 
         if trimmed.hasPrefix("/") || trimmed.hasPrefix("~/") {
             let expanded = (trimmed as NSString).expandingTildeInPath
-            // `URL(fileURLWithPath:)` handles percent-encoding; the link **text** keeps
-            // the original `~/...` form so users see what they typed.
-            let urlString = URL(fileURLWithPath: expanded).absoluteString
-            return "[\(trimmed)](\(urlString))"
+            // `URL(fileURLWithPath:)` handles percent-encoding of spaces, unicode, etc.
+            return URL(fileURLWithPath: expanded)
         }
 
         if let regex = emailRegex {
             let nsRange = NSRange(location: 0, length: (trimmed as NSString).length)
             if let match = regex.firstMatch(in: trimmed, range: nsRange),
                match.range == nsRange {
-                return "[\(trimmed)](mailto:\(trimmed))"
+                return URL(string: "mailto:\(trimmed)")
             }
         }
         return nil

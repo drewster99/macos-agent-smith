@@ -160,39 +160,6 @@ struct MarkdownText: View, Equatable {
         return cells.map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
-    // MARK: - Inline code
-
-    /// GFM treats even single tildes as strikethrough delimiters, so two home-relative
-    /// paths in one line ("check ~/cursor/a and ~/cursor/b") struck through everything
-    /// between them (observed on user-typed text 2026-07-09). Escape `~` only when it
-    /// starts a `~/` path and is outside a backtick code span — deliberate
-    /// `~~strikethrough~~` and code spans are untouched.
-    static func escapingPathTildes(_ text: String) -> String {
-        guard text.contains("~/") else { return text }
-        var result = ""
-        result.reserveCapacity(text.count + 4)
-        var insideCode = false
-        var index = text.startIndex
-        while index < text.endIndex {
-            let character = text[index]
-            if character == "`" {
-                insideCode.toggle()
-                result.append(character)
-            } else if character == "~", !insideCode {
-                let next = text.index(after: index)
-                if next < text.endIndex, text[next] == "/" {
-                    result.append("\\~")
-                } else {
-                    result.append(character)
-                }
-            } else {
-                result.append(character)
-            }
-            index = text.index(after: index)
-        }
-        return result
-    }
-    
     // MARK: - Extracted View structs (refactored from func ... -> some View helpers)
     
     /// Nested View struct for rendering content blocks (refactored from renderBlock(_:)
@@ -398,74 +365,12 @@ struct MarkdownText: View, Equatable {
     
     /// Helper namespace for styled inline text (refactored from styledInlineText(_:font:))
     private enum InlineText {
+        /// The parsing/styling pipeline lives in `InlineMarkdownStyler` (AgentSmithKit)
+        /// so the package test suite can pin its behavior — emphasis and links form
+        /// across inline code spans, linkification never reaches inside them.
         static func styled(_ raw: String, font: Font) -> Text {
-            let segments = InlineCodeParser.parse(raw)
-            var combined = AttributedString()
-            
-            for segment in segments {
-                // A backtick-wrapped segment whose entire content is a single path or URL
-                // is more useful as a clickable link than as colored inline code. One
-                // `standaloneLink(for:)` call covers both the decision and the wrapping,
-                // so paths get exactly one `FileManager.fileExists` hit per render.
-                if segment.isCode, let linked = PathLinkifier.standaloneLink(for: segment.text) {
-                    combined += MarkdownParser.parse(linked, fallback: segment.text)
-                } else if segment.isCode {
-                    var part = AttributedString(segment.text)
-                    part.foregroundColor = AppColors.inlineCode
-                    combined += part
-                } else {
-                    combined += MarkdownParser.parse(PathLinkifier.linkify(segment.text), fallback: segment.text)
-                }
-            }
-            return Text(combined).font(font)
-        }
-    }
-    
-    /// Helper namespace for inline code parsing
-    private enum InlineCodeParser {
-        struct InlineSegment {
-            let text: String
-            let isCode: Bool
-        }
-        
-        static func parse(_ text: String) -> [InlineSegment] {
-            var segments: [InlineSegment] = []
-            var remaining = text[...]
-            
-            while let backtickStart = remaining.firstIndex(of: "`") {
-                if backtickStart > remaining.startIndex {
-                    segments.append(InlineSegment(text: String(remaining[remaining.startIndex..<backtickStart]), isCode: false))
-                }
-                let afterBacktick = remaining.index(after: backtickStart)
-                if afterBacktick < remaining.endIndex,
-                   let backtickEnd = remaining[afterBacktick...].firstIndex(of: "`") {
-                    segments.append(InlineSegment(text: String(remaining[afterBacktick..<backtickEnd]), isCode: true))
-                    remaining = remaining[remaining.index(after: backtickEnd)...]
-                } else {
-                    // No closing backtick — treat rest as plain text.
-                    segments.append(InlineSegment(text: String(remaining[backtickStart...]), isCode: false))
-                    remaining = remaining[remaining.endIndex...]
-                }
-            }
-            if !remaining.isEmpty {
-                segments.append(InlineSegment(text: String(remaining), isCode: false))
-            }
-            return segments
-        }
-    }
-    
-    /// Helper namespace for markdown parsing
-    private enum MarkdownParser {
-        static func parse(_ markdown: String, fallback: String) -> AttributedString {
-            if let parsed = try? AttributedString(
-                markdown: MarkdownText.escapingPathTildes(markdown),
-                options: AttributedString.MarkdownParsingOptions(
-                    interpretedSyntax: .inlineOnlyPreservingWhitespace
-                )
-            ) {
-                return parsed
-            }
-            return AttributedString(fallback)
+            Text(InlineMarkdownStyler.styledLine(raw, inlineCodeColor: AppColors.inlineCode))
+                .font(font)
         }
     }
 }
