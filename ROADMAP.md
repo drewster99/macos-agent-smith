@@ -2257,6 +2257,34 @@ This surface is why item 3 above cannot be swept mechanically — and that is th
 
 Do this one *with or before* item 3, since it is what makes item 3 tractable.
 
+### Smith's system-message filter matches on prose (2026-07-27)
+
+The last surviving instance of "behaviour driven by transcript text" after the `ToolEffect` work.
+`OrchestrationRuntime.swift:2100`, in the filter deciding which system messages reach Smith's context:
+
+```swift
+if case .system = message.sender {
+    if message.kind == .taskUpdateGuidance {
+        // Always pass through — this is system guidance for Smith.
+    } else {
+        let c = message.content
+        guard c.hasPrefix("Agent ") || c.hasPrefix("Rate limit:") else { return false }
+    }
+}
+```
+
+Note the shape: the branch above reads `message.kind`; the fallback below reads prose. **11 system
+messages** depend on that prefix — 10 built as `"Agent \(…)"` plus the rate-limit notice. Among them
+is `"Agent Brown returned 6 consecutive text-only responses…"`, the termination notice from the
+incident that started this thread. It reaches Smith only because it happens to begin with `"Agent "`.
+Reword any of them to lead with the agent's own name — "Brown returned…" — and Smith silently stops
+being told that its worker died.
+
+**Fix:** give those messages kinds (`agentLifecycle`, `rateLimit`, or finer) and filter on kind,
+deleting the prefix test. Bounded work: add the cases to `ChannelMessageKind`, tag the 11 post sites,
+extend the wire-string table. New kinds don't appear in historical logs so the corpus requirement
+doesn't apply — but per the retirement rule they can never be deleted afterwards.
+
 ### The three loop breakers cancel each other out (2026-07-27)
 
 `AgentActor` has three circuit breakers, and each is reset by the signal the others fire on:

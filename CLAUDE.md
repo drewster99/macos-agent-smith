@@ -72,6 +72,25 @@ When adding session-scoped state, put it on `AppViewModel` (not `SharedAppState`
 
 The runtime fires `@Sendable` callbacks (`onAbort`, `onProcessingStateChange`, `onAgentStarted`, `onTurnRecorded`, `onEvaluationRecorded`, `onContextChanged`) so the SwiftUI layer can observe activity without poking into actor state.
 
+### Never drive behavior by matching free text in the transcript
+
+**No control flow may depend on the wording of a tool's output, a message's content, or any other prose in the transcript.** That text is written for a model or for a human. It gets reworded, localized, given a variant for an edge case — and every reword silently changes behavior somewhere else, because a string comparison that stops matching does not throw, log, or fail a test.
+
+This is not hypothetical; it is the most repeated defect in this codebase's history:
+
+- `message_brown` set `sentMessage` only when its output equalled `"Message sent to Brown."`. The tool had been reworded to name the task, so the match never fired and **Smith never parked after messaging a worker** — it kept acting instead of waiting for the reply. Found 2026-07-27, live for an unknown period.
+- The same comparisons broke for **every message carrying an attachment**, because the attachment path returns a different sentence.
+- `create_task`'s `result.contains("System is restarting")` was dead for the same reason.
+- The parked-worker spin that started all of this was the same shape one level up: a gate keyed on the wrong property of a message instead of a typed discriminator.
+
+**Instead:** the producer declares a typed fact and the consumer reads it.
+
+- Tool caused something the run loop must react to → declare `successEffects` (`ToolEffect`) on the tool. See `AgentTool.swift`.
+- Tool succeeded or failed → `ToolExecutionResult.succeeded`, never the output text.
+- Message means something structural → `ChannelMessageKind`, never the content (below).
+
+The one legitimate exception is a deliberately fuzzy heuristic over **model-authored** prose, where there is no typed signal to read because the model wrote the words — e.g. `detectActionClaimWithoutToolCall`, which notices Smith *claiming* it terminated an agent without calling the tool. Those must fail safe (a miss costs a correction, never a wrong action) and must never be the only thing standing between the system and a wrong state.
+
 ### Message kinds are typed, never bare strings
 
 Every structural `ChannelMessage` carries a `messageKind` discriminator in its metadata, and readers key both display AND control flow off it. **These are never written or compared as string literals.** Use `ChannelMessageKind` (`AgentSmithKit/Channel/ChannelMessageKind.swift`):
