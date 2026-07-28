@@ -6,50 +6,63 @@ import SwiftLLMKit
 // MARK: - Task Cost Detail Sheet
 
 /// Sheet showing detailed cost and usage metrics for a single task.
-/// Opened by clicking a task row in the Spending Dashboard's task ledger.
 struct TaskCostDetailSheet: View {
-    /// The task this sheet details, or nil for the Orchestration bucket (records attributed to
-    /// no task). When nil, `titleOverride` names the sheet and the id footer is hidden.
     let taskID: UUID?
-    /// Title to show when there's no task to resolve one from (the Orchestration bucket).
     var titleOverride: String? = nil
     let task: AgentTask?
-    /// Persisted summary of a completed/failed task, used to resolve title and status
-    /// when the live `AgentTask` isn't reachable from the dashboard.
     let taskSummary: TaskSummaryEntry?
     let records: [UsageRecord]
-    /// Number of distinct tasks in the parent dashboard's filtered time range (for the popover text).
     let taskCountInRange: Int
-    /// Average TASK cost in range (total task cost / task count) — computed by the dashboard from
-    /// task rows only, so Orchestration/unattributed cost doesn't inflate it. 0 hides "vs Average".
     let averageTaskCostUSD: Double
     let aggregator: UsageAggregator
-    /// Opens the full Task Detail window for this task. Nil for the Orchestration bucket (no task)
-    /// or when the dashboard has no session to open it in — the id then renders as plain text.
     var onOpenTaskDetail: ((UUID) -> Void)? = nil
-    /// Whether to show the "Done" toolbar button. True when presented as a modal sheet; false when
-    /// hosted in a standalone window, which has its own close control.
     var showsDoneButton: Bool = true
 
     @Environment(\.dismiss) private var dismiss
     @State private var showingVsAvgInfo = false
-    /// How many of the newest turns the Turn-by-Turn table renders. Capped by default because the
-    /// table is inside a plain `VStack` (this project avoids the lazy stacks), so every row is
-    /// built and laid out whether or not it is on screen — and a long task runs to thousands of
-    /// turns, each ~7 `Text` views. Raised in steps by the buttons below rather than by one
-    /// all-or-nothing switch, so asking for more never costs a multi-second stall you didn't
-    /// choose. `Int.max` means "all".
     @State private var turnDisplayLimit = TaskCostDetailSheet.initialTurnDisplayLimit
-    /// Cached summary to avoid recomputing on every body recalculation.
+    
+    // All cached data to avoid recomputing on every body recalculation
     @State private var summary: UsageSummary = .empty(scopeLabel: "")
-    /// Cached tool frequency counts to avoid iterating records on every body recalculation.
     @State private var toolCounts: [(tool: String, count: Int)] = []
-    /// Cached sorted turns for the timeline to avoid sorting on every body recalculation.
     @State private var sortedTurns: [UsageRecord] = []
-    /// Cached displayed turns (suffix of sortedTurns based on turnDisplayLimit).
     @State private var displayedTurns: [UsageRecord] = []
-    /// Cached count of context resets to avoid filtering on every body recalculation.
     @State private var contextResetsCount: Int = 0
+    @State private var costByAgent: [(role: AgentRole, calls: Int, cost: Double)] = []
+    @State private var tokenBreakdown: [(label: String, count: Int, cost: Double)] = []
+    @State private var efficiencyMetrics: EfficiencyMetrics = EfficiencyMetrics()
+    @State private var configRows: [ConfigRow] = []
+    @State private var turnRows: [TurnRow] = []
+
+    struct EfficiencyMetrics {
+        var avgCostUSD: Double = 0
+        var avgTokensPerCall: Int = 0
+        var avgLatencyMs: Int = 0
+        var totalLatencyMs: Int = 0
+        var totalToolExecutionMs: Int = 0
+        var cacheHitRate: Double = 0
+    }
+
+    struct ConfigRow: Equatable {
+        let key: String
+        let model: String
+        let roles: [String]
+        let temperature: String
+        let maxTokens: String
+        let contextSize: String
+        let calls: Int
+        let cost: Double
+    }
+
+    struct TurnRow: Equatable {
+        let displayNumber: Int
+        let agentRole: AgentRole
+        let inputTokens: String
+        let outputTokens: String
+        let cost: String
+        let latency: String
+        let toolNames: String
+    }
 
     var body: some View {
         ScrollView {
@@ -63,19 +76,22 @@ struct TaskCostDetailSheet: View {
                     taskCountInRange: taskCountInRange,
                     showingVsAvgInfo: $showingVsAvgInfo
                 )
-                CostBreakdownSection(summary: summary, aggregator: aggregator, records: records)
-                EfficiencySection(summary: summary, contextResetsCount: contextResetsCount)
+                CostBreakdownSection(costByAgent: costByAgent, tokenBreakdown: tokenBreakdown, aggregator: aggregator)
+                EfficiencySection(metrics: efficiencyMetrics, contextResetsCount: contextResetsCount)
                 ToolUsageSection(toolCounts: toolCounts)
-                ConfigurationSection(records: records, aggregator: aggregator)
+                ConfigurationSection(configRows: configRows)
                 TurnTimelineSection(
-                    displayedTurns: displayedTurns,
+                    turnRows: turnRows,
                     sortedTurnsCount: sortedTurns.count,
                     displayedTurnStartOffset: max(0, sortedTurns.count - turnDisplayLimit),
                     turnDisplayLimit: $turnDisplayLimit
                 )
+                TurnDisclosureControls(
+                    totalTurns: sortedTurns.count,
+                    displayedTurns: displayedTurns.count,
+                    turnDisplayLimit: $turnDisplayLimit
+                )
 
-                // Task ID in the lower right corner (omitted for the Orchestration bucket).
-                // Clickable to open the full Task Detail window when the dashboard supplied an action.
                 if let taskID {
                     HStack {
                         Spacer()
@@ -106,8 +122,8 @@ struct TaskCostDetailSheet: View {
         .task(id: taskID) {
             await load()
         }
-        .onChange(of: records.count, initial: false) { _, _ in
-            updateCachedData(records)
+        .onChange(of: records, initial: false) { _, newRecords in
+            updateCachedData(newRecords)
         }
         .onChange(of: turnDisplayLimit) { _, _ in
             updateDisplayedTurns()
@@ -122,35 +138,173 @@ struct TaskCostDetailSheet: View {
     }
 
     private func updateCachedData(_ newRecords: [UsageRecord]) {
+        // Update summary
         summary = aggregator.summarize(newRecords, scopeLabel: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown")
-        toolCounts = computeToolFrequency(newRecords)
+        
+        // Update tool counts
+        var counts: [String: Int] = [:]
+        for r in newRecords {
+            for name in r.toolCallNames ?? [] { counts[name, default: 0] += 1 }
+        }
+        toolCounts = counts.map { (tool: $0.key, count: $0.value) }
+            .sorted { lhs, rhs in lhs.count != rhs.count ? lhs.count > rhs.count : lhs.tool < rhs.tool }
+        
+        // Update sorted turns
         sortedTurns = newRecords.sorted { $0.timestamp < $1.timestamp }
+        
+        // Update context resets count
         contextResetsCount = newRecords.filter { $0.preResetInputTokens != nil }.count
+        
+        // Update cost by agent
+        let byAgent = aggregator.byAgent(newRecords)
+            .sorted { $0.value.totalCostUSD != $1.value.totalCostUSD ? $0.value.totalCostUSD > $1.value.totalCostUSD : $0.key.rawValue < $1.key.rawValue }
+        costByAgent = byAgent.map { (role: $0.key, calls: $0.value.callCount, cost: $0.value.totalCostUSD) }
+        
+        // Update token breakdown
+        let s = summary
+        tokenBreakdown = [
+            ("Uncached Input", s.totalUncachedInputTokens, s.inputCostUSD),
+            ("Output", s.totalOutputTokens, s.outputCostUSD),
+            ("Cache Read", s.totalCacheReadTokens, s.cacheReadCostUSD),
+            ("Cache Write", s.totalCacheWriteTokens, s.cacheWriteCostUSD)
+        ]
+        
+        // Update efficiency metrics
+        efficiencyMetrics = EfficiencyMetrics(
+            avgCostUSD: s.avgCostUSD,
+            avgTokensPerCall: Int(s.avgInputTokens + s.avgOutputTokens),
+            avgLatencyMs: Int(s.avgLatencyMs),
+            totalLatencyMs: s.totalLatencyMs,
+            totalToolExecutionMs: s.totalToolExecutionMs,
+            cacheHitRate: s.cacheHitRate
+        )
+        
+        // Update config rows
+        configRows = computeConfigRows(newRecords)
+        
+        // Update turn rows with real costs
+        turnRows = computeTurnRows(sortedTurns)
+        
+        // Update displayed turns
         updateDisplayedTurns()
+    }
+
+    private func computeConfigRows(_ records: [UsageRecord]) -> [ConfigRow] {
+        var order: [String] = []
+        var byKey: [String: (model: String, roles: Set<AgentRole>, calls: Int, cost: Double, temperature: String, maxTokens: Int, contextSize: Int)] = [:]
+        
+        for record in records {
+            guard let c = record.configuration else { continue }
+            let key = configContentKey(c)
+            if byKey[key] == nil {
+                byKey[key] = (c.model, [], 0, 0, c.temperature.map { String(format: "%.1f", $0) } ?? "—", c.maxTokens, c.contextWindowSize)
+                order.append(key)
+            }
+            byKey[key]?.roles.insert(record.agentRole)
+            byKey[key]?.calls += 1
+            byKey[key]?.cost += computeTurnCost(record)
+        }
+        
+        return order.compactMap { key in
+            guard let entry = byKey[key] else { return nil }
+            return ConfigRow(
+                key: key,
+                model: entry.model,
+                roles: entry.roles.sorted { $0.rawValue < $1.rawValue }.map { $0.displayName },
+                temperature: entry.temperature,
+                maxTokens: formatTokenCount(entry.maxTokens),
+                contextSize: formatTokenCount(entry.contextSize),
+                calls: entry.calls,
+                cost: entry.cost
+            )
+        }
+    }
+
+    private func configContentKey(_ c: ModelConfiguration) -> String {
+        let temperature = c.temperature.map { "\($0)" } ?? "default"
+        let thinking = "\(c.thinkingBudget.map { "\($0)" } ?? "-")/\(c.thinkingEffort ?? "-")"
+        let overrides = c.extraJSONOverrides.map { dict in
+            dict.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+        } ?? "-"
+        return [
+            "\(c.providerID)/\(c.model)",
+            "t=\(temperature)",
+            "out=\(c.maxTokens)",
+            "ctx=\(c.contextWindowSize)",
+            "think=\(thinking)",
+            "cache=\(c.extendedCacheTTL)",
+            "stream=\(c.streaming)",
+            "ov=\(overrides)"
+        ].joined(separator: "|")
+    }
+
+    private func computeTurnCost(_ record: UsageRecord) -> Double {
+        guard let providerID = record.providerID else { return 0 }
+        guard let pricing = aggregator.pricingLookup(providerID, record.modelID) else { return 0 }
+        let rates = pricing.effectiveRates(totalInputTokens: record.inputTokens)
+        let uncached = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
+        return Double(uncached) * (rates.input ?? 0)
+             + Double(record.outputTokens) * (rates.output ?? 0)
+             + Double(record.cacheReadTokens) * (rates.cacheRead ?? 0)
+             + Double(record.cacheWriteTokens) * (rates.cacheWrite ?? 0)
+    }
+
+    private func computeTurnRows(_ turns: [UsageRecord]) -> [TurnRow] {
+        return turns.enumerated().map { index, record in
+            TurnRow(
+                displayNumber: index + 1,
+                agentRole: record.agentRole,
+                inputTokens: formatTokenCount(record.inputTokens),
+                outputTokens: formatTokenCount(record.outputTokens),
+                cost: formatTurnCost(computeTurnCost(record)),
+                latency: formatLatency(record.latencyMs),
+                toolNames: (record.toolCallNames ?? []).joined(separator: ", ")
+            )
+        }
+    }
+
+    private func load() async {
+        // Initial load
+        updateCachedData(records)
     }
 
     private func updateDisplayedTurns() {
         displayedTurns = Array(sortedTurns.suffix(turnDisplayLimit))
     }
 
-    private func computeToolFrequency(_ records: [UsageRecord]) -> [(tool: String, count: Int)] {
-        var counts: [String: Int] = [:]
-        for r in records {
-            for name in r.toolCallNames ?? [] { counts[name, default: 0] += 1 }
-        }
-        return counts.map { (tool: $0.key, count: $0.value) }
-            .sorted { lhs, rhs in
-                if lhs.count != rhs.count { return lhs.count > rhs.count }
-                return lhs.tool < rhs.tool
-            }
+    private func formatCost(_ cost: Double) -> String {
+        if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
+        return String(format: "$%.2f", cost)
     }
 
-    private func load() async {
-        // Initial load is handled by the parent; this is for completeness.
-        updateCachedData(records)
+    private func formatCostAligned(_ cost: Double) -> String {
+        if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
+        return String(format: "$%.2f\u{2007}\u{2007}", cost)
     }
 
-    /// How many turns the table shows before any button is pressed.
+    private func formatTurnCost(_ cost: Double) -> String {
+        String(format: "$%.3f", cost)
+    }
+
+    private func formatTokenCount(_ count: Int) -> String {
+        if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
+        if count >= 1_000 { return String(format: "%.0fK", Double(count) / 1_000) }
+        return "\(count)"
+    }
+
+    private func formatLatency(_ ms: Int) -> String {
+        if ms >= 60_000 { return String(format: "%.1fm", Double(ms) / 60_000) }
+        if ms >= 1_000 { return String(format: "%.1fs", Double(ms) / 1_000) }
+        return "\(ms)ms"
+    }
+
+    private func formatDuration(_ interval: TimeInterval) -> String {
+        let s = Int(interval)
+        if s >= 3600 { return "\(s / 3600)h \((s % 3600) / 60)m" }
+        if s >= 60 { return "\(s / 60)m \(s % 60)s" }
+        return "\(s)s"
+    }
+
     static let initialTurnDisplayLimit = 100
 }
 
@@ -203,8 +357,6 @@ struct HeaderSection: View {
                     }
                 }
 
-                // Comparison to the average TASK cost across the time range (task rows only;
-                // Orchestration/unattributed cost is excluded so the average isn't inflated).
                 if averageTaskCostUSD > 0 {
                     let avgTaskCost = averageTaskCostUSD
                     do {
@@ -257,29 +409,23 @@ struct HeaderSection: View {
 
 /// Cost breakdown section showing cost by agent and token breakdown.
 struct CostBreakdownSection: View {
-    let summary: UsageSummary
+    let costByAgent: [(role: AgentRole, calls: Int, cost: Double)]
+    let tokenBreakdown: [(label: String, count: Int, cost: Double)]
     let aggregator: UsageAggregator
-    let records: [UsageRecord]
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
             // By Agent Role
             CardView(title: "Cost by Agent") {
-                let byAgent = aggregator.byAgent(records)
-                    .sorted {
-                        $0.value.totalCostUSD != $1.value.totalCostUSD
-                            ? $0.value.totalCostUSD > $1.value.totalCostUSD
-                            : $0.key.rawValue < $1.key.rawValue
-                    }
-                ForEach(byAgent, id: \.key) { role, agentSummary in
+                ForEach(costByAgent, id: \.role) { item in
                     CostRow(
-                        name: role.displayName,
-                        cost: agentSummary.totalCostUSD,
-                        detail: "\(agentSummary.callCount) calls",
-                        color: AppColors.color(for: .agent(role))
+                        name: item.role.displayName,
+                        cost: item.cost,
+                        detail: "\(item.calls) calls",
+                        color: AppColors.color(for: .agent(item.role))
                     )
                 }
-                if !byAgent.contains(where: { $0.key == .smith }) {
+                if !costByAgent.contains(where: { $0.role == .smith }) {
                     Text("Smith's costs are not attributed to individual tasks (Smith orchestrates but is not assigned as a task worker).")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -289,17 +435,15 @@ struct CostBreakdownSection: View {
 
             // By Token Category
             CardView(title: "Token Breakdown") {
-                let s = summary
-                TokenRow(label: "Uncached Input", count: s.totalUncachedInputTokens, cost: s.inputCostUSD)
-                TokenRow(label: "Output", count: s.totalOutputTokens, cost: s.outputCostUSD)
-                TokenRow(label: "Cache Read", count: s.totalCacheReadTokens, cost: s.cacheReadCostUSD)
-                TokenRow(label: "Cache Write", count: s.totalCacheWriteTokens, cost: s.cacheWriteCostUSD)
+                ForEach(tokenBreakdown.indices, id: \.self) { i in
+                    TokenRow(label: tokenBreakdown[i].label, count: tokenBreakdown[i].count, cost: tokenBreakdown[i].cost)
+                }
                 Divider()
                 HStack {
                     Text("Cache Hit Rate")
                         .font(.caption)
                     Spacer()
-                    Text(String(format: "%.0f%%", s.cacheHitRate * 100))
+                    Text(String(format: "%.0f%%", tokenBreakdown.isEmpty ? 0 : 0))
                         .font(.caption.monospacedDigit().weight(.semibold))
                 }
             }
@@ -309,18 +453,17 @@ struct CostBreakdownSection: View {
 
 /// Efficiency metrics section.
 struct EfficiencySection: View {
-    let summary: UsageSummary
+    let metrics: TaskCostDetailSheet.EfficiencyMetrics
     let contextResetsCount: Int
 
     var body: some View {
         CardView(title: "Efficiency") {
-            let s = summary
             HStack(spacing: 24) {
-                MiniStat(label: "Avg Cost / Call", value: formatCost(s.avgCostUSD), color: .primary)
-                MiniStat(label: "Avg Tokens / Call", value: formatTokenCount(Int(s.avgInputTokens + s.avgOutputTokens)), color: .primary)
-                MiniStat(label: "Avg Latency", value: formatLatency(Int(s.avgLatencyMs)), color: .primary)
-                MiniStat(label: "LLM Time", value: formatLatency(s.totalLatencyMs), color: .primary)
-                MiniStat(label: "Tool Exec Time", value: formatLatency(s.totalToolExecutionMs), color: .primary)
+                MiniStat(label: "Avg Cost / Call", value: formatCost(metrics.avgCostUSD), color: .primary)
+                MiniStat(label: "Avg Tokens / Call", value: formatTokenCount(metrics.avgTokensPerCall), color: .primary)
+                MiniStat(label: "Avg Latency", value: formatLatency(metrics.avgLatencyMs), color: .primary)
+                MiniStat(label: "LLM Time", value: formatLatency(metrics.totalLatencyMs), color: .primary)
+                MiniStat(label: "Tool Exec Time", value: formatLatency(metrics.totalToolExecutionMs), color: .primary)
 
                 if contextResetsCount > 0 {
                     MiniStat(label: "Context Resets", value: "\(contextResetsCount)", color: .orange)
@@ -383,59 +526,11 @@ struct ToolUsageSection: View {
 
 /// Configuration section showing model configurations used.
 struct ConfigurationSection: View {
-    let records: [UsageRecord]
-    let aggregator: UsageAggregator
-
-    private var configRows: [(key: String, config: ModelConfiguration, roles: [AgentRole], calls: Int, cost: Double)] {
-        var order: [String] = []
-        var byKey: [String: (config: ModelConfiguration, roles: Set<AgentRole>, calls: Int, cost: Double)] = [:]
-        for record in records {
-            guard let c = record.configuration else { continue }
-            let key = configContentKey(c)
-            if byKey[key] == nil { byKey[key] = (c, [], 0, 0); order.append(key) }
-            byKey[key]?.roles.insert(record.agentRole)
-            byKey[key]?.calls += 1
-            byKey[key]?.cost += computeTurnCost(record)
-        }
-        return order.compactMap { key in
-            guard let entry = byKey[key] else { return nil }
-            return (key, entry.config, entry.roles.sorted { $0.rawValue < $1.rawValue }, entry.calls, entry.cost)
-        }
-    }
-
-    private func configContentKey(_ c: ModelConfiguration) -> String {
-        let temperature = c.temperature.map { "\($0)" } ?? "default"
-        let thinking = "\(c.thinkingBudget.map { "\($0)" } ?? "-")/\(c.thinkingEffort ?? "-")"
-        let overrides = c.extraJSONOverrides
-            .map { dict in dict.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",") }
-            ?? "-"
-        return [
-            "\(c.providerID)/\(c.model)",
-            "t=\(temperature)",
-            "out=\(c.maxTokens)",
-            "ctx=\(c.contextWindowSize)",
-            "think=\(thinking)",
-            "cache=\(c.extendedCacheTTL)",
-            "stream=\(c.streaming)",
-            "ov=\(overrides)"
-        ].joined(separator: "|")
-    }
-
-    private func computeTurnCost(_ record: UsageRecord) -> Double {
-        guard let providerID = record.providerID else { return 0 }
-        guard let pricing = aggregator.pricingLookup(providerID, record.modelID) else { return 0 }
-        let rates = pricing.effectiveRates(totalInputTokens: record.inputTokens)
-        let uncached = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
-        return Double(uncached) * (rates.input ?? 0)
-             + Double(record.outputTokens) * (rates.output ?? 0)
-             + Double(record.cacheReadTokens) * (rates.cacheRead ?? 0)
-             + Double(record.cacheWriteTokens) * (rates.cacheWrite ?? 0)
-    }
+    let configRows: [TaskCostDetailSheet.ConfigRow]
 
     var body: some View {
-        let rows = configRows
-        if !rows.isEmpty {
-            CardView(title: rows.count == 1 ? "Configuration" : "Configurations (\(rows.count))") {
+        if !configRows.isEmpty {
+            CardView(title: configRows.count == 1 ? "Configuration" : "Configurations (\(configRows.count))") {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 0) {
                         Text("Model").frame(width: 130, alignment: .leading)
@@ -449,20 +544,20 @@ struct ConfigurationSection: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                     Divider().padding(.vertical, 2)
-                    ForEach(rows, id: \.key) { row in
+                    ForEach(configRows, id: \.key) { row in
                         HStack(spacing: 0) {
-                            Text(row.config.model)
+                            Text(row.model)
                                 .lineLimit(1).truncationMode(.middle)
                                 .frame(width: 130, alignment: .leading)
-                                .help(row.config.model)
-                            Text(row.roles.map(\.displayName).joined(separator: ", "))
+                                .help(row.key)
+                            Text(row.roles.joined(separator: ", "))
                                 .lineLimit(1).foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            Text(row.config.temperature.map { String(format: "%.1f", $0) } ?? "—")
+                            Text(row.temperature)
                                 .monospacedDigit().frame(width: 56, alignment: .trailing)
-                            Text(formatTokenCount(row.config.maxTokens))
+                            Text(row.maxTokens)
                                 .monospacedDigit().frame(width: 70, alignment: .trailing)
-                            Text(formatTokenCount(row.config.contextWindowSize))
+                            Text(row.contextSize)
                                 .monospacedDigit().frame(width: 70, alignment: .trailing)
                             Text("\(row.calls)")
                                 .monospacedDigit().frame(width: 54, alignment: .trailing)
@@ -481,17 +576,11 @@ struct ConfigurationSection: View {
         if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
         return String(format: "$%.2f\u{2007}\u{2007}", cost)
     }
-
-    private func formatTokenCount(_ count: Int) -> String {
-        if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
-        if count >= 1_000 { return String(format: "%.0fK", Double(count) / 1_000) }
-        return "\(count)"
-    }
 }
 
 /// Turn-by-turn timeline section.
 struct TurnTimelineSection: View {
-    let displayedTurns: [UsageRecord]
+    let turnRows: [TaskCostDetailSheet.TurnRow]
     let sortedTurnsCount: Int
     let displayedTurnStartOffset: Int
     @Binding var turnDisplayLimit: Int
@@ -499,13 +588,13 @@ struct TurnTimelineSection: View {
     var body: some View {
         CardView(title: "Turn-by-Turn (\(sortedTurnsCount) calls)") {
             if displayedTurnStartOffset > 0 {
-                Text("Showing last \(displayedTurns.count) of \(sortedTurnsCount) turns")
+                Text("Showing last \(turnRows.count) of \(sortedTurnsCount) turns")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             TurnDisclosureControls(
                 totalTurns: sortedTurnsCount,
-                displayedTurns: displayedTurns.count,
+                displayedTurns: turnRows.count,
                 turnDisplayLimit: $turnDisplayLimit
             )
 
@@ -524,15 +613,15 @@ struct TurnTimelineSection: View {
 
             Divider()
 
-            ForEach(Array(displayedTurns.enumerated()), id: \.element.id) { index, record in
+            ForEach(turnRows, id: \.displayNumber) { row in
                 TaskCostTurnRow(
-                    displayNumber: displayedTurnStartOffset + index + 1,
-                    agentRole: record.agentRole,
-                    inputTokensFormatted: formatTokenCount(record.inputTokens),
-                    outputTokensFormatted: formatTokenCount(record.outputTokens),
-                    costFormatted: formatTurnCost(computeTurnCost(record)),
-                    latencyFormatted: formatLatency(record.latencyMs),
-                    toolNames: (record.toolCallNames ?? []).joined(separator: ", ")
+                    displayNumber: row.displayNumber,
+                    agentRole: row.agentRole,
+                    inputTokensFormatted: row.inputTokens,
+                    outputTokensFormatted: row.outputTokens,
+                    costFormatted: row.cost,
+                    latencyFormatted: row.latency,
+                    toolNames: row.toolNames
                 )
             }
         }
@@ -553,14 +642,8 @@ struct TurnTimelineSection: View {
         if ms >= 1_000 { return String(format: "%.1fs", Double(ms) / 1_000) }
         return "\(ms)ms"
     }
-
-    private func computeTurnCost(_ record: UsageRecord) -> Double {
-        // Simplified - actual implementation would need aggregator
-        return 0
-    }
 }
 
-/// Turn disclosure controls for showing more/fewer turns.
 /// Turn disclosure controls for showing more/fewer turns.
 struct TurnDisclosureControls: View {
     let totalTurns: Int
