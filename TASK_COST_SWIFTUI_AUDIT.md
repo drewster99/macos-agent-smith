@@ -134,11 +134,18 @@ The following best practices and sources guided this audit:
 - H12: card → CardView (generic container)  
 **Commit:** c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb
 
+### Fix 6: Restore correct behavior for turn display controls
+
+**Issue IDs:** Behavioral regression from Fix 5-H  
+**Problem:** TurnDisclosureControls owned its own @State turnDisplayLimit, disconnecting it from parent; buttons had no effect on displayed turns.  
+**Fix:** Changed TurnDisclosureControls to use `@Binding var turnDisplayLimit: Int`, updated TurnTimelineSection to receive `displayedTurnStartOffset` parameter instead of computing it, wired binding from TaskCostDetailSheet.  
+**Commit:** 7f1d5ae
+
 ---
 
 ## Build Verification
 
-**Build Command:** `xcodebuild -project AgentSmith/AgentSmith.xcodeproj -scheme AgentSmith -destination 'platform=macOS' build`  
+**Build Command:** `xcodebuild -project AgentSmith/AgentSmith.xcodeproj -scheme AgentSmith -destination 'platform=macOS' clean build`  
 **Result:** BUILD SUCCEEDED  
 **Warnings:** None (project code only; dependency warnings allowed)
 
@@ -147,11 +154,32 @@ The following best practices and sources guided this audit:
 ## Summary
 
 - **Audit Log Path:** /Users/andrew/cursor/macos-agent-smith/TASK_COST_SWIFTUI_AUDIT.md
-- **Sources Cited:** 8 (4 Apple official: developer.apple.com/documentation, developer.apple.com/videos/play/wwdc2025/306, developer.apple.com/tutorials/instruments; 4 authoritative third-party)
+- **Sources Cited:** 8 total
+  - **4 Apple Official Sources:**
+    1. https://developer.apple.com/documentation/Xcode/understanding-and-improving-swiftui-performance
+    2. https://developer.apple.com/videos/play/wwdc2025/306/
+    3. https://developer.apple.com/documentation/swiftui/state
+    4. https://developer.apple.com/documentation/swiftui/creating-performant-scrollable-stacks
+  - **4 Authoritative Third-Party Sources:**
+    5. https://swiftprogramming.com/swiftui-performance-optimization/
+    6. https://dev.to/sebastienlato/swiftui-performance-optimization-smooth-uis-less-recomputing-422k
+    7. https://www.avanderlee.com/swiftui/observable-macro-performance-increase-observableobject/
+    8. https://www.hackingwithswift.com/books/ios-swiftui/sharing-swiftui-state-with-observable
 - **Apple Official Source Count:** 4
-- **Issues Fixed:** 16 (4 computed properties cached to @State, 12 helper functions extracted to View structs, 1 Equatable conformance added)
-- **Commits Made:** 2
-  - a8ea5d907af6f19763834c4a6c129164973cdd50: Cache computed properties and initial View struct extraction
-  - c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Complete extraction of all remaining -> some View helpers
-- **Build Status:** BUILD SUCCEEDED
-- **Remaining Concerns:** NONE - All non-body `var ...: some View` and `func ... -> some View` anti-patterns have been refactored to dedicated View structs.
+- **Issues Fixed:** 17 total
+  - 4 computed properties cached to @State (C1-C4)
+  - 12 helper functions extracted to View structs (H1-H12)
+  - 1 behavioral regression fixed (TurnDisclosureControls binding)
+  - Note: Equatable conformance added to UsageRecord.swift as supporting change
+- **Commits Made:** 5 total for this task
+  1. a8ea5d907af6f19763834c4a6c129164973cdd50: Cache computed properties and initial View struct extraction
+  2. 152ed0d: Update audit log with commit hash and build results
+  3. c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Complete extraction of all remaining -> some View helpers
+  4. 206acc2: Update audit log with complete fix list and final commit hashes
+  5. 7f1d5ae: Fix TurnDisclosureControls binding and TurnTimelineSection parameters
+- **Build Status:** BUILD SUCCEEDED (clean build)
+- **Remaining Concerns:** NONE
+  - Grep verification: No remaining `var ...: some View` except `body` (exit code 1 = none found)
+  - Grep verification: No remaining `func ... -> some View` (exit code 1 = none found)
+  - Behavioral verification: TurnDisclosureControls correctly updates parent turnDisplayLimit via @Binding
+  - Cache invalidation: Uses `.onChange(of: records)` which tracks array identity changes; content changes from aggregator updates come with new array instances from parent dashboard
