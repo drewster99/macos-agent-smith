@@ -66,6 +66,11 @@ struct NowLiveSection: View {
         .onChange(of: viewModel.messages) { _, _ in recompute() }
         .onChange(of: viewModel.processingInstances) { _, _ in recompute() }
         .onChange(of: viewModel.toolExecutingByInstance) { _, _ in recompute() }
+        // The security registry drives both a worker's "waiting on security" line and the
+        // per-call "Security" marker, so it has to wake the recompute like any other live input.
+        // Without this the only thing refreshing them is the 10s stale sweep, and a review that
+        // starts and finishes between ticks never appears at all.
+        .onChange(of: viewModel.shared.liveActivitySnapshot) { _, _ in recompute() }
     }
 
     /// A cheap Equatable digest of the active tasks' identity + stage, so a status change
@@ -76,6 +81,9 @@ struct NowLiveSection: View {
 
     private func recompute() {
         let live = viewModel.activeTaskList.filter { Self.isLive($0.status) }
+        // The one registry `SecurityEvaluator` writes. Read ONCE per recompute so the tally, the
+        // per-worker blocked state, and every tool row describe the same instant.
+        let security = viewModel.shared.liveActivitySnapshot
 
         // One ROW per call, built by joining the three messages a call produces on their shared
         // `requestID`: the request, the Security Agent's verdict, and the output. Bucketing on the
@@ -123,7 +131,9 @@ struct NowLiveSection: View {
                     request: request.message,
                     name: request.tool,
                     review: reviewByRequest[request.requestID],
-                    output: outputByRequest[request.requestID]
+                    output: outputByRequest[request.requestID],
+                    requestID: request.requestID,
+                    security: security
                 )
             )
         }
@@ -139,7 +149,7 @@ struct NowLiveSection: View {
                 id: task.id,
                 title: task.title,
                 status: task.status,
-                brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance),
+                brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance, security: security),
                 // Already newest-first and already capped by the collecting loop above.
                 tools: toolsByTask[task.id] ?? []
             )
@@ -158,26 +168,36 @@ struct NowLiveSection: View {
         request: ChannelMessage,
         name: String,
         review: ChannelMessage?,
-        output: ChannelMessage?
+        output: ChannelMessage?,
+        requestID: String,
+        security: LiveActivityTracker.Snapshot
     ) -> ToolActivity {
         let disposition: String? = {
             if case .string(let value)? = review?.metadata?["securityDisposition"] { return value }
             return nil
         }()
-        let security: ToolActivity.SecurityPhase
+        let phase: ToolActivity.SecurityPhase
         switch disposition {
-        case "approved": security = .approved
-        case "autoApproved": security = .autoApproved
-        case "warning": security = .warned
-        case "denied": security = .denied
-        // No verdict on the wire yet: still in front of the Security Agent. A verdict carrying an
-        // unrecognised disposition is treated as reviewed-and-allowed rather than guessed at — it
-        // got past the gate, which is the only thing this row claims.
-        default: security = review == nil ? .evaluating : .approved
+        case "approved": phase = .approved
+        case "autoApproved": phase = .autoApproved
+        case "warning": phase = .warned
+        case "denied": phase = .denied
+        // No verdict on the wire yet. "Under review" is ASKED, not inferred: the registry
+        // `SecurityEvaluator` writes says whether this exact call is in front of the LLM right
+        // now. Inferring it from a missing verdict was also true before evaluation started and
+        // during any delivery gap, so a call could show "Security" while nothing was looking at
+        // it. A verdict carrying an unrecognised disposition is treated as reviewed-and-allowed
+        // rather than guessed at — it got past the gate, which is all this row claims.
+        default:
+            if review != nil {
+                phase = .approved
+            } else {
+                phase = security.isEvaluating(callID: requestID) ? .evaluating : .notYetReviewed
+            }
         }
 
         let run: ToolActivity.RunPhase
-        if security == .denied || security == .evaluating {
+        if phase == .denied || phase == .evaluating || phase == .notYetReviewed {
             run = .notStarted
         } else if let output {
             run = .finished(runMs: {
@@ -194,7 +214,7 @@ struct NowLiveSection: View {
             id: request.id,
             name: name,
             requestedAt: request.timestamp,
-            security: security,
+            security: phase,
             run: run
         )
     }
@@ -204,7 +224,8 @@ struct NowLiveSection: View {
     private static func brownState(
         for task: AgentTask,
         processing: Set<AgentInstanceRef>,
-        tools: [AgentInstanceRef: [String: Int]]
+        tools: [AgentInstanceRef: [String: Int]],
+        security: LiveActivityTracker.Snapshot
     ) -> String? {
         for id in task.assigneeIDs {
             let brownRef = AgentInstanceRef(role: .brown, instanceID: id)
@@ -213,8 +234,10 @@ struct NowLiveSection: View {
                 if names.count == 1, let only = names.first { return "running \(only)" }
                 return "running \(names.count) tools"
             }
-            // Brown is blocked while the Security Agent reviews the call it just issued.
-            if processing.contains(AgentInstanceRef(role: .securityAgent, instanceID: id)) {
+            // Brown is blocked while the Security Agent reviews a call it issued. Derived from the
+            // one registry `SecurityEvaluator` writes, so this can never contradict the Agents
+            // tally or the tool row beneath it — all three read the same entries.
+            if security.isAwaitingSecurity(agentInstanceID: id) {
                 return "waiting on security"
             }
             if processing.contains(brownRef) { return "thinking" }
@@ -269,8 +292,12 @@ struct NowLiveSection: View {
 
         /// What the Security Agent has decided about this call, so far.
         enum SecurityPhase: Equatable {
-            /// No verdict on the wire yet — the call is sitting in review.
+            /// The Security Agent's LLM is looking at this call right now.
             case evaluating
+            /// No verdict yet, and nothing is evaluating it — the moment between a call being
+            /// issued and review starting, or an auto-approval whose verdict hasn't landed. Shown
+            /// as nothing rather than as a security wait that isn't happening.
+            case notYetReviewed
             /// Reviewed by the Security Agent's LLM and allowed.
             case approved
             /// Pre-cleared without an LLM round-trip (the auto-approve table, or a WARN retry).
@@ -368,6 +395,8 @@ private struct LiveToolStatusView: View {
 
     var body: some View {
         switch tool.security {
+        case .notYetReviewed:
+            EmptyView()
         case .evaluating:
             // The one state that names an agent: this call is parked in front of the Security
             // Agent and nothing else is happening to it.

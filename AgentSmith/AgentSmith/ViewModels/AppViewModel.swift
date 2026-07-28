@@ -184,6 +184,17 @@ final class AppViewModel {
     private static let maxMessageHistory = 100
     /// Roles of agents that are currently waiting for an LLM response.
     var processingRoles: Set<AgentRole> = []
+
+    /// True while the Security Agent is doing ANY LLM work — evaluating a tool call, or scoping a
+    /// task's tools. Two genuinely different operations, each with exactly one source: evaluations
+    /// come from the registry `SecurityEvaluator` writes, scoping from its own processing signal.
+    /// This is their union for a card that only asks "is it busy", not a second opinion about
+    /// either. Per-call evaluations are deliberately NOT in `processingRoles`: bracketing them
+    /// from the caller could not tell a real evaluation from an auto-approved fast path, which is
+    /// how "waiting on security" once appeared above a tally reading "0 Security".
+    var isSecurityAgentBusy: Bool {
+        shared.liveActivitySnapshot.securityEvaluations > 0 || processingRoles.contains(.securityAgent)
+    }
     /// Tool names currently executing, per agent role. A multiset (counts) — a single role
     /// can have multiple parallel calls of the same tool in flight (e.g. parallel
     /// `run_applescript`), so we track counts rather than a Set so the indicator clears

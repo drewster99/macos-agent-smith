@@ -476,7 +476,8 @@ actor SecurityEvaluator {
         toolGroupDescription: String?,
         agentContext: String? = nil,
         sanctionedDirectories: [String] = [],
-        toolCallID: String? = nil
+        toolCallID: String? = nil,
+        evaluatingForAgentID: UUID? = nil
     ) async -> SecurityDisposition {
         let parsedParams = Self.parseToolParams(toolParams)
 
@@ -517,10 +518,27 @@ actor SecurityEvaluator {
             return disposition
         }
 
-        // Count only real LLM-backed evaluations toward the inspector's concurrency strip — the two
-        // auto-approve fast-paths above return synchronously and aren't "in flight".
-        activityTracker?.begin(.securityEvaluation)
-        defer { activityTracker?.end(.securityEvaluation) }
+        // THE single registration of "the Security Agent is evaluating this call". Everything the
+        // UI says about security-in-flight derives from here: the Agents tally counts these, a
+        // worker reads "waiting on security" because one of ITS calls is in this set, and a tool
+        // row shows the Security Agent because ITS call id is in it.
+        //
+        // It sits below the two auto-approve fast paths on purpose — those return synchronously
+        // with no LLM round-trip, so nothing is ever "in flight" for them. That distinction is
+        // knowable ONLY here, which is why this is the one place allowed to publish it; callers
+        // that tried to bracket `evaluate()` from outside necessarily included the fast paths and
+        // disagreed with this count.
+        //
+        // A call with no id can't be registered (nothing to key it by) and no caller in the app
+        // omits one; it degrades to not showing, never to showing something false.
+        if let toolCallID, let evaluatingForAgentID {
+            activityTracker?.beginSecurityEvaluation(callID: toolCallID, agentInstanceID: evaluatingForAgentID)
+        }
+        defer {
+            if let toolCallID, evaluatingForAgentID != nil {
+                activityTracker?.endSecurityEvaluation(callID: toolCallID)
+            }
+        }
 
         let evalPrompt = await buildEvalPrompt(
             toolName: toolName,

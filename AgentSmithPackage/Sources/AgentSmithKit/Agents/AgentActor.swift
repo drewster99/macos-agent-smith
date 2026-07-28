@@ -2148,8 +2148,7 @@ public actor AgentActor {
                 let taskTitleForChannel = channelTaskTitle
                 let agentIDPrefix = String(id.uuidString.prefix(8))
 
-                let securityAgentActiveCount = OSAllocatedUnfairLock(initialState: 0)
-                let securityAgentCallback = ctx.onSecurityAgentProcessingStateChange
+                let agentInstanceID = id
 
                 // Evaluate + execute a single entry. Extracted so the sliding
                 // window doesn't duplicate the task body.
@@ -2157,24 +2156,11 @@ public actor AgentActor {
                     let toolDef = entry.tool.definition(for: role)
                     let toolParamDefs = AgentActor.formatToolParameterDefinitions(toolDef.parameters)
 
-                    // Same reasoning as the sequential path. The counter keeps the signal
-                    // edge-triggered across the whole batch — first in lights it, last out clears
-                    // it — so a per-entry `defer` still cannot clear it while siblings are live.
-                    let disposition: SecurityDisposition
-                    do {
-                        let shouldSignalStart = securityAgentActiveCount.withLock { count -> Bool in
-                            count += 1
-                            return count == 1
-                        }
-                        if shouldSignalStart { securityAgentCallback(true) }
-                        defer {
-                            let shouldSignalEnd = securityAgentActiveCount.withLock { count -> Bool in
-                                count -= 1
-                                return count == 0
-                            }
-                            if shouldSignalEnd { securityAgentCallback(false) }
-                        }
-                        disposition = await evaluator.evaluate(
+                    // Same as the sequential path: the evaluator registers each call itself, so
+                    // there is no batch-wide counter to keep edge-triggered here any more. Each
+                    // call appears and disappears individually, which is also what lets a row say
+                    // WHICH of a parallel batch is under review.
+                    let disposition = await evaluator.evaluate(
                             toolName: entry.call.name,
                             toolParams: entry.call.arguments,
                             toolDescription: toolDef.description,
@@ -2188,9 +2174,9 @@ public actor AgentActor {
                             toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: entry.tool),
                             agentContext: agentContext,
                             sanctionedDirectories: sanctionedDirectories,
-                            toolCallID: entry.call.id
+                            toolCallID: entry.call.id,
+                            evaluatingForAgentID: agentInstanceID
                         )
-                    }
 
                     await AgentActor.postSecurityReviewToChannel(
                         disposition: disposition, callID: entry.call.id, roleName: roleName,
@@ -2518,15 +2504,12 @@ public actor AgentActor {
         // routed through it so they're visible and centrally gated. Brown is fully evaluated.
         // The worker's task-scoped working dirs — writes here are expected, not suspicious.
         let sanctionedDirectories = [toolContext.taskEvidenceDirectory, toolContext.taskTemporaryDirectory].compactMap { $0?.path }
-        // Bracketed in a `defer` inside its own scope so the flag falls even if an early return,
-        // a throw, or a cancellation is ever introduced in this window. A stranded "true" is not
-        // cosmetic: it renders as Brown "waiting on security" indefinitely, which is exactly how a
-        // healthy agent comes to look hung.
-        let disposition: SecurityDisposition
-        do {
-            toolContext.onSecurityAgentProcessingStateChange(true)
-            defer { toolContext.onSecurityAgentProcessingStateChange(false) }
-            disposition = await evaluator.evaluate(
+        // No "security is busy" signal is raised here. This scope cannot tell a real LLM
+        // evaluation from an auto-approved fast path, so bracketing `evaluate()` from outside
+        // produced a second, wider answer to a question the evaluator was already answering — and
+        // the two disagreed on screen. `SecurityEvaluator` registers the call itself; passing our
+        // id is what lets a reader work out WHICH agent is blocked.
+        let disposition = await evaluator.evaluate(
                 toolName: call.name,
                 toolParams: call.arguments,
                 toolDescription: toolDef.description,
@@ -2540,9 +2523,9 @@ public actor AgentActor {
                 toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: tool),
                 agentContext: agentContext,
                 sanctionedDirectories: sanctionedDirectories,
-                toolCallID: call.id
+                toolCallID: call.id,
+                evaluatingForAgentID: id
             )
-        }
 
         // Post approval/denial status.
         await Self.postSecurityReviewToChannel(

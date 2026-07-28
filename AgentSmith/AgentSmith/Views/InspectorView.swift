@@ -187,6 +187,10 @@ private struct RoleAgentCard: View {
         .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationRecords.count : 0)
                                                                                      { _, _ in recompute() }
         .onChange(of: viewModel.processingRoles.contains(role))                      { _, _ in recompute() }
+        // The Security Agent's busy state also comes from the evaluation registry, so that has to
+        // wake the recompute too or its card stays dark through every per-call review.
+        .onChange(of: role == .securityAgent ? viewModel.shared.liveActivitySnapshot.securityEvaluations : 0)
+                                                                                     { _, _ in recompute() }
         .onChange(of: viewModel.toolExecutingByRole[role])                           { _, _ in recompute() }
         .onChange(of: viewModel.agentPollIntervals[role])                            { _, _ in recompute() }
         .onChange(of: viewModel.agentMaxToolCalls[role])                             { _, _ in recompute() }
@@ -263,7 +267,7 @@ private struct RoleAgentCard: View {
             hasActivity: !roleMessages.isEmpty || viewModel.hasAgentActivity(role),
             availableTools: viewModel.agentToolNames[role] ?? [],
             evaluationRecords: role == .securityAgent ? store.evaluationRecords : [],
-            isProcessing: viewModel.processingRoles.contains(role),
+            isProcessing: role == .securityAgent ? viewModel.isSecurityAgentBusy : viewModel.processingRoles.contains(role),
             executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[role]),
             modelConfig: viewModel.resolvedAgentConfigs[role]
         )
