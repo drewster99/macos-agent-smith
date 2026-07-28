@@ -2176,6 +2176,70 @@ would stack on top of every live Brown's; (b) ordering assumptions in Smith's ow
 (c) that the parallel path's inputs stay identical to the sequential one — `agentContext` was missing
 there until 2026-07-26 and only harmless because the path was Brown-only.
 
+### Retire the remaining stringly-typed surfaces (design 2026-07-27)
+
+**Status:** planned. `messageKind` is done (see `ChannelMessageKind` and the "Message kinds are typed, never bare strings" section in CLAUDE.md); it was the first of four surfaces, not the only one.
+
+The `messageKind` work started from a concrete incident: a private notice whose entire text said "STOP and wait" *un-parked* the worker it was quieting, because the gate keyed on addressing rather than on the kind. The fix made kinds a closed enum with guard tests. The same antipattern remains in three other places, listed worst-first — worst meaning "silently changes control flow when the string drifts", not "most sites".
+
+| Surface | Sites | Consequence when the string drifts |
+|---|---|---|
+| Tool results compared as English prose | 4 | **Control flow.** Silent. |
+| Tool names compared as bare strings | 11 (`call.name == "…"` in Sources) plus several `Set<String>` rosters | Control flow, including safety gating. Silent. |
+| Metadata keys as bare strings | ≥40 distinct keys, 93 read sites (writes are larger — see below) | Data reads as absent. Silent. |
+
+#### 1. Tool results compared as English prose — do this one first
+
+`AgentActor.updatePostCallFlags` decides control flow by string-matching a tool's *human-facing* return text:
+
+```swift
+// AgentActor.swift:2923-2925, 2936
+if call.name == "message_user"  && result == "Message sent to user."  { sentMessage = true }
+if call.name == "message_brown" && result == "Message sent to Brown." { sentMessage = true }
+if call.name == "reply_to_user" && result == "Reply sent to user."    { sentMessage = true }
+isSuccessfulTaskCommunication = result == "Update sent to Agent Smith."
+```
+
+`sentMessage` decides whether the agent parks after messaging (`handleResponse`: `if sentMessage { hasUnprocessedInput = false; return }`). Reword any of those four strings — add a period, shorten "Agent Smith" to "Smith", localize them — and the comparison stops matching, the agent does not park, and it keeps working, with nothing thrown and nothing logged. `isSuccessfulTaskCommunication` likewise re-arms the Brown silence nudge.
+
+This is the same defect class as the parked-worker incident, one function away from where that was fixed. **The codebase already knows.** Three lines below the block above:
+
+```swift
+// A successful task_complete or request_help hands control to another actor. Use the
+// tool's domain outcome rather than parsing its human-facing response text.
+if Self.shouldParkAfterLifecycleTool(named: call.name, succeeded: succeeded) { calledTaskComplete = true }
+```
+
+The principle is stated, applied to the lifecycle tools, and not applied to the four lines immediately preceding it. Half of this was fixed and the rest left.
+
+**Approach:** `ToolExecutionResult` already carries the domain outcome (`succeeded`) that `shouldParkAfterLifecycleTool` consumes. Extend the same idea — let a tool declare that it delivered a message (a flag on the result, or a marker protocol the dispatcher checks) and have `updatePostCallFlags` read that instead of the prose. Small, bounded, and it removes a latent bug rather than tidying syntax.
+
+#### 2. Tool names as bare strings
+
+11 `call.name == "…"` comparisons in Sources, plus `Set<String>` rosters (`handoffLifecycleTools`, `taskLifecycleTools`, `smithTaskActionTools`, and `ToolSafetyClassification`'s `knownBuiltInNames` / `destructiveNames` / `openWorldNames`). A tool renamed in its `AgentTool` conformance silently drops out of every set naming it — including the **safety** classifications, where falling out of `destructiveNames` means a destructive tool quietly stops being gated.
+
+The shape differs from `messageKind`: tool names aren't persisted as a discriminator, so the corpus-scan requirement doesn't apply. But MCP tools are dynamic, so this cannot be a closed enum — likely a `ToolName` wrapper with static members for the built-ins plus a path for MCP-provided names.
+
+#### 3. Metadata keys as bare strings
+
+The read side alone is **40 distinct keys across 93 sites** (`metadata?["…"]` plus the `stringMetadata`/`intMetadata` helpers): `actionKind`, `agentRole`, `autoSearch`, `bufferOrigin`, `consolidated`, `contextMemories`, `contextMemoryCount`, `contextPriorTaskCount`, `contextPriorTasks`, `dispositionMessage`, `expandedContent`, `fileWriteDiff`, `fileWritePath`, `isError`, `latencyMs`, `memoryContent`, `memoryCount`, `memoryResults`, `memorySource`, `memoryTags`, `messageKind`, `parallelCount`, `parallelIndex`, `params`, `pendingUserMessageID`, `recipientTaskTitle`, `requestID`, `restartChromeKind`, `searchQuery`, `securityDisposition`, `senderTaskTitle`, `taskCount`, `taskDescription`, `taskID`, `taskResult`, `taskResults`, `taskTitle`, `timerEventKind`, `timerTaskID`, `tool`. The write side is larger and not cleanly countable — see the warning below.
+
+Lowest severity — a mistyped key reads as absent, which usually degrades display rather than control flow — but the largest surface and the most likely to rot. Do it after 1 and 2.
+
+**Do not sweep this with a regex.** Channel metadata literals and JSON-Schema literals for tool *parameters* are syntactically identical (`"someKey": .string(…)` / `.dictionary(…)`), and the schema keys — `type`, `properties`, `required`, `items`, `enum`, `additionalProperties`, `description` — are a wire contract with the model providers. A naive pattern over write sites matches 111 distinct "keys" across 914 occurrences, most of which are tool-parameter schemas and tool ARGUMENT names (`command`, `path`, `timeout`, `query`) that must not be touched. Scope the work by call site (`ChannelMessage(metadata:)` construction) rather than by literal shape.
+
+Expect the same lesson `messageKind` taught: **enumerate from the persisted corpus, not from a grep of the sources**, because keys written by retired code still sit in the logs.
+
+### `Phase2LongLivedSmithTests` — resolve the worker-identity race (2026-07-27)
+
+`Phase2LongLivedSmithTests.swift:115` (`#expect(firstBrown != secondBrown, "each task gets a FRESH worker")`) fails intermittently under full-suite load and passes 5/5 in isolation. Not a product bug.
+
+The test resolves workers with `runtime.agentIDForRole(.brown)` — "the" Brown — but the pool can transiently hold two while the first is being reaped, so after `waitForPendingRestarts()` the lookup can still return the first. **Fix:** query the Brown bound to the specific task (via the task's `assigneeIDs`) rather than by role. Do not fix it by sleeping.
+
+### Verify the tool-path truncation renders as intended (2026-07-27)
+
+`ToolPathText` was changed so the filename claims layout width first and both halves truncate in the middle; previously both truncated at the tail, so a long `attachments/` name lost the part that identifies it. Build-clean and pure layout modifiers, but never verified visually — it shipped while a live session was running and launching the app would have disturbed it. Confirm against a long path (`~/Library/Application Support/AgentSmith/attachments/<uuid>_<name>.md`) that the directory collapses and the filename survives, then delete this item.
+
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved
