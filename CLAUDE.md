@@ -167,6 +167,38 @@ Every `UsageRecord` and `ChannelMessage` is stamped with `OrchestrationRuntime.c
 
 **Retrieval scope differs by trigger, deliberately.** Auto-retrieval runs on **every** user message — each message is its own question and deserves its own memories. There is no once-per-conversation throttle and no flag for one; the `autoMemoryOncePerConversation` switch and its `conversationHasAutoMemoryContext` marker-scan were deleted rather than left parked at `false`. Per-message retrieval is affordable precisely because of the scoping below. A user message to Smith auto-retrieves **memories only** (`AgentActor.injectAutoMemoryContextIfNeeded`, `taskLimit: 0`); prior-task summaries are retrieved only when a task is **created or started** (`TaskContextRetrieval.attachRelevantContext`, from `CreateTaskTool`, `RunTaskTool`, and `OrchestrationRuntime.resolveStartTarget`). "What earlier work resembles this?" is a question about a task, not about a conversational turn — and asking it on every user message cost a second query embedding plus a full second corpus scan every time. `taskLimit: 0` is load-bearing: `searchAll` skips both the task embedding and the task scan when a pool's limit is zero, and `searchMemoriesInternal`/`searchTaskSummariesInternal` return early rather than scoring a corpus whose results get discarded. `searchAll` embeds each pool's instruction-prefixed query in ONE batched forward pass (`embedDistinct`) — the prefixes still differ per pool, so retrieval is unchanged; only the second sequential pass is gone.
 
+### Storage model (verified 2026-07-29)
+
+Agent Smith uses **JSON files** for all persistence — no SQLite or other database. Primary task storage is a per-session "giant JSON blob" (`tasks.json`), with archived/deleted tasks in a global `inactive_tasks.json`. All data lives under `~/Library/Application Support/AgentSmith/`, which **IS included in Time Machine backups** by default.
+
+| Component | Absolute Path | Description |
+|-----------|--------------|-------------|
+| **Session List** | `/Users/andrew/Library/Application Support/AgentSmith/sessions.json` | Array of session metadata (ID, name, timestamps) |
+| **Active Tasks (per session)** | `/Users/andrew/Library/Application Support/AgentSmith/sessions/{SESSION_ID}/tasks.json` | JSON array of active tasks for that session |
+| **Inactive/Deleted Tasks** | `/Users/andrew/Library/Application Support/AgentSmith/inactive_tasks.json` | Global archive of completed/deleted tasks |
+| **Task Summaries** | `/Users/andrew/Library/Application Support/AgentSmith/task_summaries.json` | Global task summary entries (for memory/retrieval) |
+| **Task Evidence (per task)** | `/Users/andrew/Library/Application Support/AgentSmith/sessions/{SESSION_ID}/tasks/{TASK_ID}/evidence/` | Per-task evidence files (usually empty or contains task-specific outputs) |
+| **Attachments (global)** | `/Users/andrew/Library/Application Support/AgentSmith/attachments/` | Shared attachment store with UUID-named files |
+| **Session State** | `/Users/andrew/Library/Application Support/AgentSmith/sessions/{SESSION_ID}/state.json` | Session configuration (agent assignments, poll intervals, etc.) |
+| **Channel Log** | `/Users/andrew/Library/Application Support/AgentSmith/sessions/{SESSION_ID}/channel_log.jsonl` | Newline-delimited JSON message log |
+| **Memories** | `/Users/andrew/Library/Application Support/AgentSmith/memories.json` | Semantic memory entries with embeddings |
+| **Usage Records** | `/Users/andrew/Library/Application Support/AgentSmith/usage_records.json` | Token/cost tracking |
+| **Backups** | `/Users/andrew/Library/Application Support/AgentSmith/backups/` | Automatic backups from migrations |
+
+**Global vs per-session model:**
+
+- **GLOBAL (shared across all sessions):** `sessions.json` (the list), `inactive_tasks.json`, `task_summaries.json`, `attachments/`, `memories.json`, `usage_records.json`, `backups/`, `mcp_servers.json`, `model_overrides.json`
+- **PER-SESSION (scoped to `sessions/{SESSION_ID}/`):** `tasks.json` (active tasks only), `tasks/{TASK_ID}/evidence/`, `state.json`, `channel_log.jsonl`, `timer_events.json`, `scheduled_wakes.json`, `pending_scheduled_run_queue.json`, `notification_ledger.json`, `notification_pending.json`, `pending_user_messages.json`
+
+**Task summaries usage:** Task summaries (`task_summaries.json`) are used primarily for **semantic search / memory lookup** via `MemoryStore.searchAll()`. They are NOT used by `list_tasks` — that tool loads actual task objects from the JSON files (both per-session `tasks.json` and global `inactive_tasks.json`).
+
+**Evidence scoping:** Evidence directories are scoped to their session (`sessions/{SESSION_ID}/tasks/{TASK_ID}/evidence/`). This is acceptable because attachments (the actual files) are stored globally in `attachments/`, so they remain accessible from any session. Evidence directories typically contain only task-specific outputs that are session-contextual.
+
+**Search scope:**
+- `search_memory` (semantic search): **GLOBAL** — searches all task summaries in `task_summaries.json`, excludes recently-deleted by default
+- `list_tasks` with `disposition_filter: "active"` (default): **PER-SESSION** — only current session's active tasks
+- `list_tasks` with `disposition_filter: "all"`: **GLOBAL** — active + archived + deleted
+
 **Per-task cost AND tokens have ONE source: `CostBoard.taskUsage`,** mirrored to the main thread as `SharedAppState.taskUsage` and read through `AppViewModel.cachedTaskCost` / `cachedTaskTokens`. Don't reintroduce a per-view usage fetch. Every one of those surfaces used to scan the whole `UsageStore` on appear and cache the result, refreshed only when the task reached `.completed`/`.failed` — so an in-flight task displayed whatever had accrued at the instant its view first rendered, which is nothing for any task started while its view was already on screen, and a permanently stale figure for one that was mid-run at launch. Cost and tokens share one entry so they can never disagree about which records they describe. The rollup is a full grouped pass, not an incremental increment, because `UsageStore.backfillTaskID` re-attributes already-stored records (no insert to observe) and `append` enqueues delivery after mutating its array (so an incremental rebuild could double-count); it is coalesced to at most one pass per 750ms and re-runs on the 60s watcher as a convergence backstop. `AppViewModel.estimatedCost(from:)` and `tokenTotals(from:)` survive for the PDF exporter only — it computes from its own fetch so one document describes one instant — and must keep applying the same formula as `CostBoard.costOf`.
 
 ### The step plan (`manage_steps` / `TaskStepAction`)
