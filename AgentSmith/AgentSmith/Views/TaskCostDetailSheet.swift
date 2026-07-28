@@ -29,7 +29,7 @@ struct TaskCostDetailSheet: View {
     @State private var displayedTurns: [UsageRecord] = []
     @State private var contextResetsCount: Int = 0
     @State private var costByAgent: [(role: AgentRole, calls: Int, cost: Double)] = []
-    @State private var tokenBreakdown: [(label: String, count: Int, cost: Double)] = []
+    @State private var tokenBreakdown: [TokenBreakdownRow] = []
     @State private var efficiencyMetrics: EfficiencyMetrics = EfficiencyMetrics()
     @State private var configRows: [ConfigRow] = []
     @State private var turnRows: [TurnRow] = []
@@ -68,17 +68,20 @@ struct TaskCostDetailSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HeaderSection(
-                    titleOverride: titleOverride,
-                    task: task,
-                    taskSummary: taskSummary,
+                    resolvedTitle: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown Task",
+                    resolvedStatus: task?.status ?? taskSummary?.status,
                     summary: summary,
                     averageTaskCostUSD: averageTaskCostUSD,
                     taskCountInRange: taskCountInRange,
+                    durationText: task.flatMap { t in t.startedAt.map { started in
+                        let end = t.completedAt ?? Date()
+                        return formatDuration(end.timeIntervalSince(started))
+                    }} ?? nil,
                     showingVsAvgInfo: $showingVsAvgInfo
                 )
                 CostBreakdownSection(costByAgent: costByAgent, tokenBreakdown: tokenBreakdown, aggregator: aggregator)
                 EfficiencySection(metrics: efficiencyMetrics, contextResetsCount: contextResetsCount)
-                ToolUsageSection(toolCounts: toolCounts)
+                ToolUsageSection(toolCounts: toolCounts, maxCount: toolCounts.first?.count ?? 1)
                 ConfigurationSection(configRows: configRows)
                 TurnTimelineSection(
                     turnRows: turnRows,
@@ -163,10 +166,10 @@ struct TaskCostDetailSheet: View {
         // Update token breakdown
         let s = summary
         tokenBreakdown = [
-            ("Uncached Input", s.totalUncachedInputTokens, s.inputCostUSD),
-            ("Output", s.totalOutputTokens, s.outputCostUSD),
-            ("Cache Read", s.totalCacheReadTokens, s.cacheReadCostUSD),
-            ("Cache Write", s.totalCacheWriteTokens, s.cacheWriteCostUSD)
+            TokenBreakdownRow(id: "uncached_input", label: "Uncached Input", count: s.totalUncachedInputTokens, cost: s.inputCostUSD),
+            TokenBreakdownRow(id: "output", label: "Output", count: s.totalOutputTokens, cost: s.outputCostUSD),
+            TokenBreakdownRow(id: "cache_read", label: "Cache Read", count: s.totalCacheReadTokens, cost: s.cacheReadCostUSD),
+            TokenBreakdownRow(id: "cache_write", label: "Cache Write", count: s.totalCacheWriteTokens, cost: s.cacheWriteCostUSD)
         ]
         
         // Update efficiency metrics
@@ -312,21 +315,13 @@ struct TaskCostDetailSheet: View {
 
 /// Header section showing task title, status, and key metrics.
 struct HeaderSection: View {
-    let titleOverride: String?
-    let task: AgentTask?
-    let taskSummary: TaskSummaryEntry?
+    let resolvedTitle: String
+    let resolvedStatus: AgentTask.Status?
     let summary: UsageSummary
     let averageTaskCostUSD: Double
     let taskCountInRange: Int
+    let durationText: String?
     @Binding var showingVsAvgInfo: Bool
-
-    private var resolvedTitle: String {
-        titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown Task"
-    }
-
-    private var resolvedStatus: AgentTask.Status? {
-        task?.status ?? taskSummary?.status
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -350,11 +345,8 @@ struct HeaderSection: View {
                 HeaderStat(label: "LLM Calls", value: "\(summary.callCount)", color: .primary)
                 HeaderStat(label: "Tokens", value: formatTokenCount(summary.totalInputTokens + summary.totalOutputTokens), color: .primary)
 
-                if let task {
-                    if let started = task.startedAt {
-                        let end = task.completedAt ?? Date()
-                        HeaderStat(label: "Duration", value: formatDuration(end.timeIntervalSince(started)), color: .primary)
-                    }
+                if let durationText {
+                    HeaderStat(label: "Duration", value: durationText, color: .primary)
                 }
 
                 if averageTaskCostUSD > 0 {
@@ -398,19 +390,19 @@ struct HeaderSection: View {
         if count >= 1_000 { return String(format: "%.0fK", Double(count) / 1_000) }
         return "\(count)"
     }
-
-    private func formatDuration(_ interval: TimeInterval) -> String {
-        let s = Int(interval)
-        if s >= 3600 { return "\(s / 3600)h \((s % 3600) / 60)m" }
-        if s >= 60 { return "\(s / 60)m \(s % 60)s" }
-        return "\(s)s"
-    }
 }
 
 /// Cost breakdown section showing cost by agent and token breakdown.
+struct TokenBreakdownRow: Equatable, Hashable, Identifiable {
+    let id: String
+    let label: String
+    let count: Int
+    let cost: Double
+}
+
 struct CostBreakdownSection: View {
     let costByAgent: [(role: AgentRole, calls: Int, cost: Double)]
-    let tokenBreakdown: [(label: String, count: Int, cost: Double)]
+    let tokenBreakdown: [TokenBreakdownRow]
     let aggregator: UsageAggregator
 
     var body: some View {
@@ -435,8 +427,8 @@ struct CostBreakdownSection: View {
 
             // By Token Category
             CardView(title: "Token Breakdown") {
-                ForEach(tokenBreakdown.indices, id: \.self) { i in
-                    TokenRow(label: tokenBreakdown[i].label, count: tokenBreakdown[i].count, cost: tokenBreakdown[i].cost)
+                ForEach(tokenBreakdown, id: \.id) { row in
+                    TokenRow(label: row.label, count: row.count, cost: row.cost)
                 }
                 Divider()
                 HStack {
@@ -493,6 +485,7 @@ struct EfficiencySection: View {
 /// Tool usage section showing tool call frequency.
 struct ToolUsageSection: View {
     let toolCounts: [(tool: String, count: Int)]
+    let maxCount: Int
 
     var body: some View {
         CardView(title: "Tool Usage") {
@@ -501,7 +494,6 @@ struct ToolUsageSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                let maxCount = toolCounts.first?.count ?? 1
                 ForEach(toolCounts.prefix(12), id: \.tool) { tool, count in
                     HStack(spacing: 8) {
                         Text(tool)
