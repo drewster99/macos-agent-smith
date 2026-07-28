@@ -40,20 +40,26 @@ struct TaskCostDetailSheet: View {
     /// all-or-nothing switch, so asking for more never costs a multi-second stall you didn't
     /// choose. `Int.max` means "all".
     @State private var turnDisplayLimit = TaskCostDetailSheet.initialTurnDisplayLimit
-
-    private var summary: UsageSummary {
-        aggregator.summarize(records, scopeLabel: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown")
-    }
+    /// Cached summary to avoid recomputing on every body recalculation.
+    @State private var summary: UsageSummary = .empty(scopeLabel: "")
+    /// Cached tool frequency counts to avoid iterating records on every body recalculation.
+    @State private var toolCounts: [(tool: String, count: Int)] = []
+    /// Cached sorted turns for the timeline to avoid sorting on every body recalculation.
+    @State private var sortedTurns: [UsageRecord] = []
+    /// Cached displayed turns (suffix of sortedTurns based on turnDisplayLimit).
+    @State private var displayedTurns: [UsageRecord] = []
+    /// Cached count of context resets to avoid filtering on every body recalculation.
+    @State private var contextResetsCount: Int = 0
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                headerSection()
-                costBreakdownSection()
-                efficiencySection()
-                toolUsageSection()
+                headerSection(summary: summary)
+                costBreakdownSection(summary: summary)
+                efficiencySection(summary: summary, contextResetsCount: contextResetsCount)
+                toolUsageSection(toolCounts: toolCounts)
                 configurationSection()
-                turnTimelineSection()
+                turnTimelineSection(displayedTurns: displayedTurns, sortedTurnsCount: sortedTurns.count)
 
                 // Task ID in the lower right corner (omitted for the Orchestration bucket).
                 // Clickable to open the full Task Detail window when the dashboard supplied an action.
@@ -84,6 +90,15 @@ struct TaskCostDetailSheet: View {
         }
         .frame(minWidth: 600, minHeight: 500)
         .background(AppColors.background)
+        .task(id: taskID) {
+            await load()
+        }
+        .onChange(of: records, initial: false) { _, newRecords in
+            updateCachedData(newRecords)
+        }
+        .onChange(of: turnDisplayLimit) { _, _ in
+            updateDisplayedTurns()
+        }
         .toolbar {
             if showsDoneButton {
                 ToolbarItem(placement: .cancellationAction) {
@@ -93,11 +108,41 @@ struct TaskCostDetailSheet: View {
         }
     }
 
+    private func updateCachedData(_ newRecords: [UsageRecord]) {
+        summary = aggregator.summarize(newRecords, scopeLabel: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown")
+        toolCounts = computeToolFrequency(newRecords)
+        sortedTurns = newRecords.sorted { $0.timestamp < $1.timestamp }
+        contextResetsCount = newRecords.filter { $0.preResetInputTokens != nil }.count
+        updateDisplayedTurns()
+    }
+
+    private func updateDisplayedTurns() {
+        displayedTurns = Array(sortedTurns.suffix(turnDisplayLimit))
+    }
+
+    private func computeToolFrequency(_ records: [UsageRecord]) -> [(tool: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for r in records {
+            for name in r.toolCallNames ?? [] { counts[name, default: 0] += 1 }
+        }
+        // Deterministic order: by count desc, then tool name asc to break ties.
+        return counts.map { (tool: $0.key, count: $0.value) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count > rhs.count }
+                return lhs.tool < rhs.tool
+            }
+    }
+
+    private func load() async {
+        // Initial load is handled by the parent; this is for completeness.
+        updateCachedData(records)
+    }
+
+
     // MARK: - Header
 
     @ViewBuilder
-
-    private func headerSection() -> some View {
+    private func headerSection(summary: UsageSummary) -> some View {
         let resolvedTitle = titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown Task"
         let resolvedStatus: AgentTask.Status? = task?.status ?? taskSummary?.status
         VStack(alignment: .leading, spacing: 8) {
@@ -165,7 +210,7 @@ struct TaskCostDetailSheet: View {
 
     @ViewBuilder
 
-    private func costBreakdownSection() -> some View {
+    private func costBreakdownSection(summary: UsageSummary) -> some View {
         HStack(alignment: .top, spacing: 16) {
             // By Agent Role
             card(title: "Cost by Agent") {
@@ -214,7 +259,7 @@ struct TaskCostDetailSheet: View {
 
     @ViewBuilder
 
-    private func efficiencySection() -> some View {
+    private func efficiencySection(summary: UsageSummary, contextResetsCount: Int) -> some View {
         card(title: "Efficiency") {
             let s = summary
             HStack(spacing: 24) {
@@ -224,9 +269,8 @@ struct TaskCostDetailSheet: View {
                 miniStat(label: "LLM Time", value: formatLatency(s.totalLatencyMs))
                 miniStat(label: "Tool Exec Time", value: formatLatency(s.totalToolExecutionMs))
 
-                let contextResets = records.filter { $0.preResetInputTokens != nil }.count
-                if contextResets > 0 {
-                    miniStat(label: "Context Resets", value: "\(contextResets)", color: .orange)
+                if contextResetsCount > 0 {
+                    miniStat(label: "Context Resets", value: "\(contextResetsCount)", color: .orange)
                 }
             }
         }
@@ -236,20 +280,16 @@ struct TaskCostDetailSheet: View {
 
     @ViewBuilder
 
-    private func toolUsageSection() -> some View {
+    private func toolUsageSection(toolCounts: [(tool: String, count: Int)]) -> some View {
         card(title: "Tool Usage") {
-            // Deterministic order: by count desc, then tool name asc to break ties. Without the
-            // tie-breaker, equal-count tools came out in the dictionary's (randomized) iteration
-            // order and visibly reshuffled on every re-render.
-            let toolCounts = toolFrequency(records)
-                .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            // toolCounts is now passed as a parameter, already sorted
             if toolCounts.isEmpty {
                 Text("No tool call data")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                let maxCount = toolCounts.first?.value ?? 1
-                ForEach(toolCounts.prefix(12), id: \.key) { tool, count in
+                let maxCount = toolCounts.first?.count ?? 1
+                ForEach(toolCounts.prefix(12), id: \.tool) { tool, count in
                     HStack(spacing: 8) {
                         Text(tool)
                             .font(.caption)
@@ -369,18 +409,16 @@ struct TaskCostDetailSheet: View {
 
     @ViewBuilder
 
-    private func turnTimelineSection() -> some View {
-        card(title: "Turn-by-Turn (\(records.count) calls)") {
-            let sorted = records.sorted { $0.timestamp < $1.timestamp }
-            let displayedTurns = Array(sorted.suffix(turnDisplayLimit))
-            let startOffset = sorted.count - displayedTurns.count
+    private func turnTimelineSection(displayedTurns: [UsageRecord], sortedTurnsCount: Int) -> some View {
+        card(title: "Turn-by-Turn (\(sortedTurnsCount) calls)") {
+            let startOffset = max(0, sortedTurnsCount - turnDisplayLimit)
 
             if startOffset > 0 {
-                Text("Showing last \(displayedTurns.count) of \(sorted.count) turns")
+                Text("Showing last \(displayedTurns.count) of \(sortedTurnsCount) turns")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            turnDisclosureControls(totalTurns: sorted.count, shownTurns: displayedTurns.count)
+            turnDisclosureControls(totalTurns: sortedTurnsCount, shownTurns: displayedTurns.count)
 
             // Header
             HStack(spacing: 0) {
@@ -539,5 +577,85 @@ struct TaskCostDetailSheet: View {
         if s >= 3600 { return "\(s / 3600)h \((s % 3600) / 60)m" }
         if s >= 60 { return "\(s / 60)m \(s % 60)s" }
         return "\(s)s"
+    }
+}
+
+// MARK: - Extracted View Structs
+
+/// Header stat display for the Task Cost detail view.
+struct HeaderStat: View {
+    let label: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(color)
+        }
+    }
+}
+
+/// Mini stat display for the Task Cost detail view.
+struct MiniStat: View {
+    let label: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.weight(.semibold)).foregroundStyle(color)
+        }
+    }
+}
+
+/// Cost row display for the Task Cost detail view.
+struct CostRow: View {
+    let name: String
+    let cost: Double
+    let detail: String
+    let color: Color
+
+    private func formatCostAligned(_ cost: Double) -> String {
+        if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
+        return String(format: "$%.2f\u{2007}\u{2007}", cost)
+    }
+
+    var body: some View {
+        HStack {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(name).font(.caption)
+            Spacer()
+            Text(formatCostAligned(cost)).font(.system(.caption, design: .monospaced)).frame(width: 78, alignment: .trailing)
+            Text(detail).font(.caption2).foregroundStyle(.secondary).frame(width: 60, alignment: .trailing)
+        }
+    }
+}
+
+/// Token row display for the Task Cost detail view.
+struct TokenRow: View {
+    let label: String
+    let count: Int
+    let cost: Double
+
+    private func formatTokenCount(_ count: Int) -> String {
+        if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
+        if count >= 1_000 { return String(format: "%.0fK", Double(count) / 1_000) }
+        return "\(count)"
+    }
+
+    private func formatCostAligned(_ cost: Double) -> String {
+        if cost > 0 && cost < 0.01 { return String(format: "$%.4f", cost) }
+        return String(format: "$%.2f\u{2007}\u{2007}", cost)
+    }
+
+    var body: some View {
+        HStack {
+            Text(label).font(.caption)
+            Spacer()
+            Text(formatTokenCount(count)).font(.caption.monospacedDigit()).frame(width: 60, alignment: .trailing)
+            Text(formatCostAligned(cost)).font(.system(.caption, design: .monospaced)).frame(width: 72, alignment: .trailing)
+        }
     }
 }

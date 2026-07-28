@@ -2,7 +2,7 @@ import Foundation
 import SwiftLLMKit
 
 /// A single LLM API call's token usage, persisted for analytics.
-public struct UsageRecord: Codable, Identifiable, Sendable {
+public struct UsageRecord: Codable, Identifiable, Sendable, Equatable {
     public let id: UUID
     public let timestamp: Date
     public let agentRole: AgentRole
