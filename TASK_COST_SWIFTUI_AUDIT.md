@@ -115,12 +115,24 @@ The following best practices and sources guided this audit:
 **Fix:** Changed to `@State private var contextResetsCount: Int = 0`, updated via `.onChange(of: records.count)`.  
 **Commit:** a8ea5d907af6f19763834c4a6c129164973cdd50
 
-### Fix 5-H: Refactor helper functions to View structs (partial)
+### Fix 5-H: Refactor ALL helper functions to View structs (COMPLETE)
 
-**Issue IDs:** H8-H11  
+**Issue IDs:** H1-H12  
 **Problem:** Functions returning `-> some View` are anti-pattern; each call creates new view instance.  
-**Fix:** Extracted `headerStat`, `miniStat`, `costRow`, `tokenRow` to dedicated `struct: View` types (HeaderStat, MiniStat, CostRow, TokenRow).  
-**Commit:** a8ea5d907af6f19763834c4a6c129164973cdd50
+**Fix:** Extracted ALL 12 helper functions to dedicated `struct: View` types:
+- H1: headerSection → HeaderSection
+- H2: costBreakdownSection → CostBreakdownSection
+- H3: efficiencySection → EfficiencySection
+- H4: toolUsageSection → ToolUsageSection
+- H5: configurationSection → ConfigurationSection
+- H6: turnTimelineSection → TurnTimelineSection
+- H7: turnDisclosureControls → TurnDisclosureControls
+- H8: headerStat → HeaderStat
+- H9: miniStat → MiniStat
+- H10: costRow → CostRow
+- H11: tokenRow → TokenRow
+- H12: card → CardView (generic container)  
+**Commit:** c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb
 
 ---
 
@@ -137,7 +149,9 @@ The following best practices and sources guided this audit:
 - **Audit Log Path:** /Users/andrew/cursor/macos-agent-smith/TASK_COST_SWIFTUI_AUDIT.md
 - **Sources Cited:** 8 (4 Apple official: developer.apple.com/documentation, developer.apple.com/videos/play/wwdc2025/306, developer.apple.com/tutorials/instruments; 4 authoritative third-party)
 - **Apple Official Source Count:** 4
-- **Issues Fixed:** 9 (4 computed properties cached to @State, 4 helper functions extracted to View structs, 1 Equatable conformance added)
-- **Commits Made:** 1 (a8ea5d907af6f19763834c4a6c129164973cdd50)
+- **Issues Fixed:** 16 (4 computed properties cached to @State, 12 helper functions extracted to View structs, 1 Equatable conformance added)
+- **Commits Made:** 2
+  - a8ea5d907af6f19763834c4a6c129164973cdd50: Cache computed properties and initial View struct extraction
+  - c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Complete extraction of all remaining -> some View helpers
 - **Build Status:** BUILD SUCCEEDED
-- **Remaining Concerns:** Section-level helper functions (headerSection, costBreakdownSection, efficiencySection, toolUsageSection, configurationSection, turnTimelineSection, turnDisclosureControls, card) remain as `-> some View` functions but now accept cached data as parameters, reducing their computation burden. Full extraction to View structs can be done in a follow-up pass if needed.
+- **Remaining Concerns:** NONE - All non-body `var ...: some View` and `func ... -> some View` anti-patterns have been refactored to dedicated View structs.
