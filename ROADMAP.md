@@ -976,7 +976,7 @@ clients.
   inspector/worker cards re-keyed by agent ID (incl. terminatedAgentArchive + processing
   state, currently role-keyed). M3 orchestration gates (run_task/create_task/drains/
   wakes capacity-aware; the awaiting-review block drops — validation owns completion),
-  Smith prompt + digest + message_brown task addressing. M4 polish (interrupt policy at
+  Smith prompt + digest + notify_brown (then `message_brown`) task addressing. M4 polish (interrupt policy at
   capacity, MCP concurrency verification, scoping off the serialized spawn path).
   Cross-task file conflicts and vLLM load are explicitly out of scope (user-managed).
 
@@ -1419,7 +1419,7 @@ Today only `GhTool.firstForbiddenSequence` has direct test coverage (`GhToolArgs
 **Implementation waves:**
 - **Wave 1 (no runtime deps):** `GlobTool`, `GrepTool`, `CurrentTimeTool`, `FileReadTool`, `FileWriteTool`, `FileEditTool`. Each takes a path + args and returns a string; tests use a per-test temp directory.
 - **Wave 2 (TaskStore-only):** `CreateTaskTool`, `ListTasksTool`, `GetTaskDetailsTool`, `AmendTaskTool`, `UpdateTaskTool`, `ManageTaskDispositionTool`, `TaskUpdateTool`, `TaskCompleteTool`, `TaskAcknowledgedTool`. `TaskStore` is a regular actor — easy to construct and inspect.
-- **Wave 3 (callback-driven):** `AbortTool`, `MessageUserTool`, `MessageBrownTool`, `ReplyToUserTool`, `ReviewWorkTool`, `TerminateAgentTool`, `RunTaskTool`, `ScheduleTaskActionTool`, `ScheduleWake`/`Cancel`/`Reschedule`/`List` tools. Each test asserts the right closure was invoked with the right args.
+- **Wave 3 (callback-driven):** `AbortTool`, `MessageUserTool`, `NotifyBrownTool` (then `MessageBrownTool`), `ReplyToUserTool`, `ReviewWorkTool`, `TerminateAgentTool`, `RunTaskTool`, `ScheduleTaskActionTool`, `ScheduleWake`/`Cancel`/`Reschedule`/`List` tools. Each test asserts the right closure was invoked with the right args.
 - **Wave 4 (subprocess pure-logic only):** `BashTool` arg validation, `RunAppleScriptTool` serialization, `KillProcessTool` pid validation, `ListProcessesTool` output parsing. End-to-end subprocess execution stays out of the unit suite.
 - **Integration-only (excluded from `swift test`):** `SaveMemoryTool`, `SearchMemoryTool` — covered by the existing `MemoryStoreIntegrationTests` xcodebuild path.
 
@@ -2200,7 +2200,7 @@ someone rewords a sentence written for the model.
 found that out by checking each tool's actual return values rather than trusting the roadmap entry
 that had been written from the call site:
 
-- **`message_brown` never matched.** It compared against `"Message sent to Brown."`, but the tool
+- **`message_brown` never matched** (the tool has since been renamed `notify_brown`)**.** It compared against `"Message sent to Brown."`, but the tool
   had been reworded to name the task — `"Message sent to the worker on \"…\"."`. So `sentMessage`
   was never set for that tool and **Smith never parked after messaging a worker**; it carried on
   acting instead of waiting for the reply.
