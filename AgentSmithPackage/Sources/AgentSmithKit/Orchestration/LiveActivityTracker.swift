@@ -131,6 +131,24 @@ public final class LiveActivityTracker: @unchecked Sendable {
         handler?(snap)
     }
 
+    /// Drops every evaluation registered against one agent, whether or not its `defer` ever runs.
+    ///
+    /// For agent teardown. A turn cancelled mid-flight leaves its registration standing until the
+    /// in-flight LLM call finally returns — which, for a slow or cancellation-ignoring provider,
+    /// can be minutes after `stop()` gave up and orphaned it. Without this the stopped worker reads
+    /// "waiting on security" forever and its entry keeps inflating the Agents tally. Idempotent
+    /// with the eventual `defer`, which finds nothing left to remove.
+    public func endSecurityEvaluations(forAgentInstanceID agentInstanceID: UUID) {
+        lock.lock()
+        snapshot.securityEvaluationsByCall = snapshot.securityEvaluationsByCall.filter {
+            $0.value.agentInstanceID != agentInstanceID
+        }
+        let snap = snapshot
+        let handler = onChange
+        lock.unlock()
+        handler?(snap)
+    }
+
     /// Clears a call's evaluation. Idempotent — clearing one that isn't registered is a no-op, so
     /// a duplicated `defer` can't corrupt the state the way an unbalanced counter could.
     public func endSecurityEvaluation(callID: String) {

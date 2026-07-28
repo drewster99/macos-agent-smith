@@ -829,6 +829,10 @@ public actor AgentActor {
         // after being paused/stopped. Firing `false` here is idempotent with the eventual defer.
         toolContext.onProcessingStateChange(false)
         toolContext.onSecurityAgentProcessingStateChange(false)
+        // Same reasoning for the evaluation registry: an evaluation orphaned by this stop keeps
+        // its entry until the LLM call returns, so the stopped agent would read "waiting on
+        // security" until then. Idempotent with `evaluate()`'s own `defer`.
+        await securityEvaluator?.clearInFlightEvaluations(forAgentInstanceID: id)
 
         // Drop UI/runtime observer callbacks now that the agent has shut down.
         // Releases the strong references those closures hold against the app

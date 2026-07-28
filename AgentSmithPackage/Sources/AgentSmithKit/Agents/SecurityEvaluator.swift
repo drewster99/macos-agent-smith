@@ -459,6 +459,17 @@ actor SecurityEvaluator {
     /// Posts channel messages for UI visibility (tool review status).
     /// Handles WARN auto-retry: if Brown resubmits an identical request as the very next call,
     /// it is auto-approved without an LLM call.
+    /// Drops any evaluations still registered for an agent that is shutting down.
+    ///
+    /// `evaluate()`'s `defer` is the normal way an entry goes away, but it only runs when the
+    /// in-flight LLM call returns — which a cancelled or hung provider may never do promptly. This
+    /// keeps a stopped agent from reading "waiting on security" forever, and its orphaned entry
+    /// from inflating the Agents tally. Routed through the evaluator rather than called on the
+    /// tracker directly, so this type stays the ONLY writer of that registry.
+    public func clearInFlightEvaluations(forAgentInstanceID agentInstanceID: UUID) {
+        activityTracker?.endSecurityEvaluations(forAgentInstanceID: agentInstanceID)
+    }
+
     public func evaluate(
         toolName: String,
         toolParams: String,
