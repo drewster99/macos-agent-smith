@@ -13,6 +13,10 @@ struct MainViewDetailColumn: View {
     @FocusState.Binding var isLightboxFocused: Bool
     let onAbortReset: () -> Void
     let onDrop: ([NSItemProvider]) -> Bool
+    
+    /// Cached display preferences to avoid creating a new TimestampPreferences instance on every body pass.
+    /// Updated via .onChange when any of the underlying shared preferences change.
+    @State private var cachedDisplayPrefs = TimestampPreferences.default
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,17 +55,53 @@ struct MainViewDetailColumn: View {
                     shared.settingsSelectedTab = .mcp
                     openSettings()
                 },
-                displayPrefs: TimestampPreferences(
+                displayPrefs: cachedDisplayPrefs,
+                selectedImageAttachment: $selectedImageAttachment
+            )
+            .equatable()
+            // Update cached display preferences when any of the underlying shared preferences change.
+            // This avoids creating a new TimestampPreferences instance on every body pass.
+            .onChange(of: shared.showTimestampsOnTaskBanners) { _, newValue in
+                DispatchQueue.main.async {
+                    cachedDisplayPrefs.taskBanners = newValue
+                }
+            }
+            .onChange(of: shared.showTimestampsOnToolCalls) { _, newValue in
+                DispatchQueue.main.async {
+                    cachedDisplayPrefs.toolCalls = newValue
+                }
+            }
+            .onChange(of: shared.showTimestampsOnMessaging) { _, newValue in
+                DispatchQueue.main.async {
+                    cachedDisplayPrefs.messaging = newValue
+                }
+            }
+            .onChange(of: shared.showTimestampsOnSystemMessages) { _, newValue in
+                DispatchQueue.main.async {
+                    cachedDisplayPrefs.systemMessages = newValue
+                }
+            }
+            .onChange(of: shared.showElapsedTimeOnToolCalls) { _, newValue in
+                DispatchQueue.main.async {
+                    cachedDisplayPrefs.elapsedTimeOnToolCalls = newValue
+                }
+            }
+            .onChange(of: shared.showRestartChrome) { _, newValue in
+                DispatchQueue.main.async {
+                    cachedDisplayPrefs.showRestartChrome = newValue
+                }
+            }
+            // Initialize cached preferences on first appearance.
+            .task {
+                cachedDisplayPrefs = TimestampPreferences(
                     taskBanners: shared.showTimestampsOnTaskBanners,
                     toolCalls: shared.showTimestampsOnToolCalls,
                     messaging: shared.showTimestampsOnMessaging,
                     systemMessages: shared.showTimestampsOnSystemMessages,
                     elapsedTimeOnToolCalls: shared.showElapsedTimeOnToolCalls,
                     showRestartChrome: shared.showRestartChrome
-                ),
-                selectedImageAttachment: $selectedImageAttachment
-            )
-            .equatable()
+                )
+            }
 
             Divider()
 
