@@ -2345,9 +2345,9 @@ case that preserves the raw value and surfaces loudly, not a silent nil.
 
 The test resolves workers with `runtime.agentIDForRole(.brown)` — "the" Brown — but the pool can transiently hold two while the first is being reaped, so after `waitForPendingRestarts()` the lookup can still return the first. **Fix:** query the Brown bound to the specific task (via the task's `assigneeIDs`) rather than by role. Do not fix it by sleeping.
 
-### Verify the tool-path truncation renders as intended (2026-07-27)
+### ~~Verify the tool-path truncation renders as intended~~ ✅ Confirmed 2026-07-27
 
-`ToolPathText` was changed so the filename claims layout width first and both halves truncate in the middle; previously both truncated at the tail, so a long `attachments/` name lost the part that identifies it. Build-clean and pure layout modifiers, but never verified visually — it shipped while a live session was running and launching the app would have disturbed it. Confirm against a long path (`~/Library/Application Support/AgentSmith/attachments/<uuid>_<name>.md`) that the directory collapses and the filename survives, then delete this item.
+`ToolPathText` was changed so the filename claims layout width first and both halves truncate in the middle; previously both truncated at the tail, so a long `attachments/` name lost the part that identifies it. Build-clean and pure layout modifiers, but never verified visually — it shipped while a live session was running and launching the app would have disturbed it. Confirmed visually by the user on 2026-07-27: the directory collapses and the filename survives. Checked against ordinary transcript paths rather than an exhaustive sweep of widths and window sizes, so a pathological case (a very narrow inspector, or a filename longer than the row) is unproven — reopen if one turns up.
 
 ## Blockers
 
