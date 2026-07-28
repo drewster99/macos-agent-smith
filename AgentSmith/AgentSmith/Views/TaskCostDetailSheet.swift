@@ -33,6 +33,11 @@ struct TaskCostDetailSheet: View {
     @State private var efficiencyMetrics: EfficiencyMetrics = EfficiencyMetrics()
     @State private var configRows: [ConfigRow] = []
     @State private var turnRows: [TurnRow] = []
+    @State private var resolvedTitle: String = ""
+    @State private var resolvedStatus: AgentTask.Status? = nil
+    @State private var durationText: String? = nil
+    @State private var toolMaxCount: Int = 1
+    @State private var displayedTurnStartOffset: Int = 0
 
     struct EfficiencyMetrics {
         var avgCostUSD: Double = 0
@@ -68,25 +73,22 @@ struct TaskCostDetailSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HeaderSection(
-                    resolvedTitle: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown Task",
-                    resolvedStatus: task?.status ?? taskSummary?.status,
+                    resolvedTitle: resolvedTitle,
+                    resolvedStatus: resolvedStatus,
                     summary: summary,
                     averageTaskCostUSD: averageTaskCostUSD,
                     taskCountInRange: taskCountInRange,
-                    durationText: task.flatMap { t in t.startedAt.map { started in
-                        let end = t.completedAt ?? Date()
-                        return formatDuration(end.timeIntervalSince(started))
-                    }} ?? nil,
+                    durationText: durationText,
                     showingVsAvgInfo: $showingVsAvgInfo
                 )
                 CostBreakdownSection(costByAgent: costByAgent, tokenBreakdown: tokenBreakdown, aggregator: aggregator)
                 EfficiencySection(metrics: efficiencyMetrics, contextResetsCount: contextResetsCount)
-                ToolUsageSection(toolCounts: toolCounts, maxCount: toolCounts.first?.count ?? 1)
+                ToolUsageSection(toolCounts: toolCounts, maxCount: toolMaxCount)
                 ConfigurationSection(configRows: configRows)
                 TurnTimelineSection(
                     turnRows: turnRows,
                     sortedTurnsCount: sortedTurns.count,
-                    displayedTurnStartOffset: max(0, sortedTurns.count - turnDisplayLimit),
+                    displayedTurnStartOffset: displayedTurnStartOffset,
                     turnDisplayLimit: $turnDisplayLimit
                 )
                 TurnDisclosureControls(
@@ -144,6 +146,18 @@ struct TaskCostDetailSheet: View {
         // Update summary
         summary = aggregator.summarize(newRecords, scopeLabel: titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown")
         
+        // Update resolved title and status
+        resolvedTitle = titleOverride ?? task?.title ?? taskSummary?.title ?? "Unknown Task"
+        resolvedStatus = task?.status ?? taskSummary?.status
+        
+        // Update duration text
+        if let t = task, let started = t.startedAt {
+            let end = t.completedAt ?? Date()
+            durationText = formatDuration(end.timeIntervalSince(started))
+        } else {
+            durationText = nil
+        }
+        
         // Update tool counts
         var counts: [String: Int] = [:]
         for r in newRecords {
@@ -151,6 +165,7 @@ struct TaskCostDetailSheet: View {
         }
         toolCounts = counts.map { (tool: $0.key, count: $0.value) }
             .sorted { lhs, rhs in lhs.count != rhs.count ? lhs.count > rhs.count : lhs.tool < rhs.tool }
+        toolMaxCount = toolCounts.first?.count ?? 1
         
         // Update sorted turns
         sortedTurns = newRecords.sorted { $0.timestamp < $1.timestamp }
@@ -188,7 +203,7 @@ struct TaskCostDetailSheet: View {
         // Update turn rows with real costs
         turnRows = computeTurnRows(sortedTurns)
         
-        // Update displayed turns
+        // Update displayed turns and offset
         updateDisplayedTurns()
     }
 
