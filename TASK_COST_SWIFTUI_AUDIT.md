@@ -141,6 +141,13 @@ The following best practices and sources guided this audit:
 **Fix:** Changed TurnDisclosureControls to use `@Binding var turnDisplayLimit: Int`, updated TurnTimelineSection to receive `displayedTurnStartOffset` parameter instead of computing it, wired binding from TaskCostDetailSheet.  
 **Commit:** 7f1d5ae
 
+### Fix 7: Complete caching - all derived data pre-computed
+
+**Issue IDs:** C5-C9 (body-time computations in child views)  
+**Problem:** Child views (CostBreakdownSection, ConfigurationSection, TurnTimelineSection) performed derived computations in body or had computed properties feeding body.  
+**Fix:** Moved ALL derived data computation to TaskCostDetailSheet.updateCachedData(): costByAgent, tokenBreakdown, efficiencyMetrics, configRows, turnRows. All child views now receive pre-computed data with zero body-time aggregation. Changed cache trigger to `.onChange(of: records)` for content-change detection. Restored real per-turn cost calculation (was returning 0).  
+**Commit:** dda4ac866573848756d7ce761477c9b159826c00
+
 ---
 
 ## Build Verification
@@ -166,20 +173,22 @@ The following best practices and sources guided this audit:
     7. https://www.avanderlee.com/swiftui/observable-macro-performance-increase-observableobject/
     8. https://www.hackingwithswift.com/books/ios-swiftui/sharing-swiftui-state-with-observable
 - **Apple Official Source Count:** 4
-- **Issues Fixed:** 17 total
-  - 4 computed properties cached to @State (C1-C4)
+- **Issues Fixed:** 22 total
+  - 9 computed properties/derived data cached to @State (C1-C9)
   - 12 helper functions extracted to View structs (H1-H12)
   - 1 behavioral regression fixed (TurnDisclosureControls binding)
   - Note: Equatable conformance added to UsageRecord.swift as supporting change
-- **Commits Made:** 5 total for this task (on top of base a8ea5d9)
+- **Commits Made:** 6 total for this task (on top of base a8ea5d9)
   1. 152ed0d: Update audit log with commit hash and build results
   2. c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Complete extraction of all remaining -> some View helpers
   3. 206acc2: Update audit log with complete fix list and final commit hashes
   4. 7f1d5ae: Fix TurnDisclosureControls binding and TurnTimelineSection parameters
-  5. df14b89: Update audit log with all 5 commits, 17 fixes, and complete source list
+  5. df14b89: Update audit log with all commits and complete source list
+  6. dda4ac866573848756d7ce761477c9b159826c00: Complete caching refactor - all derived data pre-computed
 - **Build Status:** BUILD SUCCEEDED (clean build)
 - **Remaining Concerns:** NONE
   - Grep verification: No remaining `var ...: some View` except `body` (exit code 1 = none found)
   - Grep verification: No remaining `func ... -> some View` (exit code 1 = none found)
   - Behavioral verification: TurnDisclosureControls correctly updates parent turnDisplayLimit via @Binding
-  - Cache invalidation: Uses `.onChange(of: records)` which tracks array identity changes; content changes from aggregator updates come with new array instances from parent dashboard
+  - Behavioral verification: Per-turn costs display real values (computeTurnCost uses aggregator.pricingLookup)
+  - Cache invalidation: Uses `.onChange(of: records)` which tracks array identity; parent dashboard provides new array instances when content changes
