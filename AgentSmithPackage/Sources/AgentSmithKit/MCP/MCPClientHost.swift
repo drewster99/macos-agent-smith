@@ -180,9 +180,15 @@ public actor MCPClientHost {
                 beginConnect(new)
             } else if let new {
                 // Same process; just refresh stored config so tool filtering picks up
-                // per-tool toggles on the next turn.
-                connections[id]?.config = new
-                statuses[id]?.toolCount = exposedToolCount(serverID: id, config: new)
+                // per-tool toggles on the next turn. If the connection doesn't exist
+                // (e.g., server was disabled and is now re-enabled, or failed and is
+                // being retried via toggle), start it.
+                if connections[id] != nil {
+                    connections[id]?.config = new
+                    statuses[id]?.toolCount = exposedToolCount(serverID: id, config: new)
+                } else {
+                    beginConnect(new)
+                }
             }
         }
         // Launch newly-added enabled servers.
