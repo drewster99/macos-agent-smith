@@ -1110,7 +1110,14 @@ public actor AgentActor {
     /// also means the worker has already oriented on the task before being asked anything.
     ///
     /// Runs at most once per worker: the drain is read-and-clear, and the flag stops a second
-    /// pass even if the drain came back empty.
+    /// pass even if the drain came back empty. A worker is one task — `performSpawnBrown` is the
+    /// only site constructing a Brown — so every task gets a fresh actor and a fresh flag.
+    ///
+    /// Called at the TOP of the run loop, ahead of `drainPendingInjectedMessages`, so the message
+    /// it enqueues reaches context in the SAME iteration; enqueuing after that drain sent the next
+    /// LLM turn out without it and delivered only on the turn after. Being ahead of the
+    /// `hasUnprocessedInput` idle guard also means an idle worker is woken by the handover
+    /// (`appendUserMessage` sets the flag) rather than sleeping through it.
     private func deliverQueuedTaskMessagesIfDue() async {
         guard configuration.role == .brown, !hasDeliveredQueuedTaskMessages else { return }
         // "After the briefing turn" means literally that — at least one LLM turn has completed,
@@ -1296,6 +1303,11 @@ public actor AgentActor {
             // A `/clear` that arrived while a tool turn was open was deferred to here (the turn
             // is now complete), so it can't orphan tool results.
             applyDeferredHistoryReset()
+            // Queue the handover BEFORE the injected-message drain below, so it lands in this
+            // iteration's context rather than the next one. Enqueuing after the drain meant the
+            // very next LLM turn went out WITHOUT the message and only the turn after that saw
+            // it — a wasted turn, and delivery one turn later than "the turn after the briefing".
+            await deliverQueuedTaskMessagesIfDue()
             // Injected messages first: a spawn briefing enqueued before `start()` must precede
             // any channel message that raced in, so it stays Brown's first context entry.
             drainPendingInjectedMessages()
@@ -1345,8 +1357,6 @@ public actor AgentActor {
                 pushLiveContext()
                 continue
             }
-
-            await deliverQueuedTaskMessagesIfDue()
 
             do {
                 let activeTasks = await toolContext.taskStore.allTasks().filter { $0.disposition == .active }
