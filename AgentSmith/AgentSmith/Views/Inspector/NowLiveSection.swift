@@ -2,21 +2,25 @@ import SwiftUI
 import AgentSmithKit
 
 /// The live "Now" view at the top of the inspector: the tasks happening right now, each
-/// with its stage, its Brown's live micro-state, whether the Security Agent is reviewing
-/// one of its calls, and its most recent tool activity.
+/// with its stage, its Brown's live micro-state, and its most recent tool calls — each showing
+/// who is looking at it and how long it actually ran.
 ///
-/// Sources: recent tool calls are bucketed from the channel by `taskID` (request side only —
-/// see `recompute`); the Brown state (`thinking` / `running <tool>` / `waiting on security`)
-/// and the nested `Security · evaluating` row come from the per-instance telemetry (the M2
-/// re-key), matched to a task via the Brown instance id in its `assigneeIDs`. Auto-approved
-/// read-only evidence takes the no-LLM fast path, so it correctly shows no security wait.
-/// Nothing is faked — a state that isn't currently signalled is simply omitted.
+/// Sources: the Brown state (`thinking` / `running <tool>` / `waiting on security`) comes from
+/// per-instance telemetry (the M2 re-key), matched to a task via the Brown instance id in its
+/// `assigneeIDs`. Each tool row is assembled from the CHANNEL, joining a call's request, its
+/// Security Agent verdict, and its output on the `requestID` all three carry — the same join the
+/// transcript uses. Nothing is faked; a state that isn't on the wire is simply omitted.
 ///
-/// Activity rows are age-bounded (`activityWindowSeconds`) and swept on a timer, because this
-/// section means "now" literally. Each row renders a `.relative` age, so anything left in it
-/// past its welcome counts upward and reads as a tool that never returned — which is exactly
-/// how a correctly-parked task came to look like a hang. A task keeps its title and stage chip
-/// for as long as its status is live; only the activity beneath it expires.
+/// The per-call security state replaced a single `Security · evaluating` line under Brown. That
+/// line could not say WHICH call of a batch was under review, and it contradicted the Agents
+/// tally beside it: the tally counts only real LLM-backed evaluations, while the line lit up for
+/// auto-approved calls too, so "Brown waiting on security" could sit directly above "0 Security".
+///
+/// Activity rows are age-bounded (`activityWindowSeconds`) on their REQUEST time and swept on a
+/// timer, because this section means "now" literally. What a row DISPLAYS is the tool's own run
+/// duration, never that age — showing the age made a call that had long since returned read as
+/// one that never did. A task keeps its title and stage chip for as long as its status is live;
+/// only the activity beneath it expires.
 struct NowLiveSection: View {
     let viewModel: AppViewModel
 
@@ -73,32 +77,54 @@ struct NowLiveSection: View {
     private func recompute() {
         let live = viewModel.activeTaskList.filter { Self.isLive($0.status) }
 
-        // Only the REQUEST side of a call is one activity. Both `tool_request` and `tool_output`
-        // carry a `tool` metadata key, so bucketing on that key alone listed every call twice —
-        // once when issued, once when it returned. Four visible rows were really two calls, and
-        // the ~5-second request→result gap between each pair read as four separate events.
+        // One ROW per call, built by joining the three messages a call produces on their shared
+        // `requestID`: the request, the Security Agent's verdict, and the output. Bucketing on the
+        // `tool` metadata key alone (which request AND output both carry) listed every call twice.
         //
-        // Rows are also age-bounded. This section answers "what is happening now", and each row
-        // renders a `.relative` AGE — so without a cutoff the last few calls of a task that has
-        // gone quiet sit here indefinitely, counting upward, indistinguishable from a tool that
-        // never returned. Work genuinely still in flight is reported by `brownState` (which is
-        // read from live telemetry, not timestamps), so a long-running call keeps its "running
-        // <tool>" line even after its request row ages out.
-        // Walk newest-first and stop at the cutoff. `messages` is append-ordered, so everything
-        // past the first too-old message is older still. That matters because this now runs on a
-        // timer: the resident transcript is normally capped, but "restore full history" opts into
-        // holding the entire session log, and rescanning all of it every tick to find the last
-        // two minutes would be pure waste.
+        // Only the REQUESTS are age-bounded, and only they end the walk: `messages` is
+        // append-ordered, so once a request predates the window every earlier request does too.
+        // Verdicts and outputs are collected without a cutoff — a call issued just inside the
+        // window returns just outside it, and dropping its output would leave a finished call
+        // rendering forever as "under review".
+        //
+        // Walking newest-first also means the FIRST verdict/output seen for a requestID is the
+        // newest, which is the one that counts; a repeated id keeps its latest state.
         let cutoff = Date().addingTimeInterval(-Self.activityWindowSeconds)
+        var reviewByRequest: [String: ChannelMessage] = [:]
+        var outputByRequest: [String: ChannelMessage] = [:]
+        var requests: [(message: ChannelMessage, taskID: UUID, tool: String, requestID: String)] = []
+        scan: for message in viewModel.messages.reversed() {
+            guard case .string(let requestID)? = message.metadata?["requestID"] else { continue }
+            // A security verdict carries NO `messageKind`; it is identified by its typed
+            // `securityDisposition`, exactly as the transcript's `isSuppressibleFollowUp` does.
+            // Still a typed discriminator — just a different one.
+            if message.metadata?["securityDisposition"] != nil {
+                if reviewByRequest[requestID] == nil { reviewByRequest[requestID] = message }
+                continue
+            }
+            switch message.kind {
+            case .toolOutput:
+                if outputByRequest[requestID] == nil { outputByRequest[requestID] = message }
+            case .toolRequest:
+                guard message.timestamp >= cutoff else { break scan }
+                guard let taskID = message.taskID,
+                      case .string(let tool)? = message.metadata?["tool"] else { continue }
+                requests.append((message, taskID, tool, requestID))
+            default:
+                continue
+            }
+        }
+
         var toolsByTask: [UUID: [ToolActivity]] = [:]
-        for message in viewModel.messages.reversed() {
-            guard message.timestamp >= cutoff else { break }
-            guard let taskID = message.taskID,
-                  message.kind == .toolRequest,
-                  case .string(let tool)? = message.metadata?["tool"] else { continue }
-            guard toolsByTask[taskID, default: []].count < Self.maxToolRowsPerTask else { continue }
-            toolsByTask[taskID, default: []].append(
-                ToolActivity(id: message.id, name: tool, timestamp: message.timestamp)
+        for request in requests {
+            guard toolsByTask[request.taskID, default: []].count < Self.maxToolRowsPerTask else { continue }
+            toolsByTask[request.taskID, default: []].append(
+                Self.activity(
+                    request: request.message,
+                    name: request.tool,
+                    review: reviewByRequest[request.requestID],
+                    output: outputByRequest[request.requestID]
+                )
             )
         }
 
@@ -114,7 +140,6 @@ struct NowLiveSection: View {
                 title: task.title,
                 status: task.status,
                 brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance),
-                securityEvaluating: Self.securityEvaluating(for: task, processing: processing),
                 // Already newest-first and already capped by the collecting loop above.
                 tools: toolsByTask[task.id] ?? []
             )
@@ -124,6 +149,54 @@ struct NowLiveSection: View {
         DispatchQueue.main.async {
             if rows != next { rows = next }
         }
+    }
+
+    /// Assembles one call's state from its request, its Security Agent verdict, and its output.
+    /// Every branch is driven by which of those three messages EXIST and by the verdict's typed
+    /// `securityDisposition` — never by their prose.
+    private static func activity(
+        request: ChannelMessage,
+        name: String,
+        review: ChannelMessage?,
+        output: ChannelMessage?
+    ) -> ToolActivity {
+        let disposition: String? = {
+            if case .string(let value)? = review?.metadata?["securityDisposition"] { return value }
+            return nil
+        }()
+        let security: ToolActivity.SecurityPhase
+        switch disposition {
+        case "approved": security = .approved
+        case "autoApproved": security = .autoApproved
+        case "warning": security = .warned
+        case "denied": security = .denied
+        // No verdict on the wire yet: still in front of the Security Agent. A verdict carrying an
+        // unrecognised disposition is treated as reviewed-and-allowed rather than guessed at — it
+        // got past the gate, which is the only thing this row claims.
+        default: security = review == nil ? .evaluating : .approved
+        }
+
+        let run: ToolActivity.RunPhase
+        if security == .denied || security == .evaluating {
+            run = .notStarted
+        } else if let output {
+            run = .finished(runMs: {
+                if case .int(let ms)? = output.metadata?["executionMs"] { return ms }
+                return nil
+            }())
+        } else {
+            // Executing. The verdict is posted immediately before the tool is invoked, so its
+            // timestamp is the closest start-of-execution marker the transcript carries.
+            run = .running(since: review?.timestamp ?? request.timestamp)
+        }
+
+        return ToolActivity(
+            id: request.id,
+            name: name,
+            requestedAt: request.timestamp,
+            security: security,
+            run: run
+        )
     }
 
     /// The live micro-state of the Brown assigned to `task`, read from the per-instance
@@ -147,11 +220,6 @@ struct NowLiveSection: View {
             if processing.contains(brownRef) { return "thinking" }
         }
         return nil
-    }
-
-    /// Whether the Security Agent is actively evaluating a call for this task's Brown.
-    private static func securityEvaluating(for task: AgentTask, processing: Set<AgentInstanceRef>) -> Bool {
-        task.assigneeIDs.contains { processing.contains(AgentInstanceRef(role: .securityAgent, instanceID: $0)) }
     }
 
     /// Most-recent tool calls shown per task before older ones fall off.
@@ -185,18 +253,44 @@ struct NowLiveSection: View {
         /// M2 re-key) and matched by the Brown instance id in the task's assignees — so two
         /// concurrent Browns no longer overwrite one shared indicator. Nil when idle.
         let brownState: String?
-        /// True while the Security Agent is actively evaluating a call for this task's Brown
-        /// (the 4–6 s LLM review). Drives the nested "Security · evaluating" row and Brown's
-        /// "waiting on security" state. Auto-approved read-only evidence never sets this —
-        /// it takes the no-LLM fast path, so there's genuinely no wait to show.
-        let securityEvaluating: Bool
         let tools: [ToolActivity]
     }
 
+    /// One tool call's live story: who is looking at it, and how long it actually RAN.
     struct ToolActivity: Identifiable, Equatable {
         let id: UUID
         let name: String
-        let timestamp: Date
+        /// When the request was posted. NOT displayed — it is the row's AGE, which is what this
+        /// used to show and what made a finished call read as a tool that never returned. Kept
+        /// only to age the row out of the "now" window.
+        let requestedAt: Date
+        let security: SecurityPhase
+        let run: RunPhase
+
+        /// What the Security Agent has decided about this call, so far.
+        enum SecurityPhase: Equatable {
+            /// No verdict on the wire yet — the call is sitting in review.
+            case evaluating
+            /// Reviewed by the Security Agent's LLM and allowed.
+            case approved
+            /// Pre-cleared without an LLM round-trip (the auto-approve table, or a WARN retry).
+            case autoApproved
+            /// Allowed, with a caveat.
+            case warned
+            /// Refused. The tool never ran, so there is no duration to show.
+            case denied
+        }
+
+        /// How far the tool itself has got. `.notStarted` covers both "still in review" and
+        /// "denied" — in neither case has the tool run, and a denied call never will.
+        enum RunPhase: Equatable {
+            case notStarted
+            /// Approved and executing, counting from the verdict's timestamp.
+            case running(since: Date)
+            /// Finished, with the duration `runToolWithTimeout` actually measured. Nil when the
+            /// producing path published none — rendered as no duration, never a fabricated one.
+            case finished(runMs: Int?)
+        }
     }
 }
 
@@ -238,35 +332,107 @@ private struct LiveTaskRowView: View {
                 .padding(.leading, 12)
             }
 
-            if row.securityEvaluating {
-                HStack(spacing: 6) {
-                    Text("Security")
-                        .font(AppFonts.liveAgentLabel)
-                        .foregroundStyle(AppColors.color(for: .agent(.securityAgent)))
-                    Text("evaluating")
-                        .font(AppFonts.liveAgentState)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.leading, 28)
-            }
-
             ForEach(row.tools) { tool in
-                HStack(spacing: 6) {
-                    Text(tool.name)
-                        .font(AppFonts.liveToolName)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 8)
-
-                    Text(tool.timestamp, style: .relative)
-                        .font(AppFonts.liveToolAge)
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.leading, 28)
-                .padding(.trailing, 12)
+                LiveToolRowView(tool: tool)
             }
         }
         .padding(.vertical, 5)
+    }
+}
+
+/// One tool call: its name, then whatever is true of it right now — under review, running, or
+/// finished with the time it actually took and how Security ruled on it.
+private struct LiveToolRowView: View {
+    let tool: NowLiveSection.ToolActivity
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(tool.name)
+                .font(AppFonts.liveToolName)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            LiveToolStatusView(tool: tool)
+        }
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
+    }
+}
+
+/// The trailing half of a live tool row: either the Security Agent holding the call, or the run
+/// duration plus the verdict it was let through on.
+private struct LiveToolStatusView: View {
+    let tool: NowLiveSection.ToolActivity
+
+    var body: some View {
+        switch tool.security {
+        case .evaluating:
+            // The one state that names an agent: this call is parked in front of the Security
+            // Agent and nothing else is happening to it.
+            Text("Security")
+                .font(AppFonts.liveAgentLabel)
+                .foregroundStyle(AppColors.color(for: .agent(.securityAgent)))
+        case .denied:
+            // No duration: a denied call never ran, so any number here would be a lie.
+            Image(systemName: "xmark.circle.fill")
+                .font(AppFonts.liveToolVerdictIcon)
+                .foregroundStyle(AppColors.securityDenied)
+        case .approved, .autoApproved, .warned:
+            HStack(spacing: 5) {
+                LiveToolDurationView(run: tool.run)
+                Image(systemName: verdictSymbol)
+                    .font(AppFonts.liveToolVerdictIcon)
+                    .foregroundStyle(verdictColor)
+            }
+        }
+    }
+
+    private var verdictSymbol: String {
+        switch tool.security {
+        case .autoApproved: return "bolt.circle.fill"
+        case .warned: return "exclamationmark.triangle.fill"
+        default: return "checkmark.circle.fill"
+        }
+    }
+
+    private var verdictColor: Color {
+        switch tool.security {
+        case .warned: return AppColors.securityWarning
+        case .autoApproved: return AppColors.securityAutoApproved
+        default: return AppColors.securityApproved
+        }
+    }
+}
+
+/// Time the TOOL spent running — never the age of the row, never the review wait. A call still
+/// executing counts up from its verdict; a finished one shows what was measured.
+private struct LiveToolDurationView: View {
+    let run: NowLiveSection.ToolActivity.RunPhase
+
+    var body: some View {
+        switch run {
+        case .notStarted:
+            EmptyView()
+        case .running(let since):
+            Text(since, style: .timer)
+                .font(AppFonts.liveToolAge)
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+        case .finished(let runMs):
+            if let runMs {
+                Text(Self.formatted(runMs))
+                    .font(AppFonts.liveToolAge)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    /// Sub-second calls read in milliseconds, longer ones in seconds: "1483 ms" is harder to
+    /// compare at a glance than "1.5s" when scanning a column of them.
+    static func formatted(_ runMs: Int) -> String {
+        runMs < 1000 ? "\(runMs) ms" : String(format: "%.1fs", Double(runMs) / 1000)
     }
 }

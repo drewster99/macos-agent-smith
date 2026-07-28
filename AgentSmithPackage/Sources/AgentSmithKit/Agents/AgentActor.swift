@@ -2157,13 +2157,24 @@ public actor AgentActor {
                     let toolDef = entry.tool.definition(for: role)
                     let toolParamDefs = AgentActor.formatToolParameterDefinitions(toolDef.parameters)
 
-                    let shouldSignalStart = securityAgentActiveCount.withLock { count -> Bool in
-                        count += 1
-                        return count == 1
-                    }
-                    if shouldSignalStart { securityAgentCallback(true) }
-
-                    let disposition = await evaluator.evaluate(
+                    // Same reasoning as the sequential path. The counter keeps the signal
+                    // edge-triggered across the whole batch — first in lights it, last out clears
+                    // it — so a per-entry `defer` still cannot clear it while siblings are live.
+                    let disposition: SecurityDisposition
+                    do {
+                        let shouldSignalStart = securityAgentActiveCount.withLock { count -> Bool in
+                            count += 1
+                            return count == 1
+                        }
+                        if shouldSignalStart { securityAgentCallback(true) }
+                        defer {
+                            let shouldSignalEnd = securityAgentActiveCount.withLock { count -> Bool in
+                                count -= 1
+                                return count == 0
+                            }
+                            if shouldSignalEnd { securityAgentCallback(false) }
+                        }
+                        disposition = await evaluator.evaluate(
                         toolName: entry.call.name,
                         toolParams: entry.call.arguments,
                         toolDescription: toolDef.description,
@@ -2178,13 +2189,8 @@ public actor AgentActor {
                         agentContext: agentContext,
                         sanctionedDirectories: sanctionedDirectories,
                         toolCallID: entry.call.id
-                    )
-
-                    let shouldSignalEnd = securityAgentActiveCount.withLock { count -> Bool in
-                        count -= 1
-                        return count == 0
+                        )
                     }
-                    if shouldSignalEnd { securityAgentCallback(false) }
 
                     await AgentActor.postSecurityReviewToChannel(
                         disposition: disposition, callID: entry.call.id, roleName: roleName,
@@ -2210,7 +2216,8 @@ public actor AgentActor {
                         // cancellation is also recorded as a failure.
                         await ctx.setToolExecutionStatus(entry.call.id, outcome.succeeded)
                         await AgentActor.postToolOutputToChannel(
-                            result: result, call: entry.call, role: role, context: ctx, taskTitle: taskTitleForChannel
+                            result: result, call: entry.call, role: role, context: ctx,
+                            taskTitle: taskTitleForChannel, executionMs: executionMs
                         )
                     } else {
                         if let taskID = currentTask?.id {
@@ -2511,8 +2518,15 @@ public actor AgentActor {
         // routed through it so they're visible and centrally gated. Brown is fully evaluated.
         // The worker's task-scoped working dirs — writes here are expected, not suspicious.
         let sanctionedDirectories = [toolContext.taskEvidenceDirectory, toolContext.taskTemporaryDirectory].compactMap { $0?.path }
-        toolContext.onSecurityAgentProcessingStateChange(true)
-        let disposition = await evaluator.evaluate(
+        // Bracketed in a `defer` inside its own scope so the flag falls even if an early return,
+        // a throw, or a cancellation is ever introduced in this window. A stranded "true" is not
+        // cosmetic: it renders as Brown "waiting on security" indefinitely, which is exactly how a
+        // healthy agent comes to look hung.
+        let disposition: SecurityDisposition
+        do {
+            toolContext.onSecurityAgentProcessingStateChange(true)
+            defer { toolContext.onSecurityAgentProcessingStateChange(false) }
+            disposition = await evaluator.evaluate(
             toolName: call.name,
             toolParams: call.arguments,
             toolDescription: toolDef.description,
@@ -2527,8 +2541,8 @@ public actor AgentActor {
             agentContext: agentContext,
             sanctionedDirectories: sanctionedDirectories,
             toolCallID: call.id
-        )
-        toolContext.onSecurityAgentProcessingStateChange(false)
+            )
+        }
 
         // Post approval/denial status.
         await Self.postSecurityReviewToChannel(
@@ -2539,9 +2553,10 @@ public actor AgentActor {
         if disposition.approved {
             let outcome = await directExecute(call, tool: tool)
             await Self.postToolOutputToChannel(
-                result: outcome.result, call: call, role: configuration.role, context: toolContext, taskTitle: channelTaskTitle
+                result: outcome.result, call: call, role: configuration.role, context: toolContext,
+                taskTitle: channelTaskTitle, executionMs: outcome.executionMs
             )
-            return outcome
+            return (outcome.result, outcome.succeeded)
         } else {
             if let task = currentTask {
                 let update = Self.securityDenialUpdateMessage(
@@ -2588,7 +2603,7 @@ public actor AgentActor {
     /// Runs an ALREADY-APPROVED call. Its only caller is `executeWithApproval`, which has posted
     /// the tool_request and the verdict itself — hence no visibility posting here. It carried a
     /// `postVisibility` flag for the old un-evaluated path, which no longer exists.
-    private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> (result: String, succeeded: Bool) {
+    private func directExecute(_ call: LLMToolCall, tool: any AgentTool) async -> (result: String, succeeded: Bool, executionMs: Int) {
 
         let agentIDPrefix = String(id.uuidString.prefix(8))
         let outcome = await Self.runToolWithTimeout(call, tool: tool, context: toolContext) { name, seconds in
@@ -2598,7 +2613,7 @@ public actor AgentActor {
         turnToolResultChars += outcome.result.count
         await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
         recordToolOutcome(name: call.name, succeeded: outcome.succeeded)
-        return (outcome.result, outcome.succeeded)
+        return (outcome.result, outcome.succeeded, outcome.executionMs)
     }
 
     /// Tools whose "failure" is the CALLEE's exit status, not a tool malfunction — bash
@@ -2846,23 +2861,31 @@ public actor AgentActor {
     ///
     /// The channel message stores only the display-truncated version of the output to avoid
     /// bloating the SwiftUI view layer with megabytes of data (e.g., binary blobs from osascript).
-    static func postToolOutputToChannel(result: String, call: LLMToolCall, role: AgentRole, context: ToolContext, taskTitle: String? = nil) async {
+    static func postToolOutputToChannel(result: String, call: LLMToolCall, role: AgentRole, context: ToolContext, taskTitle: String? = nil, executionMs: Int? = nil) async {
         await postToolOutputToChannel(
             result: result,
             call: call,
             sender: .agent(role),
             post: { await context.post($0) },
-            taskTitle: taskTitle
+            taskTitle: taskTitle,
+            executionMs: executionMs
         )
     }
 
+    /// `executionMs` is the tool's own wall-clock RUN time, as measured by `runToolWithTimeout`.
+    /// Published because it is NOT derivable from the transcript: the request→output gap also
+    /// contains the Security Agent's review, and the age of the request message keeps growing
+    /// after the call returns. The live inspector displayed that age, so a call that had long
+    /// since finished read as one that never did. Nil for post paths that execute no tool of their
+    /// own, and absent rather than zero — a duration nobody measured must not render as "0 ms".
     static func postToolOutputToChannel(
         result: String,
         call: LLMToolCall,
         sender: ChannelMessage.Sender,
         post: @Sendable (ChannelMessage) async -> Void,
         taskTitle: String? = nil,
-        taskID: UUID? = nil
+        taskID: UUID? = nil,
+        executionMs: Int? = nil
     ) async {
         let trimmedResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedResult.isEmpty else { return }
@@ -2873,6 +2896,9 @@ public actor AgentActor {
             "messageKind": .kind(.toolOutput),
             "tool": .string(call.name)
         ]
+        if let executionMs {
+            outputMetadata["executionMs"] = .int(executionMs)
+        }
         if let taskTitle {
             outputMetadata["senderTaskTitle"] = .string(taskTitle)
         }

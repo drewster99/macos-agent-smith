@@ -85,6 +85,10 @@ enum AppColors {
     static let securityWarning = Color.orange
     static let securityDenied = Color.orange
     static let securityAbort = Color.red
+    /// Pre-cleared with no LLM round-trip (the auto-approve table, or a WARN retry). Deliberately
+    /// muted rather than green: no judgement was made, and colouring it like an approval would
+    /// overstate what happened.
+    static let securityAutoApproved = Color.secondary
 
     // MARK: - Tool-row inline accents
 
@@ -269,6 +273,8 @@ enum AppFonts {
     static let liveToolName = Font.system(size: 11, design: .monospaced)
     /// 10pt monospaced — the relative age beside a live task's recent tool call.
     static let liveToolAge = Font.system(size: 10, design: .monospaced)
+    /// 9pt — the security-verdict glyph trailing a live tool row.
+    static let liveToolVerdictIcon = Font.system(size: 9, weight: .semibold)
 
     // MARK: PDF export (TaskPDFDocumentView)
     // Fixed point sizes (not Dynamic Type styles) because these render into a fixed-size
