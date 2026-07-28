@@ -225,8 +225,8 @@ struct TemplateSubstitutionTests {
         #expect(await store.task(id: template.id)?.acceptanceCriteria.isEmpty == true)
     }
 
-    @Test("Removing an input is refused while a placeholder still names it")
-    func removingAnInputCannotOrphanAPlaceholder() async {
+    @Test("Removing an input leaves its placeholders as literal text, refused on the next edit")
+    func removingAnInputStrandsPlaceholdersAsLiteralText() async {
         let store = TaskStore()
         let template = await makeTemplate(
             store: store,
@@ -237,17 +237,70 @@ struct TemplateSubstitutionTests {
             ]
         )
 
-        let problem = await store.setTemplateInputDefinitions(id: template.id, definitions: [
-            TemplateInputDefinition(name: "app_name", description: "App name.", required: true)
-        ])
-        #expect(problem?.contains("project_dir") == true)
-        #expect(await store.task(id: template.id)?.templateInputDefinitions.count == 2)
-
-        // Rewriting the text first is what unblocks it.
-        #expect(await store.updateDescription(id: template.id, description: "Build {{app_name}}.") == nil)
+        // Allowed — a definitions-only write validates no text. Refusing here is what made an
+        // input rename impossible; see `renamingAnInputIsPossibleFromEveryPath`.
         #expect(await store.setTemplateInputDefinitions(id: template.id, definitions: [
             TemplateInputDefinition(name: "app_name", description: "App name.", required: true)
         ]) == nil)
+
+        // The stranded placeholder degrades to literal text — visible, never a failed run.
+        guard let instance = await instance(store, template.id, ["app_name": "Widgets"]) else { return }
+        #expect(instance.description == "Build Widgets from {{project_dir}}.")
+
+        // And the next edit of that text says so, which is where the author gets told.
+        let problem = await store.updateDescription(id: template.id, description: "Rebuild {{app_name}} from {{project_dir}}.")
+        #expect(problem?.contains("project_dir") == true)
+    }
+
+    @Test("Renaming an input and its references is possible from every path")
+    func renamingAnInputIsPossibleFromEveryPath() async {
+        let store = TaskStore()
+        let template = await makeTemplate(
+            store: store,
+            description: "Build {{app_name}}.",
+            inputs: [TemplateInputDefinition(name: "app_name", description: "App.", required: true)]
+        )
+        #expect(await store.setSteps(id: template.id, steps: [
+            TaskStep(text: "xcodebuild -scheme {{app_name}}", origin: .user)
+        ]) == nil)
+
+        // Exactly the task editor's save order: the definition (with the new input AND the new
+        // description) first, then the criteria, then the steps. Checking `updateDefinition`
+        // against fields it does not write refused this at step one, over step text the very next
+        // call was about to replace — so a correctly-renamed template could not be saved at all.
+        #expect(await store.updateDefinition(
+            id: template.id,
+            title: "Build",
+            description: "Build {{product}}.",
+            isTemplate: true,
+            templateInputDefinitions: [TemplateInputDefinition(name: "product", description: "Product.", required: true)],
+            templateInstanceTitleTemplate: nil
+        ) == nil)
+        #expect(await store.setSteps(id: template.id, steps: [
+            TaskStep(text: "xcodebuild -scheme {{product}}", origin: .user)
+        ]) == nil)
+
+        guard let instance = await instance(store, template.id, ["product": "Widgets"]) else { return }
+        #expect(instance.description == "Build Widgets.")
+        #expect(instance.steps.map(\.text) == ["xcodebuild -scheme Widgets"])
+    }
+
+    @Test("A title with no placeholders survives instantiation byte-for-byte")
+    func titleWithoutPlaceholdersIsNotNormalized() async {
+        let store = TaskStore()
+        // Whitespace collapsing repairs the gap an omitted optional input leaves behind, so it must
+        // not run when nothing was substituted. Unconditional collapsing silently rewrote the title
+        // of every instance — including templates that use no placeholders anywhere.
+        let template = await makeTemplate(
+            store: store,
+            title: "Nightly  report — v2",
+            description: "Audit {{repo_path}}.",
+            inputs: [TemplateInputDefinition(name: "repo_path", description: "Repo.", required: true)]
+        )
+
+        guard let instance = await instance(store, template.id, ["repo_path": "/src"]) else { return }
+        #expect(instance.title == "Nightly  report — v2")
+        #expect(instance.description == "Audit /src.")
     }
 
     @Test("An input and its placeholders can be renamed in one edit")

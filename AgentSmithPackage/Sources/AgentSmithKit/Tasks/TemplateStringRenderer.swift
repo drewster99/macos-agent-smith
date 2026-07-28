@@ -15,8 +15,14 @@ public enum TemplateStringRenderer {
         /// multi-line — a description, a step, or a validation prompt is markdown, and collapsing
         /// it would fuse the whole document onto a single line.
         case preserved
-        /// Collapse runs of whitespace to a single space and trim. For titles, where an omitted
-        /// optional input would otherwise leave a visible double space or a trailing gap.
+        /// Collapse runs of whitespace to a single space and trim, but ONLY if a placeholder was
+        /// actually substituted. For titles, where an omitted optional input would otherwise leave
+        /// a visible double space or a trailing gap.
+        ///
+        /// The "only if" is load-bearing: the collapse repairs damage substitution caused, so text
+        /// substitution never touched must come back byte-for-byte. Collapsing unconditionally
+        /// silently rewrote the title of every template instance — `Nightly  report` became
+        /// `Nightly report` even on a template that defines no inputs at all.
         case singleLine
     }
 
@@ -47,6 +53,7 @@ public enum TemplateStringRenderer {
     ) -> String {
         var output = ""
         var index = template.startIndex
+        var didSubstitute = false
         while index < template.endIndex {
             guard let openRange = template[index...].range(of: "{{") else {
                 output += template[index...]
@@ -68,11 +75,12 @@ public enum TemplateStringRenderer {
                 continue
             }
             output += substitution.value
+            didSubstitute = true
             index = substitution.continuationIndex
         }
         switch layout {
         case .preserved: return output
-        case .singleLine: return collapsingWhitespace(output)
+        case .singleLine: return didSubstitute ? collapsingWhitespace(output) : output
         }
     }
 

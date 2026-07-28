@@ -121,35 +121,25 @@ public enum TemplateInputValidation {
     }
 }
 
+/// The field LABELS shared by everything that reports a placeholder problem, so the same offending
+/// step reads the same way whether it was caught by the store, by `create_task`, or live in the
+/// task editor. Substitution covers `title`, `description`, each ACTIVE step, and each criterion's
+/// name / validation prompt / input enumerator prompt (`TaskStore.instantiateTemplate`); the two
+/// simple fields are labelled inline by their callers, and the two structured ones get a helper
+/// here because they carry a position or a name.
+///
+/// There is deliberately no whole-task variant. Nothing validates a task's ENTIRE authored text
+/// against a definition set any more — see the note in `setTemplateInputDefinitions` for why that
+/// made renaming an input impossible. Each write checks the text it writes.
 extension AgentTask {
-    /// Every authored text field that template-input substitution renders when this template is
-    /// instantiated, each labelled for error messages. The SINGLE list of what substitution
-    /// covers — `instantiateTemplate` renders exactly these, and the authoring checks validate
-    /// exactly these, so a field added to one can't be forgotten by the other.
-    ///
-    /// Tombstoned steps are absent because instantiation drops them: they are the TEMPLATE's
-    /// authoring history, never part of a run. `templateInstanceTitleTemplate` is absent because
-    /// it is validated by its own strict rule, whose message tells the author to clear or update
-    /// the title template specifically.
-    public var templateRenderedTextFields: [(field: String, text: String)] {
-        var fields: [(field: String, text: String)] = [("title", title), ("description", description)]
-        for (index, step) in steps.filter(\.isActive).enumerated() {
-            fields += Self.templateRenderedTextFields(ofStep: step.text, atPosition: index + 1)
-        }
-        for criterion in acceptanceCriteria {
-            fields += Self.templateRenderedTextFields(ofCriterion: criterion)
-        }
-        return fields
-    }
-
-    /// The renderable fields of a single step, labelled as `templateRenderedTextFields` labels
-    /// them. Split out so a path validating ONE step edit reports it the same way the whole-task
-    /// sweep would, without re-checking fields the edit never touched.
+    /// The renderable fields of a single step. `position` is its 1-based place among the ACTIVE
+    /// steps, matching the numbering the worker, the briefing, and `get_task_details` all show.
     public static func templateRenderedTextFields(ofStep text: String, atPosition position: Int) -> [(field: String, text: String)] {
         [("step \(position)", text)]
     }
 
-    /// The renderable fields of a single acceptance criterion. Same purpose as the step overload.
+    /// The renderable fields of a single acceptance criterion. `name` is included because for a
+    /// default-validated criterion the name IS the judging instruction.
     public static func templateRenderedTextFields(ofCriterion criterion: AcceptanceCriterion) -> [(field: String, text: String)] {
         var fields: [(field: String, text: String)] = [
             ("criterion \"\(criterion.name)\" name", criterion.name),
@@ -159,18 +149,5 @@ extension AgentTask {
             fields.append(("criterion \"\(criterion.name)\" input enumerator prompt", inputEnumeratorPrompt))
         }
         return fields
-    }
-
-    /// Returns the first authored field referencing a placeholder that names no input in
-    /// `definedNames`, or nil when every field is clean. Used when the DEFINITION set changes
-    /// under text that was already written — the one edit that can invalidate fields it doesn't
-    /// touch.
-    public func templatePlaceholderProblem(definedNames: Set<String>) -> String? {
-        for (field, text) in templateRenderedTextFields {
-            if let problem = TemplateInputValidation.placeholderProblem(in: text, field: field, definedNames: definedNames) {
-                return problem
-            }
-        }
-        return nil
     }
 }

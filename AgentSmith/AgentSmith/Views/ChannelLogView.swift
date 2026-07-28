@@ -218,6 +218,14 @@ struct ChannelLogView: View, Equatable {
     @State private var maxVisibleCount = ChannelLogView.initialWindowSize
     /// The attachment currently shown in the full-screen image viewer, managed by the parent.
     @Binding var selectedImageAttachment: Attachment?
+    
+    /// Cached window start index to avoid recalculating on every body pass.
+    /// Updated via .onChange when messages or maxVisibleCount changes.
+    @State private var cachedWindowStart = 0
+    /// Cached visible messages array to avoid creating it on every body pass.
+    @State private var cachedVisibleMessages: [ChannelMessage] = []
+    /// Cached grouping index to avoid rebuilding dictionaries on every body pass.
+    @State private var cachedGroupingIndex = ChannelGroupingIndex([])
 
     /// Rows rendered on first display / while tracking the tail. Large enough to cover any
     /// normal scrollback without a "Load earlier" click, small enough that its layers are a
@@ -256,19 +264,10 @@ struct ChannelLogView: View, Equatable {
     }
 
     var body: some View {
-        let windowStart = windowStartIndex()
-        let visibleMessages = windowStart == 0 ? messages : Array(messages[windowStart...])
-        let hiddenEarlierCount = windowStart
-        // Grouping lookups that hold message references (the review/output dicts) are derived
-        // fresh from the *rendered window* — they're only consumed by in-window tool rows, so
-        // windowing them keeps the render O(window) with nothing retained beyond the visible rows.
-        let index = ChannelGroupingIndex(visibleMessages)
-        // Suppression must see EVERY resident tool_request id — not just the window's — so a
-        // security-review / tool-output row whose parent tool_request has scrolled past the
-        // window's top edge still collapses into that parent instead of leaking as a loose row.
-        // The set is maintained incrementally by `AppViewModel` (O(1) per append) and passed in,
-        // rather than rebuilt over the whole transcript on every render.
-
+        // Use cached values that are updated via .onChange to avoid recalculating on every body pass.
+        let hiddenEarlierCount = cachedWindowStart
+        let index = cachedGroupingIndex
+        
         return ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
@@ -289,7 +288,7 @@ struct ChannelLogView: View, Equatable {
                                     // shove the content the user is reading downward. Re-anchor
                                     // to the previously-first visible row after the new rows
                                     // exist (next runloop tick).
-                                    let anchorID = visibleMessages.first?.id
+                                    let anchorID = cachedVisibleMessages.first?.id
                                     maxVisibleCount = min(messages.count, maxVisibleCount + Self.windowGrowStep)
                                     if let anchorID {
                                         DispatchQueue.main.async {
@@ -300,7 +299,7 @@ struct ChannelLogView: View, Equatable {
                             )
                         }
 
-                        ForEach(visibleMessages) { message in
+                        ForEach(cachedVisibleMessages) { message in
                             if !shouldSuppress(message, toolRequestIDs: toolRequestIDs) {
                                 ChannelMessageBanner(
                                     message: message,
@@ -366,6 +365,23 @@ struct ChannelLogView: View, Equatable {
                         proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
+                // Cache expensive computations: window start, visible messages array, and grouping index.
+                // These are updated only when dependencies change, not on every body pass.
+                // Per SwiftUI best practices, use .onChange to drive state updates instead of
+                // recalculating in the body.
+                .onChange(of: messages.count) { _, _ in
+                    updateCachedValues()
+                }
+                .onChange(of: maxVisibleCount) { _, _ in
+                    updateCachedValues()
+                }
+                .onChange(of: messages.last?.id) { _, _ in
+                    updateCachedValues()
+                }
+                // Initialize cached values on first appearance.
+                .task {
+                    updateCachedValues()
+                }
 
                 if !isAtBottom {
                     ChannelLogScrollToBottomButton(onTap: {
@@ -377,6 +393,16 @@ struct ChannelLogView: View, Equatable {
                 }
             }
         }
+    }
+    
+    /// Updates cached values for window start, visible messages, and grouping index.
+    /// Called via .onChange when dependencies change to avoid recalculating on every body pass.
+    /// Follows SwiftUI best practice: calculations driven by .onChange, not computed properties in body.
+    private func updateCachedValues() {
+        let windowStart = windowStartIndex()
+        cachedWindowStart = windowStart
+        cachedVisibleMessages = windowStart == 0 ? messages : Array(messages[windowStart...])
+        cachedGroupingIndex = ChannelGroupingIndex(cachedVisibleMessages)
     }
 
     /// True for security-review and tool-output rows, which are grouped into (and rendered

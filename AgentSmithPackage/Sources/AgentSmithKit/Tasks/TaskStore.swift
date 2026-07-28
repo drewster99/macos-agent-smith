@@ -153,11 +153,19 @@ public actor TaskStore {
            let problem = TemplateStringRenderer.validate(titleTemplate, allowedNames: Set(definitions.map(\.name))) {
             return "Template inputs would invalidate the instance title template: \(problem) Clear or update the title template first."
         }
-        // Dropping or renaming an input orphans every placeholder that named it. Those live in
-        // fields this call never touches, so this is the one edit that must look at the whole task.
-        if let problem = task.templatePlaceholderProblem(definedNames: Set(definitions.map(\.name))) {
-            return "Template inputs would orphan an existing placeholder — \(problem) Update that text first, or keep the input defined."
-        }
+        // Deliberately does NOT sweep the task's existing text for placeholders this change would
+        // orphan. That guard was written and removed the same day: it makes RENAMING an input
+        // impossible. The new name can't appear in a step until it is defined, and the definition
+        // can't change while a step still names the old one — neither ordering is legal, and there
+        // is no third call that does both. Its error message even advised the impossible ("update
+        // that text first").
+        //
+        // So the rule everywhere is: a write validates the text IT writes, against the definitions
+        // that will then be in effect. Removing an input can therefore leave a `{{name}}` behind in
+        // text this call doesn't touch — it renders as literal text (the lenient path), the task
+        // editor flags it live across the whole prospective task, and the next edit of that text
+        // refuses it outright. A visible stale placeholder is worth far less than a rename nobody
+        // can perform.
         task.templateInputDefinitions = definitions
         task.templateInputValues = [:]
         task.updatedAt = Date()
@@ -215,14 +223,19 @@ public actor TaskStore {
                 return problem
             }
         }
-        // Checked against the PROSPECTIVE state, because this call can change the text and the
-        // input definitions together: validating either half against the stored other half would
-        // reject an edit that renames an input and its placeholders in one consistent step.
+        // Only the two fields this call WRITES, checked against the definitions it is about to
+        // install — so renaming an input and its references in the title and description is one
+        // legal call. Extending it to the steps and criteria (which this call does not write) is
+        // what deadlocked the task editor: it saves the definition first and the steps second, so
+        // a user who correctly renamed the input AND fixed every step in one sheet had the save
+        // refused over the step text it was about to replace. Those fields are checked by the
+        // calls that write them.
         if isTemplate {
-            var prospective = task
-            prospective.title = title
-            prospective.description = description
-            if let problem = prospective.templatePlaceholderProblem(definedNames: Set(templateInputDefinitions.map(\.name))) {
+            let definedNames = Set(templateInputDefinitions.map(\.name))
+            if let problem = TemplateInputValidation.firstProblem(
+                in: [("title", title), ("description", description)],
+                definedNames: definedNames
+            ) {
                 return problem
             }
         }
@@ -341,7 +354,8 @@ public actor TaskStore {
         // both are as broken by a surviving placeholder as the description is. Unknown placeholders
         // pass through untouched — see `renderSubstitutingDefinedPlaceholders` for why that is
         // deliberate, and `TemplateInputValidation.placeholderProblem` for where a typo is caught
-        // instead. The set of fields rendered here is `templateRenderedTextFields`.
+        // instead. This function is the definition of WHICH fields substitution covers; the
+        // authoring checks mirror it field for field.
         let definedNames = Set(template.templateInputDefinitions.map(\.name))
         func substituted(_ text: String, layout: TemplateStringRenderer.Layout = .preserved) -> String {
             TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
