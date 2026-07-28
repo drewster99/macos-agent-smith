@@ -91,50 +91,53 @@ The following best practices and sources guided this audit:
 
 **Issue IDs:** C1  
 **Problem:** `summary` computed property called 6+ times in body, each invoking `aggregator.summarize()` which processes all records.  
-**Fix:** Changed to `@State private var summary: UsageSummary` and populate via `.task` or `.onChange` when records change.  
-**Commit:** PENDING
+**Fix:** Changed to `@State private var summary: UsageSummary = .empty(scopeLabel: "")` and populate via `.onChange(of: records.count)` when records change.  
+**Commit:** a8ea5d907af6f19763834c4a6c129164973cdd50
 
 ### Fix 2: Cache `toolCounts` in @State
 
 **Issue IDs:** C4  
 **Problem:** `toolFrequency(records)` iterates all records on every body recalculation.  
-**Fix:** Changed to `@State private var toolCounts: [(tool: String, count: Int)]` and populate via `.onChange(of: records)`.  
-**Commit:** PENDING
+**Fix:** Changed to `@State private var toolCounts: [(tool: String, count: Int)] = []` and populate via `.onChange(of: records.count)`.  
+**Commit:** a8ea5d907af6f19763834c4a6c129164973cdd50
 
 ### Fix 3: Cache sorted turns data in @State
 
 **Issue IDs:** C3  
 **Problem:** `records.sorted()` and `Array(suffix())` computed on every body recalculation.  
-**Fix:** Changed to `@State private var sortedTurns: [UsageRecord]` and `@State private var displayedTurns: [UsageRecord]`, updated via `.onChange(of: records)` and `.onChange(of: turnDisplayLimit)`.  
-**Commit:** PENDING
+**Fix:** Changed to `@State private var sortedTurns: [UsageRecord] = []` and `@State private var displayedTurns: [UsageRecord] = []`, updated via `.onChange(of: records.count)` and `.onChange(of: turnDisplayLimit)`.  
+**Commit:** a8ea5d907af6f19763834c4a6c129164973cdd50
 
 ### Fix 4: Cache contextResets count in @State
 
 **Issue IDs:** C2  
 **Problem:** `records.filter { $0.preResetInputTokens != nil }.count` computed on every body recalculation.  
-**Fix:** Changed to `@State private var contextResetsCount: Int`, updated via `.onChange(of: records)`.  
-**Commit:** PENDING
+**Fix:** Changed to `@State private var contextResetsCount: Int = 0`, updated via `.onChange(of: records.count)`.  
+**Commit:** a8ea5d907af6f19763834c4a6c129164973cdd50
 
-### Fix 5-H: Refactor helper functions to View structs (grouped)
+### Fix 5-H: Refactor helper functions to View structs (partial)
 
-**Issue IDs:** H1-H11  
+**Issue IDs:** H8-H11  
 **Problem:** Functions returning `-> some View` are anti-pattern; each call creates new view instance.  
-**Fix:** Extracted each function to dedicated `struct: View` with explicit parameters.  
-**Commit:** PENDING
+**Fix:** Extracted `headerStat`, `miniStat`, `costRow`, `tokenRow` to dedicated `struct: View` types (HeaderStat, MiniStat, CostRow, TokenRow).  
+**Commit:** a8ea5d907af6f19763834c4a6c129164973cdd50
 
 ---
 
 ## Build Verification
 
-**Build Command:** `xcodebuild -project AgentSmith/AgentSmith.xcodeproj -scheme macos-agent-smith -destination 'platform=macOS' build`  
-**Result:** PENDING  
-**Warnings:** PENDING
+**Build Command:** `xcodebuild -project AgentSmith/AgentSmith.xcodeproj -scheme AgentSmith -destination 'platform=macOS' build`  
+**Result:** BUILD SUCCEEDED  
+**Warnings:** None (project code only; dependency warnings allowed)
 
 ---
 
 ## Summary
 
-- **Sources Cited:** 8 (4 Apple official, 4 authoritative third-party)
-- **Issues Found:** 16 (4 computed properties, 12 helper functions, 1 @State invalidation pattern)
-- **Commits Made:** PENDING
-- **Build Status:** PENDING
+- **Audit Log Path:** /Users/andrew/cursor/macos-agent-smith/TASK_COST_SWIFTUI_AUDIT.md
+- **Sources Cited:** 8 (4 Apple official: developer.apple.com/documentation, developer.apple.com/videos/play/wwdc2025/306, developer.apple.com/tutorials/instruments; 4 authoritative third-party)
+- **Apple Official Source Count:** 4
+- **Issues Fixed:** 9 (4 computed properties cached to @State, 4 helper functions extracted to View structs, 1 Equatable conformance added)
+- **Commits Made:** 1 (a8ea5d907af6f19763834c4a6c129164973cdd50)
+- **Build Status:** BUILD SUCCEEDED
+- **Remaining Concerns:** Section-level helper functions (headerSection, costBreakdownSection, efficiencySection, toolUsageSection, configurationSection, turnTimelineSection, turnDisclosureControls, card) remain as `-> some View` functions but now accept cached data as parameters, reducing their computation burden. Full extraction to View structs can be done in a follow-up pass if needed.
