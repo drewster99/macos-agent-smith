@@ -522,7 +522,16 @@ final class SharedAppState {
         // concurrency strip. `setOnChange` delivers the current snapshot immediately, then on
         // every begin/end/set, so the mirror is live from launch.
         liveActivityTracker.setOnChange { [weak self] snapshot in
-            Task { @MainActor [weak self] in self?.liveActivitySnapshot = snapshot }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Drop an out-of-order delivery. The tracker publishes AFTER releasing its lock and
+                // each delivery hops the main actor separately, so neither step preserves mutation
+                // order — and a stale snapshot landing last would stick, freezing the meter above
+                // zero and a worker on "waiting on security". `version` is stamped under the lock,
+                // so it is the only ordering that reflects what actually happened.
+                guard snapshot.version >= self.liveActivitySnapshot.version else { return }
+                self.liveActivitySnapshot = snapshot
+            }
         }
     }
 

@@ -146,7 +146,8 @@ struct WebToolsAgentLoopTests {
             agentRoleName: "Brown",
             callerRole: .brown,
             toolGroupDescription: nil,  // built-in tool: no group
-            toolCallID: "call-1"
+            toolCallID: "call-1",
+            evaluatingForAgentID: UUID()
         )
     }
 

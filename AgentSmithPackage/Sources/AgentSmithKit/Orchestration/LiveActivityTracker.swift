@@ -9,17 +9,37 @@ import Foundation
 /// actor hop mid-operation. Each mutation fires `onChange` with a value snapshot; the app layer hops
 /// that to the main thread (like the cost board).
 public final class LiveActivityTracker: @unchecked Sendable {
-    /// One tool call currently in front of the Security Agent's LLM.
-    public struct SecurityEvaluationInFlight: Sendable, Equatable {
-        /// The agent whose call this is — the one blocked until the verdict lands.
+    /// Identifies one in-flight evaluation.
+    ///
+    /// The agent instance is part of the KEY, not just the value. A tool call id is whatever the
+    /// provider sent — some OpenAI-compatible servers emit per-response index ids (`call_0`), and
+    /// the id field is only guarded against being absent, not against being empty. This tracker is
+    /// app-wide and shared by every session's runtime, so keying on the call id alone let two
+    /// agents collide: the second registration overwrote the first (under-counting the meter AND
+    /// making the first agent's "waiting on security" read false while it was genuinely blocked),
+    /// and whichever finished first deleted the other's entry.
+    public struct SecurityEvaluationKey: Sendable, Hashable {
         public let agentInstanceID: UUID
-        public init(agentInstanceID: UUID) {
+        public let callID: String
+        public init(agentInstanceID: UUID, callID: String) {
             self.agentInstanceID = agentInstanceID
+            self.callID = callID
         }
     }
 
     /// Count of each concurrently-running operation type. Zero-valued default = nothing in flight.
     public struct Snapshot: Sendable, Equatable {
+        /// Monotonic, assigned under the lock at every mutation.
+        ///
+        /// Every mutator captures the snapshot under the lock and delivers it AFTER unlocking, so
+        /// delivery order is not mutation order: a thread can be preempted between unlocking and
+        /// delivering, and a newer snapshot can be observed first. The older one then lands last
+        /// and sticks. With a 20-wide evaluation task group that is not theoretical, and the
+        /// consequence is a meter frozen above zero and a worker reading "waiting on security"
+        /// until some unrelated mutation happens to correct it. Observers compare this and drop
+        /// anything older than what they already hold.
+        public internal(set) var version: UInt64 = 0
+
         public var brownWorkers = 0
         public var validatorEvaluations = 0
         public var summarizerRuns = 0
@@ -34,19 +54,20 @@ public final class LiveActivityTracker: @unchecked Sendable {
         /// per-agent bool that included them, and a view that inferred "evaluating" from a verdict
         /// message not having arrived yet. That produced a worker reading "waiting on security"
         /// directly above a tally reading "0 Security".
-        public var securityEvaluationsByCall: [String: SecurityEvaluationInFlight] = [:]
+        public var securityEvaluationsByCall: [SecurityEvaluationKey: Date] = [:]
 
         /// How many real LLM-backed evaluations are in flight. Derived — never set.
         public var securityEvaluations: Int { securityEvaluationsByCall.count }
 
         /// Whether this agent is blocked waiting on a verdict for one of its calls. Derived.
         public func isAwaitingSecurity(agentInstanceID: UUID) -> Bool {
-            securityEvaluationsByCall.values.contains { $0.agentInstanceID == agentInstanceID }
+            securityEvaluationsByCall.keys.contains { $0.agentInstanceID == agentInstanceID }
         }
 
-        /// Whether this specific tool call is the one under review. Derived.
-        public func isEvaluating(callID: String) -> Bool {
-            securityEvaluationsByCall[callID] != nil
+        /// Whether this agent's call is the one under review. Derived. The agent is required
+        /// because a bare call id is not unique across sessions — see `SecurityEvaluationKey`.
+        public func isEvaluating(callID: String, agentInstanceID: UUID) -> Bool {
+            securityEvaluationsByCall[SecurityEvaluationKey(agentInstanceID: agentInstanceID, callID: callID)] != nil
         }
 
         public init() {}
@@ -114,6 +135,7 @@ public final class LiveActivityTracker: @unchecked Sendable {
             brownWorkersBySource[source] = clamped
         }
         snapshot.brownWorkers = brownWorkersBySource.values.reduce(0, +)
+        snapshot.version &+= 1
         let snap = snapshot
         let handler = onChange
         lock.unlock()
@@ -122,9 +144,13 @@ public final class LiveActivityTracker: @unchecked Sendable {
 
     /// Registers a tool call as being evaluated by the Security Agent's LLM. Pair with
     /// `endSecurityEvaluation` in a `defer` — a stranded entry reads as an agent blocked forever.
-    public func beginSecurityEvaluation(callID: String, agentInstanceID: UUID) {
+    public func beginSecurityEvaluation(callID: String, agentInstanceID: UUID, startedAt: Date) {
+        // An empty id is not a usable key: the provider guard only rejects a MISSING id, so an
+        // empty string reaches here, and every empty-id call across the app would share one entry.
+        guard !callID.isEmpty else { return }
         lock.lock()
-        snapshot.securityEvaluationsByCall[callID] = SecurityEvaluationInFlight(agentInstanceID: agentInstanceID)
+        snapshot.securityEvaluationsByCall[SecurityEvaluationKey(agentInstanceID: agentInstanceID, callID: callID)] = startedAt
+        snapshot.version &+= 1
         let snap = snapshot
         let handler = onChange
         lock.unlock()
@@ -140,9 +166,13 @@ public final class LiveActivityTracker: @unchecked Sendable {
     /// with the eventual `defer`, which finds nothing left to remove.
     public func endSecurityEvaluations(forAgentInstanceID agentInstanceID: UUID) {
         lock.lock()
-        snapshot.securityEvaluationsByCall = snapshot.securityEvaluationsByCall.filter {
-            $0.value.agentInstanceID != agentInstanceID
+        let remaining = snapshot.securityEvaluationsByCall.filter { $0.key.agentInstanceID != agentInstanceID }
+        guard remaining.count != snapshot.securityEvaluationsByCall.count else {
+            lock.unlock()
+            return
         }
+        snapshot.securityEvaluationsByCall = remaining
+        snapshot.version &+= 1
         let snap = snapshot
         let handler = onChange
         lock.unlock()
@@ -151,9 +181,16 @@ public final class LiveActivityTracker: @unchecked Sendable {
 
     /// Clears a call's evaluation. Idempotent — clearing one that isn't registered is a no-op, so
     /// a duplicated `defer` can't corrupt the state the way an unbalanced counter could.
-    public func endSecurityEvaluation(callID: String) {
+    public func endSecurityEvaluation(callID: String, agentInstanceID: UUID) {
+        let key = SecurityEvaluationKey(agentInstanceID: agentInstanceID, callID: callID)
         lock.lock()
-        snapshot.securityEvaluationsByCall[callID] = nil
+        // Nothing to remove means nothing to publish. Firing `onChange` regardless made every
+        // idempotent double-end cost a main-actor hop and a full inspector recompute.
+        guard snapshot.securityEvaluationsByCall.removeValue(forKey: key) != nil else {
+            lock.unlock()
+            return
+        }
+        snapshot.version &+= 1
         let snap = snapshot
         let handler = onChange
         lock.unlock()
@@ -167,6 +204,7 @@ public final class LiveActivityTracker: @unchecked Sendable {
         case .summarizerRun: snapshot.summarizerRuns = max(0, snapshot.summarizerRuns + delta)
         case .memorySearch: snapshot.memorySearches = max(0, snapshot.memorySearches + delta)
         }
+        snapshot.version &+= 1
         let snap = snapshot
         let handler = onChange
         lock.unlock()

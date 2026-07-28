@@ -656,8 +656,12 @@ extension OrchestrationRuntime {
         // Own the attach_file staging buffer so the validator can pull an evidence image into its
         // own context; the runner drains it into a user turn after each tool round.
         let stagingBuffer = StagedAttachmentBuffer()
+        // Hoisted so the gate can name the same instance it evaluates FOR. It used to be an
+        // inline `UUID()` here and nothing at all at the `evaluate` call, which left every
+        // validator evidence read unregistered and invisible on the Security meter.
+        let validatorInstanceID = UUID()
         let evaluationContext = makeToolContext(
-            agentID: UUID(),
+            agentID: validatorInstanceID,
             role: .validator,
             attachmentStageOverride: { attachments, _ in await stagingBuffer.stage(attachments) }
         )
@@ -711,7 +715,8 @@ extension OrchestrationRuntime {
                     agentRoleName: AgentRole.validator.displayName,
                     callerRole: .validator,
                     toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: tool),
-                    toolCallID: call.id
+                    toolCallID: call.id,
+                    evaluatingForAgentID: validatorInstanceID
                 )
                 // Surface the verdict on the SAME path as an agent's tool call — the shared
                 // review poster — so a validator's auto-approved evidence read gets the same

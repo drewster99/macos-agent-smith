@@ -797,6 +797,11 @@ public actor AgentActor {
         Self.stopLogger.notice("AgentActor.stop entry role=\(role, privacy: .public) agent=\(agentID, privacy: .public)")
         isRunning = false
         consecutiveEmptyResponses = 0
+        // ABOVE the early return on purpose. A first `stop()` that timed out sets `runTask = nil`
+        // while abandoning a run loop that may still be registering evaluations; the later
+        // `terminateAgent` → `stop()` is exactly when those orphans need sweeping, and it takes
+        // this early return. Idempotent and cheap, so running it on every stop costs nothing.
+        await securityEvaluator?.clearInFlightEvaluations(forAgentInstanceID: id)
         guard let task = runTask else {
             Self.stopLogger.notice("AgentActor.stop no runTask — early return role=\(role, privacy: .public) agent=\(agentID, privacy: .public)")
             return
@@ -829,9 +834,9 @@ public actor AgentActor {
         // after being paused/stopped. Firing `false` here is idempotent with the eventual defer.
         toolContext.onProcessingStateChange(false)
         toolContext.onSecurityAgentProcessingStateChange(false)
-        // Same reasoning for the evaluation registry: an evaluation orphaned by this stop keeps
-        // its entry until the LLM call returns, so the stopped agent would read "waiting on
-        // security" until then. Idempotent with `evaluate()`'s own `defer`.
+        // Swept a second time: the run loop is ABANDONED rather than stopped when the 5s wait
+        // expires, and the parallel batch keeps seeding evaluations as earlier ones land, so the
+        // pre-cancel sweep above can be overtaken by registrations made while we waited.
         await securityEvaluator?.clearInFlightEvaluations(forAgentInstanceID: id)
 
         // Drop UI/runtime observer callbacks now that the agent has shut down.
@@ -1256,14 +1261,16 @@ public actor AgentActor {
         guard let evaluator = securityEvaluator,
               let task = await currentTaskForScoping() else { return }
         // Light the Security Agent card while it re-scopes (a real Security Agent LLM call).
+        // `defer`-paired for the reason the deleted per-call brackets were: a stranded "true" here
+        // shows the gatekeeper busy forever, and this is now the ONLY user of this signal.
         toolContext.onSecurityAgentProcessingStateChange(true)
+        defer { toolContext.onSecurityAgentProcessingStateChange(false) }
         let result = await evaluator.scopeTools(
             candidateTools: toolRegistry.candidateTools,
             taskTitle: task.title,
             taskID: task.id.uuidString,
             taskDescription: task.renderedDescriptionWithTemplateInputs()
         )
-        toolContext.onSecurityAgentProcessingStateChange(false)
         guard result.succeeded else { return }
         // Only act when the *approved* set actually changed. A candidate-set change that
         // leaves Brown's usable tools identical (e.g. a new MCP tool that Security Agent blocks) must

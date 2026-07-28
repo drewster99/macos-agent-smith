@@ -454,11 +454,6 @@ actor SecurityEvaluator {
         ))
     }
 
-    /// Evaluates a tool request and returns a security disposition.
-    ///
-    /// Posts channel messages for UI visibility (tool review status).
-    /// Handles WARN auto-retry: if Brown resubmits an identical request as the very next call,
-    /// it is auto-approved without an LLM call.
     /// Drops any evaluations still registered for an agent that is shutting down.
     ///
     /// `evaluate()`'s `defer` is the normal way an entry goes away, but it only runs when the
@@ -470,6 +465,11 @@ actor SecurityEvaluator {
         activityTracker?.endSecurityEvaluations(forAgentInstanceID: agentInstanceID)
     }
 
+    /// Evaluates a tool request and returns a security disposition.
+    ///
+    /// Posts channel messages for UI visibility (tool review status).
+    /// Handles WARN auto-retry: if Brown resubmits an identical request as the very next call,
+    /// it is auto-approved without an LLM call.
     public func evaluate(
         toolName: String,
         toolParams: String,
@@ -488,7 +488,7 @@ actor SecurityEvaluator {
         agentContext: String? = nil,
         sanctionedDirectories: [String] = [],
         toolCallID: String? = nil,
-        evaluatingForAgentID: UUID? = nil
+        evaluatingForAgentID: UUID
     ) async -> SecurityDisposition {
         let parsedParams = Self.parseToolParams(toolParams)
 
@@ -540,14 +540,25 @@ actor SecurityEvaluator {
         // that tried to bracket `evaluate()` from outside necessarily included the fast paths and
         // disagreed with this count.
         //
-        // A call with no id can't be registered (nothing to key it by) and no caller in the app
-        // omits one; it degrades to not showing, never to showing something false.
-        if let toolCallID, let evaluatingForAgentID {
-            activityTracker?.beginSecurityEvaluation(callID: toolCallID, agentInstanceID: evaluatingForAgentID)
+        // `evaluatingForAgentID` is deliberately NOT optional. It was, briefly, and the validator's
+        // gate — the one caller that never passed it — silently stopped registering anything, so
+        // every validator evidence read (none of which are auto-approved) ran a full Security Agent
+        // round-trip while the meter read zero. An optional whose absence turns the feature off
+        // reproduces the exact bug this registry exists to prevent; requiring it makes the compiler
+        // enumerate the callers instead.
+        //
+        // A call with no id still can't be registered — there is nothing to key it by — and that
+        // degrades to not showing, never to showing something false.
+        if let toolCallID {
+            activityTracker?.beginSecurityEvaluation(
+                callID: toolCallID,
+                agentInstanceID: evaluatingForAgentID,
+                startedAt: Date()
+            )
         }
         defer {
-            if let toolCallID, evaluatingForAgentID != nil {
-                activityTracker?.endSecurityEvaluation(callID: toolCallID)
+            if let toolCallID {
+                activityTracker?.endSecurityEvaluation(callID: toolCallID, agentInstanceID: evaluatingForAgentID)
             }
         }
 

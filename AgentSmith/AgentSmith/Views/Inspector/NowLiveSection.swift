@@ -180,6 +180,12 @@ struct NowLiveSection: View {
         requestID: String,
         security: LiveActivityTracker.Snapshot
     ) -> ToolActivity {
+        // The issuing agent, stamped on the request by `postToolRequestToChannel`. Needed because
+        // an evaluation is keyed by (agent, call) — a bare call id is not unique across sessions.
+        let agentInstanceID: UUID? = {
+            if case .string(let raw)? = request.metadata?["agentID"] { return UUID(uuidString: raw) }
+            return nil
+        }()
         let disposition: String? = {
             if case .string(let value)? = review?.metadata?["securityDisposition"] { return value }
             return nil
@@ -200,7 +206,12 @@ struct NowLiveSection: View {
             if review != nil {
                 phase = .approved
             } else {
-                phase = security.isEvaluating(callID: requestID) ? .evaluating : .notYetReviewed
+                // Without an agent id there is no key to look up, so this reports "not yet
+                // reviewed" rather than guessing — the honest answer for a row we can't place.
+                let isEvaluating = agentInstanceID.map {
+                    security.isEvaluating(callID: requestID, agentInstanceID: $0)
+                } ?? false
+                phase = isEvaluating ? .evaluating : .notYetReviewed
             }
         }
 

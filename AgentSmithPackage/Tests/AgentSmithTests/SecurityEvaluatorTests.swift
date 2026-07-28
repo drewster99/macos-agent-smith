@@ -105,7 +105,8 @@ struct SecurityEvaluatorTests {
             agentRoleName: "Brown",
             callerRole: .brown,
             toolGroupDescription: nil,  // built-in tool: no group
-            toolCallID: toolCallID
+            toolCallID: toolCallID,
+            evaluatingForAgentID: UUID()
         )
     }
 
@@ -322,7 +323,8 @@ struct SecurityEvaluatorTests {
             agentRoleName: "Brown",
             callerRole: .brown,
             toolGroupDescription: nil,  // built-in tool: no group
-            toolCallID: "first"
+            toolCallID: "first",
+            evaluatingForAgentID: UUID()
         )
 
         // 2nd call: the prompt should now reference the prior call as FAILED.
@@ -338,7 +340,8 @@ struct SecurityEvaluatorTests {
             agentRoleName: "Brown",
             callerRole: .brown,
             toolGroupDescription: nil,  // built-in tool: no group
-            toolCallID: "second"
+            toolCallID: "second",
+            evaluatingForAgentID: UUID()
         )
 
         #expect(provider.capturedPrompts.count == 2)
@@ -367,13 +370,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "first"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "first", evaluatingForAgentID: UUID()
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "second"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "second", evaluatingForAgentID: UUID()
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -400,13 +403,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "first"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "first", evaluatingForAgentID: UUID()
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "second"
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "second", evaluatingForAgentID: UUID()
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -433,13 +436,13 @@ struct SecurityEvaluatorTests {
             toolName: "bash", toolParams: "{\"command\":\"ls\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: nil
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: nil, evaluatingForAgentID: UUID()
         )
         _ = await evaluator.evaluate(
             toolName: "bash", toolParams: "{\"command\":\"pwd\"}",
             toolDescription: "", toolParameterDefs: "",
             taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d",
-            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: nil
+            siblingCalls: nil, agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: nil, evaluatingForAgentID: UUID()
         )
 
         let secondPrompt = provider.capturedPrompts[1]
@@ -498,7 +501,8 @@ struct SecurityEvaluatorTests {
             agentRoleName: "Brown",
             callerRole: .brown,
             toolGroupDescription: nil,  // built-in tool: no group
-            toolCallID: "edit-1"
+            toolCallID: "edit-1",
+            evaluatingForAgentID: UUID()
         )
 
         #expect(provider.capturedPrompts.count == 1)
@@ -536,7 +540,8 @@ struct SecurityEvaluatorTests {
             agentRoleName: "Brown",
             callerRole: .brown,
             toolGroupDescription: nil,  // built-in tool: no group
-            toolCallID: nil
+            toolCallID: nil,
+            evaluatingForAgentID: UUID()
         )
 
         #expect(provider.capturedPrompts[0].contains("## Resulting diff") == false)
