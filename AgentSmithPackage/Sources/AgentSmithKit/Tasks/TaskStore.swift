@@ -995,6 +995,35 @@ public actor TaskStore {
         return nil
     }
 
+    // MARK: - Queued worker messages
+
+    /// Queues a message for a task's worker to receive when it next starts.
+    ///
+    /// For messages Smith sends to a task whose worker isn't alive yet — most often immediately
+    /// after `create_task` or `run_task`, which both return before the worker is spawned. Point
+    /// mutation: appends to this task's queue and touches nothing else.
+    public func enqueueWorkerMessage(taskID: UUID, message: QueuedWorkerMessage) -> Bool {
+        guard tasks[taskID] != nil else { return false }
+        tasks[taskID]?.pendingWorkerMessages.append(message)
+        tasks[taskID]?.updatedAt = Date()
+        onChange?()
+        return true
+    }
+
+    /// Returns this task's queued worker messages AND clears them, atomically.
+    ///
+    /// Read-and-clear is one operation on purpose: a separate read then write would let a message
+    /// queued in between be dropped, which is the failure this queue exists to prevent. Called when
+    /// a worker's briefing is composed, so each message is delivered once and does not resurface on
+    /// a later restart.
+    public func takePendingWorkerMessages(taskID: UUID) -> [QueuedWorkerMessage] {
+        guard let queued = tasks[taskID]?.pendingWorkerMessages, !queued.isEmpty else { return [] }
+        tasks[taskID]?.pendingWorkerMessages = []
+        tasks[taskID]?.updatedAt = Date()
+        onChange?()
+        return queued
+    }
+
     // MARK: - Validation ledger
 
     /// Begins the next validation round and returns the token identifying it — the round number AND

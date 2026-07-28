@@ -29,7 +29,14 @@ public struct ManageStepsTool: AgentTool {
         `before_step_id`, `after_step_id`, or `position`), `reorder` (`step_ids`: every active \
         step id, in the new order — prefer `move` unless you are genuinely rewriting the whole \
         sequence), and `list` (show the current list with ids). \
-        Every action returns the full, numbered, current list. \
+        \
+        Proper use of `set_status`: You MUST call `set_status` as SOON as the status changes. \
+        For example, if you have a step that is "Enumerate directory contents", you MUST call \
+        `set_status` with a status of `in_progress` BEFORE you make the tool call to enumerate the \
+        directory contents. Once that call returns successfully, you must immediately call `set_status` \
+        again, with a status of `completed`. This way, the display to the user is perfectly accurate at all times. \
+        Every action returns the full, numbered, current list, except `set_status`, which only shows the \
+        updated item.\
         \
         Honesty matters: validators see every skipped/removed step and its note. Quietly \
         dropping planned work is the fastest way to get your submission rejected.
@@ -201,7 +208,7 @@ public struct ManageStepsTool: AgentTool {
             if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .update(stepID: stepID, newText: text)) {
                 return .failure(error)
             }
-            return .success("Step updated.\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
+            return .success("Step updated. \(await Self.renderedStep(taskID: task.id, stepID: stepID, context: context))")
 
         case "set_status":
             guard let stepID = Self.stepID(from: arguments) else {
@@ -217,7 +224,7 @@ public struct ManageStepsTool: AgentTool {
             if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .setStatus(stepID: stepID, status: status, note: note)) {
                 return .failure(error)
             }
-            return .success("Step status set to \(statusRaw).\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
+            return .success("Step status set to \(statusRaw). \(await Self.renderedStep(taskID: task.id, stepID: stepID, context: context))")
 
         case "delete":
             guard let stepID = Self.stepID(from: arguments) else {
@@ -229,6 +236,10 @@ public struct ManageStepsTool: AgentTool {
             if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .delete(stepID: stepID, note: note)) {
                 return .failure(error)
             }
+            // Keeps the full list, unlike the other point mutations. Deleting is a tombstone, and
+            // the list rendering is where the tombstone accounting appears ("N removed step(s)
+            // remain on the record for validators") — that count IS the useful part of the answer,
+            // and delete is not the parallel-issued action the point-report change was aimed at.
             return .success("Step deleted (tombstoned).\n\n\(await Self.renderedStepList(taskID: task.id, context: context))")
 
         case "purge":
@@ -349,6 +360,27 @@ public struct ManageStepsTool: AgentTool {
     /// so the numbering matches the briefing, `get_task_details`, and the validator's punch list.
     /// Tombstoned (removed) steps are counted but not numbered — they're gone from the active
     /// plan, though validators still see them in full.
+    /// Renders ONLY the step a point mutation touched.
+    ///
+    /// These actions can run in parallel — a worker marking four steps complete in one turn issues
+    /// four concurrent calls — and each used to answer with a full re-render of the whole list,
+    /// read separately after its own mutation. The transcript then shows those snapshots in CALL
+    /// order while they were captured in COMPLETION order, so the last listing a worker reads is
+    /// usually the oldest one. Observed 2026-07-27: a worker read the stale tail, concluded "the
+    /// step statuses got messed up due to the parallel calls", and redid work that was already
+    /// done. The underlying state had been correct throughout.
+    ///
+    /// A call that changes one step therefore reports one step. Callers wanting the whole picture
+    /// have `list`, which is a single call whose answer is about the list by definition.
+    private static func renderedStep(taskID: UUID, stepID: UUID, context: ToolContext) async -> String {
+        guard let task = await context.taskStore.task(id: taskID),
+              let step = task.steps.first(where: { $0.id == stepID }) else {
+            return "(step \(stepID) not found)"
+        }
+        let note = step.note.map { " — \($0)" } ?? ""
+        return "[\(step.status.rawValue)] \(step.text) (id: \(step.id))\(note)"
+    }
+
     private static func renderedStepList(taskID: UUID, context: ToolContext) async -> String {
         guard let task = await context.taskStore.task(id: taskID) else { return "(task not found)" }
         guard let rendered = task.renderedSteps(includeIDs: true) else { return "Step list is empty." }

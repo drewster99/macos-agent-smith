@@ -112,8 +112,8 @@ struct WorkerAddressingTests {
         }
     }
 
-    @Test("message_brown refuses a task with no live worker instead of falling back to another")
-    func messageBrownRefusesWhenTaskHasNoWorker() async throws {
+    @Test("message_brown QUEUES for a task with no live worker, and never falls back to another")
+    func messageBrownQueuesWhenTaskHasNoWorker() async throws {
         let fixture = await TwoWorkers.make()
         let idle = await fixture.taskStore.addTask(title: "Queued task", description: "not started")
 
@@ -125,8 +125,15 @@ struct WorkerAddressingTests {
             context: fixture.context()
         )
 
-        #expect(result.succeeded == false)
-        #expect(result.output.contains("No worker is running"))
+        // Used to fail outright. It now queues: `create_task`/`run_task` return before the worker
+        // is spawned, so "no worker yet" means the message is EARLY, not misaddressed.
+        #expect(result.succeeded)
+        #expect(result.output.contains("QUEUED"))
+        let queued = await fixture.taskStore.task(id: idle.id)?.pendingWorkerMessages
+        #expect(queued?.map(\.text) == ["hello?"])
+
+        // The original guard, unchanged and still the important one: queuing must not become a
+        // back door to delivering into some OTHER task's worker context.
         let delivered = await fixture.channel.allMessages().filter { $0.content.contains("hello?") }
         #expect(delivered.isEmpty, "a task with no worker must not have its message rerouted to a live one")
     }

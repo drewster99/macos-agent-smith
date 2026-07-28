@@ -145,8 +145,12 @@ public struct ToolAvailabilityContext: Sendable {
     /// longer keys on `.awaitingReview`: that is now a user-owned validator-error park with no live
     /// worker, and must not gate Smith's messaging of unrelated running workers.
     public let hasAwaitingReviewTasks: Bool
-
-    public init(lastDirectUserMessageAt: Date? = nil, agentRole: AgentRole, hasRunnableTasks: Bool = false, hasAwaitingReviewTasks: Bool = false) {
+    public init(
+        lastDirectUserMessageAt: Date? = nil,
+        agentRole: AgentRole,
+        hasRunnableTasks: Bool = false,
+        hasAwaitingReviewTasks: Bool = false
+    ) {
         self.lastDirectUserMessageAt = lastDirectUserMessageAt
         self.agentRole = agentRole
         self.hasRunnableTasks = hasRunnableTasks

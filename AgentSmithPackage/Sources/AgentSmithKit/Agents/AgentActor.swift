@@ -2555,6 +2555,7 @@ public actor AgentActor {
         }
     }
 
+
     /// Rebuilds the per-turn `ToolAvailabilityContext` using current actor state.
     /// Availability can flip mid-turn (e.g. `hasAwaitingReviewTasks` changes after
     /// `task_complete` runs), so the dispatch-time check uses freshly read task state

@@ -1,6 +1,24 @@
 import Foundation
 
 /// A unit of work managed by the orchestration system.
+/// A message for a task's worker that was queued because no worker was alive to receive it.
+///
+/// Carries its own id so delivery can be made idempotent, and the time it was queued so a worker
+/// reading it in a briefing can tell how stale the instruction is.
+public struct QueuedWorkerMessage: Identifiable, Codable, Sendable, Equatable {
+    public var id: UUID
+    public var text: String
+    public var queuedAt: Date
+    public var attachments: [Attachment]
+
+    public init(id: UUID = UUID(), text: String, queuedAt: Date = Date(), attachments: [Attachment] = []) {
+        self.id = id
+        self.text = text
+        self.queuedAt = queuedAt
+        self.attachments = attachments
+    }
+}
+
 public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     public var id: UUID
     public var title: String
@@ -117,6 +135,19 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// `.validating` and re-enqueues it. (Distinguishes a config park from a validator-error park —
     /// see `occupiesWorkerSlot` and the escalation row actions.)
     public var validationBlockedReason: String?
+
+    /// Messages addressed to this task's worker that arrived while no worker was alive.
+    ///
+    /// Smith addresses a worker by task (`message_brown`), but the worker's existence is a race
+    /// Smith cannot observe: creating or starting a task returns before the worker is spawned, so
+    /// an immediate follow-up message had nobody to deliver to and simply failed. Asking Smith to
+    /// notice that race and pick a different tool is asking it to reason about scheduling it has
+    /// no visibility into. Instead the message is queued here and handed to the worker in its
+    /// briefing when it starts — same shape as an amendment, which is durable for the same reason.
+    ///
+    /// Drained by `takePendingWorkerMessages` when the briefing is composed, so a message is
+    /// delivered once and does not resurface on a later restart.
+    public var pendingWorkerMessages: [QueuedWorkerMessage]
 
     /// Whether this task currently holds one of the `maxConcurrentWorkers` slots — i.e. has a LIVE
     /// worker. `starting`/`running`/`validating`/`awaitingHelp` always do (Brown is alive, working,
@@ -377,6 +408,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         approvedTools: [String]? = nil,
         userToolOverrides: [String: Bool]? = nil,
         helpRequest: String? = nil,
+        pendingWorkerMessages: [QueuedWorkerMessage] = [],
         validationBlockedReason: String? = nil,
         acceptanceCriteria: [AcceptanceCriterion] = [],
         steps: [TaskStep] = [],
@@ -413,6 +445,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.approvedTools = approvedTools
         self.userToolOverrides = userToolOverrides
         self.helpRequest = helpRequest
+        self.pendingWorkerMessages = pendingWorkerMessages
         self.validationBlockedReason = validationBlockedReason
         self.acceptanceCriteria = acceptanceCriteria
         self.steps = steps
@@ -427,7 +460,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages
     }
 
     public init(from decoder: Decoder) throws {
@@ -458,6 +491,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         approvedTools = try c.decodeIfPresent([String].self, forKey: .approvedTools)
         userToolOverrides = try c.decodeIfPresent([String: Bool].self, forKey: .userToolOverrides)
         helpRequest = try c.decodeIfPresent(String.self, forKey: .helpRequest)
+        pendingWorkerMessages = try c.decodeIfPresent([QueuedWorkerMessage].self, forKey: .pendingWorkerMessages) ?? []
         validationBlockedReason = try c.decodeIfPresent(String.self, forKey: .validationBlockedReason)
         acceptanceCriteria = try c.decodeIfPresent([AcceptanceCriterion].self, forKey: .acceptanceCriteria) ?? []
         steps = try c.decodeIfPresent([TaskStep].self, forKey: .steps) ?? []
@@ -507,6 +541,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(approvedTools, forKey: .approvedTools)
         try c.encodeIfPresent(userToolOverrides, forKey: .userToolOverrides)
         try c.encodeIfPresent(helpRequest, forKey: .helpRequest)
+        try c.encode(pendingWorkerMessages, forKey: .pendingWorkerMessages)
         try c.encodeIfPresent(validationBlockedReason, forKey: .validationBlockedReason)
         if !acceptanceCriteria.isEmpty {
             try c.encode(acceptanceCriteria, forKey: .acceptanceCriteria)
