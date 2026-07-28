@@ -171,12 +171,12 @@ The following best practices and sources guided this audit:
   - 12 helper functions extracted to View structs (H1-H12)
   - 1 behavioral regression fixed (TurnDisclosureControls binding)
   - Note: Equatable conformance added to UsageRecord.swift as supporting change
-- **Commits Made:** 5 total for this task
-  1. a8ea5d907af6f19763834c4a6c129164973cdd50: Cache computed properties and initial View struct extraction
-  2. 152ed0d: Update audit log with commit hash and build results
-  3. c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Complete extraction of all remaining -> some View helpers
-  4. 206acc2: Update audit log with complete fix list and final commit hashes
-  5. 7f1d5ae: Fix TurnDisclosureControls binding and TurnTimelineSection parameters
+- **Commits Made:** 5 total for this task (on top of base a8ea5d9)
+  1. 152ed0d: Update audit log with commit hash and build results
+  2. c9def6c70fdf69eb60bc05bb54ff4d2fab89bbeb: Complete extraction of all remaining -> some View helpers
+  3. 206acc2: Update audit log with complete fix list and final commit hashes
+  4. 7f1d5ae: Fix TurnDisclosureControls binding and TurnTimelineSection parameters
+  5. df14b89: Update audit log with all 5 commits, 17 fixes, and complete source list
 - **Build Status:** BUILD SUCCEEDED (clean build)
 - **Remaining Concerns:** NONE
   - Grep verification: No remaining `var ...: some View` except `body` (exit code 1 = none found)
