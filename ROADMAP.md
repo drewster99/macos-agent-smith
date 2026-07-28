@@ -2178,15 +2178,16 @@ there until 2026-07-26 and only harmless because the path was Brown-only.
 
 ### Retire the remaining stringly-typed surfaces (design 2026-07-27)
 
-**Status:** planned. `messageKind` is done (see `ChannelMessageKind` and the "Message kinds are typed, never bare strings" section in CLAUDE.md); it was the first of four surfaces, not the only one.
+**Status:** planned. `messageKind` is done (see `ChannelMessageKind` and the "Message kinds are typed, never bare strings" section in CLAUDE.md); it was the first of five surfaces, not the only one.
 
-The `messageKind` work started from a concrete incident: a private notice whose entire text said "STOP and wait" *un-parked* the worker it was quieting, because the gate keyed on addressing rather than on the kind. The fix made kinds a closed enum with guard tests. The same antipattern remains in three other places, listed worst-first — worst meaning "silently changes control flow when the string drifts", not "most sites".
+The `messageKind` work started from a concrete incident: a private notice whose entire text said "STOP and wait" *un-parked* the worker it was quieting, because the gate keyed on addressing rather than on the kind. The fix made kinds a closed enum with guard tests. The same antipattern remains in four other places, listed worst-first — worst meaning "silently changes control flow when the string drifts", not "most sites".
 
 | Surface | Sites | Consequence when the string drifts |
 |---|---|---|
 | Tool results compared as English prose | 4 | **Control flow.** Silent. |
 | Tool names compared as bare strings | 11 (`call.name == "…"` in Sources) plus several `Set<String>` rosters | Control flow, including safety gating. Silent. |
 | Metadata keys as bare strings | ≥40 distinct keys, 93 read sites (writes are larger — see below) | Data reads as absent. Silent. |
+| Tool parameter schemas hand-built as untyped dictionaries | 45 tools, 674 schema-keyword literals | Provider rejects the tool, or silently ignores a constraint. |
 
 #### 1. Tool results compared as English prose — do this one first
 
@@ -2229,6 +2230,29 @@ Lowest severity — a mistyped key reads as absent, which usually degrades displ
 **Do not sweep this with a regex.** Channel metadata literals and JSON-Schema literals for tool *parameters* are syntactically identical (`"someKey": .string(…)` / `.dictionary(…)`), and the schema keys — `type`, `properties`, `required`, `items`, `enum`, `additionalProperties`, `description` — are a wire contract with the model providers. A naive pattern over write sites matches 111 distinct "keys" across 914 occurrences, most of which are tool-parameter schemas and tool ARGUMENT names (`command`, `path`, `timeout`, `query`) that must not be touched. Scope the work by call site (`ChannelMessage(metadata:)` construction) rather than by literal shape.
 
 Expect the same lesson `messageKind` taught: **enumerate from the persisted corpus, not from a grep of the sources**, because keys written by retired code still sit in the logs.
+
+#### 4. Tool parameter schemas hand-built as untyped dictionaries
+
+Every tool declares its parameters as a `[String: AnyCodable]` literal spelling out JSON Schema by hand — 45 tools, 674 occurrences of the schema keywords:
+
+```swift
+let parameters: [String: AnyCodable] = [
+    "type": .string("object"),
+    "properties": .dictionary([
+        "path": .dictionary([
+            "type": .string("string"),
+            "description": .string("File path to read (absolute or ~/relative).")
+        ]),
+    ]),
+    "required": .array([.string("path")])
+]
+```
+
+Nothing checks any of it. `"requried"` compiles and the argument silently stops being required. `"strng"` compiles and the provider either rejects the tool at request time or ignores the constraint, depending on which provider. A missing `properties` nests wrong and the model is handed a schema describing nothing. Every one of these is a runtime discovery, and several are silent.
+
+This surface is why item 3 above cannot be swept mechanically — and that is the argument for fixing it, not a reason to route around it. Two unrelated domains (channel metadata and provider wire format) currently share one untyped container, so at every literal "is this key mine to rename?" is a judgment call rather than a type error. Give tool parameters a real builder — `ToolParameters.object(properties:required:)` with typed `.string(description:)` / `.integer(description:)` members emitting the same JSON — and the two stop being confusable by the compiler, not merely by grep. It also deletes the possibility of an invalid schema reaching a provider.
+
+Do this one *with or before* item 3, since it is what makes item 3 tractable.
 
 ### `Phase2LongLivedSmithTests` — resolve the worker-identity race (2026-07-27)
 
