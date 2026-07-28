@@ -28,8 +28,8 @@ struct TaskDescriptionEditingTests {
         let task = AgentTask(title: "T", description: "old", status: status)
         await store.restore([task])
 
-        let succeeded = await store.updateDescription(id: task.id, description: "new")
-        #expect(succeeded == true)
+        let problem = await store.updateDescription(id: task.id, description: "new")
+        #expect(problem == nil)
 
         let updated = await store.task(id: task.id)
         #expect(updated?.description == "new")
@@ -46,8 +46,8 @@ struct TaskDescriptionEditingTests {
         let task = AgentTask(title: "T", description: "old", status: status)
         await store.restore([task])
 
-        let succeeded = await store.updateDescription(id: task.id, description: "new")
-        #expect(succeeded == false)
+        let problem = await store.updateDescription(id: task.id, description: "new")
+        #expect(problem?.contains(status.rawValue) == true)
 
         let updated = await store.task(id: task.id)
         #expect(updated?.description == "old", "Description must be unchanged on rejection")
@@ -60,8 +60,8 @@ struct TaskDescriptionEditingTests {
         let task = AgentTask(title: "T", description: "same", status: .completed)
         await store.restore([task])
 
-        let succeeded = await store.updateDescription(id: task.id, description: "same")
-        #expect(succeeded == true, "Returning success keeps the UI's Save button quiet")
+        let problem = await store.updateDescription(id: task.id, description: "same")
+        #expect(problem == nil, "Returning success keeps the UI's Save button quiet")
 
         let updated = await store.task(id: task.id)
         #expect(updated?.lastEditedAt == nil, "Identical-content edit must not stamp the badge")
@@ -88,11 +88,11 @@ struct TaskDescriptionEditingTests {
         #expect(updated?.description == "edited")
     }
 
-    @Test("Updating a non-existent task ID returns false")
-    func unknownIDReturnsFalse() async {
+    @Test("Updating a non-existent task ID is refused")
+    func unknownIDIsRefused() async {
         let store = TaskStore()
-        let succeeded = await store.updateDescription(id: UUID(), description: "x")
-        #expect(succeeded == false)
+        let problem = await store.updateDescription(id: UUID(), description: "x")
+        #expect(problem == "Task not found.")
     }
 
     @Test("AgentTask round-trips lastEditedAt through Codable")

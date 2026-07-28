@@ -238,6 +238,13 @@ struct TaskEditorSheet: View {
                     }
                 }
 
+                if !inputs.isEmpty {
+                    Text("Write {{input_name}} in the title, description, steps, or acceptance criteria — each is replaced with the run's value when an instance is created.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if let problem = templateProblem {
                     Label(problem, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -399,11 +406,29 @@ struct TaskEditorSheet: View {
             return TemplateInputDefinition(name: name, description: description, required: row.required)
         }
         if let problem = TemplateInputValidation.validateDefinitions(built) { return problem }
+        let definedNames = Set(built.map(\.name))
         let titleTemplate = instanceTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !titleTemplate.isEmpty {
-            return TemplateStringRenderer.validate(titleTemplate, allowedNames: Set(built.map(\.name)))
+        if !titleTemplate.isEmpty,
+           let problem = TemplateStringRenderer.validate(titleTemplate, allowedNames: definedNames) {
+            return problem
         }
-        return nil
+        // The same placeholder check the store applies on save, run live so a mistyped
+        // `{{input}}` reads as a typo next to the input list rather than as a rejected Save.
+        var fields: [(field: String, text: String)] = [("title", title), ("description", description)]
+        for (position, step) in steps.filter({ $0.status != .removed }).enumerated() {
+            fields += AgentTask.templateRenderedTextFields(ofStep: step.text, atPosition: position + 1)
+        }
+        for row in criteria {
+            fields += AgentTask.templateRenderedTextFields(ofCriterion: AcceptanceCriterion(
+                id: row.id,
+                name: row.name,
+                validationPrompt: row.validationPrompt,
+                inputEnumeratorPrompt: row.inputEnumeratorPrompt,
+                waivable: row.waivable,
+                origin: .user
+            ))
+        }
+        return TemplateInputValidation.firstProblem(in: fields, definedNames: definedNames)
     }
 
     private func save() {

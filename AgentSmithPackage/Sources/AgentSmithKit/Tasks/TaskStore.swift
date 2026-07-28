@@ -153,6 +153,11 @@ public actor TaskStore {
            let problem = TemplateStringRenderer.validate(titleTemplate, allowedNames: Set(definitions.map(\.name))) {
             return "Template inputs would invalidate the instance title template: \(problem) Clear or update the title template first."
         }
+        // Dropping or renaming an input orphans every placeholder that named it. Those live in
+        // fields this call never touches, so this is the one edit that must look at the whole task.
+        if let problem = task.templatePlaceholderProblem(definedNames: Set(definitions.map(\.name))) {
+            return "Template inputs would orphan an existing placeholder — \(problem) Update that text first, or keep the input defined."
+        }
         task.templateInputDefinitions = definitions
         task.templateInputValues = [:]
         task.updatedAt = Date()
@@ -207,6 +212,17 @@ public actor TaskStore {
         if isTemplate, let normalizedTitleTemplate, !normalizedTitleTemplate.isEmpty {
             let names = Set(templateInputDefinitions.map(\.name))
             if let problem = TemplateStringRenderer.validate(normalizedTitleTemplate, allowedNames: names) {
+                return problem
+            }
+        }
+        // Checked against the PROSPECTIVE state, because this call can change the text and the
+        // input definitions together: validating either half against the stored other half would
+        // reject an edit that renames an input and its placeholders in one consistent step.
+        if isTemplate {
+            var prospective = task
+            prospective.title = title
+            prospective.description = description
+            if let problem = prospective.templatePlaceholderProblem(definedNames: Set(templateInputDefinitions.map(\.name))) {
                 return problem
             }
         }
@@ -319,18 +335,34 @@ public actor TaskStore {
                 \(details)
                 """)
         }
+        // Substitution covers EVERY authored field the run is judged and executed against, not
+        // just the title. A criterion reading "the binary must be named {{app_name}}" is put to a
+        // validator verbatim, and a step reading "cd {{project_dir}}" is put to a worker verbatim;
+        // both are as broken by a surviving placeholder as the description is. Unknown placeholders
+        // pass through untouched — see `renderSubstitutingDefinedPlaceholders` for why that is
+        // deliberate, and `TemplateInputValidation.placeholderProblem` for where a typo is caught
+        // instead. The set of fields rendered here is `templateRenderedTextFields`.
+        let definedNames = Set(template.templateInputDefinitions.map(\.name))
+        func substituted(_ text: String, layout: TemplateStringRenderer.Layout = .preserved) -> String {
+            TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
+                text,
+                values: resolvedInputs.values,
+                definedNames: definedNames,
+                layout: layout
+            )
+        }
         // Tombstones belong to the TEMPLATE's authoring history, not to the run. Mapping the
         // whole array (which is what this used to do) reset every `.removed` step to `.pending`
         // and shipped it to the instance as live work the author had already deleted. A fresh
         // run gets the active plan and an empty removal record of its own.
         let clonedSteps = template.steps.filter(\.isActive).map { step in
-            TaskStep(text: step.text, status: .pending, note: nil, origin: step.origin)
+            TaskStep(text: substituted(step.text), status: .pending, note: nil, origin: step.origin)
         }
         let clonedCriteria = template.acceptanceCriteria.map { criterion in
             AcceptanceCriterion(
-                name: criterion.name,
-                validationPrompt: criterion.validationPrompt,
-                inputEnumeratorPrompt: criterion.inputEnumeratorPrompt,
+                name: substituted(criterion.name),
+                validationPrompt: substituted(criterion.validationPrompt),
+                inputEnumeratorPrompt: criterion.inputEnumeratorPrompt.map { substituted($0) },
                 waivable: criterion.waivable,
                 origin: criterion.origin
             )
@@ -341,7 +373,7 @@ public actor TaskStore {
             switch TemplateStringRenderer.render(
                 titleTemplate,
                 values: resolvedInputs.values,
-                definedNames: Set(template.templateInputDefinitions.map(\.name))
+                definedNames: definedNames
             ) {
             case .success(let rendered):
                 let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -350,11 +382,16 @@ public actor TaskStore {
                 return .failure(message)
             }
         } else {
-            instanceTitle = template.title
+            // No instance title template, so the template's OWN title is what the instance
+            // inherits — and an author who wrote placeholders straight into it meant them just as
+            // much as the ones in the description. Rendered single-line, like the title template
+            // it stands in for, so an omitted optional input can't leave a doubled space.
+            let rendered = substituted(template.title, layout: .singleLine)
+            instanceTitle = rendered.isEmpty ? template.title : rendered
         }
         let instance = AgentTask(
             title: instanceTitle,
-            description: template.description,
+            description: substituted(template.description),
             status: .pending,
             disposition: .active,
             descriptionAttachments: template.descriptionAttachments,
@@ -678,22 +715,32 @@ public actor TaskStore {
     /// edit is also no-op'd if the new description is identical to the old one — no
     /// `lastEditedAt` change in that case.
     ///
-    /// Returns true if the update succeeded, false if the task wasn't found or its status
-    /// doesn't allow editing.
+    /// Returns a human-readable refusal, or nil on success — the caller used to invent its own
+    /// reason from a bare `false`, which could only ever name one of the ways this can fail.
     @discardableResult
-    public func updateDescription(id: UUID, description: String) -> Bool {
-        guard var task = tasks[id] else { return false }
-        guard task.status.isDescriptionEditable else { return false }
+    public func updateDescription(id: UUID, description: String) -> String? {
+        guard var task = tasks[id] else { return "Task not found." }
+        guard task.status.isDescriptionEditable else {
+            return "Task \"\(task.title)\" can't be edited while it is \(task.status.rawValue)."
+        }
         // Skip the no-op edit so an "edited" badge doesn't appear from a Save click that
         // didn't actually change anything.
-        guard task.description != description else { return true }
+        guard task.description != description else { return nil }
+        if task.isTemplate,
+           let problem = TemplateInputValidation.placeholderProblem(
+               in: description,
+               field: "description",
+               definedNames: Set(task.templateInputDefinitions.map(\.name))
+           ) {
+            return problem
+        }
         task.description = description
         let now = Date()
         task.updatedAt = now
         task.lastEditedAt = now
         tasks[id] = task
         onChange?()
-        return true
+        return nil
     }
 
     /// Appends a clearly-labeled amendment to a task's description, optionally adding
@@ -752,6 +799,14 @@ public actor TaskStore {
                 is unchanged) and `delete` (which says so plainly) instead.
                 """
         }
+        if task.isTemplate {
+            let definedNames = Set(task.templateInputDefinitions.map(\.name))
+            for criterion in criteria {
+                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: definedNames) {
+                    return problem
+                }
+            }
+        }
         writeAcceptanceContract(criteria, to: &task)
         task.updatedAt = Date()
         tasks[id] = task
@@ -773,26 +828,36 @@ public actor TaskStore {
         }
         guard !actions.isEmpty else { return "No criterion actions were given." }
         var criteria = task.acceptanceCriteria
+        let templateInputNames = task.isTemplate ? Set(task.templateInputDefinitions.map(\.name)) : []
         for action in actions {
             switch action {
             case .add(let name, let validationPrompt, let inputEnumeratorPrompt, let waivable, let origin):
-                criteria.append(AcceptanceCriterion(
+                let criterion = AcceptanceCriterion(
                     name: name,
                     validationPrompt: validationPrompt,
                     inputEnumeratorPrompt: inputEnumeratorPrompt,
                     waivable: waivable,
                     origin: origin
-                ))
+                )
+                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: templateInputNames) {
+                    return problem
+                }
+                criteria.append(criterion)
             case .update(let criterionID, let name, let validationPrompt, let inputEnumeratorPrompt, let waivable):
                 guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
                     return "No acceptance criterion with id \(criterionID.uuidString)."
                 }
                 // id and origin are deliberately untouched: preserving identity across an edit is
                 // the whole reason this verb exists.
-                criteria[index].name = name
-                criteria[index].validationPrompt = validationPrompt
-                criteria[index].inputEnumeratorPrompt = inputEnumeratorPrompt
-                criteria[index].waivable = waivable
+                var edited = criteria[index]
+                edited.name = name
+                edited.validationPrompt = validationPrompt
+                edited.inputEnumeratorPrompt = inputEnumeratorPrompt
+                edited.waivable = waivable
+                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: edited, definedNames: templateInputNames) {
+                    return problem
+                }
+                criteria[index] = edited
             case .delete(let criterionID):
                 guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
                     return "No acceptance criterion with id \(criterionID.uuidString)."
@@ -866,12 +931,28 @@ public actor TaskStore {
     /// Callers editing an EXISTING plan must pass the tombstones back through, not drop
     /// them: this writes exactly what it is given, so an "active steps only" array silently
     /// erases the append-only record validators are promised.
-    public func setSteps(id: UUID, steps: [TaskStep]) {
-        guard var task = tasks[id] else { return }
+    ///
+    /// Returns a human-readable refusal, or nil on success.
+    @discardableResult
+    public func setSteps(id: UUID, steps: [TaskStep]) -> String? {
+        guard var task = tasks[id] else { return "Task not found." }
+        if task.isTemplate {
+            let definedNames = Set(task.templateInputDefinitions.map(\.name))
+            for (position, step) in steps.filter(\.isActive).enumerated() {
+                if let problem = TemplateInputValidation.placeholderProblem(
+                    inStep: step.text,
+                    atPosition: position + 1,
+                    definedNames: definedNames
+                ) {
+                    return problem
+                }
+            }
+        }
         task.steps = steps
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
+        return nil
     }
 
     /// Returns the active steps to unstarted for a fresh attempt: status back to `.pending`,
@@ -906,12 +987,31 @@ public actor TaskStore {
     @discardableResult
     public func applyStepAction(taskID: UUID, action: TaskStepAction) -> String? {
         guard let task = tasks[taskID] else { return "Task not found." }
+        // Only the two actions that author TEXT can introduce a placeholder; the rest move,
+        // status, or tombstone steps whose text was checked when it was written.
+        let templateInputNames = task.isTemplate ? Set(task.templateInputDefinitions.map(\.name)) : []
         switch action {
         case .add(let text, let origin):
+            if let problem = TemplateInputValidation.placeholderProblem(
+                inStep: text,
+                atPosition: task.steps.filter(\.isActive).count + 1,
+                definedNames: templateInputNames
+            ) {
+                return problem
+            }
             tasks[taskID]?.steps.append(TaskStep(text: text, origin: origin))
         case .update(let stepID, let newText):
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
             guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be edited." }
+            // Position among the ACTIVE steps, which is the numbering everything else reports.
+            // Total, not defaulted: the guard above already established this step is active.
+            if let problem = TemplateInputValidation.placeholderProblem(
+                inStep: newText,
+                atPosition: task.steps[..<index].filter(\.isActive).count + 1,
+                definedNames: templateInputNames
+            ) {
+                return problem
+            }
             tasks[taskID]?.steps[index].text = newText
         case .setStatus(let stepID, let status, let note):
             // `delete` is the single source of tombstoning. Letting `setStatus` write `.removed`

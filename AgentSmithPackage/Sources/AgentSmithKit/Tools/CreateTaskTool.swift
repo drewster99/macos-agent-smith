@@ -162,11 +162,11 @@ public struct CreateTaskTool: AgentTool {
                 ]),
                 "is_template": .dictionary([
                     "type": .string("boolean"),
-                    "description": .string("Make this a TEMPLATE. A template never runs itself. Each time it's started, a fresh instance is cloned (title/description/steps/criteria copied, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly (either manually or on a schedule) and get a clean run each time. Default `false`. When you schedule a RECURRING run on a task with `schedule_task_action`, it becomes a template automatically.")
+                    "description": .string("Make this a TEMPLATE. A template never runs itself. Each time it's started, a fresh instance is cloned (title/description/steps/criteria copied with every {{input_name}} placeholder replaced by that run's value, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly (either manually or on a schedule) and get a clean run each time. Default `false`. When you schedule a RECURRING run on a task with `schedule_task_action`, it becomes a template automatically.")
                 ]),
                 "template_instance_title_template": .dictionary([
                     "type": .string("string"),
-                    "description": .string("Optional template-only title pattern for cloned instances, using {{input_name}} placeholders. Example: \"Localize {{target_app}}\".")
+                    "description": .string("Optional template-only title pattern for cloned instances, using {{input_name}} placeholders. Example: \"Localize {{target_app}}\". Only needed when an instance's title should read differently from the template's own — the template's `title` renders its placeholders too.")
                 ]),
                 "template_inputs": .dictionary([
                     "type": .string("array"),
@@ -215,6 +215,10 @@ public struct CreateTaskTool: AgentTool {
                         ]
 
                         Names must match ^[a-z][a-z0-9_]*$ and must be unique. Values are strings only. Blank optional values are omitted when the template runs.
+
+                        REFERENCE THEM WITH `{{input_name}}`. Every placeholder in the title, the description, any step, and any acceptance criterion is replaced with that run's value when the instance is created — so with `repository_path` defined, a description reading "Audit {{repository_path}} for unused exports" and a step reading "cd {{repository_path}}" both reach the worker naming the real path. Don't leave the text generic and describe the inputs in prose; the worker and the validators only ever see the rendered instance.
+
+                        A `{{name}}` matching no defined input is rejected here, naming the offending field. An input left blank on the run renders as an empty string.
                         """)
                 ])
             ]
@@ -336,6 +340,34 @@ public struct CreateTaskTool: AgentTool {
             templateInstanceTitleTemplate = nil
         }
 
+        let stepTexts: [String]
+        if case .array(let rawSteps) = arguments["steps"] {
+            stepTexts = rawSteps.compactMap { raw -> String? in
+                guard case .string(let s) = raw else { return nil }
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+        } else {
+            stepTexts = []
+        }
+
+        // Every authored field is checked BEFORE anything is stored, so a template written with a
+        // mistyped `{{placeholder}}` leaves nothing behind to clean up. The store re-checks each
+        // field on its own write; this pass exists because `addTask` has no way to refuse.
+        if isTemplate {
+            let definedNames = Set(templateInputDefinitions.map(\.name))
+            var fields: [(field: String, text: String)] = [("title", title), ("description", description)]
+            for (position, text) in stepTexts.enumerated() {
+                fields += AgentTask.templateRenderedTextFields(ofStep: text, atPosition: position + 1)
+            }
+            for criterion in seedCriteria {
+                fields += AgentTask.templateRenderedTextFields(ofCriterion: criterion)
+            }
+            if let problem = TemplateInputValidation.firstProblem(in: fields, definedNames: definedNames) {
+                return .failure("Task NOT created — \(problem)")
+            }
+        }
+
         let task = await context.taskStore.addTask(
             title: title,
             description: description,
@@ -359,17 +391,14 @@ public struct CreateTaskTool: AgentTool {
                 return .failure("Task created but its acceptance criteria could not be saved: \(problem)")
             }
         }
-        if case .array(let rawSteps) = arguments["steps"] {
-            let texts = rawSteps.compactMap { raw -> String? in
-                guard case .string(let s) = raw else { return nil }
-                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : trimmed
-            }
-            if !texts.isEmpty {
-                await context.taskStore.setSteps(
-                    id: task.id,
-                    steps: texts.map { TaskStep(text: $0, origin: .smith) }
-                )
+        if !stepTexts.isEmpty {
+            // Same reasoning as the criteria seed above: a task that came into existence without
+            // the plan Smith just wrote for it, silently, is the outcome worth failing loudly over.
+            if let problem = await context.taskStore.setSteps(
+                id: task.id,
+                steps: stepTexts.map { TaskStep(text: $0, origin: .smith) }
+            ) {
+                return .failure("Task created but its steps could not be saved: \(problem)")
             }
         }
 

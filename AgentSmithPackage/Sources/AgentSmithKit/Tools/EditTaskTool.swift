@@ -8,7 +8,10 @@ public struct EditTaskTool: AgentTool {
         Edit a pending, paused, interrupted, failed, scheduled, or template task's definition. \
         Use this for title, full description replacement, template toggle, template input \
         definitions, template instance title template, and per-task worker tool overrides. \
-        Do not use while a worker is running the task.
+        Do not use while a worker is running the task. On a TEMPLATE, title and description may \
+        use `{{input_name}}` placeholders; one naming no defined input is refused. Renaming an \
+        input and the text that references it in a SINGLE call is accepted — the two are checked \
+        together, so neither half has to be valid against the other's old version.
         """
 
     /// JSON-schema-compatible parameter description for editing a task definition.

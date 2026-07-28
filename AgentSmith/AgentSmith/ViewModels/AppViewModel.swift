@@ -1353,9 +1353,8 @@ final class AppViewModel {
 
     func updateTaskDescription(id: UUID, description: String) async {
         guard let taskStore else { return }
-        let succeeded = await taskStore.updateDescription(id: id, description: description)
-        if !succeeded {
-            taskActionError = "This task can't be edited while it's running or awaiting review."
+        if let problem = await taskStore.updateDescription(id: id, description: description) {
+            taskActionError = problem
         }
     }
 
@@ -1379,6 +1378,27 @@ final class AppViewModel {
            let problem = TemplateStringRenderer.validate(titleTemplate, allowedNames: Set(templateInputDefinitions.map(\.name))) {
             taskActionError = problem
             return false
+        }
+        // Checked before anything is stored so a mistyped `{{placeholder}}` leaves no half-built
+        // task behind; `addTask` has no way to refuse one. The store re-checks each field it writes.
+        if isTemplate {
+            var fields: [(field: String, text: String)] = [
+                ("title", title.trimmingCharacters(in: .whitespacesAndNewlines)),
+                ("description", description.trimmingCharacters(in: .whitespacesAndNewlines))
+            ]
+            for (position, step) in steps.filter(\.isActive).enumerated() {
+                fields += AgentTask.templateRenderedTextFields(ofStep: step.text, atPosition: position + 1)
+            }
+            for criterion in acceptanceCriteria {
+                fields += AgentTask.templateRenderedTextFields(ofCriterion: criterion)
+            }
+            if let problem = TemplateInputValidation.firstProblem(
+                in: fields,
+                definedNames: Set(templateInputDefinitions.map(\.name))
+            ) {
+                taskActionError = problem
+                return false
+            }
         }
         let task = await taskStore.addTask(
             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1420,7 +1440,15 @@ final class AppViewModel {
             }
         }
         if !steps.isEmpty {
-            await taskStore.setSteps(id: task.id, steps: steps)
+            // Reported, not rolled back — same reasoning as the criteria seed above. The task and
+            // everything else the user typed survives; the step editor fixes the plan in place.
+            if let problem = await taskStore.setSteps(id: task.id, steps: steps) {
+                taskActionError = """
+                    The task "\(task.title)" WAS created, but its steps were rejected: \(problem)
+                    Don't create it again — close this and add the steps from the task's detail view.
+                    """
+                return false
+            }
         }
         return true
     }
@@ -1512,7 +1540,10 @@ final class AppViewModel {
             taskActionError = "Steps can't be edited while the task is running, validating, or completed."
             return false
         }
-        await taskStore.setSteps(id: id, steps: steps)
+        if let problem = await taskStore.setSteps(id: id, steps: steps) {
+            taskActionError = problem
+            return false
+        }
         return true
     }
 

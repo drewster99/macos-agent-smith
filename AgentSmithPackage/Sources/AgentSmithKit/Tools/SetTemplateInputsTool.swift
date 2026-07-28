@@ -7,7 +7,11 @@ public struct SetTemplateInputsTool: AgentTool {
         Replace a TEMPLATE task's string-only input definitions. Template inputs are named values \
         supplied when `run_task` instantiates a template. Ordinary non-template tasks cannot define \
         inputs. Each input is `{name, description, required?}`; names must match \
-        ^[a-z][a-z0-9_]*$ and be unique. This replaces the complete input definition list.
+        ^[a-z][a-z0-9_]*$ and be unique. This replaces the complete input definition list. \
+        Reference an input from the template's title, description, steps, and acceptance criteria \
+        as `{{input_name}}`; each is replaced with that run's value when an instance is created. \
+        Dropping or renaming an input is REFUSED while any of that text still names it — rewrite \
+        the text first, in the same edit if you are using `edit_task`.
         """
 
     public let parameters: [String: AnyCodable] = [
