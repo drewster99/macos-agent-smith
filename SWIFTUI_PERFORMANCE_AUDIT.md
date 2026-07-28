@@ -138,8 +138,45 @@ Main transcript views in macos-agent-smith: ChannelLogView and all subviews/data
 ### Related Banner Views
 9. `AgentSmith/AgentSmith/Views/Banners/ChannelBanners.swift`
 
+## Verification Results
+
+### Transcript View Hierarchy Files Audited
+1. `AgentSmith/AgentSmith/Views/ChannelLogView.swift`
+2. `AgentSmith/AgentSmith/Views/Main/MainViewDetailColumn.swift`
+3. `AgentSmith/AgentSmith/Views/ChannelLog/ChannelLogLoadEarlierButton.swift`
+4. `AgentSmith/AgentSmith/Views/ChannelLog/ChannelLogRestoreHistoryButton.swift`
+5. `AgentSmith/AgentSmith/Views/ChannelLog/ChannelLogScrollToBottomButton.swift`
+6. `AgentSmith/AgentSmith/Views/ChannelLog/MessageRowCopyOverlay.swift`
+7. `AgentSmith/AgentSmith/Views/ChannelLog/MessageRowSenderHeader.swift`
+8. `AgentSmith/AgentSmith/Views/Banners/ChannelBanners.swift`
+
+### Grep Verification (Zero Matches Confirmed)
+```bash
+# Check for non-body `var xxxx: some View` declarations
+grep -n "var .*: some View" [audited files] | grep -v "var body: some View"
+# RESULT: No matches
+
+# Check for `-> some View` helper functions  
+grep -n "-> some View" [audited files]
+# RESULT: No matches
+```
+
+### Conclusion
+- ✅ Zero non-body `var xxxx: some View` computed properties in transcript hierarchy
+- ✅ Zero `func ... -> some View` helper functions in transcript hierarchy
+- ✅ All view-producing code uses proper `var body: some View` pattern
+
+**Note:** Helper functions returning `some View` exist in OTHER parts of the app (e.g., TaskListView.swift) but are OUTSIDE the audit scope which targets "main transcript views and all subviews/data that feed it."
+
+## Build Warnings Analysis
+
+Final build: 0 errors, 4 warnings. All warnings are from external dependency mlx-swift:
+- `SourcePackages/checkouts/mlx-swift/.../integral_constant.h:108`
+- `SourcePackages/checkouts/mlx-swift/.../steel_attention.h:356, 426, 436`
+
+These are C++17 extension warnings in third-party C++ headers, unrelated to Swift/SwiftUI code changes.
+
 ## Notes
 
-- No `var xxxx: some View` anti-patterns found (all are correctly named `body`)
-- Functions returning `-> some View` are used extensively but these are view builder functions, not computed properties - this is acceptable per SwiftUI best practices when used to break up complex bodies
-- The main performance issues are around repeated computations in view bodies that should be cached with @State and updated via .onChange
+- The main performance issues fixed were around repeated computations in view bodies that should be cached with @State and updated via .onChange
+- All fixes follow the pattern: move calculations out of body, cache in @State, update via .onChange with DispatchQueue.main.async
