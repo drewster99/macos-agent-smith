@@ -1123,15 +1123,26 @@ public actor AgentActor {
         guard !queued.isEmpty else { return }
 
         let formatter = ISO8601DateFormatter()
-        let rendered = queued.map { "- (sent \(formatter.string(from: $0.queuedAt))) \($0.text)" }
         let attachments = queued.flatMap(\.attachments)
-        appendUserMessage("""
-            [Messages from Agent Smith] These were sent to you before you started and were held \
-            until now. They are messages from your supervisor, not part of the task description — \
-            respond to them as you would to anything else Smith says to you.
+        let rendered = queued.map {
+            Self.orchestratorMessageEnvelope("(sent \(formatter.string(from: $0.queuedAt)), before you started) \($0.text)")
+        }
+        appendUserMessage(rendered.joined(separator: "\n\n"), attachments: attachments)
+    }
 
-            \(rendered.joined(separator: "\n"))
-            """, attachments: attachments)
+    /// How a message from Smith is presented to a worker.
+    ///
+    /// A worker used to receive `[AGENT Smith]: <text>` — the same shape as every other line of
+    /// transcript, saying nothing about who Smith is, that the message is directed AT the worker,
+    /// or what the worker may do about it. A message asking for something therefore read as
+    /// supervisor commentary and was acted on only when it happened to be task work. Naming the
+    /// sender's ROLE and the one channel back makes both explicit at the point of reading.
+    ///
+    /// Used by the live path (`drainPendingMessages`) and the queued path
+    /// (`deliverQueuedTaskMessagesIfDue`) so a message looks identical to the worker whether it
+    /// arrived while the worker was running or was held from before it started.
+    static func orchestratorMessageEnvelope(_ body: String) -> String {
+        "IMPORTANT INFORMATION FROM AGENT SMITH (TASK ORCHESTRATOR) - IF YOU NEED HELP, CALL `request_help`: \(body)"
     }
 
     /// Whether the agent is currently running.
@@ -3386,7 +3397,9 @@ public actor AgentActor {
             case .validator:
                 senderLabel = "VALIDATOR"
             }
-            let formatted = "[\(senderLabel)]: \(message.content)"
+            let formatted = message.kind == .orchestratorMessage
+                ? Self.orchestratorMessageEnvelope(message.content)
+                : "[\(senderLabel)]: \(message.content)"
 
             // Downscale + inject images (gated on the model's vision capability) and surface
             // EVERY attachment as a `file://` reference line the agent can quote (id=…) into a

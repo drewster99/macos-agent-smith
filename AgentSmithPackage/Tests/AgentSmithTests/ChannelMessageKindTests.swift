@@ -51,6 +51,7 @@ struct ChannelMessageKindTests {
         (.submissionAutoRejected, "submission_auto_rejected"),
         (.validationBlocked, "validation_blocked"),
         (.validationBlockedWorkerNotice, "validation_blocked_worker_notice"),
+        (.orchestratorMessage, "orchestrator_message"),
         (.helpRequested, "help_requested"),
         (.helpProvided, "help_provided"),
         (.memorySaved, "memory_saved"),

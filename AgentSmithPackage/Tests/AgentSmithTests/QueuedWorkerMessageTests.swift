@@ -103,3 +103,48 @@ struct QueuedWorkerMessageTests {
         #expect(drained.first?.attachments.map(\.filename) == ["evidence.png"])
     }
 }
+
+/// How a message from Smith is presented to a worker.
+@Suite("Orchestrator message envelope")
+struct OrchestratorMessageEnvelopeTests {
+
+    @Test("The envelope names the sender's role and the one channel back")
+    func envelopeContent() {
+        let wrapped = AgentActor.orchestratorMessageEnvelope("Please reply with 'Hello'")
+        #expect(wrapped.contains("AGENT SMITH"))
+        #expect(wrapped.contains("TASK ORCHESTRATOR"))
+        #expect(wrapped.contains("request_help"))
+        #expect(wrapped.hasSuffix("Please reply with 'Hello'"), "the body must come last, intact")
+    }
+
+    @Test("It does not use the generic transcript label")
+    func notTheGenericLabel() {
+        // `[AGENT Smith]: …` is what every other channel line looks like. A directed message from
+        // the orchestrator reading identically to ambient transcript is the whole defect.
+        #expect(!AgentActor.orchestratorMessageEnvelope("x").contains("[AGENT Smith]"))
+    }
+
+    @Test("message_brown tags its post so the formatter can recognise it")
+    func messageBrownIsTagged() {
+        // The formatter keys on the KIND, not on the sender or the text — a worker gets the
+        // envelope because the message is an orchestrator message, not because of who sent it.
+        let tagged = ChannelMessage(
+            sender: .agent(.smith),
+            recipientID: UUID(),
+            recipient: .agent(.brown),
+            content: "do the thing",
+            metadata: ["messageKind": .kind(.orchestratorMessage)]
+        )
+        #expect(tagged.kind == .orchestratorMessage)
+
+        // A help ANSWER is a different kind and must NOT get the "if you need help" framing.
+        let help = ChannelMessage(
+            sender: .agent(.smith),
+            recipientID: UUID(),
+            recipient: .agent(.brown),
+            content: "here is the answer",
+            metadata: ["messageKind": .kind(.helpProvided)]
+        )
+        #expect(help.kind != .orchestratorMessage)
+    }
+}

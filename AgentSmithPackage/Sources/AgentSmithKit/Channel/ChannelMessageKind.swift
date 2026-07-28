@@ -81,6 +81,14 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// `awaitingTaskReview`. Everything else addressed to a worker means "here is work back".
     case validationBlockedWorkerNotice = "validation_blocked_worker_notice"
 
+    /// A direct message from Smith to a task's worker (`message_brown`).
+    ///
+    /// Distinguished from every other Smith-to-worker message so the worker's context formatter
+    /// can frame it as supervisor communication rather than as another line of transcript. A
+    /// worker receiving a bare `[AGENT Smith]: …` has nothing telling it that a reply is wanted
+    /// or how one could be sent — see `AgentActor.orchestratorMessageEnvelope`.
+    case orchestratorMessage = "orchestrator_message"
+
     // MARK: Help
     case helpRequested = "help_requested"
     case helpProvided = "help_provided"

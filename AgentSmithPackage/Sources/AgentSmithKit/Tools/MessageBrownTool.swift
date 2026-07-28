@@ -116,7 +116,10 @@ struct MessageBrownTool: AgentTool {
             recipient: .agent(.brown),
             content: message,
             attachments: attachments,
-            metadata: ["recipientTaskTitle": .string(recipientTask.title)]
+            metadata: [
+                "messageKind": .kind(.orchestratorMessage),
+                "recipientTaskTitle": .string(recipientTask.title)
+            ]
         ))
 
         return .success("Message sent to the worker on \"\(recipientTask.title)\"\(attachmentSuffix).")
