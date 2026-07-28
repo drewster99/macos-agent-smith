@@ -70,7 +70,8 @@ struct TaskCostDetailSheet: View {
                 TurnTimelineSection(
                     displayedTurns: displayedTurns,
                     sortedTurnsCount: sortedTurns.count,
-                    turnDisplayLimit: turnDisplayLimit
+                    displayedTurnStartOffset: max(0, sortedTurns.count - turnDisplayLimit),
+                    turnDisplayLimit: $turnDisplayLimit
                 )
 
                 // Task ID in the lower right corner (omitted for the Orchestration bucket).
@@ -492,23 +493,20 @@ struct ConfigurationSection: View {
 struct TurnTimelineSection: View {
     let displayedTurns: [UsageRecord]
     let sortedTurnsCount: Int
-    let turnDisplayLimit: Int
-
-    private var startOffset: Int {
-        max(0, sortedTurnsCount - turnDisplayLimit)
-    }
+    let displayedTurnStartOffset: Int
+    @Binding var turnDisplayLimit: Int
 
     var body: some View {
         CardView(title: "Turn-by-Turn (\(sortedTurnsCount) calls)") {
-            if startOffset > 0 {
+            if displayedTurnStartOffset > 0 {
                 Text("Showing last \(displayedTurns.count) of \(sortedTurnsCount) turns")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             TurnDisclosureControls(
                 totalTurns: sortedTurnsCount,
-                shownTurns: displayedTurns.count,
-                startOffset: startOffset
+                displayedTurns: displayedTurns.count,
+                turnDisplayLimit: $turnDisplayLimit
             )
 
             // Header
@@ -528,7 +526,7 @@ struct TurnTimelineSection: View {
 
             ForEach(Array(displayedTurns.enumerated()), id: \.element.id) { index, record in
                 TaskCostTurnRow(
-                    displayNumber: startOffset + index + 1,
+                    displayNumber: displayedTurnStartOffset + index + 1,
                     agentRole: record.agentRole,
                     inputTokensFormatted: formatTokenCount(record.inputTokens),
                     outputTokensFormatted: formatTokenCount(record.outputTokens),
@@ -563,12 +561,11 @@ struct TurnTimelineSection: View {
 }
 
 /// Turn disclosure controls for showing more/fewer turns.
+/// Turn disclosure controls for showing more/fewer turns.
 struct TurnDisclosureControls: View {
     let totalTurns: Int
-    let shownTurns: Int
-    let startOffset: Int
-
-    @State private var turnDisplayLimit: Int = 100
+    let displayedTurns: Int
+    @Binding var turnDisplayLimit: Int
 
     private static let initialTurnDisplayLimit = 100
     private static let turnDisplayIncrement = 500
@@ -576,15 +573,15 @@ struct TurnDisclosureControls: View {
     var body: some View {
         if totalTurns > Self.initialTurnDisplayLimit {
             HStack(spacing: 12) {
-                if shownTurns < totalTurns {
-                    Button("Show \(min(Self.turnDisplayIncrement, totalTurns - shownTurns)) more") {
-                        turnDisplayLimit = shownTurns + Self.turnDisplayIncrement
+                if displayedTurns < totalTurns {
+                    Button("Show \(min(Self.turnDisplayIncrement, totalTurns - displayedTurns)) more") {
+                        turnDisplayLimit = displayedTurns + Self.turnDisplayIncrement
                     }
                     Button("Show all \(totalTurns)") {
                         turnDisplayLimit = .max
                     }
                 }
-                if shownTurns > Self.initialTurnDisplayLimit {
+                if displayedTurns > Self.initialTurnDisplayLimit {
                     Button("Show last \(Self.initialTurnDisplayLimit)") {
                         turnDisplayLimit = Self.initialTurnDisplayLimit
                     }
