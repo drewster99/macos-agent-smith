@@ -7,7 +7,7 @@ import Foundation
 /// `amend_task` mutates the stored task description (so Security Agent, which reads the live
 /// description on every approval, sees the new intent) but Brown's briefing is a
 /// one-time spawn snapshot. To keep a running Brown in sync — rather than relying on
-/// Smith to remember a follow-up `message_brown` — the tool injects the amendment
+/// Smith to remember a follow-up `notify_brown` — the tool injects the amendment
 /// directly into a live Brown's conversation. These tests pin that contract:
 ///   - When Brown is running the amended task, the amendment is posted privately to
 ///     Brown as a `.system` message (not attributed to Smith) carrying the amendment text.

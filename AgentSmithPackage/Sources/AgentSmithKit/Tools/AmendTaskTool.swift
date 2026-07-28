@@ -9,10 +9,10 @@ import Foundation
 /// snapshot, so without this the running Brown would never see post-spawn amendments —
 /// while Security Agent keeps citing them — which is exactly the desync that sends Brown
 /// hunting for content it can't see. Delivery is automatic and deterministic; Smith
-/// does not need to follow up with `message_brown`.
+/// does not need to follow up with `notify_brown`.
 struct AmendTaskTool: AgentTool {
     let name = "amend_task"
-    let toolDescription = "Add a clarification or updated instruction to a task's description. Use this when the user provides new context, corrections, or additional requirements for an in-progress task. The amendment is appended to the description (visible to Security Agent on every security check) and, if a Brown is currently running this task, delivered to that live Brown automatically — you do NOT need to message_brown afterward. Optionally attach files via `attachment_ids`; they're added to the task's description attachments and forwarded to the live Brown with the amendment (and re-injected into Brown's briefing on any future respawn)."
+    let toolDescription = "Add a clarification or updated instruction to a task's description. Use this when the user provides new context, corrections, or additional requirements for an in-progress task. The amendment is appended to the description (visible to Security Agent on every security check) and, if a Brown is currently running this task, delivered to that live Brown automatically — you do NOT need to notify_brown afterward. Optionally attach files via `attachment_ids`; they're added to the task's description attachments and forwarded to the live Brown with the amendment (and re-injected into Brown's briefing on any future respawn)."
 
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
@@ -83,7 +83,7 @@ struct AmendTaskTool: AgentTool {
         }
 
         if deliveredToBrown {
-            return .success("Task \(taskIDString) amended\(attachmentSuffix). The change was delivered to the running Brown automatically — do NOT message_brown about it.")
+            return .success("Task \(taskIDString) amended\(attachmentSuffix). The change was delivered to the running Brown automatically — do NOT notify_brown about it.")
         }
         return .success("Task \(taskIDString) amended\(attachmentSuffix). No running Brown is assigned to this task, so the amendment will be included in Brown's briefing when the task is next started.")
     }

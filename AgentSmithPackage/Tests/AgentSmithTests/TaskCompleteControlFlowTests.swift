@@ -83,7 +83,7 @@ struct ParkedWorkerResumeTests {
 
     @Test("A private message with no messageKind resumes the worker")
     func unlabelledPrivateMessageResumes() {
-        // `message_brown`, `provide_help`, and `amend_task` all reach a parked worker as private
+        // `notify_brown`, `provide_help`, and `amend_task` all reach a parked worker as private
         // messages. The default must stay "resume": a missed exemption costs one wasted turn,
         // while a missed ALLOWLIST entry would strand the worker parked forever.
         let agentID = UUID()

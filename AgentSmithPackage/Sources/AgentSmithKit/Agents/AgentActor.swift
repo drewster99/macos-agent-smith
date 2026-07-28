@@ -1353,7 +1353,7 @@ public actor AgentActor {
                 let hasRunnableTasks = activeTasks.contains { $0.status.isRunnable }
                 // Gate on `.awaitingHelp` (a Brown blocked on a help request) only — NOT `.awaitingReview`,
                 // which is now a user-owned validator-error park with its worker already gone; letting it
-                // gate would disable message_brown / provide_help across unrelated running workers.
+                // gate would disable notify_brown / provide_help across unrelated running workers.
                 let hasAwaitingReview = activeTasks.contains { $0.status == .awaitingHelp }
                 let availabilityContext = ToolAvailabilityContext(
                     lastDirectUserMessageAt: lastDirectUserMessageAt,
@@ -1869,7 +1869,7 @@ public actor AgentActor {
                         message Brown. If you intended to act:
                         - Terminate an agent → call `terminate_agent`
                         - Mark a task failed / archived / completed → call `update_task` (status) or `manage_task_disposition`
-                        - Send Brown instructions → call `message_brown`
+                        - Send Brown instructions → call `notify_brown`
                         - Schedule something → call `schedule_task_action`
                         Reply now with the correct tool call. Do not just claim it again.
                         """))
@@ -2895,7 +2895,7 @@ public actor AgentActor {
     /// `handoffLifecycleTools` must stay a subset of it — see `parkingToolsAreLifecycleTools`.
     static let taskLifecycleTools: Set<String> = [
         "task_update", "task_complete", "request_help", "reply_to_user",
-        "message_user", "message_brown"
+        "message_user", "notify_brown"
     ]
 
     /// Smith tools that ACT ON a specific task, identified by a `task_id` argument. A Smith turn
@@ -2951,7 +2951,7 @@ public actor AgentActor {
     ///
     /// The default is deliberately "a private message resumes the worker": every other way a
     /// message reaches a parked worker means somebody is handing work back (a validator punch
-    /// list, a user send-back, `provide_help`, `amend_task`, Smith's `message_brown`), and a
+    /// list, a user send-back, `provide_help`, `amend_task`, Smith's `notify_brown`), and a
     /// missed entry here only costs an extra turn. A missed entry in an ALLOWLIST would instead
     /// strand the worker parked forever, which is the worse failure — hence the exemption list.
     static let parkedWorkerInformationalMessageKinds: Set<ChannelMessageKind> = [
@@ -2971,7 +2971,7 @@ public actor AgentActor {
     static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID) -> Bool {
         guard message.recipientID == agentID else { return false }
         // No kind is a POSITIVE answer here, not a fallback: the private messages that hand work
-        // back — `message_brown`, `amend_task` — carry no `messageKind` at all. "Addressed to this
+        // back — `notify_brown`, `amend_task` — carry no `messageKind` at all. "Addressed to this
         // worker and not on the exemption list" IS the rule, and an unkinded message satisfies it.
         guard let kind = message.kind else { return true }
         return !parkedWorkerInformationalMessageKinds.contains(kind)

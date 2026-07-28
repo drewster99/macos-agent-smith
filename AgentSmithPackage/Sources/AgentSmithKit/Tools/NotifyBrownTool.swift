@@ -1,16 +1,34 @@
 import Foundation
 
-/// Smith tool: sends a private message to Agent Brown.
-/// Replaces send_message(recipient_id: "brown") for Smith's tool set.
-struct MessageBrownTool: AgentTool {
-    /// Smith parks after messaging a worker so it waits for the worker's reply.
+/// Smith tool: delivers timely, ONE-WAY information to the worker running a task.
+///
+/// Named `notify_` rather than `message_` deliberately. As `message_brown` it read as a
+/// conversation opener, and it is not one: a worker has no reply channel — only `task_update`
+/// (a progress report), `request_help` (which parks it), and `task_complete`. A question sent
+/// this way is never answered, and before the rename that is exactly what happened — Smith asked
+/// a worker to reply, the worker received the message, had no way to comply, and carried on with
+/// its task while Smith sat parked waiting for an answer that could not arrive.
+struct NotifyBrownTool: AgentTool {
+    /// Smith stops after notifying so it can't stack notifications faster than the worker reads
+    /// them. NOT a wait-for-reply — there is no reply channel; see the type doc.
     public var successEffects: Set<ToolEffect> { [.deliveredMessage] }
 
-    let name = "message_brown"
+    let name = "notify_brown"
     let toolDescription = """
-        Send a message to the worker running a specific task. Use for task instructions, corrections, and follow-ups. \
-        `task_id` identifies WHICH worker to address — several tasks can be running at once, each with its own \
-        worker, and a message goes only to the worker running the task you name. \
+        Deliver additional TIMELY INFORMATION to the worker running a specific task. This is \
+        ONE-WAY: the worker cannot reply, so do not ask it questions — it will read this and carry \
+        on working. \
+        Use it when information should reach the worker NOW but would not make sense to memorialize \
+        into the task itself. The typical case is answering a `task_update` that looks like it is \
+        missing information or heading in the wrong direction: send the correction or the missing \
+        context here so the worker can adjust its approach immediately. \
+        For changes to the TASK — its description, its requirements, or what the user actually \
+        wants — use `amend_task` instead. That records the change on the task, where it survives, \
+        is visible to the validator, and is re-delivered if the task is restarted. Use this tool \
+        for the transient; use `amend_task` for the durable. \
+        `task_id` identifies WHICH worker to notify — several tasks can run at once, each with its \
+        own worker, and this reaches only the worker on the task you name. If that task has no \
+        worker yet, the notification is queued and delivered when the worker starts. \
         Be specific and unambiguous — Brown is literal and may misinterpret vague instructions. \
         Optionally forward attachments via `attachment_ids` (UUID strings from `[filename](file://…) … id=<UUID>` markdown links).
         """
@@ -20,11 +38,11 @@ struct MessageBrownTool: AgentTool {
         "properties": .dictionary([
             "task_id": .dictionary([
                 "type": .string("string"),
-                "description": .string("UUID of the running task whose worker should receive this message.")
+                "description": .string("UUID of the task whose worker should be notified.")
             ]),
             "message": .dictionary([
                 "type": .string("string"),
-                "description": .string("The message to send to Brown.")
+                "description": .string("The information to deliver. One-way — the worker cannot answer, so state what it needs to know rather than asking.")
             ]),
             "attachment_ids": .dictionary([
                 "type": .string("array"),
@@ -49,11 +67,11 @@ struct MessageBrownTool: AgentTool {
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         // Defense-in-depth: reject while a Brown is blocked on a help request (`.awaitingHelp`), even
         // if the tool was presented from a stale definition cache — that blocker's resolution is
-        // `provide_help`, not message_brown. A user-owned `.awaitingReview` park has no live Brown and
+        // `provide_help`, not notify_brown. A user-owned `.awaitingReview` park has no live Brown and
         // must NOT gate messaging of unrelated running workers.
         let activeTasks = await context.taskStore.allTasks().filter { $0.disposition == .active }
         if activeTasks.contains(where: { $0.status == .awaitingHelp }) {
-            return .failure("Cannot message Brown while a task is awaiting your help — resolve it with `provide_help` first.")
+            return .failure("Cannot notify a worker while a task is awaiting your help — resolve it with `provide_help` first.")
         }
 
         guard case .string(let message) = arguments["message"] else {
@@ -106,7 +124,7 @@ struct MessageBrownTool: AgentTool {
             guard queued else {
                 return .failure("Could not queue the message for task \(taskIDString) — the task no longer exists.")
             }
-            return .success("No worker is running \"\(recipientTask.title)\" yet (status: \(recipientTask.status.rawValue)), so the message was QUEUED\(attachmentSuffix). It will be delivered in the worker's briefing when the task starts. Do not resend it.")
+            return .success("No worker is running \"\(recipientTask.title)\" yet (status: \(recipientTask.status.rawValue)), so the notification was QUEUED\(attachmentSuffix). It will be delivered once the worker starts. Do not resend it.")
         }
 
         // Label the recipient with its task so the UI shows WHICH worker was addressed.
@@ -122,6 +140,6 @@ struct MessageBrownTool: AgentTool {
             ]
         ))
 
-        return .success("Message sent to the worker on \"\(recipientTask.title)\"\(attachmentSuffix).")
+        return .success("Notified the worker on \"\(recipientTask.title)\"\(attachmentSuffix).")
     }
 }

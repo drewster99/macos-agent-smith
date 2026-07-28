@@ -114,7 +114,7 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
             "manage_steps", "set_acceptance_criteria", "task_update", "task_complete"
         ],
         .messaging: [
-            "message_user", "message_brown", "reply_to_user",
+            "message_user", "notify_brown", "reply_to_user",
             "report_inbound_user_message", "request_help", "provide_help"
         ],
         .scheduling: [

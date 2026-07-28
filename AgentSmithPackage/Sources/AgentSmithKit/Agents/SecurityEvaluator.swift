@@ -206,7 +206,7 @@ actor SecurityEvaluator {
                 "cancel_wake",
                 "list_scheduled_wakes",
 
-                "message_brown",
+                "notify_brown",
                 "provide_help",
 
                 "get_current_time",

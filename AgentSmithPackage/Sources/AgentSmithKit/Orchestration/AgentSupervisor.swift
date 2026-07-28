@@ -156,7 +156,7 @@ struct AgentSupervisor {
     /// (`OrchestrationRuntime.liveWorkerID(taskID:)`), since this returns the OLDEST live
     /// worker and nothing more meaningful than that.
     ///
-    /// `message_brown` and `amend_task` were migrated to the task-scoped lookup on
+    /// `notify_brown` and `amend_task` were migrated to the task-scoped lookup on
     /// 2026-07-25; both had been silently correct only at worker capacity 1. The
     /// Brown-activity digest still calls this with `.brown`, which is fine — it asks
     /// "is any worker alive?", not "which one?".

@@ -1901,7 +1901,7 @@ public actor OrchestrationRuntime {
             await smithAgent.appendUserMessage("""
                 [System: Task "\(refreshed.title)" (ID: \(taskID.uuidString)) has been started. A fresh worker \
                 (Brown) was spawned and briefed automatically. Do NOT call `run_task`, `create_task`, or \
-                `message_brown` FOR THIS task — Brown will signal progress via task_update / task_complete, \
+                `notify_brown` FOR THIS task — Brown will signal progress via task_update / task_complete, \
                 and you'll get the periodic Brown-activity digest; do NOT poll. This start came from your own \
                 run_task call or a scheduled timer: if the user doesn't already know it started, tell them in \
                 one short line. Handle any NEW user message normally.]
@@ -2450,7 +2450,7 @@ public actor OrchestrationRuntime {
                     smithParts.append("""
                         Brown is already working on task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)). \
                         The task description and any prior progress have been delivered to Brown automatically. \
-                        Do NOT call `run_task`, `create_task`, or `message_brown` FOR THIS task — Brown is already briefed and working. \
+                        Do NOT call `run_task`, `create_task`, or `notify_brown` FOR THIS task — Brown is already briefed and working. \
                         This restriction applies ONLY to this in-progress task. If the user sends a NEW message, handle it normally: \
                         create a task for genuine new work, or simply reply if they're answering a question or chatting — use your judgment, and don't force a task for a clarification. \
                         Brown will signal progress via task_update / task_complete; you'll also get an automatic 10-minute Brown-activity digest. Do NOT poll. \
@@ -2560,7 +2560,7 @@ public actor OrchestrationRuntime {
                 parts.append("""
                     \(lead)
                     - \(list)
-                    Do NOT call `message_brown` for these — the workers are already briefed and working. \
+                    Do NOT call `notify_brown` for these — the workers are already briefed and working. \
                     They signal progress via task_update / task_complete; you'll also get an automatic 10-minute Brown-activity digest. Do NOT poll.
                     """)
             }
@@ -2592,7 +2592,7 @@ public actor OrchestrationRuntime {
                     The following task(s) already submitted their result and are in acceptance validation:
                     \(taskList)
                     The runtime has re-enqueued validation for these task(s). Do NOT call `run_task`, \
-                    `create_task`, or `message_brown` for them, and do NOT recreate any side-effect work \
+                    `create_task`, or `notify_brown` for them, and do NOT recreate any side-effect work \
                     they already performed. Wait for validation to complete — it needs nothing from you, \
                     and if it can't reach a verdict the user resolves it, not you.
                     """)

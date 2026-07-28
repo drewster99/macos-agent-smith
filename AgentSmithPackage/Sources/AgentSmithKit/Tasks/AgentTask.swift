@@ -138,7 +138,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
 
     /// Messages addressed to this task's worker that arrived while no worker was alive.
     ///
-    /// Smith addresses a worker by task (`message_brown`), but the worker's existence is a race
+    /// Smith addresses a worker by task (`notify_brown`), but the worker's existence is a race
     /// Smith cannot observe: creating or starting a task returns before the worker is spawned, so
     /// an immediate follow-up message had nobody to deliver to and simply failed. Asking Smith to
     /// notice that race and pick a different tool is asking it to reason about scheduling it has

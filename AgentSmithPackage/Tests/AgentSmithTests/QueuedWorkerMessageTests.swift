@@ -73,24 +73,24 @@ struct QueuedWorkerMessageTests {
         #expect(fromLegacy.pendingWorkerMessages.isEmpty)
     }
 
-    @Test("message_brown stays available with no live worker, because the call now queues")
+    @Test("notify_brown stays available with no live worker, because the call now queues")
     func toolRemainsAvailableWithoutLiveWorker() {
         // The opposite gate was considered and rejected: hiding the tool when no worker is alive
         // removes it at exactly the moment Smith most expects it — right after create_task.
         let context = ToolAvailabilityContext(agentRole: .smith, hasAwaitingReviewTasks: false)
-        #expect(MessageBrownTool().isAvailable(in: context))
+        #expect(NotifyBrownTool().isAvailable(in: context))
     }
 
-    @Test("message_brown is still withheld while a worker is blocked on request_help")
+    @Test("notify_brown is still withheld while a worker is blocked on request_help")
     func withheldWhileAwaitingHelp() {
         let blocked = ToolAvailabilityContext(agentRole: .smith, hasAwaitingReviewTasks: true)
-        #expect(!MessageBrownTool().isAvailable(in: blocked))
+        #expect(!NotifyBrownTool().isAvailable(in: blocked))
         #expect(ProvideHelpTool().isAvailable(in: blocked))
     }
 
     @Test("A queued message keeps its attachments, so they can be delivered with it")
     func attachmentsSurviveTheQueue() async {
-        // message_brown accepts attachment_ids. Storing the text but dropping the files would
+        // notify_brown accepts attachment_ids. Storing the text but dropping the files would
         // accept an attachment at the call site and lose it somewhere the sender never sees.
         let store = TaskStore()
         let task = await store.addTask(title: "t", description: "d")
@@ -124,7 +124,7 @@ struct OrchestratorMessageEnvelopeTests {
         #expect(!AgentActor.orchestratorMessageEnvelope("x").contains("[AGENT Smith]"))
     }
 
-    @Test("message_brown tags its post so the formatter can recognise it")
+    @Test("notify_brown tags its post so the formatter can recognise it")
     func messageBrownIsTagged() {
         // The formatter keys on the KIND, not on the sender or the text — a worker gets the
         // envelope because the message is an orchestrator message, not because of who sent it.

@@ -6,7 +6,7 @@ import Foundation
 ///
 /// Both tools here resolved their recipient with `agentIDForRole(.brown)`, which returns the
 /// OLDEST live worker. That is an arbitrary answer once `maxConcurrentWorkers > 1`:
-///   - `message_brown` had no `task_id` at all, so every message went to the oldest worker
+///   - `notify_brown` had no `task_id` at all, so every message went to the oldest worker
 ///     and was labelled in the UI with whatever task that worker happened to own. Smith's
 ///     correction for one task could land in another worker's context.
 ///   - `amend_task` guarded with `task.assigneeIDs.contains(brownID)`, so it never
@@ -78,13 +78,13 @@ struct WorkerAddressingTests {
         }
     }
 
-    // MARK: - message_brown
+    // MARK: - notify_brown
 
-    @Test("message_brown reaches the worker on the named task, not the oldest worker")
+    @Test("notify_brown reaches the worker on the named task, not the oldest worker")
     func messageBrownAddressesTheNamedTask() async throws {
         let fixture = await TwoWorkers.make()
 
-        let result = try await MessageBrownTool().execute(
+        let result = try await NotifyBrownTool().execute(
             arguments: [
                 "task_id": .string(fixture.newerTask.id.uuidString),
                 "message": .string("stop editing the wrong repo")
@@ -112,12 +112,12 @@ struct WorkerAddressingTests {
         }
     }
 
-    @Test("message_brown QUEUES for a task with no live worker, and never falls back to another")
+    @Test("notify_brown QUEUES for a task with no live worker, and never falls back to another")
     func messageBrownQueuesWhenTaskHasNoWorker() async throws {
         let fixture = await TwoWorkers.make()
         let idle = await fixture.taskStore.addTask(title: "Queued task", description: "not started")
 
-        let result = try await MessageBrownTool().execute(
+        let result = try await NotifyBrownTool().execute(
             arguments: [
                 "task_id": .string(idle.id.uuidString),
                 "message": .string("hello?")
@@ -138,10 +138,10 @@ struct WorkerAddressingTests {
         #expect(delivered.isEmpty, "a task with no worker must not have its message rerouted to a live one")
     }
 
-    @Test("message_brown rejects an unknown task id")
+    @Test("notify_brown rejects an unknown task id")
     func messageBrownRejectsUnknownTask() async throws {
         let fixture = await TwoWorkers.make()
-        let result = try await MessageBrownTool().execute(
+        let result = try await NotifyBrownTool().execute(
             arguments: ["task_id": .string(UUID().uuidString), "message": .string("hi")],
             context: fixture.context()
         )
