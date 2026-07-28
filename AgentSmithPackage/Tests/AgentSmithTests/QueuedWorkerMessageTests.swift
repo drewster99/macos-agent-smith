@@ -87,4 +87,19 @@ struct QueuedWorkerMessageTests {
         #expect(!MessageBrownTool().isAvailable(in: blocked))
         #expect(ProvideHelpTool().isAvailable(in: blocked))
     }
+
+    @Test("A queued message keeps its attachments, so they can be delivered with it")
+    func attachmentsSurviveTheQueue() async {
+        // message_brown accepts attachment_ids. Storing the text but dropping the files would
+        // accept an attachment at the call site and lose it somewhere the sender never sees.
+        let store = TaskStore()
+        let task = await store.addTask(title: "t", description: "d")
+        let attachment = Attachment(filename: "evidence.png", mimeType: "image/png", byteCount: 1, data: Data([0x1]))
+        await store.enqueueWorkerMessage(
+            taskID: task.id,
+            message: QueuedWorkerMessage(text: "see the screenshot", attachments: [attachment])
+        )
+        let drained = await store.takePendingWorkerMessages(taskID: task.id)
+        #expect(drained.first?.attachments.map(\.filename) == ["evidence.png"])
+    }
 }
