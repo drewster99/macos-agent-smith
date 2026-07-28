@@ -137,7 +137,12 @@ struct NotifyBrownTool: AgentTool {
             metadata: [
                 "messageKind": .kind(.orchestratorMessage),
                 "recipientTaskTitle": .string(recipientTask.title)
-            ]
+            ],
+            // Attribute the row to the task it is about. `amend_task` already stamps its
+            // equivalent post; without it a notification is task-less in the channel log, so
+            // anything grouping by task — the inspector, per-task filtering — can't find it,
+            // even though this tool is addressed BY task and knows exactly which one.
+            taskID: taskID
         ))
 
         return .success("Notified the worker on \"\(recipientTask.title)\"\(attachmentSuffix).")
