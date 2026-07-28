@@ -399,14 +399,9 @@ struct TaskEditorSheet: View {
     /// inline as you type, instead of only silently blocking Create.
     private var templateProblem: String? {
         guard isTemplate else { return nil }
-        let built = inputs.compactMap { row -> TemplateInputDefinition? in
-            let name = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let description = row.description.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty || !description.isEmpty else { return nil }
-            return TemplateInputDefinition(name: name, description: description, required: row.required)
-        }
-        if let problem = TemplateInputValidation.validateDefinitions(built) { return problem }
-        let definedNames = Set(built.map(\.name))
+        let definitions = builtInputs
+        if let problem = TemplateInputValidation.validateDefinitions(definitions) { return problem }
+        let definedNames = Set(definitions.map(\.name))
         let titleTemplate = instanceTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
         if !titleTemplate.isEmpty,
            let problem = TemplateStringRenderer.validate(titleTemplate, allowedNames: definedNames) {
@@ -414,48 +409,63 @@ struct TaskEditorSheet: View {
         }
         // The same placeholder check the store applies on save, run live so a mistyped
         // `{{input}}` reads as a typo next to the input list rather than as a rejected Save.
-        var fields: [(field: String, text: String)] = [("title", title), ("description", description)]
-        for (position, step) in steps.filter({ $0.status != .removed }).enumerated() {
-            fields += AgentTask.templateRenderedTextFields(ofStep: step.text, atPosition: position + 1)
-        }
-        for row in criteria {
-            fields += AgentTask.templateRenderedTextFields(ofCriterion: AcceptanceCriterion(
-                id: row.id,
-                name: row.name,
-                validationPrompt: row.validationPrompt,
-                inputEnumeratorPrompt: row.inputEnumeratorPrompt,
-                waivable: row.waivable,
-                origin: .user
-            ))
-        }
-        return TemplateInputValidation.firstProblem(in: fields, definedNames: definedNames)
+        // Built from the SAME lists `save()` writes, so the field this names is the field the
+        // refusal names — numbering over the raw rows made this say "step 3" where the store said
+        // "step 2", and quoting a raw row made it name a criterion the store called something else.
+        return TemplateInputValidation.firstProblem(
+            authoringTemplateWithTitle: title,
+            description: description,
+            activeStepTexts: builtActiveSteps.map(\.text),
+            criteria: builtCriteria,
+            definedNames: definedNames
+        )
     }
 
-    private func save() {
-        let builtInputs = inputs.compactMap { row -> TemplateInputDefinition? in
+    /// The template input definitions this form would save. Shared with `save()` so the live
+    /// warning and the refusal that actually blocks Save can never disagree about what is written.
+    private var builtInputs: [TemplateInputDefinition] {
+        inputs.compactMap { row -> TemplateInputDefinition? in
             let name = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let description = row.description.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty || !description.isEmpty else { return nil }
             return TemplateInputDefinition(name: name, description: description, required: row.required)
         }
-        let builtCriteria = criteria.compactMap { row -> AcceptanceCriterion? in
+    }
+
+    /// The acceptance criteria this form would save. A row with neither a name nor a prompt is
+    /// dropped, and an empty name falls back to the prompt — which is also the name the store
+    /// quotes back in a placeholder refusal, so the live warning has to be built from exactly this
+    /// list or it names a different criterion than the save does.
+    private var builtCriteria: [AcceptanceCriterion] {
+        criteria.compactMap { row -> AcceptanceCriterion? in
             let name = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let prompt = row.validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty || !prompt.isEmpty else { return nil }
+            let enumerator = row.inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             return AcceptanceCriterion(
                 id: row.id,
                 name: name.isEmpty ? prompt : name,
                 validationPrompt: prompt.isEmpty ? name : prompt,
-                inputEnumeratorPrompt: row.inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? nil
-                    : row.inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+                inputEnumeratorPrompt: enumerator.isEmpty ? nil : enumerator,
                 waivable: row.waivable,
                 origin: .user
             )
         }
+    }
+
+    /// The ACTIVE steps this form would save, in plan order. Empty rows are dropped HERE, exactly
+    /// as they are on save, so the position a placeholder problem names is the position `setSteps`
+    /// names.
+    private var builtActiveSteps: [TaskStep] {
+        steps.compactMap { $0.built() }
+    }
+
+    private func save() {
+        let inputDefinitions = builtInputs
+        let criteriaToSave = builtCriteria
         // Tombstones go back on the end, matching the ordering convention `applyStepAction`'s
         // reorder/move use: active steps in plan order, then the removal record.
-        let builtSteps = steps.compactMap { $0.built() } + preservedTombstones
+        let builtSteps = builtActiveSteps + preservedTombstones
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else {
@@ -474,9 +484,9 @@ struct TaskEditorSheet: View {
                     title: trimmedTitle,
                     description: trimmedDescription,
                     isTemplate: isTemplate,
-                    templateInputDefinitions: builtInputs,
+                    templateInputDefinitions: inputDefinitions,
                     templateInstanceTitleTemplate: instanceTitleTemplate,
-                    acceptanceCriteria: builtCriteria,
+                    acceptanceCriteria: criteriaToSave,
                     steps: builtSteps
                 )
             case .edit(let task):
@@ -485,11 +495,11 @@ struct TaskEditorSheet: View {
                     title: trimmedTitle,
                     description: trimmedDescription,
                     isTemplate: isTemplate,
-                    templateInputDefinitions: builtInputs,
+                    templateInputDefinitions: inputDefinitions,
                     templateInstanceTitleTemplate: instanceTitleTemplate
                 )
                 if saved && canEditValidationContract {
-                    let criteriaSaved = await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: builtCriteria)
+                    let criteriaSaved = await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteriaToSave)
                     let stepsSaved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
                     saved = criteriaSaved && stepsSaved
                 }

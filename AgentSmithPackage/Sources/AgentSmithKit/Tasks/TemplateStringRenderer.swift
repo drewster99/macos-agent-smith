@@ -132,12 +132,12 @@ public enum TemplateStringRenderer {
             }
             output += template[index..<openRange.lowerBound]
             guard let closeRange = template[openRange.upperBound...].range(of: "}}") else {
-                return .failure("Unclosed template placeholder in '\(template)'.")
+                return .failure(unclosedPlaceholderProblem(in: template, at: openRange.lowerBound))
             }
             let rawName = String(template[openRange.upperBound..<closeRange.lowerBound])
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty, rawName == name, TemplateInputValidation.isValidName(name) else {
-                return .failure("Invalid template placeholder '{{\(rawName)}}'. Names must match ^[a-z][a-z0-9_]*$.")
+                return .failure("Invalid template placeholder '{{\(quotedForMessage(rawName))}}'. Names must match ^[a-z][a-z0-9_]*$.")
             }
             guard definedNames.contains(name) else {
                 return .failure("Unknown template placeholder '{{\(name)}}'. Valid inputs: \(definedNames.sorted().joined(separator: ", ")).")
@@ -146,6 +146,45 @@ public enum TemplateStringRenderer {
             index = closeRange.upperBound
         }
         return .success(collapsingWhitespace(output))
+    }
+
+    /// How much text is quoted back around a problem in an error message. `validate` runs on
+    /// authored BODY prose — a description or a validation prompt is markdown that routinely runs
+    /// to thousands of characters — so interpolating the whole template produced a message nobody
+    /// could read, in a sheet label and a tool result that both have to hold it.
+    private static let messageContextCharsBeforeProblem = 60
+    private static let messageContextCharsAfterProblem = 140
+    /// The cap on a quoted SPAN whose first character is already the problem.
+    private static let maxQuotedSpanCharsInMessage = 80
+
+    /// The "unclosed `{{`" problem, quoting a WINDOW around the offending braces and naming their
+    /// 0-based character offset.
+    ///
+    /// A leading PREFIX would be worse here than quoting nothing. Unlike every other problem this
+    /// type reports, the unclosed case has no placeholder NAME to put in the message — the quoted
+    /// text is the reader's only locator — and the offending `{{` sits wherever the author typed
+    /// it, which the scan reaches only after passing every well-formed placeholder before it.
+    /// Quoting the first N characters would show text that is not the problem while omitting the
+    /// text that is, and look authoritative doing it.
+    private static func unclosedPlaceholderProblem(in template: String, at openIndex: String.Index) -> String {
+        let offset = template.distance(from: template.startIndex, to: openIndex)
+        let start = template.index(openIndex, offsetBy: -messageContextCharsBeforeProblem, limitedBy: template.startIndex)
+            ?? template.startIndex
+        let end = template.index(openIndex, offsetBy: messageContextCharsAfterProblem, limitedBy: template.endIndex)
+            ?? template.endIndex
+        let leading = start == template.startIndex ? "" : "…"
+        let trailing = end == template.endIndex ? "" : "…"
+        return "Unclosed template placeholder at character \(offset) in '\(leading)\(template[start..<end])\(trailing)'."
+    }
+
+    /// A span bounded for quoting in an error message. Safe to truncate from the FRONT, unlike the
+    /// unclosed case — every caller quotes a span whose first character is already the offending
+    /// one. `rawName` is everything between `{{` and the next `}}`, which in prose about templating,
+    /// shell, or JSON can be paragraphs apart.
+    private static func quotedForMessage(_ span: String) -> String {
+        span.count <= maxQuotedSpanCharsInMessage
+            ? span
+            : String(span.prefix(maxQuotedSpanCharsInMessage)) + "…"
     }
 
     /// Collapses runs of whitespace to a single space and trims, so an omitted optional input
@@ -162,12 +201,12 @@ public enum TemplateStringRenderer {
         while index < template.endIndex {
             guard let openRange = template[index...].range(of: "{{") else { return nil }
             guard let closeRange = template[openRange.upperBound...].range(of: "}}") else {
-                return "Unclosed template placeholder in '\(template)'."
+                return unclosedPlaceholderProblem(in: template, at: openRange.lowerBound)
             }
             let rawName = String(template[openRange.upperBound..<closeRange.lowerBound])
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty, rawName == name, TemplateInputValidation.isValidName(name) else {
-                return "Invalid template placeholder '{{\(rawName)}}'. Names must match ^[a-z][a-z0-9_]*$."
+                return "Invalid template placeholder '{{\(quotedForMessage(rawName))}}'. Names must match ^[a-z][a-z0-9_]*$."
             }
             guard allowedNames.contains(name) else {
                 return "Unknown template placeholder '{{\(name)}}'. Valid inputs: \(allowedNames.sorted().joined(separator: ", "))."

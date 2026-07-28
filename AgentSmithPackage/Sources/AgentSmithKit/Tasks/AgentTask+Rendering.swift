@@ -5,9 +5,32 @@ import Foundation
 /// the SAME 1-based numbers. "Criterion 5" and "Step 3" therefore mean the same thing in the
 /// briefing, in a tool result, in the validator's rejection punch list, and in the UI.
 extension AgentTask {
+    /// The `## Template inputs` block — the named values this run was instantiated with — rendered
+    /// in ONE place so the worker briefing and `renderedDescriptionWithTemplateInputs` cannot drift
+    /// into two different headers. Nil when the task carries no input values, i.e. everything that
+    /// isn't a template instance.
+    ///
+    /// Kept even though `{{name}}` placeholders are now substituted inline through the title,
+    /// description, steps, and criteria, because substitution DESTROYS the name→value binding: the
+    /// rendered text shows `/Users/me/Foo.app`, never `app_path`. An input no placeholder
+    /// references has no inline carrier at all, a per-run `[Amendment]` is appended after
+    /// instantiation and never substituted, and instances written before substitution existed still
+    /// hold literal `{{name}}` on disk. This block is the only place the NAMES survive — including
+    /// for `SecurityEvaluator.pathResolutionAppendix`, which harvests path candidates out of it.
+    ///
+    /// Carries no explanatory prose on purpose. Any sentence about what `{{placeholder}}` means is
+    /// false for one of those three populations, and this string also reaches the Security Agent on
+    /// every tool call, the user's New Task banner, and the semantic-retrieval embedding query —
+    /// which is cosine-gated at fixed thresholds, so boilerplate identical across every instance
+    /// would shift every query vector.
+    func renderedTemplateInputsSection() -> String? {
+        guard let templateInputValues = renderedTemplateInputValues() else { return nil }
+        return "## Template inputs\n\(templateInputValues)"
+    }
+
     func renderedDescriptionWithTemplateInputs() -> String {
-        guard let templateInputValues = renderedTemplateInputValues() else { return description }
-        return "\(description)\n\n## Template inputs\n\(templateInputValues)"
+        guard let section = renderedTemplateInputsSection() else { return description }
+        return "\(description)\n\n\(section)"
     }
 
     var hasSubmittedResult: Bool {

@@ -94,17 +94,20 @@ struct ChannelTimestamp: View {
     var foregroundStyle: HierarchicalShapeStyle = .secondary
 
     @Environment(\.timestampPreferences) private var prefs
-
+    
+    /// Determines if this timestamp should be visible based on its bucket and current preferences.
+    /// Computed as a separate property to avoid closure execution in body.
+    private var isVisible: Bool {
+        switch bucket {
+        case .taskBanner: return prefs.taskBanners
+        case .systemMessage: return prefs.systemMessages
+        case .messaging: return prefs.messaging
+        case .toolCall: return prefs.toolCalls
+        }
+    }
+    
     var body: some View {
-        let _isVisible: Bool = {
-            switch bucket {
-            case .taskBanner: return prefs.taskBanners
-            case .systemMessage: return prefs.systemMessages
-            case .messaging: return prefs.messaging
-            case .toolCall: return prefs.toolCalls
-            }
-        }()
-        if _isVisible {
+        if isVisible {
             Text(sharedTimestampFormatter.string(from: timestamp))
                 .font(AppFonts.channelTimestamp)
                 .foregroundStyle(foregroundStyle)

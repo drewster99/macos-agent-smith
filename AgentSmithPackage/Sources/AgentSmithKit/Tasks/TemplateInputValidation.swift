@@ -83,13 +83,50 @@ public enum TemplateInputValidation {
     /// Returns a problem when any field of `criterion` references an undefined placeholder.
     /// Pass an empty `definedNames` for a non-template task — nothing is a placeholder then.
     public static func placeholderProblem(inCriterion criterion: AcceptanceCriterion, definedNames: Set<String>) -> String? {
-        firstProblem(in: AgentTask.templateRenderedTextFields(ofCriterion: criterion), definedNames: definedNames)
+        firstProblem(in: renderableTextFields(ofCriterion: criterion), definedNames: definedNames)
     }
 
     /// Returns a problem when a step's text references an undefined placeholder. `position` is the
     /// step's 1-based place among the ACTIVE steps, matching the numbering everything else shows.
     public static func placeholderProblem(inStep text: String, atPosition position: Int, definedNames: Set<String>) -> String? {
-        firstProblem(in: AgentTask.templateRenderedTextFields(ofStep: text, atPosition: position), definedNames: definedNames)
+        firstProblem(in: renderableTextFields(ofStep: text, atPosition: position), definedNames: definedNames)
+    }
+
+    /// The first placeholder problem anywhere in the authored text of a template — title,
+    /// description, every ACTIVE step, every criterion — checked in the field order
+    /// `TaskStore.instantiateTemplate` substitutes them. One construction, so the callers that
+    /// check a whole prospective template cannot drift from each other or from it.
+    ///
+    /// It takes text GROUPS rather than an `AgentTask`, and that is not a convenience: an EXISTING
+    /// task is reachable only through the store's per-field writes, each of which validates the
+    /// text IT writes. Handing this a stored task's steps or criteria from a call that does not
+    /// write them re-creates the whole-task sweep that made renaming a template input impossible —
+    /// see the note in `TaskStore.setTemplateInputDefinitions`. `updateDefinition` writes title and
+    /// description only and must keep checking only those two. **Nothing in `TaskStore` may call
+    /// this.**
+    ///
+    /// Its callers are the two CREATION paths (`create_task`, the task editor's Create), which
+    /// write every field they check before anything is stored because `addTask` has no way to
+    /// refuse a task — plus the task editor's LIVE inline warning, which is the one deliberate
+    /// exception. That one covers the whole prospective task, including text a locked-contract save
+    /// would not write, and it never disables Save: it is how a placeholder stranded by a removed
+    /// input becomes visible at all. Advisory, never a gate — that distinction is the whole reason
+    /// the sweep could be removed.
+    public static func firstProblem(
+        authoringTemplateWithTitle title: String,
+        description: String,
+        activeStepTexts: [String],
+        criteria: [AcceptanceCriterion],
+        definedNames: Set<String>
+    ) -> String? {
+        var fields: [(field: String, text: String)] = [("title", title), ("description", description)]
+        for (position, text) in activeStepTexts.enumerated() {
+            fields += renderableTextFields(ofStep: text, atPosition: position + 1)
+        }
+        for criterion in criteria {
+            fields += renderableTextFields(ofCriterion: criterion)
+        }
+        return firstProblem(in: fields, definedNames: definedNames)
     }
 
     /// The first labelled field referencing an undefined placeholder, or nil when all are clean.
@@ -126,21 +163,24 @@ public enum TemplateInputValidation {
 /// task editor. Substitution covers `title`, `description`, each ACTIVE step, and each criterion's
 /// name / validation prompt / input enumerator prompt (`TaskStore.instantiateTemplate`); the two
 /// simple fields are labelled inline by their callers, and the two structured ones get a helper
-/// here because they carry a position or a name.
+/// because they carry a position or a name.
 ///
-/// There is deliberately no whole-task variant. Nothing validates a task's ENTIRE authored text
-/// against a definition set any more — see the note in `setTemplateInputDefinitions` for why that
-/// made renaming an input impossible. Each write checks the text it writes.
-extension AgentTask {
+/// There is deliberately no variant taking a STORED `AgentTask`. Nothing sweeps an existing task's
+/// entire authored text against a definition set — see the note in `setTemplateInputDefinitions`
+/// for why that made renaming an input impossible. Each write checks the text it writes. The one
+/// whole-text check that exists, `firstProblem(authoringTemplateWithTitle:…)`, serves the creation
+/// paths (which write every field they check) and the editor's advisory live warning (which gates
+/// nothing).
+extension TemplateInputValidation {
     /// The renderable fields of a single step. `position` is its 1-based place among the ACTIVE
     /// steps, matching the numbering the worker, the briefing, and `get_task_details` all show.
-    public static func templateRenderedTextFields(ofStep text: String, atPosition position: Int) -> [(field: String, text: String)] {
+    private static func renderableTextFields(ofStep text: String, atPosition position: Int) -> [(field: String, text: String)] {
         [("step \(position)", text)]
     }
 
     /// The renderable fields of a single acceptance criterion. `name` is included because for a
     /// default-validated criterion the name IS the judging instruction.
-    public static func templateRenderedTextFields(ofCriterion criterion: AcceptanceCriterion) -> [(field: String, text: String)] {
+    private static func renderableTextFields(ofCriterion criterion: AcceptanceCriterion) -> [(field: String, text: String)] {
         var fields: [(field: String, text: String)] = [
             ("criterion \"\(criterion.name)\" name", criterion.name),
             ("criterion \"\(criterion.name)\" validation prompt", criterion.validationPrompt)

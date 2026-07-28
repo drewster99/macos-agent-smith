@@ -231,7 +231,11 @@ struct RunTaskTool: AgentTool {
             } else if task.isTemplate {
                 deferredTemplateAmendment = trimmed
             } else {
-                await context.taskStore.amendDescription(id: taskID, amendment: trimmed)
+                // Handled, unlike the two instance sites below: nothing has been created or
+                // announced yet, so refusing here refuses cleanly.
+                if let problem = await context.taskStore.amendDescription(id: taskID, amendment: trimmed) {
+                    return .failure(problem)
+                }
             }
         }
 
@@ -246,7 +250,13 @@ struct RunTaskTool: AgentTool {
                 return .failure(message)
             }
             if let deferredTemplateAmendment, !deferredTemplateAmendment.isEmpty {
-                await context.taskStore.amendDescription(id: instance.id, amendment: deferredTemplateAmendment)
+                // Discarded on purpose. The instance is `isTemplate: false` by construction
+                // (`instantiateTemplate`) and the placeholder check is template-only, so there is
+                // nothing here to refuse. Bailing would also be the WRONG response: the instance
+                // already exists and has not been announced yet, so an early return would leave an
+                // orphaned `.pending` task that auto-advance starts later anyway, minus these
+                // instructions.
+                _ = await context.taskStore.amendDescription(id: instance.id, amendment: deferredTemplateAmendment)
             }
             await context.taskStore.addUpdate(id: task.id, message: "Started instance \(instance.id.uuidString) from this template.")
             let announced = await context.taskStore.task(id: instance.id) ?? instance

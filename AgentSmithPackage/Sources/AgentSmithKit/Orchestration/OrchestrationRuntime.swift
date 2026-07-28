@@ -1034,8 +1034,8 @@ public actor OrchestrationRuntime {
     func composeBrownTaskBriefing(for task: AgentTask) async -> String {
         var parts: [String] = []
         parts.append("Task: \"\(task.title)\" (ID: \(task.id.uuidString))\n\n\(task.description)")
-        if let templateInputValues = task.renderedTemplateInputValues() {
-            parts.append("## Template inputs\n\(templateInputValues)")
+        if let templateInputs = task.renderedTemplateInputsSection() {
+            parts.append(templateInputs)
         }
         // A prior acknowledgment means this is a resume (respawn after interruption, or a
         // rejection sent back for revision). The synthetic ack hasn't run yet at briefing time,
@@ -1753,7 +1753,11 @@ public actor OrchestrationRuntime {
         // Re-read after amending so the announced description reflects the applied instructions
         // (Brown's briefing already reads the task fresh by id; this keeps the banner consistent).
         if let amendment, !amendment.isEmpty {
-            await taskStore.amendDescription(id: instance.id, amendment: amendment)
+            // Discarded on purpose, same as `RunTaskTool`'s deferred-amendment site: the instance is
+            // `isTemplate: false` by construction, so the template-only placeholder check has
+            // nothing to refuse, and bailing after the instance exists would orphan a `.pending`
+            // task that auto-advance starts later regardless.
+            _ = await taskStore.amendDescription(id: instance.id, amendment: amendment)
         }
         let announced = await taskStore.task(id: instance.id) ?? instance
         // Fetch relevant context for THIS run (not just at template authoring) so a repeatedly-run

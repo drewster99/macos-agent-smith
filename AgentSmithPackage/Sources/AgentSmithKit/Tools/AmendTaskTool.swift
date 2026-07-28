@@ -65,7 +65,9 @@ struct AmendTaskTool: AgentTool {
         }
         let attachments = resolution.attachments
 
-        await context.taskStore.amendDescription(id: taskID, amendment: trimmed, attachments: attachments)
+        if let problem = await context.taskStore.amendDescription(id: taskID, amendment: trimmed, attachments: attachments) {
+            return .failure(problem)
+        }
 
         let deliveredToBrown = await deliverToLiveBrown(
             taskID: taskID,

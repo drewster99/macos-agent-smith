@@ -381,6 +381,30 @@ public actor TaskStore {
                 origin: criterion.origin
             )
         }
+        // Composed ONCE, because both title paths need it: the template's own title is what an
+        // instance inherits, and it is equally what the instance falls back to when a title
+        // template renders to nothing. This was composed twice and the copies disagreed — the
+        // fallback handed back the RAW title, which stopped being correct the moment
+        // `template.title` began rendering like every other authored field. A template titled
+        // `Localize {{app_name}}` fronted by an optional `{{locale}}` title template showed a
+        // placeholder for an input the run had actually supplied.
+        //
+        // An author who wrote placeholders straight into the title meant them just as much as the
+        // ones in the description, so it renders single-line, like the title template it stands in
+        // for. That is safe as the universal fallback because `.singleLine` collapses whitespace
+        // ONLY when something substituted, so a title holding no placeholders comes back
+        // byte-for-byte — the raw title, reached by a longer route.
+        let renderedTemplateTitle = substituted(template.title, layout: .singleLine)
+        // Empty means the title was nothing BUT placeholders and every one was left blank, so there
+        // is no rendered text to inherit and the author's raw text stands in — it at least names
+        // the template the run came from. Deliberately not an error: failing would let a cosmetic
+        // title veto a recurring scheduled run forever, the same reason an omitted optional input
+        // renders empty rather than erroring.
+        //
+        // Whitespace-only is not treated as empty, and cannot need to be: `collapsingWhitespace`
+        // trims, so a whitespace-only result implies nothing substituted, which implies the value
+        // already IS `template.title` — both sides of the ternary agree.
+        let titleInheritedFromTemplate = renderedTemplateTitle.isEmpty ? template.title : renderedTemplateTitle
         let instanceTitle: String
         if let titleTemplate = template.templateInstanceTitleTemplate,
            !titleTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -391,17 +415,12 @@ public actor TaskStore {
             ) {
             case .success(let rendered):
                 let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
-                instanceTitle = trimmed.isEmpty ? template.title : trimmed
+                instanceTitle = trimmed.isEmpty ? titleInheritedFromTemplate : trimmed
             case .failure(let message):
                 return .failure(message)
             }
         } else {
-            // No instance title template, so the template's OWN title is what the instance
-            // inherits — and an author who wrote placeholders straight into it meant them just as
-            // much as the ones in the description. Rendered single-line, like the title template
-            // it stands in for, so an omitted optional input can't leave a doubled space.
-            let rendered = substituted(template.title, layout: .singleLine)
-            instanceTitle = rendered.isEmpty ? template.title : rendered
+            instanceTitle = titleInheritedFromTemplate
         }
         let instance = AgentTask(
             title: instanceTitle,
@@ -764,8 +783,27 @@ public actor TaskStore {
     /// amendment to a running Brown is `AmendTaskTool`'s responsibility, since Brown's
     /// briefing is a one-time spawn snapshot. Attachments appended here are also
     /// re-injected into Brown's briefing on any future respawn.
-    public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) {
-        guard var task = tasks[id] else { return }
+    /// Returns a human-readable refusal, or nil on success. On a TEMPLATE the AMENDMENT is checked
+    /// for placeholders naming no defined input: this writes text that gets substituted at
+    /// instantiation, so it carries the same authoring check as `updateDescription` and
+    /// `updateDefinition` — and unlike those, a typo here welds into EVERY future clone. Only the
+    /// amendment is checked, never the description it lands on; re-sweeping the existing text would
+    /// leave a template already carrying an orphan placeholder from an earlier input rename
+    /// permanently un-amendable, the deadlock documented in `setTemplateInputDefinitions`.
+    ///
+    /// Deliberately NOT `@discardableResult` — a silently dropped refusal is the whole defect.
+    public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) -> String? {
+        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+        // Checked ABOVE the dedup: below it, re-sending an already-applied bad amendment would fall
+        // into the no-op branch and report success for text the system rejected the first time.
+        if task.isTemplate,
+           let problem = TemplateInputValidation.placeholderProblem(
+               in: amendment,
+               field: "description amendment",
+               definedNames: Set(task.templateInputDefinitions.map(\.name))
+           ) {
+            return problem
+        }
         // Dedup: don't stack an [Amendment] identical to the one already at the end of the
         // description. `run_task` amends BEFORE it tries to spawn/scope, so a failed start
         // (e.g. a tool-scoping failure) leaves the amendment applied; retrying with the same
@@ -779,6 +817,7 @@ public actor TaskStore {
         task.updatedAt = Date()
         tasks[id] = task
         onChange?()
+        return nil
     }
 
     /// Records a help-request escalation from Brown and parks the task in `.awaitingHelp`, its own

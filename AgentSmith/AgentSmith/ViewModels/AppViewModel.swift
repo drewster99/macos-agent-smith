@@ -1382,18 +1382,11 @@ final class AppViewModel {
         // Checked before anything is stored so a mistyped `{{placeholder}}` leaves no half-built
         // task behind; `addTask` has no way to refuse one. The store re-checks each field it writes.
         if isTemplate {
-            var fields: [(field: String, text: String)] = [
-                ("title", title.trimmingCharacters(in: .whitespacesAndNewlines)),
-                ("description", description.trimmingCharacters(in: .whitespacesAndNewlines))
-            ]
-            for (position, step) in steps.filter(\.isActive).enumerated() {
-                fields += AgentTask.templateRenderedTextFields(ofStep: step.text, atPosition: position + 1)
-            }
-            for criterion in acceptanceCriteria {
-                fields += AgentTask.templateRenderedTextFields(ofCriterion: criterion)
-            }
             if let problem = TemplateInputValidation.firstProblem(
-                in: fields,
+                authoringTemplateWithTitle: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+                activeStepTexts: steps.filter(\.isActive).map(\.text),
+                criteria: acceptanceCriteria,
                 definedNames: Set(templateInputDefinitions.map(\.name))
             ) {
                 taskActionError = problem

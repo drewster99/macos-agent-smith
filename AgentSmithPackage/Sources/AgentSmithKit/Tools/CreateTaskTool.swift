@@ -355,15 +355,13 @@ public struct CreateTaskTool: AgentTool {
         // mistyped `{{placeholder}}` leaves nothing behind to clean up. The store re-checks each
         // field on its own write; this pass exists because `addTask` has no way to refuse.
         if isTemplate {
-            let definedNames = Set(templateInputDefinitions.map(\.name))
-            var fields: [(field: String, text: String)] = [("title", title), ("description", description)]
-            for (position, text) in stepTexts.enumerated() {
-                fields += AgentTask.templateRenderedTextFields(ofStep: text, atPosition: position + 1)
-            }
-            for criterion in seedCriteria {
-                fields += AgentTask.templateRenderedTextFields(ofCriterion: criterion)
-            }
-            if let problem = TemplateInputValidation.firstProblem(in: fields, definedNames: definedNames) {
+            if let problem = TemplateInputValidation.firstProblem(
+                authoringTemplateWithTitle: title,
+                description: description,
+                activeStepTexts: stepTexts,
+                criteria: seedCriteria,
+                definedNames: Set(templateInputDefinitions.map(\.name))
+            ) {
                 return .failure("Task NOT created — \(problem)")
             }
         }
