@@ -161,6 +161,9 @@ private struct RoleAgentCard: View {
     let roleMessages: [ChannelMessage]
 
     @State private var cached: AgentRoleData?
+    /// All the watchers below funnel through this so a frame in which several inputs change
+    /// rebuilds this card once. See `RecomputeCoalescer`.
+    @State private var coalescer = RecomputeCoalescer()
 
     var body: some View {
         // The Group wrapper gives the view-modifier chain (.onChange) a stable parent View
@@ -180,22 +183,22 @@ private struct RoleAgentCard: View {
         // initial-fires per modifier (one for each watcher) on first body eval was
         // contributing to SwiftUI's "tried to update multiple times per frame" warnings on
         // the Array<ChannelMessage>-typed watchers.
-        .task { recompute() }
-        .onChange(of: roleMessages)                                                  { _, _ in recompute() }
-        .onChange(of: viewModel.inspectorStore.turnsByRole[role])                    { _, _ in recompute() }
-        .onChange(of: viewModel.inspectorStore.liveContexts[role])                   { _, _ in recompute() }
+        .task { scheduleRecompute() }
+        .onChange(of: roleMessages)                                                  { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.inspectorStore.turnsByRole[role])                    { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.inspectorStore.liveContexts[role])                   { _, _ in scheduleRecompute() }
         .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationRecords.count : 0)
-                                                                                     { _, _ in recompute() }
-        .onChange(of: viewModel.processingRoles.contains(role))                      { _, _ in recompute() }
+                                                                                     { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.processingRoles.contains(role))                      { _, _ in scheduleRecompute() }
         // The Security Agent's busy state also comes from the evaluation registry, so that has to
         // wake the recompute too or its card stays dark through every per-call review.
         .onChange(of: role == .securityAgent ? viewModel.shared.liveActivitySnapshot.securityEvaluations : 0)
-                                                                                     { _, _ in recompute() }
-        .onChange(of: viewModel.toolExecutingByRole[role])                           { _, _ in recompute() }
-        .onChange(of: viewModel.agentPollIntervals[role])                            { _, _ in recompute() }
-        .onChange(of: viewModel.agentMaxToolCalls[role])                             { _, _ in recompute() }
-        .onChange(of: viewModel.agentToolNames[role])                                { _, _ in recompute() }
-        .onChange(of: viewModel.resolvedAgentConfigs[role])                          { _, _ in recompute() }
+                                                                                     { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.toolExecutingByRole[role])                           { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.agentPollIntervals[role])                            { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.agentMaxToolCalls[role])                             { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.agentToolNames[role])                                { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.resolvedAgentConfigs[role])                          { _, _ in scheduleRecompute() }
     }
 
     /// Helper extracted to keep the AgentCard call out of the body's `@ViewBuilder`
@@ -252,6 +255,12 @@ private struct RoleAgentCard: View {
         }
     }
 
+    /// Asks for a rebuild on the next main-queue turn. Nothing calls `recompute()` directly —
+    /// that is what produced several `cached` assignments inside one frame.
+    private func scheduleRecompute() {
+        coalescer.schedule { recompute() }
+    }
+
     private func recompute() {
         let store = viewModel.inspectorStore
         let next = AgentRoleData(
@@ -271,12 +280,10 @@ private struct RoleAgentCard: View {
             executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[role]),
             modelConfig: viewModel.resolvedAgentConfigs[role]
         )
-        // Skip the assignment if the struct didn't change — keeps body output stable
-        // and lets SwiftUI's diff short-circuit AgentCard's body. Project rule: defer
-        // the @State mutation out of .onChange via DispatchQueue.main.async.
-        DispatchQueue.main.async {
-            if cached != next { cached = next }
-        }
+        // Skip the assignment if the struct didn't change — keeps body output stable and lets
+        // SwiftUI's diff short-circuit AgentCard's body. Already deferred off the .onChange
+        // closure by the coalescer, so this assigns directly.
+        if cached != next { cached = next }
     }
 
     /// Flattens the `[toolName: count]` multiset into an ordered, repeated-name list so
@@ -302,6 +309,7 @@ private struct SummarizerAgentCard: View {
     let summarizerMessages: [ChannelMessage]
 
     @State private var cached: SummarizerData?
+    @State private var coalescer = RecomputeCoalescer()
 
     var body: some View {
         Group {
@@ -309,12 +317,12 @@ private struct SummarizerAgentCard: View {
                 cardView(for: cached)
             }
         }
-        .task { recompute() }
-        .onChange(of: summarizerMessages)                              { _, _ in recompute() }
-        .onChange(of: viewModel.processingRoles.contains(.summarizer)) { _, _ in recompute() }
-        .onChange(of: viewModel.toolExecutingByRole[.summarizer])      { _, _ in recompute() }
-        .onChange(of: viewModel.agentPollIntervals[.summarizer])       { _, _ in recompute() }
-        .onChange(of: viewModel.agentMaxToolCalls[.summarizer])        { _, _ in recompute() }
+        .task { scheduleRecompute() }
+        .onChange(of: summarizerMessages)                              { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.processingRoles.contains(.summarizer)) { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.toolExecutingByRole[.summarizer])      { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.agentPollIntervals[.summarizer])       { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.agentMaxToolCalls[.summarizer])        { _, _ in scheduleRecompute() }
     }
 
     @ViewBuilder
@@ -341,6 +349,12 @@ private struct SummarizerAgentCard: View {
         )
     }
 
+    /// Asks for a rebuild on the next main-queue turn. Nothing calls `recompute()` directly —
+    /// that is what produced several `cached` assignments inside one frame.
+    private func scheduleRecompute() {
+        coalescer.schedule { recompute() }
+    }
+
     private func recompute() {
         let store = viewModel.inspectorStore
         let next = SummarizerData(
@@ -351,10 +365,8 @@ private struct SummarizerAgentCard: View {
             executingTools: RoleAgentCard.executingToolNames(viewModel.toolExecutingByRole[.summarizer]),
             messages: summarizerMessages
         )
-        // Project rule: defer @State mutation out of .onChange via DispatchQueue.main.async.
-        DispatchQueue.main.async {
-            if cached != next { cached = next }
-        }
+        // Already deferred off the .onChange closure by the coalescer, so this assigns directly.
+        if cached != next { cached = next }
     }
 }
 

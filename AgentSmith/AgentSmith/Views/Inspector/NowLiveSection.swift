@@ -25,6 +25,9 @@ struct NowLiveSection: View {
     let viewModel: AppViewModel
 
     @State private var rows: [LiveTaskRow] = []
+    /// Every `.onChange` below funnels through this, so a frame in which four inputs change
+    /// rebuilds the rows once instead of four times. See `RecomputeCoalescer`.
+    @State private var coalescer = RecomputeCoalescer()
 
     var body: some View {
         // Rendered only when something is actually live, so an idle session shows no
@@ -55,28 +58,34 @@ struct NowLiveSection: View {
         // thinking for minutes) none of them fire — an aged-out row would sit on screen until
         // some unrelated change happened to force a recompute.
         .task {
-            recompute()
+            scheduleRecompute()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.staleSweepIntervalSeconds))
                 guard !Task.isCancelled else { return }
-                recompute()
+                scheduleRecompute()
             }
         }
-        .onChange(of: taskSignature) { _, _ in recompute() }
-        .onChange(of: viewModel.messages) { _, _ in recompute() }
-        .onChange(of: viewModel.processingInstances) { _, _ in recompute() }
-        .onChange(of: viewModel.toolExecutingByInstance) { _, _ in recompute() }
+        .onChange(of: taskSignature) { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.messages) { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.processingInstances) { _, _ in scheduleRecompute() }
+        .onChange(of: viewModel.toolExecutingByInstance) { _, _ in scheduleRecompute() }
         // The security registry drives both a worker's "waiting on security" line and the
         // per-call "Security" marker, so it has to wake the recompute like any other live input.
         // Without this the only thing refreshing them is the 10s stale sweep, and a review that
         // starts and finishes between ticks never appears at all.
-        .onChange(of: viewModel.shared.liveActivitySnapshot) { _, _ in recompute() }
+        .onChange(of: viewModel.shared.liveActivitySnapshot) { _, _ in scheduleRecompute() }
     }
 
     /// A cheap Equatable digest of the active tasks' identity + stage, so a status change
     /// (e.g. running → validating) triggers a recompute even when no new message arrived.
     private var taskSignature: [String] {
         viewModel.activeTaskList.map { "\($0.id.uuidString):\($0.status.rawValue)" }
+    }
+
+    /// Asks for a rebuild on the next main-queue turn. Callers never invoke `recompute()`
+    /// directly — that is what produced several `rows` assignments in a single frame.
+    private func scheduleRecompute() {
+        coalescer.schedule { recompute() }
     }
 
     private func recompute() {
@@ -155,10 +164,9 @@ struct NowLiveSection: View {
             )
         }
 
-        // Project rule: defer @State mutation out of .onChange / .task closures.
-        DispatchQueue.main.async {
-            if rows != next { rows = next }
-        }
+        // Already deferred off the .onChange / .task closure by the coalescer, so this assigns
+        // directly — wrapping it again would put the rebuild a further turn behind its inputs.
+        if rows != next { rows = next }
     }
 
     /// Assembles one call's state from its request, its Security Agent verdict, and its output.
