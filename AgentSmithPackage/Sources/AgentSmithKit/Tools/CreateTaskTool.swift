@@ -101,6 +101,12 @@ public struct CreateTaskTool: AgentTool {
                                                     prompt will typically be interpreted very literally, so be sure it is clear, \
                                                     concise and complete.
 
+                                                    The validator sees ONLY this one criterion — never the others — so the prompt must be \
+                                                    self-contained and scoped to this single deliverable. Never reference other criteria \
+                                                    ("as required above", "matching the other checks") and never ask it to judge overall \
+                                                    completeness ("confirm all work is done") — overall completeness is the union of the \
+                                                    criteria, not a criterion itself.
+
                                                     Example 1: "Confirm that the worker agent ran a web search and fetched the JSON file from the website. Also confirm the JSON file exists - the agent must either have attached it or given a path to the file. If they gave a path, confirm you can read the path. If all true, ACCEPT this item. Else REJECT."
 
                                                     Example 2 might be used when an enumerator is provided: "Look at the provided enumeration input and confirm that the term provided exists in list of words found in the file /tmp/allowed_words.txt.  If the word is found, ACCEPT this item. If not, REJECT."
@@ -144,6 +150,14 @@ public struct CreateTaskTool: AgentTool {
                         "description": .string("""
                             Acceptance / validation criteria -- the list of deliverables -- for this task. ALL items must either \
                             pass (be accepted) or be waived for the task to be considered successful.
+
+                            Criteria must be ORTHOGONAL and SELF-CONTAINED. Each criterion is judged independently by a \
+                            validator that sees ONLY that one criterion — never the rest of the list — so scope each \
+                            criterion to exactly ONE deliverable, never restate a fact another criterion already asserts, \
+                            and never write umbrella criteria like "all work is complete" or "final commit of ALL work". \
+                            When criteria overlap, one unresolved defect rejects several criteria at once, every rejection \
+                            round re-litigates that same defect once per overlapping criterion, and the task burns its \
+                            no-progress failure budget several times faster.
 
                             Put all validation instructions and list acceptable evidence into `validation_prompt`.
 

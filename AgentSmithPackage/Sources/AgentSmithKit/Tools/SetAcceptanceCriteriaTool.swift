@@ -40,7 +40,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                         ]),
                         "validation_prompt": .dictionary([
                             "type": .string("string"),
-                            "description": .string("Required instructions for the LLM that judges this criterion. State what to check and what evidence is sufficient.")
+                            "description": .string("Required instructions for the LLM that judges this criterion. State what to check and what evidence is sufficient. The judge sees ONLY this criterion — never the others — so the prompt must be self-contained and scoped to this ONE deliverable. Never write \"all work is complete\" or reference other criteria.")
                         ]),
                         "input_enumerator_prompt": .dictionary([
                             "type": .string("string"),
@@ -75,7 +75,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                         ]),
                         "validation_prompt": .dictionary([
                             "type": .string("string"),
-                            "description": .string("Required for add and update: the instructions for the LLM that judges this criterion.")
+                            "description": .string("Required for add and update: the instructions for the LLM that judges this criterion. The judge sees ONLY this criterion, so the prompt must be self-contained and scoped to this ONE deliverable — never \"all work is complete\" or a reference to another criterion.")
                         ]),
                         "input_enumerator_prompt": .dictionary([
                             "type": .string("string"),
@@ -109,6 +109,18 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             "identifies the most-starred repository, or reports a tie / that none exists, whichever \
             the data shows"). If the worker can do the task correctly and still fail the criterion as \
             written, the criterion is wrong; repeated no-progress rejections FAIL the task. \
+            \
+            Criteria must be ORTHOGONAL and SELF-CONTAINED. The judge of a criterion sees ONLY \
+            that criterion — never the rest of the contract — so it cannot know what another \
+            criterion covers: never write "as required by the other criteria" or "matches the \
+            format above". Scope each criterion to exactly ONE deliverable, and never let two \
+            criteria assert the same underlying fact. An umbrella criterion ("final commit of \
+            ALL work", "everything is complete") invites the judge to re-audit the entire task: \
+            one unresolved defect then rejects several criteria at once, every rejection round \
+            re-litigates that same defect once per overlapping criterion, and the no-progress \
+            failure budget burns down several times faster. A commit criterion judges commit \
+            evidence (hash + diff), not whether the committed work is complete — other criteria \
+            already judge that. \
             \
             TWO MODES, and you must pass exactly one. `criteria` REPLACES the whole list and is for \
             FIRST-TIME authoring — pass every criterion that should apply, not just new ones. Once a \
