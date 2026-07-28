@@ -328,6 +328,50 @@ struct TemplateSubstitutionTests {
         #expect(instance.description == "Build Widgets.")
     }
 
+    @Test("An amendment to a template is checked; one to an instance or ordinary task is not")
+    func amendmentsAreCheckedOnTemplatesOnly() async {
+        let store = TaskStore()
+        let template = await makeTemplate(
+            store: store,
+            description: "Build {{app_name}}.",
+            inputs: [TemplateInputDefinition(name: "app_name", description: "App.", required: true)]
+        )
+
+        // `amendDescription` is the THIRD writer of a template's description, and the text it
+        // appends is substituted at instantiation like the rest — so a typo here would weld into
+        // every future clone.
+        let problem = await store.amendDescription(id: template.id, amendment: "Also sign {{app_nmae}}.")
+        #expect(problem?.contains("app_nmae") == true)
+        #expect(problem?.contains("description amendment") == true)
+        #expect(await store.task(id: template.id)?.description == "Build {{app_name}}.")
+
+        // A placeholder naming a real input is accepted, and substitutes in the next instance.
+        #expect(await store.amendDescription(id: template.id, amendment: "Also sign {{app_name}}.") == nil)
+        guard let instance = await instance(store, template.id, ["app_name": "Widgets"]) else { return }
+        #expect(instance.description == "Build Widgets.\n\n[Amendment]: Also sign Widgets.")
+
+        // The INSTANCE carries a snapshot of the definitions but is not a template, and its text is
+        // never rendered again — so an amendment naming anything at all is fine. Gating on the
+        // definitions rather than on `isTemplate` would break every per-run instruction.
+        #expect(await store.amendDescription(id: instance.id, amendment: "Ignore {{whatever}}.") == nil)
+        #expect(await store.task(id: instance.id)?.description.hasSuffix("[Amendment]: Ignore {{whatever}}.") == true)
+    }
+
+    @Test("A rejected amendment stays rejected when it is re-sent")
+    func rejectedAmendmentIsNotLaunderedByTheDedup() async {
+        let store = TaskStore()
+        let template = await makeTemplate(
+            store: store,
+            description: "Build {{app_name}}.",
+            inputs: [TemplateInputDefinition(name: "app_name", description: "App.", required: true)]
+        )
+        // Checking BELOW the dedup would let a re-send fall into the no-op branch and report
+        // success for text the system rejected the first time.
+        #expect(await store.amendDescription(id: template.id, amendment: "Sign {{app_nmae}}.") != nil)
+        #expect(await store.amendDescription(id: template.id, amendment: "Sign {{app_nmae}}.") != nil)
+        #expect(await store.task(id: template.id)?.description == "Build {{app_name}}.")
+    }
+
     @Test("A task with no template inputs has no placeholders to police")
     func bracesAreOrdinaryTextWithoutInputDefinitions() async {
         let store = TaskStore()
@@ -342,6 +386,109 @@ struct TemplateSubstitutionTests {
 
         guard let instance = await instance(store, task.id, [:]) else { return }
         #expect(instance.description == "Both {{user_name}} and {{org}} render blank.")
+    }
+
+    @Test("A title template that renders empty falls back to the RENDERED template title")
+    func emptyTitleTemplateFallsBackToTheRenderedTemplateTitle() async {
+        let store = TaskStore()
+        let template = await makeTemplate(
+            store: store,
+            title: "Localize {{app_name}}",
+            description: "Localize it.",
+            inputs: [
+                TemplateInputDefinition(name: "app_name", description: "App name.", required: true),
+                TemplateInputDefinition(name: "locale", description: "Locale.", required: false)
+            ]
+        )
+        // A title template made entirely of an OPTIONAL input renders to nothing when that input is
+        // omitted, which is the only way to reach the fallback.
+        #expect(await store.setTemplateInstanceTitleTemplate(id: template.id, titleTemplate: "{{locale}}") == nil)
+
+        guard let instance = await instance(store, template.id, ["app_name": "Notes"]) else { return }
+        // The fallback renders like every other title path. Handing back the RAW title showed a
+        // placeholder for an input this run actually supplied.
+        #expect(instance.title == "Localize Notes")
+    }
+
+    @Test("The fallback title is not normalized when the template title has no placeholders")
+    func fallbackTitleWithoutPlaceholdersIsNotNormalized() async {
+        let store = TaskStore()
+        let template = await makeTemplate(
+            store: store,
+            title: "Nightly  report — v2",
+            description: "Audit {{repo_path}}.",
+            inputs: [
+                TemplateInputDefinition(name: "repo_path", description: "Repo.", required: true),
+                TemplateInputDefinition(name: "locale", description: "Locale.", required: false)
+            ]
+        )
+        #expect(await store.setTemplateInstanceTitleTemplate(id: template.id, titleTemplate: "{{locale}}") == nil)
+
+        guard let instance = await instance(store, template.id, ["repo_path": "/src"]) else { return }
+        // Rendering the fallback is only safe because collapsing repairs a gap substitution made:
+        // a title nothing substituted into must come back exactly as authored, here too.
+        #expect(instance.title == "Nightly  report — v2")
+    }
+
+    @Test("The creation-path check covers every field instantiation substitutes")
+    func creationCheckCoversEverySubstitutedField() {
+        // The substituting half is pinned by `substitutionReachesEveryAuthoredField`; this is the
+        // checking half. A field that substitutes but is not checked ships a typo to a worker; a
+        // field checked but not substituted refuses text that would have run fine.
+        let defined: Set<String> = ["app_name"]
+        let clean = AcceptanceCriterion(
+            name: "Ships {{app_name}}",
+            validationPrompt: "The bundle is named {{app_name}}",
+            inputEnumeratorPrompt: "List targets in {{app_name}}",
+            origin: .smith
+        )
+        func problem(
+            title: String = "Build {{app_name}}",
+            description: String = "Build {{app_name}} for release",
+            steps: [String] = ["cd {{app_name}}"],
+            criteria: [AcceptanceCriterion] = [clean]
+        ) -> String? {
+            TemplateInputValidation.firstProblem(
+                authoringTemplateWithTitle: title,
+                description: description,
+                activeStepTexts: steps,
+                criteria: criteria,
+                definedNames: defined
+            )
+        }
+        #expect(problem() == nil)
+        #expect(problem(title: "Build {{app_nmae}}")?.hasPrefix("Template title:") == true)
+        #expect(problem(description: "Build {{app_nmae}}")?.hasPrefix("Template description:") == true)
+        #expect(problem(steps: ["cd {{app_name}}", "test {{app_nmae}}"])?.hasPrefix("Template step 2:") == true)
+
+        var badName = clean
+        badName.name = "Ships {{app_nmae}}"
+        #expect(problem(criteria: [badName])?.hasPrefix("Template criterion \"Ships {{app_nmae}}\" name:") == true)
+
+        var badPrompt = clean
+        badPrompt.validationPrompt = "The bundle is named {{app_nmae}}"
+        #expect(problem(criteria: [badPrompt])?.hasPrefix("Template criterion \"Ships {{app_name}}\" validation prompt:") == true)
+
+        var badEnumerator = clean
+        badEnumerator.inputEnumeratorPrompt = "List targets in {{app_nmae}}"
+        #expect(problem(criteria: [badEnumerator])?.hasPrefix("Template criterion \"Ships {{app_name}}\" input enumerator prompt:") == true)
+    }
+
+    @Test("An unclosed placeholder deep in long prose is located, not buried")
+    func unclosedPlaceholderQuotesAWindowNotAPrefix() {
+        // `validate` scans FORWARD past every well-formed placeholder, so the offending `{{` sits
+        // wherever the author typed it — routinely near the end of a long description. Quoting a
+        // leading prefix would show text that is not the problem while omitting the text that is,
+        // and the unclosed case has no placeholder name to fall back on.
+        let filler = String(repeating: "lorem ipsum dolor sit amet. ", count: 200)
+        let template = "\(filler)and then MARKER_BEFORE {{unterminated placeholder"
+        guard let problem = TemplateStringRenderer.validate(template, allowedNames: ["app_name"]) else {
+            Issue.record("an unclosed placeholder should be a problem")
+            return
+        }
+        #expect(problem.count < 300, "the whole document must not land in the message: \(problem.count) chars")
+        #expect(problem.contains("MARKER_BEFORE"), "the window must show the text around the offending brace")
+        #expect(problem.contains("character \(template.distance(from: template.startIndex, to: template.range(of: "{{")!.lowerBound))"))
     }
 
     @Test("Tombstoned steps are neither rendered nor policed")
