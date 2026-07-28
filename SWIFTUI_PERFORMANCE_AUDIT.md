@@ -116,6 +116,7 @@ Main transcript views in macos-agent-smith: ChannelLogView and all subviews/data
 | Issue ID | Problem | Fix | Commit Hash |
 |----------|---------|-----|-------------|
 | C1, C2, H1, M1 | ChannelLogView recalculating windowStart, visibleMessages array, and ChannelGroupingIndex on every body pass | Added @State cachedWindowStart, cachedVisibleMessages, cachedGroupingIndex; moved calculations to updateCachedValues() method; triggered via .onChange when messages.count, maxVisibleCount, or messages.last?.id changes; initialized via .task on appearance | a59bda31229063317c57b82521fae43f135a5d63 |
+| C3 | ChannelTimestamp using closure `{ switch... }()` in body | Replaced with computed property `isVisible` - avoids closure execution on every body pass | cae125e80b1b8ae5ae3471a054de20115c2c9bf1 |
 
 ---
 
