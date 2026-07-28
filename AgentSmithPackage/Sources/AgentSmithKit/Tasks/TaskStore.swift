@@ -889,16 +889,30 @@ public actor TaskStore {
     /// is its ONLY producer — the underlying record is append-only so the validator always
     /// sees what was skipped or removed and why. Returns a human-readable error, or nil on
     /// success.
+    ///
+    /// Each action is a POINT MUTATION — it writes only the field it is about.
+    ///
+    /// This used to copy the whole task out (`guard var task = tasks[taskID]`), mutate the copy,
+    /// and write the entire record back. That is safe only for as long as the function contains no
+    /// suspension point, and nothing enforces that invariant: adding a single `await` anywhere
+    /// between the read and the write-back — to persist, to notify, to look one thing up — would
+    /// silently turn concurrent step edits into lost updates, each caller clobbering the others'
+    /// fields from its own stale copy. Four steps being marked complete in parallel is an ordinary
+    /// thing for this tool to be asked to do, so the window is not hypothetical.
+    ///
+    /// `task` below is therefore a read-only snapshot used to VALIDATE and to compute new
+    /// orderings; every write goes through `tasks[taskID]?` directly and touches only its own
+    /// field. There is no whole-record write-back left to go stale.
     @discardableResult
     public func applyStepAction(taskID: UUID, action: TaskStepAction) -> String? {
-        guard var task = tasks[taskID] else { return "Task not found." }
+        guard let task = tasks[taskID] else { return "Task not found." }
         switch action {
         case .add(let text, let origin):
-            task.steps.append(TaskStep(text: text, origin: origin))
+            tasks[taskID]?.steps.append(TaskStep(text: text, origin: origin))
         case .update(let stepID, let newText):
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
             guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be edited." }
-            task.steps[index].text = newText
+            tasks[taskID]?.steps[index].text = newText
         case .setStatus(let stepID, let status, let note):
             // `delete` is the single source of tombstoning. Letting `setStatus` write `.removed`
             // too meant two code paths for one irreversible mutation, and advertised removal as
@@ -911,14 +925,14 @@ public actor TaskStore {
             if status == .skipped && (note ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
                 return "Skipping a step requires a note explaining why."
             }
-            task.steps[index].status = status
-            if let note { task.steps[index].note = note }
+            tasks[taskID]?.steps[index].status = status
+            if let note { tasks[taskID]?.steps[index].note = note }
         case .delete(let stepID, let note):
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
             guard task.steps[index].status != .removed else { return "Step \(stepID) was already removed." }
             guard !note.trimmingCharacters(in: .whitespaces).isEmpty else { return "Deleting a step requires a note explaining why." }
-            task.steps[index].status = .removed
-            task.steps[index].note = note
+            tasks[taskID]?.steps[index].status = .removed
+            tasks[taskID]?.steps[index].note = note
         case .purge(let stepID):
             // Enforced here as well as at the tool layer: this is the one step mutation that
             // leaves no trace, so the guard belongs at the point of mutation, not only at the
@@ -927,7 +941,7 @@ public actor TaskStore {
                 return "Task \"\(task.title)\" has already been run or validated — its step record can't be hard-deleted. Use `delete` to tombstone the step instead."
             }
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
-            task.steps.remove(at: index)
+            tasks[taskID]?.steps.remove(at: index)
         case .move(let stepID, let destination):
             var active = task.steps.filter(\.isActive)
             guard let from = active.firstIndex(where: { $0.id == stepID }) else {
@@ -962,7 +976,7 @@ public actor TaskStore {
                 insertionIndex = oneBased - 1
             }
             active.insert(moved, at: insertionIndex)
-            task.steps = active + task.steps.filter { !$0.isActive }
+            tasks[taskID]?.steps = active + task.steps.filter { !$0.isActive }
         case .reorder(let orderedActiveIDs):
             let active = task.steps.filter(\.isActive)
             let activeIDs = Set(active.map(\.id))
@@ -974,10 +988,9 @@ public actor TaskStore {
             // their original relative order — the record of removed steps is preserved.
             let reordered = orderedActiveIDs.compactMap { byID[$0] }
             let removed = task.steps.filter { !$0.isActive }
-            task.steps = reordered + removed
+            tasks[taskID]?.steps = reordered + removed
         }
-        task.updatedAt = Date()
-        tasks[taskID] = task
+        tasks[taskID]?.updatedAt = Date()
         onChange?()
         return nil
     }
