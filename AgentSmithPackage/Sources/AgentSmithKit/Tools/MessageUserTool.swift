@@ -3,6 +3,9 @@ import Foundation
 /// Smith tool: sends a private message to the human user.
 /// Replaces send_message(recipient_id: "user") for Smith's tool set.
 struct MessageUserTool: AgentTool {
+    /// Smith parks after messaging the user so it can't talk over its own question.
+    public var successEffects: Set<ToolEffect> { [.deliveredMessage] }
+
     let name = "message_user"
     let toolDescription = """
         Send a message to the human user. Use for status updates, questions, and delivering \

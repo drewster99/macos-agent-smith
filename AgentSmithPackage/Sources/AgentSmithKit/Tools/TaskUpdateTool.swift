@@ -2,6 +2,9 @@ import Foundation
 
 /// Brown tool: sends a progress update to Smith about the current task.
 public struct TaskUpdateTool: AgentTool {
+    /// Re-arms Brown's silence nudge — Smith has just heard from it.
+    public var successEffects: Set<ToolEffect> { [.reportedTaskProgress] }
+
     public let name = "task_update"
     public let toolDescription = """
         Send a progress update to Smith about your current task. No status change occurs. \

@@ -3,6 +3,9 @@ import Foundation
 /// Brown tool: sends a private message directly to the user.
 /// Only available when the user has directly messaged this agent within the last 10 minutes.
 struct ReplyToUserTool: AgentTool {
+    /// Same parking rule as `message_user`.
+    public var successEffects: Set<ToolEffect> { [.deliveredMessage] }
+
     let name = "reply_to_user"
     let toolDescription = """
         Send a private reply to the user. Only available when the user has messaged you directly \

@@ -46,10 +46,43 @@ public struct InboundUserMessageReport: Sendable, Equatable {
     }
 }
 
+/// A consequence of a tool call SUCCEEDING that the agent run loop has to react to.
+///
+/// The run loop needs facts about a completed call that the tool's output text cannot safely
+/// carry. Before this existed it asked by matching the tool's human-facing prose —
+/// `result == "Message sent to user."` — which breaks the moment any of that wording moves. Two
+/// of those comparisons were already dead when this was introduced (2026-07-27): `message_brown`
+/// had been reworded to name the task ("Message sent to the worker on \"…\"") so its match never
+/// fired, and every message sent WITH an attachment returns a different sentence and so never
+/// counted either. Nothing failed loudly; the agent simply stopped parking and kept talking.
+///
+/// Effects are declared per TOOL rather than per call, because that is what they are: `message_user`
+/// always delivers a message when it succeeds. Pair with the call's `succeeded` flag — a failed
+/// call has no effects.
+public enum ToolEffect: Sendable, Hashable, CaseIterable {
+    /// The tool delivered a message to someone. The agent then stops and waits for a reply rather
+    /// than continuing to act, so it can't repeat itself before anyone has had a chance to answer.
+    case deliveredMessage
+
+    /// The tool reported task progress to Smith (`task_update`, `task_complete`). Re-arms Brown's
+    /// silence nudge and resets its "tool calls since I last said anything" counter.
+    case reportedTaskProgress
+
+    /// The tool caused the runtime to restart this agent with a fresh context. The run loop must
+    /// stop immediately rather than race the restart and trigger it a second time.
+    case triggeredRuntimeRestart
+}
+
 /// A tool that an agent can invoke via LLM tool calling.
 public protocol AgentTool: Sendable {
     /// Unique name for this tool (must match the LLM tool definition).
     var name: String { get }
+
+    /// What a SUCCESSFUL call of this tool causes that the run loop must react to. Default: none.
+    ///
+    /// Declare the effect here rather than letting the run loop infer it from output text. Output
+    /// text is written for the model and gets reworded; an effect is a fact about the tool.
+    var successEffects: Set<ToolEffect> { get }
 
     /// Human-readable description of what the tool does.
     var toolDescription: String { get }
@@ -124,6 +157,9 @@ public struct ToolAvailabilityContext: Sendable {
 extension AgentTool {
     /// Default: tool is always available.
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool { true }
+
+    /// Default: no run-loop-visible effects. Most tools read or compute and the loop carries on.
+    public var successEffects: Set<ToolEffect> { [] }
 
     /// Default per-tool wall-clock cap. Picked so that the slowest legitimate in-process
     /// tools (large `glob`, deep `grep`, schema introspection of a heavy app) finish

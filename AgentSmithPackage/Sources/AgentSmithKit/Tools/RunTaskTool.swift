@@ -9,6 +9,9 @@ nonisolated private let runTaskLogger = Logger(subsystem: "com.agentsmith", cate
 /// `.pending`) before the run begins — the user said "try again" / "redo that" / "reopen
 /// that" means "rerun on the same task ID", not "create a new one."
 struct RunTaskTool: AgentTool {
+    /// A successful run_task restarts the agent with a clean context; the loop must stop rather than race it.
+    public var successEffects: Set<ToolEffect> { [.triggeredRuntimeRestart] }
+
     let name = "run_task"
     let toolDescription = "Run an existing pending, paused, interrupted, failed, or completed task. For ordinary tasks, failed and completed tasks are auto-reset (prior result/commentary cleared, status flipped back to pending) before running. For template tasks, this instantiates a fresh task instance every time; pass `input_values` for that run's template inputs. Unknown input names or missing required inputs reject the call and no task runs. The `instructions` field is REQUIRED — include any updates, permissions, scope changes, or clarifications from the user. Ordinary tasks append these to their description; template tasks apply them only to the fresh instance.\nIMPORTANT: Existing task concurrency controls sequencing. Multiple template runs may be queued; workers start as slots free."
 

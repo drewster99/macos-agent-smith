@@ -3,6 +3,9 @@ import Foundation
 /// Smith tool: sends a private message to Agent Brown.
 /// Replaces send_message(recipient_id: "brown") for Smith's tool set.
 struct MessageBrownTool: AgentTool {
+    /// Smith parks after messaging a worker so it waits for the worker's reply.
+    public var successEffects: Set<ToolEffect> { [.deliveredMessage] }
+
     let name = "message_brown"
     let toolDescription = """
         Send a message to the worker running a specific task. Use for task instructions, corrections, and follow-ups. \

@@ -1938,7 +1938,8 @@ public actor AgentActor {
 
         var sentMessage = false
         var calledTaskComplete = false
-        var calledCreateTask = false
+        // Set when a tool's declared effect restarts the runtime; the loop must then stop.
+        var triggeredRuntimeRestart = false
 
         // Segment calls into contiguous runs of lifecycle vs approval-needing.
         // Each segment completes before the next starts, preserving ordering.
@@ -1979,7 +1980,8 @@ public actor AgentActor {
                     guard isRunning else { break }
                     let result: String
                     let succeeded: Bool
-                    if let tool = activeTools.first(where: { $0.name == call.name }) {
+                    let executedTool = activeTools.first(where: { $0.name == call.name })
+                    if let tool = executedTool {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
                             succeeded = false
@@ -1995,7 +1997,7 @@ public actor AgentActor {
                         recordToolOutcome(name: call.name, succeeded: false)
                     }
                     executedCallIDs.insert(call.id)
-                    updatePostCallFlags(call: call, result: result, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
+                    updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                     if calledTaskComplete { break toolSegments }
@@ -2229,7 +2231,8 @@ public actor AgentActor {
                     // `taskLifecycleTools`), but hardcoding `false` here would silently break
                     // the handoff park the moment one of them stopped being a lifecycle tool.
                     let succeeded: Bool
-                    if let tool = activeTools.first(where: { $0.name == call.name }) {
+                    let executedTool = activeTools.first(where: { $0.name == call.name })
+                    if let tool = executedTool {
                         if let rejection = await rejectionResultIfUnavailable(call, tool: tool) {
                             result = rejection
                             succeeded = false
@@ -2249,7 +2252,7 @@ public actor AgentActor {
                         recordToolOutcome(name: call.name, succeeded: false)
                     }
                     executedCallIDs.insert(call.id)
-                    updatePostCallFlags(call: call, result: result, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, calledCreateTask: &calledCreateTask)
+                    updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                     // Mirrors the lifecycle branch: once control has been handed off, nothing
@@ -2336,7 +2339,7 @@ public actor AgentActor {
 
         // run_task fires a detached restart — stop the run loop so we don't
         // race the restart and accidentally trigger it a second time.
-        if calledCreateTask {
+        if triggeredRuntimeRestart {
             hasUnprocessedInput = false
             return
         }
@@ -2919,27 +2922,32 @@ public actor AgentActor {
         return !parkedWorkerInformationalMessageKinds.contains(kind)
     }
 
-    private func updatePostCallFlags(call: LLMToolCall, result: String, succeeded: Bool, sentMessage: inout Bool, calledTaskComplete: inout Bool, calledCreateTask: inout Bool) {
-        if call.name == "message_user" && result == "Message sent to user." { sentMessage = true }
-        if call.name == "message_brown" && result == "Message sent to Brown." { sentMessage = true }
-        if call.name == "reply_to_user" && result == "Reply sent to user." { sentMessage = true }
+    /// Folds one completed tool call into the run loop's post-turn decisions.
+    ///
+    /// Every question here is answered from the tool's DECLARED effects plus the call's domain
+    /// outcome — never from its output text. Output text is written for the model and gets
+    /// reworded; two of the prose comparisons this replaced were already dead when it was written
+    /// (see `ToolEffect`), and had been silently skipping the parking they were meant to trigger.
+    ///
+    /// `tool` is nil only for a call naming a tool that doesn't exist, which cannot have effects.
+    private func updatePostCallFlags(
+        call: LLMToolCall,
+        tool: (any AgentTool)?,
+        succeeded: Bool,
+        sentMessage: inout Bool,
+        calledTaskComplete: inout Bool,
+        triggeredRuntimeRestart: inout Bool
+    ) {
+        let effects: Set<ToolEffect> = succeeded ? (tool?.successEffects ?? []) : []
+
+        if effects.contains(.deliveredMessage) { sentMessage = true }
         // A successful task_complete or request_help hands control to another actor. Use the
         // tool's domain outcome rather than parsing its human-facing response text.
         if Self.shouldParkAfterLifecycleTool(named: call.name, succeeded: succeeded) { calledTaskComplete = true }
-        if call.name == "run_task" && result.contains("System is restarting") { calledCreateTask = true }
-        if call.name == "create_task" && result.contains("System is restarting") { calledCreateTask = true }
+        if effects.contains(.triggeredRuntimeRestart) { triggeredRuntimeRestart = true }
 
         if configuration.role == .brown {
-            let isSuccessfulTaskCommunication: Bool
-            switch call.name {
-            case "task_update":
-                isSuccessfulTaskCommunication = result == "Update sent to Agent Smith."
-            case "task_complete":
-                isSuccessfulTaskCommunication = succeeded
-            default:
-                isSuccessfulTaskCommunication = false
-            }
-            if isSuccessfulTaskCommunication {
+            if effects.contains(.reportedTaskProgress) {
                 lastTaskCommunicationAt = Date()
                 toolCallsSinceTaskCommunication = 0
                 brownSilenceNudgeArmed = true

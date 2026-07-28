@@ -2184,36 +2184,39 @@ The `messageKind` work started from a concrete incident: a private notice whose 
 
 | Surface | Sites | Consequence when the string drifts |
 |---|---|---|
-| Tool results compared as English prose | 4 | **Control flow.** Silent. |
+| ~~Tool results compared as English prose~~ ✅ **Done 2026-07-27** | 6 | **Control flow.** Silent — and two were already broken in production. |
 | Tool names compared as bare strings | 11 (`call.name == "…"` in Sources) plus several `Set<String>` rosters | Control flow, including safety gating. Silent. |
 | Metadata keys as bare strings | ≥40 distinct keys, 93 read sites (writes are larger — see below) | Data reads as absent. Silent. |
 | Tool parameter schemas hand-built as untyped dictionaries | 45 tools, 674 schema-keyword literals | Provider rejects the tool, or silently ignores a constraint. |
 
-#### 1. Tool results compared as English prose — do this one first
+#### 1. ~~Tool results compared as English prose~~ ✅ Done 2026-07-27
 
-`AgentActor.updatePostCallFlags` decides control flow by string-matching a tool's *human-facing* return text:
+**Resolved by `ToolEffect`** (`AgentTool.swift`) — a tool now declares what a successful call *causes*
+(`deliveredMessage`, `reportedTaskProgress`, `triggeredRuntimeRestart`) and `updatePostCallFlags` reads
+that instead of matching output text. Effects are a property of the tool, so they cannot drift when
+someone rewords a sentence written for the model.
 
-```swift
-// AgentActor.swift:2923-2925, 2936
-if call.name == "message_user"  && result == "Message sent to user."  { sentMessage = true }
-if call.name == "message_brown" && result == "Message sent to Brown." { sentMessage = true }
-if call.name == "reply_to_user" && result == "Reply sent to user."    { sentMessage = true }
-isSuccessfulTaskCommunication = result == "Update sent to Agent Smith."
-```
+**This was not latent. Two of the six comparisons were already dead**, and the investigation only
+found that out by checking each tool's actual return values rather than trusting the roadmap entry
+that had been written from the call site:
 
-`sentMessage` decides whether the agent parks after messaging (`handleResponse`: `if sentMessage { hasUnprocessedInput = false; return }`). Reword any of those four strings — add a period, shorten "Agent Smith" to "Smith", localize them — and the comparison stops matching, the agent does not park, and it keeps working, with nothing thrown and nothing logged. `isSuccessfulTaskCommunication` likewise re-arms the Brown silence nudge.
+- **`message_brown` never matched.** It compared against `"Message sent to Brown."`, but the tool
+  had been reworded to name the task — `"Message sent to the worker on \"…\"."`. So `sentMessage`
+  was never set for that tool and **Smith never parked after messaging a worker**; it carried on
+  acting instead of waiting for the reply.
+- **Every message sent WITH an attachment also failed**, across all three messaging tools and
+  `task_update` — the attachment path returns a different sentence
+  (`"Message sent to user with 2 attachment(s): …"`), which matched nothing.
+- **`create_task`'s restart check was dead too**, though harmlessly: it tested
+  `result.contains("System is restarting")` and no `create_task` success path has said that since
+  it stopped restarting the caller. The effect is deliberately absent now, and a test pins that.
 
-This is the same defect class as the parked-worker incident, one function away from where that was fixed. **The codebase already knows.** Three lines below the block above:
+The lesson worth keeping: the roadmap entry counted **4** prose comparisons because that is what
+`result == "…"` matched. There were **6** — the two `result.contains("System is restarting")` checks
+are the same defect wearing a different operator. Counting a defect class by one syntactic form
+undercounts it.
 
-```swift
-// A successful task_complete or request_help hands control to another actor. Use the
-// tool's domain outcome rather than parsing its human-facing response text.
-if Self.shouldParkAfterLifecycleTool(named: call.name, succeeded: succeeded) { calledTaskComplete = true }
-```
-
-The principle is stated, applied to the lifecycle tools, and not applied to the four lines immediately preceding it. Half of this was fixed and the rest left.
-
-**Approach:** `ToolExecutionResult` already carries the domain outcome (`succeeded`) that `shouldParkAfterLifecycleTool` consumes. Extend the same idea — let a tool declare that it delivered a message (a flag on the result, or a marker protocol the dispatcher checks) and have `updatePostCallFlags` read that instead of the prose. Small, bounded, and it removes a latent bug rather than tidying syntax.
+Covered by `ToolEffectTests`.
 
 #### 2. Tool names as bare strings
 
@@ -2253,6 +2256,60 @@ Nothing checks any of it. `"requried"` compiles and the argument silently stops 
 This surface is why item 3 above cannot be swept mechanically — and that is the argument for fixing it, not a reason to route around it. Two unrelated domains (channel metadata and provider wire format) currently share one untyped container, so at every literal "is this key mine to rename?" is a judgment call rather than a type error. Give tool parameters a real builder — `ToolParameters.object(properties:required:)` with typed `.string(description:)` / `.integer(description:)` members emitting the same JSON — and the two stop being confusable by the compiler, not merely by grep. It also deletes the possibility of an invalid schema reaching a provider.
 
 Do this one *with or before* item 3, since it is what makes item 3 tractable.
+
+### The three loop breakers cancel each other out (2026-07-27)
+
+`AgentActor` has three circuit breakers, and each is reset by the signal the others fire on:
+
+| Breaker | Threshold | Reset by |
+|---|---|---|
+| consecutive text-only responses | 6 (Brown) / 30 (Smith) | **any** tool call |
+| consecutive identical tool calls | 4 | **any** text-only response |
+| per-tool failure streak | 10 | only that tool finally succeeding |
+
+An agent that alternates narration with a *succeeding, unchanging* tool call defeats all three
+indefinitely. Measured on 2026-07-27: 58 text-only turns interleaved with 23 byte-identical
+`get_task_details` calls over 19 minutes, and the only reason it ever stopped is that the model
+happened to emit six narration turns in a row at the end.
+
+`continuationNudgesSinceProgress` (cap 10, resets only on a tool call whose signature *differs*)
+now covers that specific shape, but the underlying design is still three independent counters that
+mutually reset. Worth reconsidering as a single "is this agent making progress?" question — e.g.
+hashing (tool name, arguments, result) and treating a repeat as non-progress regardless of what is
+interleaved, which is the invariant all three are groping at.
+
+### `ChannelBannerKind` duplicates the message-kind wire strings (2026-07-27)
+
+`ChannelLogView.ChannelBannerKind` is a second `String`-backed enum over the *same* wire strings as
+`ChannelMessageKind`, bridged by `ChannelMessageKind → rawValue → ChannelBannerKind(rawValue:)`. It
+lives in the app target, so the package can't reference it, which is why the duplication exists.
+
+Now that kinds are typed, that bridge is the only remaining place a kind string is re-derived. A
+banner case whose raw value drifts from its `ChannelMessageKind` counterpart silently renders as a
+plain row. Either move `ChannelBannerKind` into the package beside the kind it mirrors, or have it
+map from `ChannelMessageKind` values rather than from raw strings.
+
+### A parked worker can still be woken with an empty tool list (2026-07-27)
+
+`drainPendingInjectedMessages` sets `hasUnprocessedInput = true` unconditionally, without consulting
+`awaitingTaskReview`. A parked Brown reached that way gets an LLM turn whose tool list is empty by
+construction (the `toolDefinitions` override), so the turn can only produce text and can only be
+discarded. It is no longer expensive — a parked worker is never nudged, so it costs one wasted turn
+rather than ten — but it is still a turn that could not possibly accomplish anything.
+
+Either have the injected-message drain respect the park the way `drainPendingMessages` does, or make
+the park state refuse to schedule an LLM call at all rather than scheduling one with no tools.
+
+### Unknown message kinds trap, which is cross-build hostile (2026-07-27)
+
+`ChannelMessage.kind` calls `fatalError` on a `messageKind` with no enum case — deliberately, so a
+missing case cannot silently send readers down the wrong branch. The residual exposure: a build whose
+enum knows a kind this one doesn't will write logs that crash this one on read, and the crash lands
+while rendering the transcript, potentially at launch.
+
+Acceptable today (one app, one enum, corpus enumerated, retirement rule documented). Revisit if the
+logs ever become a shared or forward-compatible format — at which point the answer is a quarantine
+case that preserves the raw value and surfaces loudly, not a silent nil.
 
 ### `Phase2LongLivedSmithTests` — resolve the worker-identity race (2026-07-27)
 

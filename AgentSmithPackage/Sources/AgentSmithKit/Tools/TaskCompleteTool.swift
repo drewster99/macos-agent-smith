@@ -2,6 +2,9 @@ import Foundation
 
 /// Brown tool: submits the task result for Smith's review, transitioning it to awaitingReview.
 public struct TaskCompleteTool: AgentTool {
+    /// Submitting work is a task communication. Parking is handled separately, by `handoffLifecycleTools`.
+    public var successEffects: Set<ToolEffect> { [.reportedTaskProgress] }
+
     public let name = "task_complete"
     public let toolDescription = """
         Submit your completed work for review. Provide the full result — do not summarize. \
