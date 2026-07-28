@@ -804,10 +804,27 @@ public actor TaskStore {
            ) {
             return problem
         }
+        // An amendment to an INSTANCE substitutes the run's supplied input values, so
+        // "also sign {{app_name}}" reads like the rest of the rendered instance instead of
+        // reaching the worker as a literal placeholder (2026-07-28, user decision; before this,
+        // instance amendments were the one authored-text path substitution never touched).
+        // `definedNames` is the VALUE key set because instances don't carry input definitions —
+        // a name with no supplied value (an omitted optional, or a typo) stays literal, which
+        // for an after-the-fact amendment is the visible outcome, not a silent empty gap.
+        var amendment = amendment
+        if !task.isTemplate, !task.templateInputValues.isEmpty {
+            amendment = TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
+                amendment,
+                values: task.templateInputValues,
+                definedNames: Set(task.templateInputValues.keys),
+                layout: .preserved
+            )
+        }
         // Dedup: don't stack an [Amendment] identical to the one already at the end of the
         // description. `run_task` amends BEFORE it tries to spawn/scope, so a failed start
         // (e.g. a tool-scoping failure) leaves the amendment applied; retrying with the same
-        // instructions would otherwise append the same block over and over.
+        // instructions would otherwise append the same block over and over. Compared AFTER
+        // substitution, because the substituted text is what the previous send appended.
         if !task.description.hasSuffix("[Amendment]: \(amendment)") {
             task.description += "\n\n[Amendment]: \(amendment)"
         }

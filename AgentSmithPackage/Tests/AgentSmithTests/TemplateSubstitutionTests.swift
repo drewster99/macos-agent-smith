@@ -357,6 +357,43 @@ struct TemplateSubstitutionTests {
         #expect(await store.task(id: instance.id)?.description.hasSuffix("[Amendment]: Ignore {{whatever}}.") == true)
     }
 
+    @Test("An instance amendment substitutes the run's supplied input values; unsupplied names stay literal")
+    func instanceAmendmentSubstitutesSuppliedValues() async {
+        let store = TaskStore()
+        let template = await makeTemplate(
+            store: store,
+            description: "Build {{app_name}}.",
+            inputs: [
+                TemplateInputDefinition(name: "app_name", description: "App.", required: true),
+                TemplateInputDefinition(name: "locale", description: "Locale.", required: false)
+            ]
+        )
+        guard let instance = await instance(store, template.id, ["app_name": "Widgets"]) else { return }
+        // The supplied value renders; the omitted optional stays literal — an instance carries
+        // values but not definitions, and for an after-the-fact amendment the visible placeholder
+        // is the honest outcome, not a silent empty gap.
+        #expect(await store.amendDescription(id: instance.id, amendment: "Also sign {{app_name}} for {{locale}}.") == nil)
+        #expect(await store.task(id: instance.id)?.description.hasSuffix("[Amendment]: Also sign Widgets for {{locale}}.") == true)
+        // The dedup compares the SUBSTITUTED text — re-sending the same amendment stacks nothing.
+        #expect(await store.amendDescription(id: instance.id, amendment: "Also sign {{app_name}} for {{locale}}.") == nil)
+        let description = await store.task(id: instance.id)?.description ?? ""
+        #expect(description.components(separatedBy: "[Amendment]:").count == 2)
+    }
+
+    @Test("The template-inputs block renders ABOVE the description")
+    func templateInputsBlockLeadsTheRenderedDescription() async {
+        let store = TaskStore()
+        let template = await makeTemplate(
+            store: store,
+            description: "Build the app.",
+            inputs: [TemplateInputDefinition(name: "app_name", description: "App.", required: true)]
+        )
+        guard let instance = await instance(store, template.id, ["app_name": "Widgets"]) else { return }
+        let rendered = instance.renderedDescriptionWithTemplateInputs()
+        #expect(rendered.hasPrefix("## Template inputs\n- app_name: Widgets"))
+        #expect(rendered.hasSuffix("Build the app."))
+    }
+
     @Test("A rejected amendment stays rejected when it is re-sent")
     func rejectedAmendmentIsNotLaunderedByTheDedup() async {
         let store = TaskStore()

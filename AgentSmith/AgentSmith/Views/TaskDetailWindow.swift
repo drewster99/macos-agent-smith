@@ -1252,7 +1252,12 @@ struct TaskDetailWindow: View {
 
     @ViewBuilder
     private func descriptionSection(_ task: AgentTask, mode: SectionMode) -> some View {
-        let isExpandable = (linePrefix(task.description, lines: 3) != task.description)
+        // Display (and copy) the same composition every agent sees — `## Template inputs` above
+        // the prose. The EDITOR below still seeds from the raw `description`: the block is
+        // derived from the stored input values, not authored text, so it must never round-trip
+        // through an edit.
+        let displayedDescription = task.renderedDescriptionWithTemplateInputs()
+        let isExpandable = (linePrefix(displayedDescription, lines: 3) != displayedDescription)
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Description")
@@ -1261,7 +1266,7 @@ struct TaskDetailWindow: View {
                     EditedBadge(editedAt: editedAt)
                 }
                 Spacer()
-                copyButton(text: task.description, id: "description")
+                copyButton(text: displayedDescription, id: "description")
                 if isDescriptionEditable && !isEditingDescription {
                     Button {
                         editedDescription = task.description
@@ -1303,8 +1308,8 @@ struct TaskDetailWindow: View {
                 }
             } else {
                 let body = (mode == .expanded || !isExpandable)
-                    ? task.description
-                    : linePrefix(task.description, lines: 3)
+                    ? displayedDescription
+                    : linePrefix(displayedDescription, lines: 3)
                 MarkdownText(content: body, baseFont: .body)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)

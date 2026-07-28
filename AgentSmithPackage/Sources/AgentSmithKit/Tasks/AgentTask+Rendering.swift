@@ -11,12 +11,12 @@ extension AgentTask {
     /// isn't a template instance.
     ///
     /// Kept even though `{{name}}` placeholders are now substituted inline through the title,
-    /// description, steps, and criteria, because substitution DESTROYS the name→value binding: the
-    /// rendered text shows `/Users/me/Foo.app`, never `app_path`. An input no placeholder
-    /// references has no inline carrier at all, a per-run `[Amendment]` is appended after
-    /// instantiation and never substituted, and instances written before substitution existed still
-    /// hold literal `{{name}}` on disk. This block is the only place the NAMES survive — including
-    /// for `SecurityEvaluator.pathResolutionAppendix`, which harvests path candidates out of it.
+    /// description, steps, criteria, and instance amendments, because substitution DESTROYS the
+    /// name→value binding: the rendered text shows `/Users/me/Foo.app`, never `app_path`. An input
+    /// no placeholder references has no inline carrier at all, and instances written before
+    /// substitution existed still hold literal `{{name}}` on disk. This block is the only place
+    /// the NAMES survive — including for `SecurityEvaluator.pathResolutionAppendix`, which
+    /// harvests path candidates out of it.
     ///
     /// Carries no explanatory prose on purpose. Any sentence about what `{{placeholder}}` means is
     /// false for one of those three populations, and this string also reaches the Security Agent on
@@ -28,9 +28,18 @@ extension AgentTask {
         return "## Template inputs\n\(templateInputValues)"
     }
 
-    func renderedDescriptionWithTemplateInputs() -> String {
+    /// The inputs render ABOVE the description (2026-07-28, user decision): the name→value list
+    /// is the run's identity ("which app is this?"), so it leads everywhere the description is
+    /// consumed — worker briefing, validator input slot, transcript banners, task detail — rather
+    /// than trailing thousands of characters of prose. Composed at render time, never baked into
+    /// the stored `description`: the stored values are the single source, amendments still append
+    /// to the authored text without threading past a machine-written header, and pre-existing
+    /// instances pick the placement up retroactively.
+    /// Public because the task-detail UI displays this same composition; the description EDITOR
+    /// must keep seeding from the raw `description` — the block is not authored text.
+    public func renderedDescriptionWithTemplateInputs() -> String {
         guard let section = renderedTemplateInputsSection() else { return description }
-        return "\(description)\n\n\(section)"
+        return "\(section)\n\n\(description)"
     }
 
     var hasSubmittedResult: Bool {

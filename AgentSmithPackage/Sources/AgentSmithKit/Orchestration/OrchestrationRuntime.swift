@@ -1018,7 +1018,8 @@ public actor OrchestrationRuntime {
     /// Used by both the run_task path and the autoRunInterruptedTasks cold-launch path.
     ///
     /// Output is markdown:
-    /// - `task.title` and `task.description` verbatim.
+    /// - `task.title`, then the description via `renderedDescriptionWithTemplateInputs()` —
+    ///   the `## Template inputs` name→value block first, the authored prose after it.
     /// - Description / per-update / result attachments rendered as
     ///   `[filename](file:///abs/path) mime · size · id=<UUID>` markdown links so Brown can
     ///   `file_read` non-image content and quote the `id=<UUID>` into downstream tool calls.
@@ -1033,10 +1034,10 @@ public actor OrchestrationRuntime {
     /// duplicated the New Task banner's description in the user-facing transcript.
     func composeBrownTaskBriefing(for task: AgentTask) async -> String {
         var parts: [String] = []
-        parts.append("Task: \"\(task.title)\" (ID: \(task.id.uuidString))\n\n\(task.description)")
-        if let templateInputs = task.renderedTemplateInputsSection() {
-            parts.append(templateInputs)
-        }
+        // `renderedDescriptionWithTemplateInputs` leads with the `## Template inputs` block, so
+        // the run's identity (which app, which path) is the first thing under the title — the
+        // same composition every other consumer (validator slot, banners) renders.
+        parts.append("Task: \"\(task.title)\" (ID: \(task.id.uuidString))\n\n\(task.renderedDescriptionWithTemplateInputs())")
         // A prior acknowledgment means this is a resume (respawn after interruption, or a
         // rejection sent back for revision). The synthetic ack hasn't run yet at briefing time,
         // so the counter still reflects earlier attempts. State it explicitly here — Brown no
