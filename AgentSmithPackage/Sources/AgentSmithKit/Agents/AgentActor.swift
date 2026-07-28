@@ -2175,20 +2175,20 @@ public actor AgentActor {
                             if shouldSignalEnd { securityAgentCallback(false) }
                         }
                         disposition = await evaluator.evaluate(
-                        toolName: entry.call.name,
-                        toolParams: entry.call.arguments,
-                        toolDescription: toolDef.description,
-                        toolParameterDefs: toolParamDefs,
-                        taskTitle: entry.taskTitle,
-                        taskID: entry.taskID,
-                        taskDescription: entry.taskDescription,
-                        siblingCalls: entry.siblings.isEmpty ? nil : entry.siblings,
-                        agentRoleName: roleName,
-                        callerRole: role,
-                        toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: entry.tool),
-                        agentContext: agentContext,
-                        sanctionedDirectories: sanctionedDirectories,
-                        toolCallID: entry.call.id
+                            toolName: entry.call.name,
+                            toolParams: entry.call.arguments,
+                            toolDescription: toolDef.description,
+                            toolParameterDefs: toolParamDefs,
+                            taskTitle: entry.taskTitle,
+                            taskID: entry.taskID,
+                            taskDescription: entry.taskDescription,
+                            siblingCalls: entry.siblings.isEmpty ? nil : entry.siblings,
+                            agentRoleName: roleName,
+                            callerRole: role,
+                            toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: entry.tool),
+                            agentContext: agentContext,
+                            sanctionedDirectories: sanctionedDirectories,
+                            toolCallID: entry.call.id
                         )
                     }
 
@@ -2527,20 +2527,20 @@ public actor AgentActor {
             toolContext.onSecurityAgentProcessingStateChange(true)
             defer { toolContext.onSecurityAgentProcessingStateChange(false) }
             disposition = await evaluator.evaluate(
-            toolName: call.name,
-            toolParams: call.arguments,
-            toolDescription: toolDef.description,
-            toolParameterDefs: toolParameterDefs,
-            taskTitle: currentTask?.title,
-            taskID: currentTask?.id.uuidString,
-            taskDescription: currentTask?.renderedDescriptionWithTemplateInputs(),
-            siblingCalls: siblings,
-            agentRoleName: configuration.role.displayName,
-            callerRole: configuration.role,
-            toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: tool),
-            agentContext: agentContext,
-            sanctionedDirectories: sanctionedDirectories,
-            toolCallID: call.id
+                toolName: call.name,
+                toolParams: call.arguments,
+                toolDescription: toolDef.description,
+                toolParameterDefs: toolParameterDefs,
+                taskTitle: currentTask?.title,
+                taskID: currentTask?.id.uuidString,
+                taskDescription: currentTask?.renderedDescriptionWithTemplateInputs(),
+                siblingCalls: siblings,
+                agentRoleName: configuration.role.displayName,
+                callerRole: configuration.role,
+                toolGroupDescription: SecurityEvaluator.toolGroupDescription(for: tool),
+                agentContext: agentContext,
+                sanctionedDirectories: sanctionedDirectories,
+                toolCallID: call.id
             )
         }
 
