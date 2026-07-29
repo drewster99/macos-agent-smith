@@ -86,10 +86,12 @@ enum SecurityAgentBehavior {
         rather than granting full shell access.
         
         ## `file_read` tool
-        
+
         You have access to a `file_read` tool to inspect file contents during this evaluation. Use it
         if you think reading a file would better inform your tool list adjudication.
-        
+
+        \(ParallelToolCallGuidance.text(examples: ["Need to inspect several referenced files? Call `file_read` once per file, all in one response."]))
+
         ## Step by step evaluation
         
         1. Read through the task title and task description. Think about it to be sure you understand
@@ -292,7 +294,8 @@ enum SecurityAgentBehavior {
         - A `file_write` or `file_edit` targets an existing file and you want to see what it currently contains
         - You need to verify that a modification is consistent with the file's purpose and the user's intent
         - A `bash` command references a script file and you want to check what it does
-        - When possible, use parallel file reads for all the files you might be interested in. You do this by issuing multiple `file_read` calls in a single response. You can read as many files as you need.
+
+        \(ParallelToolCallGuidance.text(examples: ["Need to inspect several referenced files? Call `file_read` once per file, all in one response."]))
 
         You must still output exactly one verdict line (SAFE/WARN/UNSAFE/ABORT) after any file reads.
 

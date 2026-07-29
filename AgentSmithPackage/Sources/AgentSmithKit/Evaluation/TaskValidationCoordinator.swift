@@ -841,6 +841,16 @@ extension OrchestrationRuntime {
         if hasItem {
             prompt += "\n- `itemToEvaluate` — the specific item to judge for this criterion; when present, judge IT, using the other fields as context."
         }
+        // Identical parallel-call contract to Brown's — added 2026-07-28 after measuring that
+        // validators, never told to batch, averaged ~2 evidence calls per turn and burned turn
+        // budget on sequential reads (Brown, told exactly this, batches up to 20).
+        prompt += """
+
+
+            ## Evidence gathering — parallel tool calls
+            Your evidence tools are all read-only, so their results never depend on each other.
+            \(ParallelToolCallGuidance.text(examples: ["Need to read 5 evidence files? Call `file_read` 5 times in one response.", "Checking several paths or folders? Batch the `directory_listing` / `glob` calls in one response.", "Searching for several patterns? Call `grep` once per pattern, all in one response."]))
+            """
         if definition.kind == .validator {
             // A non-waivable criterion never mentions WAIVE at all — offering a verdict the
             // system would only convert to an error just invites wasted escalations.

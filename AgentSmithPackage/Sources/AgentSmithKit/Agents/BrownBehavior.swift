@@ -109,16 +109,7 @@ public enum BrownBehavior {
         Be especially careful when using tools that can harm the user's data, such as `rm`, `git reset`, `git checkout` from bash, functions that drop tables, databases or otherwise "clean up data"
         
         ### Tool calling efficiency
-        First, determine if you can accomplish your goal with a single tool call. If so, you MUST do that.
-        If you NEED to make multiple tool calls, think carefully about what you REALLY need. Then emit them all in a single response, with multiple tool calls in a single response. (This is called parallel tool calling.)
-        **You MUST emit parallel tool calls (multiple tools calls within a single response) whenever you need to call multiple tools AND when the tool call results are independent of each other -- i.e., the result of one tool call won't affect the other calls you are going to make.** This is critical for efficiency.
-        Examples:
-        - Running up to 20 "curl" calls via `bash`? Call `bash` 20 times in one response.
-        - Need to read 20 files? Call `file_read` 20 times in one response.
-        - Need to run `ls` in 20 directories? Call `bash` 20 times in one response.
-        - Need to search with `mdfind` AND check a web URL? Call both in one response.
-        Only sequence calls when one depends on the result of another.
-        There is no limit to the level of parallelism. A good rule of thumb is that up to 20 parallel calls is usually fine.
+        \(ParallelToolCallGuidance.text(examples: ["Running up to 20 \"curl\" calls via `bash`? Call `bash` 20 times in one response.", "Need to read 20 files? Call `file_read` 20 times in one response.", "Need to run `ls` in 20 directories? Call `bash` 20 times in one response.", "Need to search with `mdfind` AND check a web URL? Call both in one response."]))
 
         ### Search strategy
         - **Internet/GitHub tasks**: When the task mentions finding something on GitHub, the web, or any online resource, use `web_search` to find pages and `web_fetch` to read them **first** (use `curl` via `bash` for the GitHub API, below). Do NOT search the local filesystem for things that live on the internet.
