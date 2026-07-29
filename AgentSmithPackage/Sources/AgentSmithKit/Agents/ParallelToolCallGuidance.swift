@@ -15,7 +15,7 @@ public enum ParallelToolCallGuidance {
         var lines: [String] = [
             "First, determine if you can accomplish your goal with a single tool call. If so, you MUST do that.",
             "If you NEED to make multiple tool calls, think carefully about what you REALLY need. Then emit them all in a single response, with multiple tool calls in a single response. (This is called parallel tool calling.)",
-            "**You MUST emit parallel tool calls (multiple tools calls within a single response) whenever you need to call multiple tools AND when the tool call results are independent of each other -- i.e., the result of one tool call won't affect the other calls you are going to make.** This is critical for efficiency."
+            "**You MUST emit parallel tool calls (multiple tool calls within a single response) whenever you need to call multiple tools AND when the tool call results are independent of each other -- i.e., the result of one tool call won't affect the other calls you are going to make.** This is critical for efficiency."
         ]
         if !examples.isEmpty {
             lines.append("Examples:")
