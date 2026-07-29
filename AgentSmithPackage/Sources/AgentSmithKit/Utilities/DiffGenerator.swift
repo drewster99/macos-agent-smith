@@ -82,6 +82,11 @@ public enum DiffGenerator {
         // Build LCS length table.
         var lcs = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
         for i in 0..<m {
+            // Cooperative cancellation, checked once per ROW rather than per cell: the table is up
+            // to maxLineCount² entries, so a superseded or dismissed diff would otherwise run to
+            // completion regardless of anyone still wanting it. Per-row keeps the check off the
+            // inner loop while still bailing within a few hundred microseconds.
+            if Task.isCancelled { return [] }
             for j in 0..<n {
                 if oldLines[i] == newLines[j] {
                     lcs[i + 1][j + 1] = lcs[i][j] + 1

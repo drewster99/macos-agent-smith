@@ -93,22 +93,25 @@ struct DiffView: View {
         }
         .padding(.leading, 12)
         .padding(.top, 2)
-        .task {
-            await updateDiffCache()
-        }
-        // Every one of these used to spawn its OWN unstructured, uncancelled Task. `oldContent` and
-        // `newContent` change together whenever a diff is presented, so two full generations of the
-        // same diff racing to assign was the normal case — and the winner was whichever finished
-        // last, which is not necessarily the one built from the newest inputs.
+        // Routed through the same scheduler as every other trigger, so there is exactly ONE
+        // tracked task. `.task` used to call `updateDiffCache()` directly — untracked and
+        // uncancellable by `scheduleDiffUpdate`, which was harmless only while generation held the
+        // main actor and could not interleave. It cannot stay that way now that generation runs
+        // off-actor: an untracked slow generate on old inputs would publish after a tracked fast
+        // one on new inputs, and the stale diff would stick.
+        .onAppear { scheduleDiffUpdate() }
+        // ONE watcher over every input `updateDiffCache()` reads — including `defaultVisibleLines`,
+        // which had none. Four separate watchers each compared their own input on every body pass
+        // of the row, and `precomputedLines` is a `[DiffLine]?`, so that was a full array-of-structs
+        // equality per pass to detect a change that, at both call sites, cannot happen: these are
+        // seeded once per message identity and the message list is append-only.
         //
-        // One task at a time, cancelled and replaced. Cancellation alone would fix only the race
-        // (it is cooperative, so it stops no work), but task bodies are ENQUEUED rather than run
-        // inline: all four handlers finish before the first body starts, so the superseded tasks
-        // hit `updateDiffCache`'s opening cancellation guard and return before generating anything.
-        .onChange(of: oldContent) { _, _ in scheduleDiffUpdate() }
-        .onChange(of: newContent) { _, _ in scheduleDiffUpdate() }
-        .onChange(of: contextLines) { _, _ in scheduleDiffUpdate() }
-        .onChange(of: precomputedLines) { _, _ in scheduleDiffUpdate() }
+        // Previously each watcher also spawned its own unstructured, uncancelled Task. That was
+        // four redundant generations, not the publish race it looked like — main-actor tasks run
+        // FIFO, so the last enqueued was always the last to publish. The redundancy was real; the
+        // race was not. It becomes real now that generation is off-actor, which is what
+        // `scheduleDiffUpdate` and the second guard are for.
+        .onChange(of: inputSignature) { _, _ in scheduleDiffUpdate() }
         .onDisappear {
             // A large diff shouldn't keep generating for a view nobody is looking at.
             diffTask?.cancel()
@@ -116,24 +119,61 @@ struct DiffView: View {
         }
     }
 
+    /// Every input the cache is built from. One value, one watcher — an input added to
+    /// `updateDiffCache()` without being added here is a cache that goes stale silently.
+    private struct InputSignature: Equatable {
+        let oldContent: String
+        let newContent: String
+        let contextLines: Int
+        let precomputedCount: Int?
+        let defaultVisibleLines: Int
+    }
+
+    private var inputSignature: InputSignature {
+        InputSignature(
+            oldContent: oldContent,
+            newContent: newContent,
+            contextLines: contextLines,
+            // Count, not the array: these are seeded once per message and never mutated in place,
+            // so identity-by-count is sufficient and avoids an array-of-structs compare per pass.
+            precomputedCount: precomputedLines?.count,
+            defaultVisibleLines: defaultVisibleLines
+        )
+    }
+
     private func scheduleDiffUpdate() {
         diffTask?.cancel()
         diffTask = Task { await updateDiffCache() }
     }
 
-    /// Two cancellation guards, doing two different jobs — both are load-bearing.
+    /// Generation runs OFF the main actor, and both cancellation guards are load-bearing.
+    ///
+    /// This target sets `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so this function was
+    /// main-actor isolated by default and `DiffGenerator.generate` — an O(m·n) LCS with a DP table
+    /// of up to 1000×1000, so ~10⁶ string comparisons and megabytes of allocation — ran on the main
+    /// thread, hitching the UI on every file-edit row with a large diff. The `await MainActor.run`
+    /// below was a no-op hop back to the actor it never left.
     @Sendable private func updateDiffCache() async {
-        // BEFORE the generate: this is what makes a burst of input changes cost one diff instead of
-        // four. Superseded tasks reach here already cancelled and return without doing the work.
+        // BEFORE the generate: a burst of input changes costs one diff, not four. Superseded tasks
+        // reach here already cancelled and return without doing any work.
         guard !Task.isCancelled else { return }
-        let allLines: [DiffLine] = precomputedLines
-            ?? DiffGenerator.generate(old: oldContent, new: newContent, contextLines: contextLines)
+        let allLines: [DiffLine]
+        if let precomputedLines {
+            allLines = precomputedLines
+        } else {
+            let (old, new, context) = (oldContent, newContent, contextLines)
+            allLines = await Task.detached(priority: .userInitiated) {
+                DiffGenerator.generate(old: old, new: new, contextLines: context)
+            }.value
+        }
         let added = allLines.reduce(into: 0) { $0 += ($1.kind == .added ? 1 : 0) }
         let removed = allLines.reduce(into: 0) { $0 += ($1.kind == .removed ? 1 : 0) }
         let needsTrunc = allLines.count > defaultVisibleLines
 
-        // AFTER it: this is what kills the race. A task that got past the first guard before being
-        // superseded must not publish a diff built from inputs that have since changed.
+        // AFTER it: now genuinely load-bearing. Generation is a real suspension point, so a task
+        // superseded WHILE generating resumes here and must not publish a diff built from inputs
+        // that have since changed. While generation held the main actor this guard could not
+        // differ from the one above — it was dead code that read like a race fix.
         guard !Task.isCancelled else { return }
         await MainActor.run {
             cachedAllLines = allLines

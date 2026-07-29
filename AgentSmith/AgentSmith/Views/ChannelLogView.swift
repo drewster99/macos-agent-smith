@@ -224,10 +224,6 @@ struct ChannelLogView: View, Equatable {
     
     /// Cached window start index to avoid recalculating on every body pass.
     /// Updated via .onChange when messages or maxVisibleCount changes.
-    /// What the cache was last built from. Two of the three watchers below fire on the SAME event
-    /// (a new message changes both `messages.count` and `messages.last?.id`), so the second one
-    /// finds this unchanged and skips a rebuild that would produce an identical result.
-    @State private var lastCacheSignature: CacheSignature?
     @State private var cachedWindowStart = 0
     /// Cached visible messages array to avoid creating it on every body pass.
     @State private var cachedVisibleMessages: [ChannelMessage] = []
@@ -375,22 +371,23 @@ struct ChannelLogView: View, Equatable {
                 // Cache expensive computations: window start, visible messages array, and grouping
                 // index. Updated only when dependencies change, not on every body pass.
                 //
-                // Two of these three — `messages.count` and `messages.last?.id` — change on EVERY
-                // appended message, always together, so the rebuild below (an array copy plus a
-                // grouping-index build over the visible window) ran twice per message and threw one
-                // result away. The signature guard skips the second.
-                .onChange(of: messages.count) { _, _ in
-                    updateCachedValuesIfNeeded()
-                }
-                .onChange(of: maxVisibleCount) { _, _ in
-                    updateCachedValuesIfNeeded()
-                }
-                .onChange(of: messages.last?.id) { _, _ in
-                    updateCachedValuesIfNeeded()
-                }
-                // Initialize cached values on first appearance.
-                .task {
-                    updateCachedValuesIfNeeded()
+                // ONE watcher over the whole dependency set, not one per input. Three separate
+                // watchers ran this rebuild (an array copy plus a grouping-index build over the
+                // visible window) twice per appended message, because `messages.count` and
+                // `messages.last?.id` change together on every one — and a fourth input,
+                // `frozenAnchorID`, had no watcher at all.
+                //
+                // Watching the signature is what keeps those in step: an input that is not in
+                // `CacheSignature` cannot be watched, and one that is added is watched by
+                // construction. A per-input watcher plus a separate signature could disagree — and
+                // did: adding `.onChange(of: frozenAnchorID)` to the old shape would have compiled,
+                // read correctly, and done nothing, because the signature it guarded on was
+                // unchanged.
+                //
+                // `initial: true` replaces the `.task` that used to seed this. `.task` suspends
+                // before running, so the first rendered frame showed an empty transcript.
+                .onChange(of: cacheSignature, initial: true) { _, _ in
+                    updateCachedValues()
                 }
 
                 if !isAtBottom {
@@ -408,33 +405,37 @@ struct ChannelLogView: View, Equatable {
     /// Updates cached values for window start, visible messages, and grouping index.
     /// Called via .onChange when dependencies change to avoid recalculating on every body pass.
     /// Follows SwiftUI best practice: calculations driven by .onChange, not computed properties in body.
-    /// Everything the cache depends on. Cheap to compute and to compare — deliberately NOT the
-    /// message array itself, which would cost more to diff than the rebuild it is avoiding.
+    /// EVERY input `updateCachedValues()` reads, and the only thing watched for it. Adding a read
+    /// to that function without adding it here is the bug this shape exists to prevent — the cache
+    /// would then go stale on a change nothing was watching, silently.
+    ///
+    /// Cheap to compute and to compare — deliberately NOT the message array itself, which would
+    /// cost more to diff than the rebuild it is avoiding.
     private struct CacheSignature: Equatable {
         let count: Int
         let lastID: UUID?
         let maxVisible: Int
+        /// Read by `windowStartIndex()` to pin the window while the user is scrolled back. It had
+        /// no watcher at all before, so the freeze engaged one appended message late.
+        let frozenAnchor: UUID?
     }
 
-    /// Rebuilds the cache only when its inputs actually differ.
-    ///
-    /// A synchronous guard rather than the deferred `RecomputeCoalescer` used by the inspector, and
-    /// the difference matters: this cache feeds the `ForEach`, and the auto-scroll watcher above —
-    /// keyed on the same `messages.last?.id` — calls `proxy.scrollTo` on the newest message in the
-    /// same pass. Deferring the rebuild by a main-queue turn would have it scroll to a row not yet
-    /// in the list, breaking auto-scroll on every message. This removes the duplicate rebuild
-    /// without moving anything in time.
-    private func updateCachedValuesIfNeeded() {
-        let signature = CacheSignature(
+    private var cacheSignature: CacheSignature {
+        CacheSignature(
             count: messages.count,
             lastID: messages.last?.id,
-            maxVisible: maxVisibleCount
+            maxVisible: maxVisibleCount,
+            frozenAnchor: frozenAnchorID
         )
-        guard signature != lastCacheSignature else { return }
-        lastCacheSignature = signature
-        updateCachedValues()
     }
 
+    /// Rebuilds the window, the visible slice, and the grouping index.
+    ///
+    /// Synchronous, and deliberately not routed through the deferred `RecomputeCoalescer` the
+    /// inspector uses: this cache feeds the `ForEach` that the auto-scroll handler above targets
+    /// with `proxy.scrollTo`, so a main-queue turn of delay would put the rebuild behind the scroll
+    /// in a view where the two are already tightly interleaved. The signature check removes the
+    /// duplicate work without moving anything in time, which is the property that matters here.
     private func updateCachedValues() {
         let windowStart = windowStartIndex()
         cachedWindowStart = windowStart
