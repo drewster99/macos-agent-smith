@@ -1,8 +1,72 @@
 import Foundation
+import Synchronization
 import SwiftLLMKit
 import os
 
 private let validationLogger = Logger(subsystem: "com.agentsmith", category: "TaskValidation")
+
+/// Mutable accumulation for ONE criterion judgment, shared with `runValidator`'s
+/// `onResponse` callback across every attempt (and, for dynamic criteria, the prepare
+/// exchange plus every per-item exchange). A `Mutex`, not an actor, because recording
+/// happens inside a per-response callback on the evaluation's hot path and must not
+/// suspend; a snapshot is taken exactly once, when the judgment's record is built.
+final class JudgmentTelemetryBox: Sendable {
+    private struct State {
+        var llmTurns = 0
+        var evidenceToolCalls = 0
+        var inputTokens = 0
+        var outputTokens = 0
+        var cacheReadTokens = 0
+        var retries = 0
+        var firstAttemptError: String?
+        var dynamicItemCount: Int?
+    }
+
+    private let state = Mutex(State())
+    private let startedAt = Date()
+
+    func recordResponse(_ response: LLMResponse) {
+        state.withLock { s in
+            s.llmTurns += 1
+            s.evidenceToolCalls += response.toolCalls.count
+            if let usage = response.usage {
+                s.inputTokens += usage.inputTokens
+                s.outputTokens += usage.outputTokens
+                s.cacheReadTokens += usage.cacheReadTokens
+            }
+        }
+    }
+
+    /// Notes an internal ERROR retry; the FIRST error is kept — it names the attempt that
+    /// used to vanish without a trace (a rescued turn-exhaustion, a transient outage).
+    func noteRetry(firstError: String) {
+        state.withLock { s in
+            s.retries += 1
+            if s.firstAttemptError == nil { s.firstAttemptError = firstError }
+        }
+    }
+
+    func noteDynamicItemCount(_ count: Int) {
+        state.withLock { s in s.dynamicItemCount = count }
+    }
+
+    func snapshot() -> ValidationJudgmentTelemetry {
+        let duration = Int(Date().timeIntervalSince(startedAt) * 1000)
+        return state.withLock { s in
+            ValidationJudgmentTelemetry(
+                llmTurns: s.llmTurns,
+                evidenceToolCalls: s.evidenceToolCalls,
+                inputTokens: s.inputTokens,
+                outputTokens: s.outputTokens,
+                cacheReadTokens: s.cacheReadTokens,
+                attempts: 1 + s.retries,
+                firstAttemptError: s.firstAttemptError,
+                durationMs: duration,
+                dynamicItemCount: s.dynamicItemCount
+            )
+        }
+    }
+}
 
 /// The `.validating` state machine: judging a submitted task against its acceptance
 /// criteria, replacing Smith's review entirely. Lives on the runtime actor (all task
@@ -217,19 +281,23 @@ extension OrchestrationRuntime {
         // that Swift 6 region isolation rightly rejects). ERROR outcomes retry once
         // inside judgeCriterion.
         var records: [CriterionVerdictRecord] = []
+        var telemetryByCriterion: [UUID: ValidationJudgmentTelemetry] = [:]
         // Immutable snapshot for the sending closures — `task` is a mutated var in the
         // actor's region and can't cross the boundary.
         let taskSnapshot = task
         for waveStart in stride(from: 0, to: pending.count, by: validationParallelism) {
             let wave = pending[waveStart..<min(waveStart + validationParallelism, pending.count)]
-            await withTaskGroup(of: CriterionVerdictRecord?.self) { group in
+            await withTaskGroup(of: (record: CriterionVerdictRecord, telemetry: ValidationJudgmentTelemetry)?.self) { group in
                 for criterion in wave {
                     group.addTask { [weak self] in
                         await self?.judgeCriterion(criterion, task: taskSnapshot, round: round)
                     }
                 }
-                for await record in group {
-                    if let record { records.append(record) }
+                for await judged in group {
+                    if let judged {
+                        records.append(judged.record)
+                        telemetryByCriterion[judged.record.criterionID] = judged.telemetry
+                    }
                 }
             }
         }
@@ -263,7 +331,7 @@ extension OrchestrationRuntime {
             validationLogger.notice("Validation round \(round) abandoned: superseded before its verdicts could land")
             return
         case .recorded(let landed):
-            await appendValidationMetrics(landed, task: taskSnapshot, token: token)
+            appendValidationMetrics(landed, task: taskSnapshot, token: token, telemetryByCriterion: telemetryByCriterion)
             recorded = landed
         }
         await postRoundSummary(taskID: taskID, records: recorded)
@@ -376,21 +444,35 @@ extension OrchestrationRuntime {
     /// drift from the ledger and superseded rounds (which wrote nothing) mirror nothing. The
     /// rows survive the three ledger destroyers (failed-task retry, reopen, criteria edits)
     /// precisely because nothing in validation ever reads them back.
-    private func appendValidationMetrics(_ landed: [CriterionVerdictRecord], task: AgentTask, token: ValidationRoundToken) async {
+    private func appendValidationMetrics(
+        _ landed: [CriterionVerdictRecord],
+        task: AgentTask,
+        token: ValidationRoundToken,
+        telemetryByCriterion: [UUID: ValidationJudgmentTelemetry]
+    ) {
         guard let ledger = validationMetricsLedger, !landed.isEmpty else { return }
-        let namesByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let sessionID = currentSessionID
-        let rows = landed.map { record in
-            ValidationMetricsRow(
+        let validatorConfig = llmConfigs[.validator]
+        let rows = landed.map { record -> ValidationMetricsRow in
+            let criterion = criteriaByID[record.criterionID]
+            return ValidationMetricsRow(
                 record: record,
-                criterionName: namesByID[record.criterionID] ?? "(criterion no longer on task)",
+                criterionName: criterion?.name ?? "(criterion no longer on task)",
+                waivable: criterion?.waivable ?? false,
+                usesDefaultValidator: criterion?.usesDefaultValidator ?? false,
                 taskID: task.id,
                 taskTitle: task.title,
+                parentTaskID: task.parentTaskID,
                 sessionID: sessionID,
-                contractVersion: token.contractVersion
+                contractVersion: token.contractVersion,
+                modelID: validatorConfig?.model,
+                providerID: validatorConfig?.providerID,
+                telemetry: telemetryByCriterion[record.criterionID]
             )
         }
-        await ledger.append(rows)
+        // Fire-and-forget: the ledger's serial queue does the file I/O off this actor.
+        ledger.append(rows)
     }
 
     /// Judges one criterion, retrying a first ERROR once (transient backends, parse
@@ -400,29 +482,31 @@ extension OrchestrationRuntime {
         _ criterion: AcceptanceCriterion,
         task: AgentTask,
         round: Int
-    ) async -> CriterionVerdictRecord {
+    ) async -> (record: CriterionVerdictRecord, telemetry: ValidationJudgmentTelemetry) {
         if criterion.effectiveInputEnumeratorPrompt != nil {
             return await judgeDynamicCriterion(criterion, task: task, round: round)
         }
+        let telemetry = JudgmentTelemetryBox()
         let resolution = resolveValidator(for: criterion)
         let definition: EvaluatorDefinition
         switch resolution {
         case .success(let resolved):
             definition = resolved
         case .failure(let problem):
-            return CriterionVerdictRecord(
+            return (CriterionVerdictRecord(
                 criterionID: criterion.id,
                 verdict: .error(message: problem),
                 validatorName: criterion.name,
                 validatorHash: "-",
                 round: round
-            )
+            ), telemetry.snapshot())
         }
 
-        var (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task)
-        if case .error = outcome {
+        var (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task, telemetry: telemetry)
+        if case .error(let firstErrorMessage) = outcome {
+            telemetry.noteRetry(firstError: firstErrorMessage)
             validationLogger.notice("Criterion \(criterion.id.uuidString.prefix(8), privacy: .public) errored — retrying once")
-            (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task)
+            (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task, telemetry: telemetry)
         }
 
         let verdict: CriterionVerdictRecord.Verdict
@@ -444,7 +528,7 @@ extension OrchestrationRuntime {
         case .error(let message):
             verdict = .error(message: message)
         }
-        return CriterionVerdictRecord(
+        return (CriterionVerdictRecord(
             criterionID: criterion.id,
             verdict: verdict,
             validatorName: definition.name,
@@ -453,7 +537,7 @@ extension OrchestrationRuntime {
             renderedInput: Self.capDebugText(transcript.renderedInput, limit: Self.maxPersistedInputChars),
             renderedSystemPrompt: Self.capDebugText(transcript.renderedSystemPrompt, limit: Self.maxPersistedInputChars),
             responseLog: Self.capDebugText(transcript.turnLog.joined(separator: "\n---\n"), limit: Self.maxPersistedLogChars)
-        )
+        ), telemetry.snapshot())
     }
 
     /// Dynamic (prepare/map) judging: the prepare function emits a JSON array of items,
@@ -467,14 +551,15 @@ extension OrchestrationRuntime {
         _ criterion: AcceptanceCriterion,
         task: AgentTask,
         round: Int
-    ) async -> CriterionVerdictRecord {
+    ) async -> (record: CriterionVerdictRecord, telemetry: ValidationJudgmentTelemetry) {
         // The accumulated debug log: the prepare exchange, then each item's exchange,
         // each under a labeled header. Persisted (capped) with the verdict record.
         var debugLog: [String] = []
         var prepareRenderedInput = ""
+        let telemetry = JudgmentTelemetryBox()
 
-        func record(_ verdict: CriterionVerdictRecord.Verdict, validator: EvaluatorDefinition? = nil) -> CriterionVerdictRecord {
-            CriterionVerdictRecord(
+        func record(_ verdict: CriterionVerdictRecord.Verdict, validator: EvaluatorDefinition? = nil) -> (record: CriterionVerdictRecord, telemetry: ValidationJudgmentTelemetry) {
+            (CriterionVerdictRecord(
                 criterionID: criterion.id,
                 verdict: verdict,
                 validatorName: validator?.name ?? "-",
@@ -482,7 +567,7 @@ extension OrchestrationRuntime {
                 round: round,
                 renderedInput: Self.capDebugText(prepareRenderedInput, limit: Self.maxPersistedInputChars),
                 responseLog: Self.capDebugText(debugLog.joined(separator: "\n"), limit: Self.maxPersistedLogChars)
-            )
+            ), telemetry.snapshot())
         }
 
         // The prepare enumerator is built on the fly from the criterion's own prompt. The
@@ -500,9 +585,10 @@ extension OrchestrationRuntime {
             return record(.error(message: "input enumerator is unavailable"))
         }
 
-        var (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task)
-        if case .error = prepareOutcome {
-            (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task)
+        var (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task, telemetry: telemetry)
+        if case .error(let prepareError) = prepareOutcome {
+            telemetry.noteRetry(firstError: "prepare: \(prepareError)")
+            (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task, telemetry: telemetry)
         }
         prepareRenderedInput = prepareTranscript.renderedInput
         debugLog.append("## prepare: \(prepareName)\n" + prepareTranscript.turnLog.joined(separator: "\n---\n"))
@@ -547,10 +633,12 @@ extension OrchestrationRuntime {
         // what providers tolerate.
         var rejections: [String] = []
         var waives: [String] = []
+        telemetry.noteDynamicItemCount(items.count)
         for (index, item) in items.enumerated() {
-            var (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
-            if case .error = outcome {
-                (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item])
+            var (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item], telemetry: telemetry)
+            if case .error(let itemError) = outcome {
+                telemetry.noteRetry(firstError: "item \(index + 1): \(itemError)")
+                (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item], telemetry: telemetry)
             }
             debugLog.append("## item \(index + 1): \(item.prefix(120))\n" + transcript.turnLog.joined(separator: "\n---\n"))
             switch outcome {
@@ -623,7 +711,8 @@ extension OrchestrationRuntime {
         _ definition: EvaluatorDefinition,
         criterion: AcceptanceCriterion,
         task: AgentTask,
-        extraSlots: [String: String] = [:]
+        extraSlots: [String: String] = [:],
+        telemetry: JudgmentTelemetryBox? = nil
     ) async -> (outcome: EvaluationRunner.Outcome, transcript: EvaluationRunner.Transcript) {
         guard let resolved = validatorModel() else {
             return (.error("no model is assigned to the Validator role"), EvaluationRunner.Transcript())
@@ -785,6 +874,7 @@ extension OrchestrationRuntime {
             modelSupportsDocuments: validatorSupportsDocuments,
             drainStagedAttachments: { await stagingBuffer.drain() },
             onResponse: { response, latencyMs in
+                telemetry?.recordResponse(response)
                 await UsageRecorder.record(
                     response: response,
                     context: LLMCallContext(
