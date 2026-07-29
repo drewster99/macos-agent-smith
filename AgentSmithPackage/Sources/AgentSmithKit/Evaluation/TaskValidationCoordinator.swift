@@ -841,6 +841,12 @@ extension OrchestrationRuntime {
                     metadata: [
                         "messageKind": .kind(.toolRequest),
                         "requestID": .string(call.id),
+                        // The instance this call belongs to, stamped for the same reason
+                        // `AgentActor.postToolRequestToChannel` stamps it: a reader joins a call to
+                        // its security verdict by (agent, call id), because a bare call id is not
+                        // unique across agents. Without it the live view cannot resolve a validator
+                        // row at all and shows "not yet reviewed" through an entire evaluation.
+                        "agentID": .string(validatorInstanceID.uuidString),
                         "taskID": .string(gateTaskID),
                         "taskTitle": .string(gateTaskTitle),
                         "tool": .string(call.name),
@@ -876,6 +882,7 @@ extension OrchestrationRuntime {
                 await AgentActor.postSecurityReviewToChannel(
                     disposition: disposition,
                     callID: call.id,
+                    agentInstanceID: validatorInstanceID,
                     roleName: "Validator",
                     agentRoleValue: nil,
                     post: { await gateChannel.post($0) }
@@ -890,6 +897,16 @@ extension OrchestrationRuntime {
             // unreviewed, which is the more expensive of the two. `start()` already refuses to
             // launch without a Security Agent provider, so this should be unreachable.
             securityGate = { _, _ in false }
+        }
+        // A validator has no `AgentActor` and therefore no `stop()`, so nothing else would ever
+        // sweep its security registrations. If an `evaluate()` is in flight when this validation
+        // task is cancelled and the provider ignores cancellation, the entry would survive for the
+        // life of the app — the meter stuck above zero and `isIdle` permanently false. Routed
+        // through the evaluator so it stays the only writer of that registry.
+        defer {
+            let instanceID = validatorInstanceID
+            let sweepEvaluator = validationSecurityEvaluator
+            Task { await sweepEvaluator?.clearInFlightEvaluations(forAgentInstanceID: instanceID) }
         }
         // Count this criterion's LLM judgment toward the inspector's concurrency strip for as long
         // as the evaluation round is in flight. Independent per-criterion runs stack here, so several
@@ -931,7 +948,8 @@ extension OrchestrationRuntime {
                     sender: .validator,
                     post: { await validationChannel.post($0) },
                     taskTitle: taskTitle,
-                    taskID: taskID
+                    taskID: taskID,
+                    agentInstanceID: validatorInstanceID
                 )
             },
             securityGate: securityGate

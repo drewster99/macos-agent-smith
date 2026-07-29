@@ -529,7 +529,7 @@ final class SharedAppState {
                 // order — and a stale snapshot landing last would stick, freezing the meter above
                 // zero and a worker on "waiting on security". `version` is stamped under the lock,
                 // so it is the only ordering that reflects what actually happened.
-                guard snapshot.version >= self.liveActivitySnapshot.version else { return }
+                guard snapshot.supersedes(self.liveActivitySnapshot) else { return }
                 self.liveActivitySnapshot = snapshot
             }
         }

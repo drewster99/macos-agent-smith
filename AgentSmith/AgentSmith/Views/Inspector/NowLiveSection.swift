@@ -107,26 +107,32 @@ struct NowLiveSection: View {
         // Walking newest-first also means the FIRST verdict/output seen for a requestID is the
         // newest, which is the one that counts; a repeated id keeps its latest state.
         let cutoff = Date().addingTimeInterval(-Self.activityWindowSeconds)
-        var reviewByRequest: [String: ChannelMessage] = [:]
-        var outputByRequest: [String: ChannelMessage] = [:]
-        var requests: [(message: ChannelMessage, taskID: UUID, tool: String, requestID: String)] = []
+        // Keyed by (agent, call id), NOT call id alone. A tool call id is whatever the provider
+        // sent — some OpenAI-compatible servers emit per-response index ids like `call_0` — so with
+        // two workers running, a bare id let one agent's row pick up another's verdict and output.
+        // The registry was hardened against exactly this; its consumer has to match.
+        var reviewByRequest: [CallKey: ChannelMessage] = [:]
+        var outputByRequest: [CallKey: ChannelMessage] = [:]
+        var requests: [(message: ChannelMessage, taskID: UUID, tool: String, key: CallKey)] = []
         scan: for message in viewModel.messages.reversed() {
-            guard case .string(let requestID)? = message.metadata?["requestID"] else { continue }
+            guard case .string(let requestID)? = message.metadata?["requestID"],
+                  let agentInstanceID = Self.agentInstanceID(of: message) else { continue }
+            let key = CallKey(agentInstanceID: agentInstanceID, callID: requestID)
             // A security verdict carries NO `messageKind`; it is identified by its typed
             // `securityDisposition`, exactly as the transcript's `isSuppressibleFollowUp` does.
             // Still a typed discriminator — just a different one.
             if message.metadata?["securityDisposition"] != nil {
-                if reviewByRequest[requestID] == nil { reviewByRequest[requestID] = message }
+                if reviewByRequest[key] == nil { reviewByRequest[key] = message }
                 continue
             }
             switch message.kind {
             case .toolOutput:
-                if outputByRequest[requestID] == nil { outputByRequest[requestID] = message }
+                if outputByRequest[key] == nil { outputByRequest[key] = message }
             case .toolRequest:
                 guard message.timestamp >= cutoff else { break scan }
                 guard let taskID = message.taskID,
                       case .string(let tool)? = message.metadata?["tool"] else { continue }
-                requests.append((message, taskID, tool, requestID))
+                requests.append((message, taskID, tool, key))
             default:
                 continue
             }
@@ -139,9 +145,9 @@ struct NowLiveSection: View {
                 Self.activity(
                     request: request.message,
                     name: request.tool,
-                    review: reviewByRequest[request.requestID],
-                    output: outputByRequest[request.requestID],
-                    requestID: request.requestID,
+                    review: reviewByRequest[request.key],
+                    output: outputByRequest[request.key],
+                    key: request.key,
                     security: security
                 )
             )
@@ -177,15 +183,9 @@ struct NowLiveSection: View {
         name: String,
         review: ChannelMessage?,
         output: ChannelMessage?,
-        requestID: String,
+        key: CallKey,
         security: LiveActivityTracker.Snapshot
     ) -> ToolActivity {
-        // The issuing agent, stamped on the request by `postToolRequestToChannel`. Needed because
-        // an evaluation is keyed by (agent, call) — a bare call id is not unique across sessions.
-        let agentInstanceID: UUID? = {
-            if case .string(let raw)? = request.metadata?["agentID"] { return UUID(uuidString: raw) }
-            return nil
-        }()
         let disposition: String? = {
             if case .string(let value)? = review?.metadata?["securityDisposition"] { return value }
             return nil
@@ -206,12 +206,9 @@ struct NowLiveSection: View {
             if review != nil {
                 phase = .approved
             } else {
-                // Without an agent id there is no key to look up, so this reports "not yet
-                // reviewed" rather than guessing — the honest answer for a row we can't place.
-                let isEvaluating = agentInstanceID.map {
-                    security.isEvaluating(callID: requestID, agentInstanceID: $0)
-                } ?? false
-                phase = isEvaluating ? .evaluating : .notYetReviewed
+                phase = security.isEvaluating(callID: key.callID, agentInstanceID: key.agentInstanceID)
+                    ? .evaluating
+                    : .notYetReviewed
             }
         }
 
@@ -296,6 +293,22 @@ struct NowLiveSection: View {
         /// concurrent Browns no longer overwrite one shared indicator. Nil when idle.
         let brownState: String?
         let tools: [ToolActivity]
+    }
+
+    /// Identifies one tool call. The agent is part of the key because a call id is provider data
+    /// and is not unique across agents — the same reason `LiveActivityTracker` keys its registry
+    /// this way, and the two must agree or a row reads another agent's verdict.
+    struct CallKey: Hashable {
+        let agentInstanceID: UUID
+        let callID: String
+    }
+
+    /// The agent a tool-lifecycle message belongs to. Every producer stamps it: `AgentActor` on
+    /// requests, verdicts and outputs; `TaskValidationCoordinator` on the validator's requests.
+    /// A message without one cannot be placed and is skipped rather than guessed at.
+    static func agentInstanceID(of message: ChannelMessage) -> UUID? {
+        guard case .string(let raw)? = message.metadata?["agentID"] else { return nil }
+        return UUID(uuidString: raw)
     }
 
     /// One tool call's live story: who is looking at it, and how long it actually RAN.

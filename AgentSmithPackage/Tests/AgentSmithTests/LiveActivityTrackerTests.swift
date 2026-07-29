@@ -38,8 +38,8 @@ struct LiveActivityTrackerTests {
         let tracker = makeTracker()
         let agentA = UUID()
         let agentB = UUID()
-        tracker.beginSecurityEvaluation(callID: "call_0", agentInstanceID: agentA, startedAt: Date())
-        tracker.beginSecurityEvaluation(callID: "call_0", agentInstanceID: agentB, startedAt: Date())
+        tracker.beginSecurityEvaluation(callID: "call_0", agentInstanceID: agentA)
+        tracker.beginSecurityEvaluation(callID: "call_0", agentInstanceID: agentB)
 
         #expect(tracker.current().securityEvaluations == 2)
         #expect(tracker.current().isAwaitingSecurity(agentInstanceID: agentA))
@@ -59,7 +59,7 @@ struct LiveActivityTrackerTests {
         // The provider guard rejects a MISSING id, not an empty one, so `""` reaches the tracker.
         // Every empty-id call would otherwise share a single key.
         let tracker = makeTracker()
-        tracker.beginSecurityEvaluation(callID: "", agentInstanceID: UUID(), startedAt: Date())
+        tracker.beginSecurityEvaluation(callID: "", agentInstanceID: UUID())
         #expect(tracker.current().securityEvaluations == 0)
     }
 
@@ -73,13 +73,19 @@ struct LiveActivityTrackerTests {
         let recorder = PublishRecorder()
         tracker.setOnChange { snapshot in recorder.record(snapshot.version) }
 
-        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent, startedAt: Date())
-        tracker.beginSecurityEvaluation(callID: "b", agentInstanceID: agent, startedAt: Date())
+        // EVERY publishing mutator, not just the two security ones — a version bump missing from
+        // `adjust`, `setBrownWorkers` or the sweep would let a stale snapshot from that path win
+        // the delivery race, and a test covering only begin/end would stay green through it.
+        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent)
+        tracker.beginSecurityEvaluation(callID: "b", agentInstanceID: agent)
+        tracker.begin(.validatorEvaluation)
+        tracker.setBrownWorkers(source: ObjectIdentifier(Self.self), to: 2)
+        tracker.end(.validatorEvaluation)
         tracker.endSecurityEvaluation(callID: "a", agentInstanceID: agent)
-        tracker.endSecurityEvaluation(callID: "b", agentInstanceID: agent)
+        tracker.endSecurityEvaluations(forAgentInstanceID: agent)
 
         let versions = recorder.versions
-        #expect(versions.count >= 4)
+        #expect(versions.count >= 7)
         #expect(versions == versions.sorted(), "versions must never go backwards: \(versions)")
         #expect(Set(versions).count == versions.count, "versions must be distinct: \(versions)")
     }
@@ -91,7 +97,7 @@ struct LiveActivityTrackerTests {
         // inspector recompute that reverse-scans the transcript.
         let tracker = makeTracker()
         let agent = UUID()
-        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent, startedAt: Date())
+        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent)
         let recorder = PublishRecorder()
         tracker.setOnChange { snapshot in recorder.record(snapshot.version) }
         let afterAttach = recorder.count  // setOnChange delivers current state immediately
@@ -112,9 +118,9 @@ struct LiveActivityTrackerTests {
         let tracker = makeTracker()
         let stopping = UUID()
         let survivor = UUID()
-        tracker.beginSecurityEvaluation(callID: "x", agentInstanceID: stopping, startedAt: Date())
-        tracker.beginSecurityEvaluation(callID: "y", agentInstanceID: stopping, startedAt: Date())
-        tracker.beginSecurityEvaluation(callID: "z", agentInstanceID: survivor, startedAt: Date())
+        tracker.beginSecurityEvaluation(callID: "x", agentInstanceID: stopping)
+        tracker.beginSecurityEvaluation(callID: "y", agentInstanceID: stopping)
+        tracker.beginSecurityEvaluation(callID: "z", agentInstanceID: survivor)
 
         tracker.endSecurityEvaluations(forAgentInstanceID: stopping)
 
@@ -130,12 +136,54 @@ struct LiveActivityTrackerTests {
         #expect(recorder.count == afterAttach, "a no-op sweep must not publish")
     }
 
+    @Test("A stale delivery is refused, and an equal-version one is not")
+    func supersedesOrdersDeliveries() {
+        // Mutators publish AFTER releasing the lock and each delivery hops the main actor
+        // separately, so neither step preserves mutation order. This is the rule the app-side
+        // mirror applies to drop a stale snapshot that lands last — it lives in the Kit precisely
+        // so it can be tested, since the app target has no test bundle.
+        let tracker = makeTracker()
+        let agent = UUID()
+        let first = tracker.current()
+
+        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent)
+        let second = tracker.current()
+        tracker.endSecurityEvaluation(callID: "a", agentInstanceID: agent)
+        let third = tracker.current()
+
+        #expect(second.supersedes(first))
+        #expect(third.supersedes(second))
+        // The stale one arriving late must be refused — this is the freeze it prevents.
+        #expect(!first.supersedes(second))
+        #expect(!second.supersedes(third))
+        // First delivery: `setOnChange` republishes existing state without bumping, so an
+        // equal-version snapshot has to be ACCEPTED or the mirror never populates at launch.
+        #expect(first.supersedes(first))
+    }
+
+    @Test("Equality ignores the version, so a content-identical publish is not a change")
+    func equalityIgnoresVersion() {
+        // `version` changes on every publish. If it participated in `==`, every observer keyed on
+        // the snapshot would fire on publishes that changed nothing — undoing the no-op-publish
+        // suppression a few lines away.
+        let tracker = makeTracker()
+        let agent = UUID()
+        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent)
+        let before = tracker.current()
+        tracker.begin(.memorySearch)
+        tracker.end(.memorySearch)
+        let after = tracker.current()
+
+        #expect(after.version > before.version, "the publishes must still be ordered")
+        #expect(after == before, "identical content must compare equal despite a newer version")
+    }
+
     @Test("isIdle reflects live evaluations")
     func idleAccountsForSecurityEvaluations() {
         let tracker = makeTracker()
         let agent = UUID()
         #expect(tracker.current().isIdle)
-        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent, startedAt: Date())
+        tracker.beginSecurityEvaluation(callID: "a", agentInstanceID: agent)
         #expect(!tracker.current().isIdle)
         tracker.endSecurityEvaluation(callID: "a", agentInstanceID: agent)
         #expect(tracker.current().isIdle)

@@ -550,11 +550,7 @@ actor SecurityEvaluator {
         // A call with no id still can't be registered — there is nothing to key it by — and that
         // degrades to not showing, never to showing something false.
         if let toolCallID {
-            activityTracker?.beginSecurityEvaluation(
-                callID: toolCallID,
-                agentInstanceID: evaluatingForAgentID,
-                startedAt: Date()
-            )
+            activityTracker?.beginSecurityEvaluation(callID: toolCallID, agentInstanceID: evaluatingForAgentID)
         }
         defer {
             if let toolCallID {

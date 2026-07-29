@@ -797,12 +797,16 @@ public actor AgentActor {
         Self.stopLogger.notice("AgentActor.stop entry role=\(role, privacy: .public) agent=\(agentID, privacy: .public)")
         isRunning = false
         consecutiveEmptyResponses = 0
-        // ABOVE the early return on purpose. A first `stop()` that timed out sets `runTask = nil`
-        // while abandoning a run loop that may still be registering evaluations; the later
-        // `terminateAgent` → `stop()` is exactly when those orphans need sweeping, and it takes
-        // this early return. Idempotent and cheap, so running it on every stop costs nothing.
-        await securityEvaluator?.clearInFlightEvaluations(forAgentInstanceID: id)
         guard let task = runTask else {
+            // Only on THIS path. A first `stop()` that timed out set `runTask = nil` while
+            // abandoning a run loop that may still be registering evaluations, and the later
+            // `terminateAgent` → `stop()` arrives here — so this is where those orphans get swept.
+            //
+            // Deliberately NOT above the guard: on a healthy stop that would run BEFORE
+            // `task.cancel()` and delete entries for evaluations still genuinely in flight, so the
+            // agent would be blocked on security while the meter said nothing was happening. The
+            // post-teardown sweep below covers the normal path, after the loop has actually gone.
+            await securityEvaluator?.clearInFlightEvaluations(forAgentInstanceID: id)
             Self.stopLogger.notice("AgentActor.stop no runTask — early return role=\(role, privacy: .public) agent=\(agentID, privacy: .public)")
             return
         }
@@ -2190,7 +2194,8 @@ public actor AgentActor {
                         )
 
                     await AgentActor.postSecurityReviewToChannel(
-                        disposition: disposition, callID: entry.call.id, roleName: roleName,
+                        disposition: disposition, callID: entry.call.id,
+                        agentInstanceID: agentInstanceID, roleName: roleName,
                         agentRoleValue: role.rawValue, post: { await ctx.post($0) }
                     )
 
@@ -2540,7 +2545,8 @@ public actor AgentActor {
 
         // Post approval/denial status.
         await Self.postSecurityReviewToChannel(
-            disposition: disposition, callID: call.id, roleName: configuration.role.displayName,
+            disposition: disposition, callID: call.id, agentInstanceID: id,
+            roleName: configuration.role.displayName,
             agentRoleValue: configuration.role.rawValue, post: { await toolContext.post($0) }
         )
 
@@ -2813,9 +2819,13 @@ public actor AgentActor {
     /// and acceptance-validator evidence calls (via the validation channel) — so an auto-approval
     /// is surfaced identically no matter who made the call. `agentRoleValue` stamps the reviewed
     /// agent's role for callers that have one (nil for validators, which aren't an `AgentRole`).
+    /// `agentInstanceID` identifies WHICH agent's call this verdict is about. `agentRole` is not
+    /// enough: two workers share a role, and a tool call id is provider data that can repeat across
+    /// them, so a reader joining a verdict to its request needs the pair to land on the right row.
     static func postSecurityReviewToChannel(
         disposition: SecurityDisposition,
         callID: String,
+        agentInstanceID: UUID,
         roleName: String,
         agentRoleValue: String?,
         post: @Sendable (ChannelMessage) async -> Void
@@ -2838,6 +2848,7 @@ public actor AgentActor {
         }
         var reviewMetadata: [String: AnyCodable] = [
             "requestID": .string(callID),
+            "agentID": .string(agentInstanceID.uuidString),
             "securityDisposition": .string(securityDisposition)
         ]
         if let agentRoleValue { reviewMetadata["agentRole"] = .string(agentRoleValue) }
@@ -2862,7 +2873,8 @@ public actor AgentActor {
             sender: .agent(role),
             post: { await context.post($0) },
             taskTitle: taskTitle,
-            executionMs: executionMs
+            executionMs: executionMs,
+            agentInstanceID: context.agentID
         )
     }
 
@@ -2879,7 +2891,8 @@ public actor AgentActor {
         post: @Sendable (ChannelMessage) async -> Void,
         taskTitle: String? = nil,
         taskID: UUID? = nil,
-        executionMs: Int? = nil
+        executionMs: Int? = nil,
+        agentInstanceID: UUID
     ) async {
         let trimmedResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedResult.isEmpty else { return }
@@ -2888,6 +2901,7 @@ public actor AgentActor {
         var outputMetadata: [String: AnyCodable] = [
             "requestID": .string(call.id),
             "messageKind": .kind(.toolOutput),
+            "agentID": .string(agentInstanceID.uuidString),
             "tool": .string(call.name)
         ]
         if let executionMs {
