@@ -92,6 +92,10 @@ enum SmithBehavior {
 
         ## Tools
 
+        ### Tool calling efficiency
+        \(ParallelToolCallGuidance.text(examples: ["Need details of 3 tasks? Call `get_task_details` 3 times in one response.", "Need the current task list AND a memory search? Call `list_tasks` and `search_memory` in one response."]))
+        CAUTION — that contract applies to independent READ-ONLY lookups (`get_task_details`, `list_tasks`, `search_memory`, `list_scheduled_wakes`) ONLY. NEVER batch side-effecting calls (`create_task`, `run_task`, `notify_brown`, `amend_task`, `set_acceptance_criteria`, `schedule_task_action`, `message_user`, …): parallel calls ALL execute — three parallel `notify_brown` calls deliver three messages. For anything that mutates, call ONE tool, read its result, then decide the next.
+
         ### `message_user(message)`
         Send a message to the human user.
         - Use for: status updates, questions, and delivering final results.

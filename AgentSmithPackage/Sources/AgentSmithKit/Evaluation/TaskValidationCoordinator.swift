@@ -349,15 +349,43 @@ extension OrchestrationRuntime {
         let unjudged = judged.acceptanceCriteria.count - latestByCriterion.count
         let errored = latestByCriterion.filter { if case .error = $0.verdict { return true }; return false }
         let rejected = latestByCriterion.filter { if case .rejected = $0.verdict { return true }; return false }
+        let settledAfterRound = latestByCriterion.filter { $0.verdict.isFinal }.count
+
+        // The outcome the round DECIDED, mirrored to the metrics file. Emitted alongside the
+        // (CAS-guarded) transition rather than after confirming it — a superseded transition is
+        // the rare zombie-round case, acceptable for telemetry and never worth a second store
+        // round-trip. Continuation via the mid-round-criteria-added re-run emits nothing: that
+        // round hasn't ended.
+        func mirrorRoundOutcome(_ outcome: String, noProgressRounds: Int? = nil, detail: String? = nil) {
+            guard let ledger = validationMetricsLedger else { return }
+            ledger.append(outcome: ValidationRoundOutcomeRow(
+                sessionID: currentSessionID,
+                taskID: taskID,
+                taskTitle: judged.title,
+                parentTaskID: judged.parentTaskID,
+                round: token.round,
+                contractVersion: token.contractVersion,
+                outcome: outcome,
+                settledCriteria: settledAfterRound,
+                totalCriteria: judged.acceptanceCriteria.count,
+                rejectedCriteria: rejected.count,
+                erroredCriteria: errored.count,
+                consecutiveRoundsWithoutNewApprovals: noProgressRounds,
+                detail: detail
+            ))
+        }
 
         if unjudged == 0 && errored.isEmpty && rejected.isEmpty {
+            mirrorRoundOutcome("completed")
             await completeValidatedTask(taskID: taskID, judgedInRound: token)
         } else if !errored.isEmpty {
             let messages = errored.map { record -> String in
                 if case .error(let message) = record.verdict { return message }
                 return "unknown"
             }
-            await escalateValidation(taskID: taskID, reason: "Validation could not be completed: \(errored.count) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review.", judgedInRound: token)
+            let reason = "Validation could not be completed: \(errored.count) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review."
+            mirrorRoundOutcome("escalated", detail: reason)
+            await escalateValidation(taskID: taskID, reason: reason, judgedInRound: token)
         } else if unjudged > 0 && rejected.isEmpty {
             // Smith added criteria mid-round (set_acceptance_criteria) — never-judged
             // criteria aren't errors OR rejections; they just need the next round.
@@ -382,6 +410,11 @@ extension OrchestrationRuntime {
                 return
             }
             if withoutNewApprovals >= maxConsecutiveValidationsWithoutNewApprovals {
+                mirrorRoundOutcome(
+                    "failed_no_progress",
+                    noProgressRounds: withoutNewApprovals,
+                    detail: "\(rejected.count) criterion(s) still rejected after \(withoutNewApprovals) round(s) without a new approval"
+                )
                 await failValidation(
                     taskID: taskID,
                     validationsWithoutNewApprovals: withoutNewApprovals,
@@ -389,6 +422,7 @@ extension OrchestrationRuntime {
                     judgedInRound: token
                 )
             } else {
+                mirrorRoundOutcome("rejections_returned", noProgressRounds: withoutNewApprovals)
                 await returnRejectionsToWorker(taskID: taskID, rejected: rejected, judgedInRound: token)
             }
         }

@@ -58,6 +58,8 @@ public struct ValidationJudgmentTelemetry: Sendable, Equatable {
 /// Flat keys, no nesting, ISO-8601 dates, and a schema version — deliberately `jq`-friendly:
 /// `jq 'select(.verdict=="rejected") | .llmTurns'` should never need a join or a nested path.
 public struct ValidationMetricsRow: Codable, Sendable, Equatable {
+    /// Discriminator for heterogeneous JSONL: judgment rows vs `ValidationRoundOutcomeRow`.
+    public var rowKind: String = "judgment"
     /// Schema version; bump when a field changes meaning (adding fields is free).
     public var v: Int = 1
     public var recordedAt: Date
@@ -80,6 +82,10 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
     /// The rejection reason or error message, capped — kept so identical-rejection convergence
     /// analysis works from this file alone. Nil for accepts.
     public var detail: String?
+    /// Typed classification of `detail` when the verdict is an error — see `ValidationErrorKind`.
+    public var errorKind: String?
+    /// Same classification for `firstAttemptError`, when a retry happened.
+    public var firstAttemptErrorKind: String?
     public var round: Int
     public var contractVersion: Int
     public var validatorName: String
@@ -153,6 +159,10 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
             self.verdict = "error"
             self.detail = String(message.prefix(Self.maxDetailLength))
         }
+        self.errorKind = {
+            if case .error(let message) = record.verdict { return ValidationErrorKind.classify(message) }
+            return nil
+        }()
         self.round = record.round
         self.contractVersion = contractVersion
         self.validatorName = record.validatorName
@@ -162,6 +172,7 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
         if let telemetry {
             self.attempts = telemetry.attempts
             self.firstAttemptError = telemetry.firstAttemptError.map { String($0.prefix(Self.maxDetailLength)) }
+            self.firstAttemptErrorKind = telemetry.firstAttemptError.map { ValidationErrorKind.classify($0) }
             self.llmTurns = telemetry.llmTurns
             self.evidenceToolCalls = telemetry.evidenceToolCalls
             self.inputTokens = telemetry.inputTokens
@@ -173,6 +184,7 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
             let counts = Self.transcriptCounts(fromResponseLog: record.responseLog ?? "")
             self.attempts = 1
             self.firstAttemptError = nil
+            self.firstAttemptErrorKind = nil
             self.llmTurns = counts.turns
             self.evidenceToolCalls = counts.toolCalls
             self.inputTokens = nil
@@ -181,6 +193,94 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
             self.durationMs = nil
             self.dynamicItemCount = nil
         }
+    }
+}
+
+/// Typed classification of validation error MESSAGES — every string matched here is composed
+/// by this codebase (`EvaluationRunner` and `TaskValidationCoordinator`), so this is parsing
+/// our own output, and it is TELEMETRY ONLY: nothing may ever branch behavior on it (the
+/// no-prose-control-flow rule). When adding a new error message at the source, extend this
+/// table; an unmatched message classifies as "other" rather than failing, so a reworded
+/// message degrades a histogram, never a run.
+public enum ValidationErrorKind {
+    public static func classify(_ message: String) -> String {
+        let lowered = message.lowercased()
+        // Inner-cause checks come FIRST: a dynamic criterion wraps causes as
+        // "item 3 (…): timed out after 600s" and "prepare '…' failed: <cause>", and the
+        // cause is the truer kind than the wrapper.
+        if lowered.contains("exhausted"), lowered.contains("turns") { return "turn_exhaustion" }
+        if lowered.contains("timed out after") { return "timeout" }
+        if lowered.contains("cancelled") { return "cancelled" }
+        if lowered.contains("llm call failed") { return "transport" }
+        if lowered.contains("empty response from validator") { return "empty_response" }
+        if lowered.contains("unparseable after") { return "unparseable" }
+        if lowered.contains("contradicted successful file_read") { return "contradiction_guard" }
+        if lowered.contains("waive"), lowered.contains("non-waivable") { return "waive_non_waivable" }
+        if lowered.contains("unexpected verdict token") { return "unexpected_verdict_token" }
+        if lowered.contains("items where a verdict was required") { return "items_where_verdict" }
+        if lowered.contains("prepare '") || lowered.contains("input enumerator is unavailable") { return "enumerator_failure" }
+        if lowered.contains("no model is assigned") { return "no_model" }
+        if lowered.contains("worker tool scope") { return "no_worker_scope" }
+        return "other"
+    }
+}
+
+/// One validation ROUND's decision, flattened — the task-level "how did this round end"
+/// that judgment rows cannot express (a round outcome like "no progress, budget burned"
+/// is a fact about the round, not any single criterion). Same file as judgment rows,
+/// discriminated by `rowKind`.
+public struct ValidationRoundOutcomeRow: Codable, Sendable, Equatable {
+    public var rowKind: String = "roundOutcome"
+    public var v: Int = 1
+    public var recordedAt: Date
+    public var sessionID: UUID?
+    public var taskID: UUID
+    public var taskTitle: String
+    public var parentTaskID: UUID?
+    public var round: Int
+    public var contractVersion: Int
+    /// "completed" | "escalated" | "failed_no_progress" | "rejections_returned".
+    public var outcome: String
+    public var settledCriteria: Int
+    public var totalCriteria: Int
+    public var rejectedCriteria: Int
+    public var erroredCriteria: Int
+    /// The convergence counter as of this outcome; nil on paths that never read it
+    /// (completion, escalation).
+    public var consecutiveRoundsWithoutNewApprovals: Int?
+    /// Escalation reason / failure message, capped like judgment `detail`.
+    public var detail: String?
+
+    public init(
+        recordedAt: Date = Date(),
+        sessionID: UUID?,
+        taskID: UUID,
+        taskTitle: String,
+        parentTaskID: UUID?,
+        round: Int,
+        contractVersion: Int,
+        outcome: String,
+        settledCriteria: Int,
+        totalCriteria: Int,
+        rejectedCriteria: Int,
+        erroredCriteria: Int,
+        consecutiveRoundsWithoutNewApprovals: Int?,
+        detail: String?
+    ) {
+        self.recordedAt = recordedAt
+        self.sessionID = sessionID
+        self.taskID = taskID
+        self.taskTitle = taskTitle
+        self.parentTaskID = parentTaskID
+        self.round = round
+        self.contractVersion = contractVersion
+        self.outcome = outcome
+        self.settledCriteria = settledCriteria
+        self.totalCriteria = totalCriteria
+        self.rejectedCriteria = rejectedCriteria
+        self.erroredCriteria = erroredCriteria
+        self.consecutiveRoundsWithoutNewApprovals = consecutiveRoundsWithoutNewApprovals
+        self.detail = detail.flatMap { $0.isEmpty ? nil : String($0.prefix(2000)) }
     }
 }
 
@@ -221,6 +321,15 @@ public final class ValidationMetricsLedger: Sendable {
     /// telemetry must never fail a validation round — but it logs loudly rather than silently,
     /// per the no-silent-fallback rule.
     public func append(_ rows: [ValidationMetricsRow]) {
+        enqueue(rows)
+    }
+
+    /// A round's decision row, same file, discriminated by `rowKind`.
+    public func append(outcome row: ValidationRoundOutcomeRow) {
+        enqueue([row])
+    }
+
+    private func enqueue<Row: Encodable & Sendable>(_ rows: [Row]) {
         guard !rows.isEmpty else { return }
         queue.async { [fileURL, logger] in
             do {

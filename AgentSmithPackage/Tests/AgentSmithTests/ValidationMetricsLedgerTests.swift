@@ -108,6 +108,78 @@ struct ValidationMetricsLedgerTests {
         #expect(row.detail?.count == 2000)
     }
 
+    @Test("Error kinds classify from our own message formats, including dynamic-criterion wrappers")
+    func errorKindClassification() {
+        let cases: [(String, String)] = [
+            ("exhausted 10 turns without a conforming result", "turn_exhaustion"),
+            ("item 3 (foo.txt): exhausted 10 turns without a conforming result", "turn_exhaustion"),
+            ("timed out after 600s", "timeout"),
+            ("prepare 'x-input-enumerator' failed: timed out after 600s", "timeout"),
+            ("cancelled", "cancelled"),
+            ("LLM call failed: The request timed out.", "transport"),
+            ("empty response from validator; retrying requires a fresh validator conversation", "empty_response"),
+            ("unparseable after 3 attempts: no verdict token", "unparseable"),
+            ("validator rejection contradicted successful file_read for /a; discarding this validator attempt", "contradiction_guard"),
+            ("validator attempted to WAIVE a non-waivable criterion: n/a", "waive_non_waivable"),
+            ("unexpected verdict token 'MAYBE' ()", "unexpected_verdict_token"),
+            ("validator returned items where a verdict was required", "items_where_verdict"),
+            ("prepare 'x' emitted 900 items (cap 200) — narrow the prepare or split the criterion", "enumerator_failure"),
+            ("input enumerator is unavailable", "enumerator_failure"),
+            ("no model is assigned to the Validator role", "no_model"),
+            ("worker tool scope (task.approvedTools) is unavailable — cannot judge feasibility; escalating for manual review", "no_worker_scope"),
+            ("something entirely new", "other")
+        ]
+        for (message, expected) in cases {
+            #expect(ValidationErrorKind.classify(message) == expected, "\(message)")
+        }
+    }
+
+    @Test("Judgment and round-outcome rows share the file, discriminated by rowKind")
+    func roundOutcomeRowsInterleave() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileURL = dir.appendingPathComponent("validation_metrics.jsonl")
+        let ledger = ValidationMetricsLedger(fileURL: fileURL)
+
+        ledger.append([makeRow(verdict: .rejected(reason: "nope"))])
+        ledger.append(outcome: ValidationRoundOutcomeRow(
+            sessionID: UUID(),
+            taskID: UUID(),
+            taskTitle: "Test task",
+            parentTaskID: nil,
+            round: 8,
+            contractVersion: 1,
+            outcome: "failed_no_progress",
+            settledCriteria: 4,
+            totalCriteria: 7,
+            rejectedCriteria: 3,
+            erroredCriteria: 0,
+            consecutiveRoundsWithoutNewApprovals: 8,
+            detail: "3 criterion(s) still rejected after 8 round(s) without a new approval"
+        ))
+        ledger.flush()
+
+        let lines = try String(contentsOf: fileURL, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == 2)
+        struct KindProbe: Decodable { let rowKind: String }
+        let kinds = try lines.map { try JSONDecoder().decode(KindProbe.self, from: Data($0.utf8)).rowKind }
+        #expect(kinds == ["judgment", "roundOutcome"])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let outcome = try decoder.decode(ValidationRoundOutcomeRow.self, from: Data(lines[1].utf8))
+        #expect(outcome.outcome == "failed_no_progress")
+        #expect(outcome.settledCriteria == 4 && outcome.totalCriteria == 7)
+        #expect(outcome.consecutiveRoundsWithoutNewApprovals == 8)
+    }
+
+    @Test("An errored judgment row carries the typed kind alongside the prose")
+    func errorRowsCarryKind() {
+        let telemetry = ValidationJudgmentTelemetry(attempts: 2, firstAttemptError: "timed out after 600s")
+        let row = makeRow(verdict: .error(message: "exhausted 10 turns without a conforming result"), telemetry: telemetry)
+        #expect(row.errorKind == "turn_exhaustion")
+        #expect(row.firstAttemptErrorKind == "timeout")
+    }
+
     @Test("The telemetry box accumulates across attempts and keeps the FIRST error")
     func telemetryBoxAccumulates() {
         let box = JudgmentTelemetryBox()
