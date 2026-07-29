@@ -62,11 +62,15 @@ struct MarkdownText: View, Equatable {
         })
     }
 
+    /// Deliberately main-actor, and deliberately without a `MainActor.run` around the
+    /// assignment. The app target is MainActor-by-default, so such a hop is a no-op that
+    /// reads as proof the parse was moved off-main — the misreading that hid a main-thread
+    /// LCS in `DiffView`. Nothing here wants to be off-main anyway: over 4,000 real channel
+    /// messages this parse is 0.001ms median, while `InlineMarkdownStyler` (29x that, and
+    /// unavoidably main-actor since it builds `Text`) runs in the View inits below.
+    /// See ROADMAP.md, "Actor-isolation boundary".
     @Sendable private func updateBlocks() async {
-        let blocks = parseContentBlocks()
-        await MainActor.run {
-            cachedBlocks = blocks
-        }
+        cachedBlocks = parseContentBlocks()
     }
 
     // MARK: - Block model
