@@ -78,6 +78,15 @@ public enum InlineMarkdownStyler {
     /// Applies the string-level preprocessors (path/URL/email linkification,
     /// `~/` escaping) to the plain stretches of `line` while passing code spans
     /// through byte-for-byte, then reassembles the line for the whole-line parse.
+    ///
+    /// Known residual gap: an authored `[text](url)` link whose text contains a
+    /// code span is SPLIT across stretches here, so `PathLinkifier`'s
+    /// authored-link protection (which scans each stretch independently) cannot
+    /// see it, and a linkifiable token in the surviving halves still gets
+    /// wrapped — voiding the author's link. Pre-existing, verified byte-identical
+    /// to the pre-rewrite pipeline; closing it means computing the link spans
+    /// once per line (code spans masked) and passing stretch-local protected
+    /// ranges into linkification.
     static func preprocessedLine(_ line: String) -> String {
         stretches(in: line)
             .map { stretch in

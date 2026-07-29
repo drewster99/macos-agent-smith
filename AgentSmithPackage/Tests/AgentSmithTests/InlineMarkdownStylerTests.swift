@@ -288,6 +288,29 @@ struct InlineMarkdownStylerTests {
         #expect(plainText(of: line) == "see https://x.com/abc` more text")
     }
 
+    @Test("authored link containing a real path renders as the authored link")
+    func authoredLinkContainingPathRendersIntact() {
+        // The old sequential linkifier injected a file link inside the authored
+        // link's text, voiding the author's link and rendering brackets literally.
+        let runs = styledRuns(of: "[see /usr/bin](https://x.com) after")
+        #expect(runs == [
+            StyledRun(text: "see /usr/bin", isBold: false, isItalic: false, isStruck: false, isCode: false, link: URL(string: "https://x.com")),
+            StyledRun(text: " after", isBold: false, isItalic: false, isStruck: false, isCode: false, link: nil),
+        ])
+    }
+
+    @Test("URL containing an email renders as one link with the full URL")
+    func urlContainingEmailRendersAsSingleLink() {
+        let line = "visit https://x.com/?email=a@b.com now"
+        let runs = styledRuns(of: line)
+        #expect(runs == [
+            StyledRun(text: "visit ", isBold: false, isItalic: false, isStruck: false, isCode: false, link: nil),
+            StyledRun(text: "https://x.com/?email=a@b.com", isBold: false, isItalic: false, isStruck: false, isCode: false, link: URL(string: "https://x.com/?email=a@b.com")),
+            StyledRun(text: " now", isBold: false, isItalic: false, isStruck: false, isCode: false, link: nil),
+        ])
+        #expect(plainText(of: line) == line)
+    }
+
     @Test("markdown link syntax spanning a code span collapses to one plain link run")
     func markdownLinkAcrossCodeSpan() {
         // The parser drops the .code intent inside link syntax and merges the text.
