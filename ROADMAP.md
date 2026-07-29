@@ -4,9 +4,9 @@
 
 ### Actor-isolation boundary: the app target is MainActor-by-default, the package is not (found 2026-07-28)
 
-**Status:** hazard identified and one instance fixed; the audit and the remaining instance are not done. Keeping the setting is decided; what is open is how to stop it misleading readers.
+**Status:** measured and settled 2026-07-29. Both settings stay. `MarkdownText` is resolved as *leave the work on main* (measurement below). What remains is a 3-line no-op deletion and adopting `@concurrent` as the way to say "off main."
 
-#### The setting
+#### The settings — there are TWO, and the second one is the one nobody mentions
 
 `AgentSmith/AgentSmith.xcodeproj/project.pbxproj` sets, in ALL FOUR configurations:
 
@@ -15,20 +15,48 @@ SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 SWIFT_APPROACHABLE_CONCURRENCY = YES;
 ```
 
-Present since the **initial commit** (`cff7c89`) — it is Xcode's app-target template default (Xcode 26 sets it for new apps), not a considered choice by anyone here. `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (SE-0466) makes every declaration in the target implicitly `@MainActor` unless marked `nonisolated`.
+Both present since the **initial commit** (`cff7c89`) — Xcode's app-target template default, not a considered choice by anyone here. `AgentSmithPackage/Package.swift` sets **neither**, so `AgentSmithKit` gets the stock Swift 6 behavior.
 
-`AgentSmithPackage/Package.swift` sets **no** isolation settings, so `AgentSmithKit` is nonisolated-by-default.
+- `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (SE-0466) → `-default-isolation=MainActor`. Every declaration in the target is implicitly `@MainActor` unless marked `nonisolated`.
+- `SWIFT_APPROACHABLE_CONCURRENCY = YES` enables, per its `Swift.xcspec` description, `DisableOutwardActorInference`, `GlobalActorIsolatedTypesUsability`, `InferIsolatedConformances`, `InferSendableFromCaptures`, and **`NonisolatedNonsendingByDefault`** (SE-0461) — "runs nonisolated async functions on the caller's actor by default unless the function is explicitly marked `@concurrent`."
 
-#### The hazard is the boundary, not the setting
+**Verified against the real build, not inferred** (2026-07-29, Xcode 27 beta 4 / Swift 6.4). From the `SwiftCompile` invocation in `DerivedData/.../Logs/Build/*.xcactivitylog`:
 
-Identical code means opposite things depending on which directory it lives in:
+| module | flags |
+|---|---|
+| `AgentSmithApp` (app target) | `-default-isolation=MainActor`, `-enable-upcoming-feature NonisolatedNonsendingByDefault`, `-enable-upcoming-feature InferIsolatedConformances`, `-enable-upcoming-feature MemberImportVisibility`, `-swift-version 6` |
+| `AgentSmithKit` | `-swift-version 6` — **no** isolation flags, **no** upcoming features |
+
+Three traps when re-checking this, all of which cost time on 2026-07-29:
+
+- **The log escapes the `=`.** It reads `-default-isolation\=MainActor`, so `grep -- "-default-isolation=MainActor"` finds nothing and looks like proof the setting is inert. Split the invocation on spaces (`tr ' ' '\n'`) instead of pattern-matching the pair.
+- **Only 2 of the 5 approachable-concurrency features reach the command line.** The other three are already implied by language mode 6 and are conditioned out in the spec; their absence is not evidence the setting is off.
+- An **incremental build with no source changes runs no `SwiftCompile` job at all**, so the log will contain no flags. Touch a source file first.
+
+#### The hazard is the boundary, not either setting
+
+Measured, not reasoned — `scripts/actor_isolation_probe.swift` compiles the same source under each flag set and prints where each function actually runs (verified 2026-07-29, Xcode 27 beta 4):
 
 | | `AgentSmithKit` | app target |
 |---|---|---|
-| `func foo() async` | runs off-main | runs **on** main |
+| `func foo() async` | off-main | **MAIN** |
+| `nonisolated func foo() async` | off-main | **MAIN** |
+| `@Sendable func foo() async` | off-main | **MAIN** |
+| `@concurrent func foo() async` | off-main | off-main |
 | `await MainActor.run { … }` | a real hop | **a no-op** |
 
 A function moved from the kit into the app silently becomes main-actor. Nothing in the source says so; it is inherited from a build setting nobody reads while reviewing a view.
+
+Two consequences that are easy to get backwards:
+
+- **`nonisolated` does not mean off-main in the app target.** Under `NonisolatedNonsendingByDefault` it means "inherit the caller," and the callers are views. **`@concurrent` is the only spelling that reaches the global concurrent executor.** It implies `nonisolated` (a bare `@concurrent` method is rejected for calling `@MainActor` code "from outside of the actor"), and if both appear the attribute must precede the modifier — `@concurrent nonisolated func`, never the reverse, which is a parse error.
+- **`@Sendable` does not strip the module default.** That is precisely the shape that made `DiffView` and `MarkdownText` read as off-main while running on main.
+
+#### Why turning `SWIFT_DEFAULT_ACTOR_ISOLATION` off was considered and rejected (2026-07-29)
+
+It would not have prevented the `DiffView` bug, for three independent reasons: conforming to SwiftUI's `View` infers main-actor isolation regardless of the module default — the compiler says so in as many words, "main actor isolation inferred from conformance to protocol 'View'", and it is a *warning* rather than an error only because the protocol is `@preconcurrency`; `NonisolatedNonsendingByDefault` keeps a nonisolated `async` function on the caller's actor anyway; and only `@concurrent`/`Task.detached` ever leaves main. So the cost is a mechanical migration across 104 files / 30k lines of mostly-UI code for zero correctness gain, and the bug class survives it. Rejected.
+
+The mirror-image option — enabling approachable concurrency in `Package.swift` so `async` means the same thing repo-wide — was also rejected, and is the more dangerous of the two: `AgentSmithKit` is full of actors, so every nonisolated async helper that currently hops off `OrchestrationRuntime` would start running *on* it, serializing work that is concurrent today. Not a flag flip; would need measurement first.
 
 #### The bug it already caused (FIXED, `cd72762`)
 
@@ -40,23 +68,33 @@ Fixed: generation is detached, `DiffGenerator.lcsDiff` checks `Task.isCancelled`
 
 #### What remains
 
-1. **`MarkdownText.updateBlocks()` is the same shape and is NOT fixed.** `@Sendable private func updateBlocks() async` with `await MainActor.run { cachedBlocks = blocks }` inside — so `parseContentBlocks()` runs on the main thread and the hop does nothing. Every channel message body goes through it. **Unmeasured**: whether this is material depends entirely on what parsing a message costs, and that has not been measured. Measure before moving it; do not assume from the shape alone.
+1. **`MarkdownText.updateBlocks()` — MEASURED 2026-07-29; do NOT make it `@concurrent`.** The shape is identical to `DiffView` and the hop is confirmed a no-op (`@Sendable` does not strip the default; see the table above). But the shape was the only reason to suspect it, and the numbers say the work isn't there.
 
-2. **Audit the remaining `MainActor.run` sites in the app target.** Only four files contain one. Already triaged:
+   Benchmarked over **4,000 real channel messages** from `channel_log.jsonl` — median 106 chars / 1 line, p95 524 chars / 8 lines, max 9,203 chars / 224 lines. (The surrounding 40k-message sample runs larger — median 155 chars, max 69KB / 1151 lines — so the tail below is not the worst this code will ever see.) Release build; debug was within 12%, so this is Foundation/regex cost, not codegen:
+
+   | | median | p95 | p99 | max |
+   |---|---|---|---|---|
+   | `parseContentBlocks()` — the `@concurrent` candidate | 0.001ms | 0.013ms | 0.076ms | 0.247ms |
+   | `InlineMarkdownStyler.styledLine` — runs in View `init`, main | 0.060ms | 0.298ms | 1.530ms | 6.471ms |
+
+   **Styling is 29× parsing**, and that ratio is a **lower bound**: the benchmark charged one `styledLine` per line, but `RenderLineView.init` eagerly styles a heading line *twice* — once into `h1Text`/`h2Text`/`h3Text` and again into `plainText`, since the heading branch does not suppress the plain branch — and `body` then renders one and discards the other. `parseContentBlocks` only splits lines and sniffs prefixes; the expensive work is `InlineMarkdownStyler.styledLine` (regex linkification + emphasis), called per line and per table cell from `RenderLineView.init` / `TableView.init` — which is **structurally main-actor**, because it builds SwiftUI `Text`/`AttributedString` inside a View initializer. Marking `updateBlocks()` `@concurrent` would move ~3% of the cost off main and add a hop plus `Sendable` constraints per message.
+
+   The correct fix is therefore just **delete the no-op `MainActor.run`** and assign directly (the compiler enforces this: direct assignment only compiles if the function really is main-actor). If message rendering ever does need optimizing, the target is caching styled `AttributedString`s — a memoization problem, not an isolation one.
+
+2. **The `MainActor.run` audit is COMPLETE (2026-07-29).** Three live sites in the whole app target; `DiffView.swift:154, :179` match a grep but are comments describing the removed hop, not calls.
    - `SharedAppState.swift:718, :721` — inside `@Sendable` callbacks invoked from off-main (the `CostBoard` actor). **Genuine.**
    - `ExportDefaults/main.swift:16` — top-level CLI code, which is nonisolated. **Genuine.**
-   - `MarkdownText.swift:67` — **suspect**, see above.
-   - `DiffView.swift` — was a no-op, now removed.
+   - `MarkdownText.swift:67` — **confirmed no-op**; delete per item 1.
 
-3. **Make isolation visible at the declaration.** Anything deliberately off-main in the app target should say `nonisolated` explicitly rather than relying on `Task.detached` at the call site to imply it. The target already has 23 `nonisolated` uses, so the idiom is established; it is just not applied to the async functions that most need it.
+3. **Make isolation visible at the declaration — with `@concurrent`, not `nonisolated`.** Anything deliberately off-main in the app target must say `@concurrent` rather than relying on a `Task.detached` at the call site to imply it. `nonisolated` alone is **not** sufficient here and reads as if it were (see the table above) — that is the trap, not the fix. The target currently has 23 `nonisolated` uses, 8 `Task.detached`, and **zero** `@concurrent`.
 
 4. **Prefer the package for CPU-heavy work.** In `AgentSmithKit`, nonisolated-by-default means an `async` function does what it looks like it does. `DiffGenerator` already lives there; the trap was entirely in the app-side caller.
 
-#### Decision: KEEP the setting
+#### Decision: KEEP BOTH settings (2026-07-29)
 
-Main-actor-by-default is *correct* for an app target — nearly all of this code is UI code that belongs on the main actor, and the alternative is hand-annotating every view and view model while Swift 6 strict concurrency rejects the ones that get missed. Turning it off would produce a large, risky migration for no correctness gain.
+Main-actor-by-default is *correct* for an app target — nearly all of this code is UI code that belongs on the main actor, and the alternative is hand-annotating every view and view model while Swift 6 strict concurrency rejects the ones that get missed. Neither turning it off nor propagating approachable concurrency into the package survives scrutiny (rationale above).
 
-The fix is not the setting; it is (a) never trusting `async` alone to mean off-main inside the app target, and (b) deleting `await MainActor.run` wherever it is a no-op, because it actively asserts something false. A no-op hop is worse than no hop: it reads as evidence that the surrounding work was moved off the main thread.
+The fix is not the settings; it is (a) never trusting `async` **or `nonisolated`** to mean off-main inside the app target — only `@concurrent` does — and (b) deleting `await MainActor.run` wherever it is a no-op, because it actively asserts something false. A no-op hop is worse than no hop: it reads as evidence that the surrounding work was moved off the main thread.
 
 ### Notification architecture — generalize the wake system into a durable notification broker (design 2026-07-22)
 
