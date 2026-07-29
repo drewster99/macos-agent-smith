@@ -2,6 +2,62 @@
 
 ## Planned
 
+### Actor-isolation boundary: the app target is MainActor-by-default, the package is not (found 2026-07-28)
+
+**Status:** hazard identified and one instance fixed; the audit and the remaining instance are not done. Keeping the setting is decided; what is open is how to stop it misleading readers.
+
+#### The setting
+
+`AgentSmith/AgentSmith.xcodeproj/project.pbxproj` sets, in ALL FOUR configurations:
+
+```
+SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+SWIFT_APPROACHABLE_CONCURRENCY = YES;
+```
+
+Present since the **initial commit** (`cff7c89`) — it is Xcode's app-target template default (Xcode 26 sets it for new apps), not a considered choice by anyone here. `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (SE-0466) makes every declaration in the target implicitly `@MainActor` unless marked `nonisolated`.
+
+`AgentSmithPackage/Package.swift` sets **no** isolation settings, so `AgentSmithKit` is nonisolated-by-default.
+
+#### The hazard is the boundary, not the setting
+
+Identical code means opposite things depending on which directory it lives in:
+
+| | `AgentSmithKit` | app target |
+|---|---|---|
+| `func foo() async` | runs off-main | runs **on** main |
+| `await MainActor.run { … }` | a real hop | **a no-op** |
+
+A function moved from the kit into the app silently becomes main-actor. Nothing in the source says so; it is inherited from a build setting nobody reads while reviewing a view.
+
+#### The bug it already caused (FIXED, `cd72762`)
+
+`DiffView.updateDiffCache()` was `@Sendable … async` with `await MainActor.run` around its assignment. Everyone (including the code's own comments) read that as "generates off-thread, hops back to publish". It was main-actor throughout, so `DiffGenerator.generate` — an O(m·n) LCS with a DP table up to 1000×1000, ~10⁶ string comparisons and megabytes allocated — ran **on the main thread**, hitching the UI on every file-edit row with a large diff. The `MainActor.run` was a no-op hop back to the actor it never left.
+
+Two further conclusions followed from the wrong model and had to be reversed in the same commit: a "publish race" that could not occur (main-actor tasks run FIFO, so the last enqueued always published last), and a second cancellation guard that was dead code because nothing could suspend in front of it. Both became genuine once generation moved to `Task.detached`.
+
+Fixed: generation is detached, `DiffGenerator.lcsDiff` checks `Task.isCancelled` once per row so a superseded diff actually stops, and the no-op hop is gone (`f60fe0d`).
+
+#### What remains
+
+1. **`MarkdownText.updateBlocks()` is the same shape and is NOT fixed.** `@Sendable private func updateBlocks() async` with `await MainActor.run { cachedBlocks = blocks }` inside — so `parseContentBlocks()` runs on the main thread and the hop does nothing. Every channel message body goes through it. **Unmeasured**: whether this is material depends entirely on what parsing a message costs, and that has not been measured. Measure before moving it; do not assume from the shape alone.
+
+2. **Audit the remaining `MainActor.run` sites in the app target.** Only four files contain one. Already triaged:
+   - `SharedAppState.swift:718, :721` — inside `@Sendable` callbacks invoked from off-main (the `CostBoard` actor). **Genuine.**
+   - `ExportDefaults/main.swift:16` — top-level CLI code, which is nonisolated. **Genuine.**
+   - `MarkdownText.swift:67` — **suspect**, see above.
+   - `DiffView.swift` — was a no-op, now removed.
+
+3. **Make isolation visible at the declaration.** Anything deliberately off-main in the app target should say `nonisolated` explicitly rather than relying on `Task.detached` at the call site to imply it. The target already has 23 `nonisolated` uses, so the idiom is established; it is just not applied to the async functions that most need it.
+
+4. **Prefer the package for CPU-heavy work.** In `AgentSmithKit`, nonisolated-by-default means an `async` function does what it looks like it does. `DiffGenerator` already lives there; the trap was entirely in the app-side caller.
+
+#### Decision: KEEP the setting
+
+Main-actor-by-default is *correct* for an app target — nearly all of this code is UI code that belongs on the main actor, and the alternative is hand-annotating every view and view model while Swift 6 strict concurrency rejects the ones that get missed. Turning it off would produce a large, risky migration for no correctness gain.
+
+The fix is not the setting; it is (a) never trusting `async` alone to mean off-main inside the app target, and (b) deleting `await MainActor.run` wherever it is a no-op, because it actively asserts something false. A no-op hop is worse than no hop: it reads as evidence that the surrounding work was moved off the main thread.
+
 ### Notification architecture — generalize the wake system into a durable notification broker (design 2026-07-22)
 
 **Status:** design, not yet implemented. `schedule_reminder` is already restored and shipped against the current wake system; it ports cleanly onto this.
