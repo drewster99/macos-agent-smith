@@ -683,7 +683,8 @@ final class AppViewModel {
             autoRunInterruptedTasks: autoRunInterruptedTasks,
             memoryStore: sharedMemoryStore,
             inactiveTaskStore: sharedInactiveStore,
-            liveActivityTracker: shared.liveActivityTracker
+            liveActivityTracker: shared.liveActivityTracker,
+            validationMetricsLedger: .shared
         )
         // Bridge per-session attachment persistence into the runtime so the new
         // attachment-aware tools (create_task / task_update / task_complete) can

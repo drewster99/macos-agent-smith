@@ -115,6 +115,10 @@ public actor OrchestrationRuntime {
     private let autoRunInterruptedTasks: Bool
     /// Persistent token usage tracking across all agents.
     public let usageStore: UsageStore
+    /// Append-only judgment telemetry, written after each validation round's verdicts land.
+    /// Nil (the default) disables it — the app passes `ValidationMetricsLedger.shared`; tests
+    /// that don't opt in structurally cannot write the user's real file.
+    let validationMetricsLedger: ValidationMetricsLedger?
     /// Append-only log of timer lifecycle events. Populated from `AgentActor`'s timer
     /// callbacks; surfaced in the View → Timers history pane.
     public let timerEventLog: TimerEventLog
@@ -1401,7 +1405,8 @@ public actor OrchestrationRuntime {
         autoRunInterruptedTasks: Bool = false,
         memoryStore: MemoryStore? = nil,
         inactiveTaskStore: InactiveTaskStore = InactiveTaskStore(),
-        liveActivityTracker: LiveActivityTracker = LiveActivityTracker()
+        liveActivityTracker: LiveActivityTracker = LiveActivityTracker(),
+        validationMetricsLedger: ValidationMetricsLedger? = nil
     ) {
         self.channel = MessageChannel()
         self.taskStore = TaskStore(inactiveStore: inactiveTaskStore)
@@ -1416,6 +1421,7 @@ public actor OrchestrationRuntime {
         self.autoAdvanceEnabled = autoAdvanceEnabled
         self.autoRunInterruptedTasks = autoRunInterruptedTasks
         self.usageStore = usageStore
+        self.validationMetricsLedger = validationMetricsLedger
         self.timerEventLog = TimerEventLog()
     }
 

@@ -63,7 +63,11 @@ public enum EvaluatorDefaults {
         ]),
         toolNames: EvaluatorDefaults.validatorEvidenceToolNames,
         maxTurns: 10,
-        timeoutSeconds: 300,
+        // 600, raised from 300 (2026-07-28): a 10-turn judgment at the ~25s/call latency of a
+        // self-hosted backend brushes 300s on honest progress, and the deadline then discards
+        // the whole paid-for conversation. The cost of the higher ceiling is a longer park
+        // before a real outage errors the criterion — bounded, and cheaper than re-judging.
+        timeoutSeconds: 600,
         maxOutputTokens: 10_000
     )
 
@@ -117,7 +121,8 @@ public enum EvaluatorDefaults {
             outputGrammar: grammar,
             toolNames: validatorEvidenceToolNames,
             maxTurns: 10,
-            timeoutSeconds: 300,
+            // 600 for the same latency reasoning as `defaultDefinition` above.
+            timeoutSeconds: 600,
             maxOutputTokens: 10_000
         ))
     }
@@ -258,6 +263,7 @@ extension OrchestrationRuntime {
             validationLogger.notice("Validation round \(round) abandoned: superseded before its verdicts could land")
             return
         case .recorded(let landed):
+            await appendValidationMetrics(landed, task: taskSnapshot, token: token)
             recorded = landed
         }
         await postRoundSummary(taskID: taskID, records: recorded)
@@ -363,6 +369,29 @@ extension OrchestrationRuntime {
     /// is an ERROR, not a truncation — silently validating a subset could pass work that
     /// fails in the unexamined tail, which is the one thing a validator must never do.
     static let maxPrepareItems = 50
+
+    /// Telemetry mirror of what LANDED on the task's ledger — one JSONL row per verdict, in the
+    /// global append-only metrics file. Written HERE, immediately after the single producer of
+    /// verdict records (`recordCriterionVerdicts`) reported `.recorded`, so the mirror cannot
+    /// drift from the ledger and superseded rounds (which wrote nothing) mirror nothing. The
+    /// rows survive the three ledger destroyers (failed-task retry, reopen, criteria edits)
+    /// precisely because nothing in validation ever reads them back.
+    private func appendValidationMetrics(_ landed: [CriterionVerdictRecord], task: AgentTask, token: ValidationRoundToken) async {
+        guard let ledger = validationMetricsLedger, !landed.isEmpty else { return }
+        let namesByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let sessionID = currentSessionID
+        let rows = landed.map { record in
+            ValidationMetricsRow(
+                record: record,
+                criterionName: namesByID[record.criterionID] ?? "(criterion no longer on task)",
+                taskID: task.id,
+                taskTitle: task.title,
+                sessionID: sessionID,
+                contractVersion: token.contractVersion
+            )
+        }
+        await ledger.append(rows)
+    }
 
     /// Judges one criterion, retrying a first ERROR once (transient backends, parse
     /// flukes). A WAIVE against a non-waivable criterion is an ERROR — an

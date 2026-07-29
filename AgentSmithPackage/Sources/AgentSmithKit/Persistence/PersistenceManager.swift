@@ -70,7 +70,9 @@ public actor PersistenceManager {
         attachmentsDirectory = baseDirectory.appendingPathComponent("attachments", isDirectory: true)
     }
 
-    private static func appSupportURL() -> URL {
+    /// Internal (not private) so `ValidationMetricsLedger.shared` composes the same real
+    /// Application Support path instead of duplicating the resolution and its precondition.
+    static func appSupportURL() -> URL {
         guard let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
