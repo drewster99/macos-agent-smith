@@ -175,12 +175,14 @@ struct DiffView: View {
         // that have since changed. While generation held the main actor this guard could not
         // differ from the one above — it was dead code that read like a race fix.
         guard !Task.isCancelled else { return }
-        await MainActor.run {
-            cachedAllLines = allLines
-            cachedAddedCount = added
-            cachedRemovedCount = removed
-            cachedNeedsTruncation = needsTrunc
-        }
+        // Assigned directly: this function is main-actor isolated (target default), and the
+        // detached generate above already hopped back on resume. The `await MainActor.run` that
+        // used to wrap this was a no-op that read like a hop to the main thread — the single most
+        // misleading line in the file, since it implied the generate above it had been off-main.
+        cachedAllLines = allLines
+        cachedAddedCount = added
+        cachedRemovedCount = removed
+        cachedNeedsTruncation = needsTrunc
     }
 
     /// Nested View struct for diff line display (refactored from diffLineView(_:))
