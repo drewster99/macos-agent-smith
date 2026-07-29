@@ -178,6 +178,47 @@ struct LiveActivityTrackerTests {
         #expect(after == before, "identical content must compare equal despite a newer version")
     }
 
+    @Test("Every stored property except `version` participates in equality")
+    func equalityCoversEveryStoredProperty() {
+        // `Snapshot`'s `==` is HAND-WRITTEN so it can exclude `version`, which changes on every
+        // publish. That costs the synthesised conformance, and the resulting footgun is the same
+        // one `ledgerCodingKeyCoverage` guards against for `CodingKeys`: a stored property added
+        // later is silently absent from `==`, so two genuinely different snapshots compare equal,
+        // every observer stops updating on that field, and nothing fails.
+        //
+        // Guarded by REFLECTION rather than by a round trip: a field missing from `==` still
+        // round-trips fine, so only counting the properties catches it.
+        let base = LiveActivityTracker.Snapshot()
+        let storedPropertyCount = Mirror(reflecting: base).children.count
+
+        // One mutator per property that MUST break equality.
+        let mutators: [(inout LiveActivityTracker.Snapshot) -> Void] = [
+            { $0.brownWorkers += 1 },
+            { $0.validatorEvaluations += 1 },
+            { $0.summarizerRuns += 1 },
+            { $0.memorySearches += 1 },
+            { $0.securityEvaluationsByCall.insert(
+                LiveActivityTracker.SecurityEvaluationKey(agentInstanceID: UUID(), callID: "c")
+            ) }
+        ]
+
+        #expect(
+            storedPropertyCount == mutators.count + 1,
+            "A stored property was added to Snapshot without deciding whether it belongs in `==`. Add it to the hand-written `==` and add a mutator here, or — if it is like `version` and must NOT affect equality — raise the `+ 1`."
+        )
+
+        for (index, mutate) in mutators.enumerated() {
+            var changed = base
+            mutate(&changed)
+            #expect(changed != base, "mutator \(index) did not break equality")
+        }
+
+        // And the one exclusion, asserted rather than assumed.
+        var bumped = base
+        bumped.version &+= 1
+        #expect(bumped == base, "`version` must not participate in equality")
+    }
+
     @Test("isIdle reflects live evaluations")
     func idleAccountsForSecurityEvaluations() {
         let tracker = makeTracker()
