@@ -66,8 +66,10 @@ struct InlineMarkdownStylerTests {
     // MARK: - Mask ↔ parser agreement
 
     /// Lines chosen to exercise every pairing rule: run-length matching, unmatched
-    /// openers, escaped backticks, escapes being literal inside spans, and the
-    /// one-space trim. No linkifiable content — this isolates the scanner.
+    /// openers, escaped backticks, escapes being literal inside spans, the
+    /// one-space trim, and cmark's backtick-string cache (failed-scan poisoning,
+    /// successful-scan rewind, the MAXBACKTICKS cap). No linkifiable content —
+    /// this isolates the scanner.
     private static let pairingCorpus: [String] = [
         "a `b` c",
         "a ``b`` c",
@@ -90,6 +92,23 @@ struct InlineMarkdownStylerTests {
         "`x`",
         "no backticks at all",
         "",
+        // cmark's backtick-string cache (Apple ships it; spec CommonMark has no
+        // such thing): a closer scan that hits end of input poisons later
+        // same-length openers unless the cache proves a run of that length lies
+        // ahead, and a successful scan can rewind a length's cache entry. These
+        // pin the live parser's off-spec pairing so OS drift fails here.
+        "`` `a` `b`",
+        "`` `a` `b` `c`",
+        "``` `x` `a``b`c``d",
+        "``` `x` `a``b` c ``d``",
+        "```` x `` y `a``b` z ``w``",
+        #"`` \``a` `b`"#,
+        "``` ``a`` ``b``",
+        "` ``a`` ``b``",
+        // cmark's MAXBACKTICKS (80): an 81-tick opener fails without even
+        // scanning; an 80-tick opener still pairs.
+        String(repeating: "`", count: 81) + "x" + String(repeating: "`", count: 81),
+        String(repeating: "`", count: 80) + "x" + String(repeating: "`", count: 80),
     ]
 
     /// The mask must find exactly the code spans the real parser finds, in order.
@@ -205,10 +224,27 @@ struct InlineMarkdownStylerTests {
     @Test("code span holding a single URL or email becomes a link")
     func standaloneURLAndEmailCodeSpansBecomeLinks() {
         let urlRuns = styledRuns(of: "docs: `https://example.com/guide`")
-        #expect(urlRuns.contains(where: { $0.link == URL(string: "https://example.com/guide") }))
+        let urlRun = urlRuns.first(where: { $0.link != nil })
+        #expect(urlRun?.link == URL(string: "https://example.com/guide"))
+        #expect(urlRun?.text == "https://example.com/guide")
+        #expect(urlRun?.isCode == false)
 
         let emailRuns = styledRuns(of: "contact `foo@bar.com` today")
-        #expect(emailRuns.contains(where: { $0.link == URL(string: "mailto:foo@bar.com") }))
+        let emailRun = emailRuns.first(where: { $0.link != nil })
+        #expect(emailRun?.link == URL(string: "mailto:foo@bar.com"))
+        #expect(emailRun?.text == "foo@bar.com")
+        #expect(emailRun?.isCode == false)
+    }
+
+    @Test("standalone path code span inside bold keeps the bold and gains the link")
+    func standalonePathCodeSpanInsideBoldKeepsBoldAndLinks() {
+        let path = "/tmp/agent-smith-nonexistent/x"
+        let runs = styledRuns(of: "**check `\(path)` now**")
+        #expect(runs == [
+            StyledRun(text: "check ", isBold: true, isItalic: false, isStruck: false, isCode: false, link: nil),
+            StyledRun(text: path, isBold: true, isItalic: false, isStruck: false, isCode: false, link: URL(fileURLWithPath: path)),
+            StyledRun(text: " now", isBold: true, isItalic: false, isStruck: false, isCode: false, link: nil),
+        ])
     }
 
     // MARK: - Linkification stays outside code spans
@@ -239,10 +275,28 @@ struct InlineMarkdownStylerTests {
         #expect(runs.contains(where: { $0.link == URL(string: "mailto:foo@bar.com") }))
     }
 
-    @Test("markdown link syntax spanning a code span still yields one clickable link")
+    @Test("bare URL abutting an unpaired backtick links cleanly, backtick stays literal")
+    func bareURLAbuttingUnpairedBacktickStaysClean() {
+        // The unpaired backtick is plain-stretch content (the mask cuts only at
+        // paired spans), so the URL regex must stop before it — a swallowed
+        // backtick pairs with the injected [url](url) syntax at parse time,
+        // destroying the link and coloring the leftovers as code.
+        let line = "see https://x.com/abc` more text"
+        let runs = styledRuns(of: line)
+        #expect(runs.contains(where: { $0.link == URL(string: "https://x.com/abc") }))
+        #expect(runs.allSatisfy { !$0.isCode })
+        #expect(plainText(of: line) == "see https://x.com/abc` more text")
+    }
+
+    @Test("markdown link syntax spanning a code span collapses to one plain link run")
     func markdownLinkAcrossCodeSpan() {
+        // The parser drops the .code intent inside link syntax and merges the text.
+        // Pinned exactly so a future parser that starts emitting .code inside links
+        // (which would route the run through the code-coloring branch) fails loudly.
         let runs = styledRuns(of: "[see `code` here](https://example.com)")
-        #expect(runs.contains(where: { $0.link == URL(string: "https://example.com") }))
+        #expect(runs == [
+            StyledRun(text: "see code here", isBold: false, isItalic: false, isStruck: false, isCode: false, link: URL(string: "https://example.com")),
+        ])
     }
 
     // MARK: - Tilde handling
@@ -259,6 +313,18 @@ struct InlineMarkdownStylerTests {
     func deliberateStrikethroughPreserved() {
         let runs = styledRuns(of: "~~gone~~ kept")
         #expect(runs.contains(StyledRun(text: "gone", isBold: false, isItalic: false, isStruck: true, isCode: false, link: nil)))
+    }
+
+    @Test("strikethrough whose delimiter abuts a slash still strikes")
+    func strikethroughDelimiterAbuttingSlashPreserved() {
+        // The second tilde of a `~~` delimiter next to a slash must not be
+        // escaped as a `~/` path start — that broke the whole strikethrough.
+        let openingRuns = styledRuns(of: "~~/gone~~ kept")
+        #expect(openingRuns.contains(StyledRun(text: "/gone", isBold: false, isItalic: false, isStruck: true, isCode: false, link: nil)))
+
+        let closingRuns = styledRuns(of: "~~old~~/new stays")
+        #expect(closingRuns.contains(StyledRun(text: "old", isBold: false, isItalic: false, isStruck: true, isCode: false, link: nil)))
+        #expect(plainText(of: "~~old~~/new stays") == "old/new stays")
     }
 
     @Test("home-relative path inside a multi-token code span stays literal")

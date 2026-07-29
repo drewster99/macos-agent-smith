@@ -66,6 +66,34 @@ struct PathLinkifierTests {
                 == "[foo@bar.com](mailto:foo@bar.com)")
     }
 
+    @Test("target is the parsed URL's absoluteString — normalized, not the input verbatim")
+    func standaloneLinkNormalizesTarget() {
+        // Non-ASCII in a URL path is percent-encoded in the target; the link text is not.
+        #expect(PathLinkifier.standaloneLink(for: "https://example.com/é")
+                == "[https://example.com/é](https://example.com/%C3%A9)")
+        // A bare `%` in an email's local part becomes `%25` in the mailto target.
+        #expect(PathLinkifier.standaloneLink(for: "foo%zz@bar.com")
+                == "[foo%zz@bar.com](mailto:foo%25zz@bar.com)")
+    }
+
+    @Test("markdown output and standaloneLinkTarget resolve to the same .link after parsing")
+    func standaloneLinkResolvesToSameURLAsTarget() throws {
+        // The invariant that makes target normalization safe: whatever bytes the markdown
+        // carries, the `.link` the parser resolves must equal `standaloneLinkTarget(for:)`,
+        // because InlineMarkdownStyler sets that URL directly on runs it styles itself.
+        for input in ["https://example.com/é", "foo%zz@bar.com", "https://example.com/path?q=1"] {
+            let markdown = try #require(PathLinkifier.standaloneLink(for: input))
+            let target = try #require(PathLinkifier.standaloneLinkTarget(for: input))
+            let parsed = try AttributedString(
+                markdown: markdown,
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            )
+            #expect(parsed.runs.compactMap(\.link) == [target])
+        }
+    }
+
     @Test("content with internal whitespace is rejected")
     func standaloneRejectsInternalWhitespace() {
         #expect(PathLinkifier.standaloneLink(for: "path: /tmp/foo") == nil)
@@ -146,6 +174,17 @@ struct PathLinkifierTests {
         let input = "see [example](https://example.com) for details"
         let output = PathLinkifier.linkifyBareURLs(input)
         #expect(output == input)
+    }
+
+    @Test("URL match stops at a backtick so injected link syntax cannot pair with it")
+    func linkifyBareURLsStopsAtBacktick() {
+        // A backtick is never a legal raw URI character (RFC 3986). Swallowing one
+        // hands the whole-line markdown parse a backtick inside the injected
+        // [url](url) syntax, where it pairs with a later backtick into a bogus
+        // code span that destroys the link.
+        let input = "see https://x.com/abc` more text"
+        let output = PathLinkifier.linkifyBareURLs(input)
+        #expect(output == "see [https://x.com/abc](https://x.com/abc)` more text")
     }
 
     // MARK: - linkifyEmails

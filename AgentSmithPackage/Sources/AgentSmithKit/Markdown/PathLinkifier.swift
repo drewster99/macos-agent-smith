@@ -13,8 +13,11 @@ public enum PathLinkifier {
     /// Compiled once and reused across all calls.
     /// `try?` — pattern is a compile-time literal; init only fails for malformed
     /// patterns, which would be caught at first run during development.
+    /// Backtick is excluded because it is never a legal raw URI character (RFC 3986),
+    /// and a swallowed backtick pairs with the injected `[url](url)` syntax at the
+    /// whole-line markdown parse, destroying the link.
     private static let bareURLRegex = try? NSRegularExpression(
-        pattern: #"(?<![(\[])https?://[^\s)\]*]+"#
+        pattern: #"(?<![(\[])https?://[^\s)\]*`]+"#
     )
 
     /// Matches plain email addresses not already inside markdown link syntax. Conservative:
@@ -44,7 +47,11 @@ public enum PathLinkifier {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let target = standaloneLinkTarget(for: trimmed) else { return nil }
         // The link **text** keeps the original trimmed form (e.g. `~/...`) so users
-        // see what they typed.
+        // see what they typed. The link **target** is the parsed URL's `absoluteString`,
+        // so it is normalized (non-ASCII → percent-encoding, a bare `%` → `%25`) rather
+        // than the input verbatim. Deliberate: `AttributedString(markdown:)` normalizes
+        // destinations identically, so the resolved `.link` is unchanged, and the
+        // markdown path agrees byte-for-byte with direct `standaloneLinkTarget` consumers.
         return "[\(trimmed)](\(target.absoluteString))"
     }
 

@@ -15,9 +15,11 @@ import SwiftUI
 /// A whole-line parse needs the code spans masked during preprocessing, because
 /// `PathLinkifier` must never rewrite text inside backticks — injected
 /// `[text](url)` syntax inside a code span renders as literal brackets. The mask
-/// (`stretches(in:)`) therefore replicates the CommonMark pairing rules the
-/// parser itself uses, so the two always agree about where code spans are; a
-/// test cross-checks the mask against the parser over a corpus of tricky lines.
+/// (`stretches(in:)`) therefore emulates the pairing algorithm Apple's parser
+/// actually ships — CommonMark's rules plus cmark's backtick-string cache, which
+/// deviates from the spec — because agreement with the live parser is the only
+/// requirement; a corpus test cross-checks the mask against the parser so an
+/// OS-side parser change surfaces as a test failure, not silent corruption.
 public enum InlineMarkdownStyler {
 
     /// A maximal piece of a line that is either one whole code span (backtick
@@ -86,8 +88,14 @@ public enum InlineMarkdownStyler {
             .joined()
     }
 
-    /// Splits `line` into code-span and plain stretches using CommonMark's
-    /// pairing rules, which is what `AttributedString(markdown:)` implements:
+    /// Splits `line` into code-span and plain stretches, agreeing with
+    /// `AttributedString(markdown:)` about where the spans are. Agreement with
+    /// the LIVE parser is the only requirement — not CommonMark correctness —
+    /// because a stretch the mask calls plain gets link syntax injected, and if
+    /// the parser then renders that stretch as code, the syntax appears
+    /// literally inside the span.
+    ///
+    /// The pairing rules (shared with CommonMark):
     ///
     /// - A run of N backticks opens a span closed only by the next run of
     ///   exactly N backticks; runs of other lengths in between are content.
@@ -96,6 +104,21 @@ public enum InlineMarkdownStyler {
     /// - Outside code spans a backslash escapes a following backtick (or
     ///   backslash), so that backtick cannot open a span. Inside a span
     ///   backslashes are literal, so they cannot hide a closer.
+    ///
+    /// Plus cmark's backtick-string cache, which Apple's parser ships and which
+    /// makes it deviate from spec CommonMark (established by differential fuzz,
+    /// 110k lines, 2026-07-28): once any closer scan has hit end of input, an
+    /// opener of length N is refused WITHOUT rescanning unless a run of exactly
+    /// N backticks is cached at a position after it. Every scan records the
+    /// start of the last run it saw per length — a successful scan records its
+    /// own closer too — so a success can move a length's cache entry backward
+    /// and suppress later openers a spec scanner would pair: in "`` `a` `b`"
+    /// the parser makes a code span of "a" only, never "b". The previous
+    /// implementation was a spec scanner, so it called such text plain while
+    /// the parser rendered it as code — the dangerous direction, which let the
+    /// linkifier inject link syntax into code spans. The pairing-corpus test
+    /// cross-checks this mask against the live parser, so an OS-side parser
+    /// change surfaces as a test failure rather than silent corruption.
     ///
     /// Concatenating the stretch texts always reproduces `line` exactly.
     static func stretches(in line: String) -> [LineStretch] {
@@ -106,6 +129,15 @@ public enum InlineMarkdownStyler {
         var result: [LineStretch] = []
         var plainStart = line.startIndex
         var i = line.startIndex
+
+        // cmark's backtick-string cache: once `scannedToEnd` is set the cache,
+        // not the text, decides whether an opener even looks for a closer — so
+        // the mask must consult the same cache to stay in agreement.
+        var scannedToEnd = false
+        var lastRunStartByLength: [Int: String.Index] = [:]
+        // cmark's MAXBACKTICKS: longer runs are never cached, and an opener
+        // longer than this fails immediately — no scan, no `scannedToEnd`.
+        let maximumCachedRunLength = 80
 
         func flushPlain(upTo end: String.Index) {
             if plainStart < end {
@@ -135,6 +167,21 @@ public enum InlineMarkdownStyler {
             }
             let openerLength = line.distance(from: i, to: openerEnd)
 
+            if openerLength > maximumCachedRunLength {
+                i = openerEnd
+                continue
+            }
+            if scannedToEnd {
+                // nil means no run of this length was ever recorded; cmark
+                // initializes those slots to the buffer start, which its
+                // "at or before the opener" refusal check always matches.
+                let knownRunAhead = lastRunStartByLength[openerLength].map { openerEnd < $0 } ?? false
+                if !knownRunAhead {
+                    i = openerEnd
+                    continue
+                }
+            }
+
             var closerEnd: String.Index?
             var searchStart = openerEnd
             while searchStart < line.endIndex {
@@ -143,7 +190,14 @@ public enum InlineMarkdownStyler {
                 while tickEnd < line.endIndex, line[tickEnd] == "`" {
                     tickEnd = line.index(after: tickEnd)
                 }
-                if line.distance(from: tickStart, to: tickEnd) == openerLength {
+                let runLength = line.distance(from: tickStart, to: tickEnd)
+                // Recorded before the length comparison because cmark records
+                // the closer run itself too — that entry is what later refuses
+                // same-length openers positioned after it.
+                if runLength <= maximumCachedRunLength {
+                    lastRunStartByLength[runLength] = tickStart
+                }
+                if runLength == openerLength {
                     closerEnd = tickEnd
                     break
                 }
@@ -156,6 +210,7 @@ public enum InlineMarkdownStyler {
                 plainStart = closerEnd
                 i = closerEnd
             } else {
+                scannedToEnd = true
                 i = openerEnd
             }
         }
@@ -168,22 +223,26 @@ public enum InlineMarkdownStyler {
     /// struck through everything between them (observed on user-typed text
     /// 2026-07-09; current OS builds no longer reproduce it, but the escape is
     /// kept so rendering doesn't depend on the OS parser's version). Escapes `~`
-    /// only when it starts a `~/` path — deliberate `~~strikethrough~~` has no
-    /// slash and is untouched. Runs only on plain stretches; code spans protect
-    /// their tildes at parse time.
+    /// only when it starts a `~/` path AND is not itself preceded by a tilde —
+    /// the second tilde of a `~~` strikethrough delimiter abutting a slash
+    /// (`~~/gone~~`, `~~old~~/new`) is delimiter, not path, and escaping it
+    /// breaks the deliberate strikethrough. Runs only on plain stretches; code
+    /// spans protect their tildes at parse time.
     static func escapePathTildes(in text: String) -> String {
         guard text.contains("~/") else { return text }
         var result = ""
         result.reserveCapacity(text.count + 4)
         var index = text.startIndex
+        var previous: Character?
         while index < text.endIndex {
             let character = text[index]
             let next = text.index(after: index)
-            if character == "~", next < text.endIndex, text[next] == "/" {
+            if character == "~", previous != "~", next < text.endIndex, text[next] == "/" {
                 result.append("\\~")
             } else {
                 result.append(character)
             }
+            previous = character
             index = next
         }
         return result
