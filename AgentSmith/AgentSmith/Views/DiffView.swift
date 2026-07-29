@@ -20,6 +20,9 @@ struct DiffView: View {
     var defaultVisibleLines: Int = 6
 
     @State private var isExpanded = false
+    /// The single in-flight diff generation. Replacing it cancels the previous one; see
+    /// `scheduleDiffUpdate`.
+    @State private var diffTask: Task<Void, Never>?
     @State private var cachedAllLines: [DiffLine] = []
     @State private var cachedAddedCount: Int = 0
     @State private var cachedRemovedCount: Int = 0
@@ -93,27 +96,45 @@ struct DiffView: View {
         .task {
             await updateDiffCache()
         }
-        .onChange(of: oldContent) { _, _ in
-            Task { await updateDiffCache() }
-        }
-        .onChange(of: newContent) { _, _ in
-            Task { await updateDiffCache() }
-        }
-        .onChange(of: contextLines) { _, _ in
-            Task { await updateDiffCache() }
-        }
-        .onChange(of: precomputedLines) { _, _ in
-            Task { await updateDiffCache() }
+        // Every one of these used to spawn its OWN unstructured, uncancelled Task. `oldContent` and
+        // `newContent` change together whenever a diff is presented, so two full generations of the
+        // same diff racing to assign was the normal case — and the winner was whichever finished
+        // last, which is not necessarily the one built from the newest inputs.
+        //
+        // One task at a time, cancelled and replaced. Cancellation alone would fix only the race
+        // (it is cooperative, so it stops no work), but task bodies are ENQUEUED rather than run
+        // inline: all four handlers finish before the first body starts, so the superseded tasks
+        // hit `updateDiffCache`'s opening cancellation guard and return before generating anything.
+        .onChange(of: oldContent) { _, _ in scheduleDiffUpdate() }
+        .onChange(of: newContent) { _, _ in scheduleDiffUpdate() }
+        .onChange(of: contextLines) { _, _ in scheduleDiffUpdate() }
+        .onChange(of: precomputedLines) { _, _ in scheduleDiffUpdate() }
+        .onDisappear {
+            // A large diff shouldn't keep generating for a view nobody is looking at.
+            diffTask?.cancel()
+            diffTask = nil
         }
     }
 
+    private func scheduleDiffUpdate() {
+        diffTask?.cancel()
+        diffTask = Task { await updateDiffCache() }
+    }
+
+    /// Two cancellation guards, doing two different jobs — both are load-bearing.
     @Sendable private func updateDiffCache() async {
+        // BEFORE the generate: this is what makes a burst of input changes cost one diff instead of
+        // four. Superseded tasks reach here already cancelled and return without doing the work.
+        guard !Task.isCancelled else { return }
         let allLines: [DiffLine] = precomputedLines
             ?? DiffGenerator.generate(old: oldContent, new: newContent, contextLines: contextLines)
         let added = allLines.reduce(into: 0) { $0 += ($1.kind == .added ? 1 : 0) }
         let removed = allLines.reduce(into: 0) { $0 += ($1.kind == .removed ? 1 : 0) }
         let needsTrunc = allLines.count > defaultVisibleLines
-        
+
+        // AFTER it: this is what kills the race. A task that got past the first guard before being
+        // superseded must not publish a diff built from inputs that have since changed.
+        guard !Task.isCancelled else { return }
         await MainActor.run {
             cachedAllLines = allLines
             cachedAddedCount = added

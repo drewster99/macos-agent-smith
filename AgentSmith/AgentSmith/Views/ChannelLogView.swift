@@ -224,6 +224,10 @@ struct ChannelLogView: View, Equatable {
     
     /// Cached window start index to avoid recalculating on every body pass.
     /// Updated via .onChange when messages or maxVisibleCount changes.
+    /// What the cache was last built from. Two of the three watchers below fire on the SAME event
+    /// (a new message changes both `messages.count` and `messages.last?.id`), so the second one
+    /// finds this unchanged and skips a rebuild that would produce an identical result.
+    @State private var lastCacheSignature: CacheSignature?
     @State private var cachedWindowStart = 0
     /// Cached visible messages array to avoid creating it on every body pass.
     @State private var cachedVisibleMessages: [ChannelMessage] = []
@@ -368,22 +372,25 @@ struct ChannelLogView: View, Equatable {
                         proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
-                // Cache expensive computations: window start, visible messages array, and grouping index.
-                // These are updated only when dependencies change, not on every body pass.
-                // Per SwiftUI best practices, use .onChange to drive state updates instead of
-                // recalculating in the body.
+                // Cache expensive computations: window start, visible messages array, and grouping
+                // index. Updated only when dependencies change, not on every body pass.
+                //
+                // Two of these three — `messages.count` and `messages.last?.id` — change on EVERY
+                // appended message, always together, so the rebuild below (an array copy plus a
+                // grouping-index build over the visible window) ran twice per message and threw one
+                // result away. The signature guard skips the second.
                 .onChange(of: messages.count) { _, _ in
-                    updateCachedValues()
+                    updateCachedValuesIfNeeded()
                 }
                 .onChange(of: maxVisibleCount) { _, _ in
-                    updateCachedValues()
+                    updateCachedValuesIfNeeded()
                 }
                 .onChange(of: messages.last?.id) { _, _ in
-                    updateCachedValues()
+                    updateCachedValuesIfNeeded()
                 }
                 // Initialize cached values on first appearance.
                 .task {
-                    updateCachedValues()
+                    updateCachedValuesIfNeeded()
                 }
 
                 if !isAtBottom {
@@ -401,6 +408,33 @@ struct ChannelLogView: View, Equatable {
     /// Updates cached values for window start, visible messages, and grouping index.
     /// Called via .onChange when dependencies change to avoid recalculating on every body pass.
     /// Follows SwiftUI best practice: calculations driven by .onChange, not computed properties in body.
+    /// Everything the cache depends on. Cheap to compute and to compare — deliberately NOT the
+    /// message array itself, which would cost more to diff than the rebuild it is avoiding.
+    private struct CacheSignature: Equatable {
+        let count: Int
+        let lastID: UUID?
+        let maxVisible: Int
+    }
+
+    /// Rebuilds the cache only when its inputs actually differ.
+    ///
+    /// A synchronous guard rather than the deferred `RecomputeCoalescer` used by the inspector, and
+    /// the difference matters: this cache feeds the `ForEach`, and the auto-scroll watcher above —
+    /// keyed on the same `messages.last?.id` — calls `proxy.scrollTo` on the newest message in the
+    /// same pass. Deferring the rebuild by a main-queue turn would have it scroll to a row not yet
+    /// in the list, breaking auto-scroll on every message. This removes the duplicate rebuild
+    /// without moving anything in time.
+    private func updateCachedValuesIfNeeded() {
+        let signature = CacheSignature(
+            count: messages.count,
+            lastID: messages.last?.id,
+            maxVisible: maxVisibleCount
+        )
+        guard signature != lastCacheSignature else { return }
+        lastCacheSignature = signature
+        updateCachedValues()
+    }
+
     private func updateCachedValues() {
         let windowStart = windowStartIndex()
         cachedWindowStart = windowStart
