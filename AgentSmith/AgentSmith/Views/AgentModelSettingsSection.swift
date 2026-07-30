@@ -206,20 +206,35 @@ struct AgentModelSettingsSection: View {
     /// shown inline so the failure mode is visible.
     @ViewBuilder
     private func providerSubmenu(for provider: ModelProvider) -> some View {
-        let providerModels = llmKit.models(for: provider.id)
-            // Hidden is presentation, not deletion — see the Model Metadata inspector. The
-            // config's current model stays listed even when hidden so the selection stays
-            // renderable and re-selectable.
-            .filter { $0.hidden != true || $0.modelID == modelID }
+        let requirements = role.modelRequirements
+        let cachedModels = llmKit.models(for: provider.id)
+        let providerModels = cachedModels
+            // Two presentation filters, both with the same escape hatch — the config's CURRENT model
+            // always stays listed so the selection remains renderable and re-selectable. Hidden is
+            // presentation, not deletion (see the Model Metadata inspector). Role requirements are
+            // capability/availability gates: tri-state, so only a model KNOWN to fail is dropped.
+            .filter { model in
+                if model.modelID == modelID { return true }
+                guard model.hidden != true else { return false }
+                return model.satisfies(
+                    requiredCapabilities: requirements.requiredCapabilities,
+                    mustNotBePresent: requirements.mustNotBePresent,
+                    includedAvailabilityStates: requirements.includedAvailabilityStates
+                )
+            }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         let refreshError = llmKit.refreshErrors[provider.name]
         let isEmpty = providerModels.isEmpty
+        // Distinguish "provider has no catalog yet" from "the catalog has models but none fit this role".
+        let filteredOutByRole = isEmpty && !cachedModels.isEmpty
 
         Menu(
             content: {
                 if isEmpty {
                     if let refreshError {
                         Text("Last refresh failed: \(refreshError)")
+                    } else if filteredOutByRole {
+                        Text("No models meet \(role.displayName)'s requirements.")
                     } else {
                         Text("No models cached.")
                     }
