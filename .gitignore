@@ -3,6 +3,11 @@
 .swiftpm
 .DS_Store
 
+# release.sh output: DerivedData, logs, notarization receipts, and the built DMG. Must stay
+# untracked — the script refuses to publish from a dirty tree, so a tracked artifact would
+# block the next release.
+build/
+
 # Retrieval-eval fixtures contain real (personal) task/memory data — never commit.
 # Only the harness *code* under RetrievalEval/ is tracked; all generated data is local.
 RetrievalEval/data/

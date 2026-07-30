@@ -4,13 +4,20 @@
 
 # Agent Smith
 
-**A multi-agent workforce for your Mac.** You hand it a task; a team of LLM agents plans it, does the work in a real shell, and reviews itself — with a dedicated security agent watching every move.
+**A safety-focused multi-agent workforce for your Mac.** You hand it a task; a team of LLM agents plans it, does the work in a real shell, and reviews itself — with a dedicated security agent watching every move.
 
 A native macOS app. Swift 6, SwiftUI, on-device. Your API keys, your machine.
 
 <img src="docs/assets/screenshot.png" width="820" alt="Agent Smith orchestrating tasks" />
 
 </div>
+
+> [!NOTE]
+> ### 👋 A special note for *Drew and Dan in the Morning* fans
+>
+> Thanks for checking this out — really. You're among the first people running Agent Smith outside my own machine, and that's exactly the stage where outside eyes are worth the most.
+>
+> **Please open a GitHub issue with any and all feedback:** [file an issue here](https://github.com/drewster99/macos-agent-smith/issues/new). Bugs, crashes, confusing UI, an agent that did something strange, a feature you went looking for and couldn't find, or just "this part felt wrong" — all of it is welcome, and all of it is greatly appreciated. Nothing is too small or too rough to report.
 
 ## Why it's different
 
@@ -55,12 +62,14 @@ Endpoints, model catalogs, and pricing metadata come from [SwiftLLMKit](https://
 
 ## Requirements
 
-- **To run:** macOS 26.2 or later, and an API key for at least one supported provider (or a local model via Ollama / LM Studio).
+- **To run:** an Apple Silicon Mac on macOS 26.2 or later, and an API key for at least one supported provider (or a local model via Ollama / LM Studio). Intel Macs aren't supported — the on-device embedding model that backs semantic memory runs on MLX, which is Apple Silicon only.
 - **To build from source:** the above, plus Xcode 26.2 or later — the app targets macOS 26.2, so earlier Xcode versions won't have the SDK for it.
 
 ## Install
 
-No prebuilt binaries are published yet, so build from source. When builds are posted they'll appear under [Releases](https://github.com/drewster99/macos-agent-smith/releases); unsigned alpha builds need a right-click → **Open** the first time, to get past Gatekeeper.
+Download the latest `.dmg` from [Releases](https://github.com/drewster99/macos-agent-smith/releases), open it, and drag **Agent Smith** to Applications. Builds are Developer ID signed and notarized by Apple, so they open with a normal double-click — no Gatekeeper detour.
+
+### Or build from source
 
 Clone and open in Xcode — Swift Package Manager resolves the dependencies automatically, no side-by-side checkouts needed:
 
@@ -75,7 +84,11 @@ Run the `AgentSmith` scheme. The engine lives in the local Swift package `AgentS
 cd AgentSmithPackage && swift test --skip MemoryStoreIntegrationTests
 ```
 
-On first run, add a provider API key in Settings, then assign a model to each role in the **Agents** inspector. The roles are independent on purpose — nothing falls back to another role's model, so a role left unset simply doesn't run. In particular, tasks queue up unjudged until the Validator has one.
+## First run
+
+A setup flow walks you through it: pick a provider (Anthropic, OpenAI, Gemini, or local Ollama), paste an API key if it needs one, and it pre-fills a tested model for each of the five roles — which you can change on the same screen. You can also skip it and wire things up yourself in Settings and the **Agents** inspector.
+
+The roles are independent on purpose: nothing falls back to another role's model, so a role left unset simply doesn't run. In particular, tasks queue up unjudged until the Validator has a model.
 
 ## A note on safety
 
