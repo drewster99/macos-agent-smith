@@ -4,9 +4,15 @@
 <dict>
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
+	<!-- The team prefix is written out rather than left as $(AppIdentifierPrefix) because that
+	     variable is supplied by the provisioning profile, and the Developer ID release build
+	     (release.sh, manual signing, no profile) has none — it would resolve to empty and emit
+	     the malformed group ".com.nuclearcyborg.AgentSmith". Provider API keys live in this
+	     group, so that failure would surface only on a tester's machine. The literal below is
+	     byte-identical to what automatic signing resolves this to today. -->
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)$(CFBundleIdentifier)</string>
+		<string>P8MA38JTXY.$(CFBundleIdentifier)</string>
 	</array>
 </dict>
 </plist>

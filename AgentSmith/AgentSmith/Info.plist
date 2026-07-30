@@ -4,6 +4,16 @@
 <dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Agent Smith uses Apple Events to script and automate other applications on your behalf when you ask it to.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Agent Smith’s worker agent reads and writes files on your Desktop to carry out tasks you assign it.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Agent Smith’s worker agent reads and writes files in your Documents folder to carry out tasks you assign it.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Agent Smith’s worker agent reads and writes files in your Downloads folder to carry out tasks you assign it.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Agent Smith’s worker agent reads and writes files on removable volumes when a task you assign it involves one.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Agent Smith’s worker agent reads and writes files on network volumes when a task you assign it involves one.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
