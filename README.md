@@ -28,15 +28,28 @@ Four agents, each with one job — plus a judge that deliberately isn't one of t
 | **Summarizer** | Distills finished tasks into memory the team can draw on later. |
 | **Validator** | Not a standing agent: each acceptance criterion is judged on its own, by a model you assign. The agent that ordered the work never signs off on it. |
 
+## Models and providers
+
+**Thirteen providers ship preconfigured**, and every role gets its own model — so you can run the worker on a local model and have a frontier model judge its work, or any mix you like. API keys live in the macOS Keychain, never in config files.
+
+| | |
+| --- | --- |
+| **Shown by default** | Anthropic · OpenAI · Gemini · Grok · OpenRouter |
+| **Also built in** | Mistral · Hugging Face · Alibaba Cloud · Meta Model API · z.ai |
+| **Run locally** | Ollama · LM Studio — no API key, nothing leaves the machine (an Ollama Cloud preset is included too) |
+| **Anything else** | Any OpenAI-compatible endpoint, by URL |
+
+Endpoints, model catalogs, and pricing metadata come from [SwiftLLMKit](https://github.com/drewster99/swift-llm-kit).
+
 ## Highlights
 
 - **Real tools, real shell** — Brown runs `bash`, reads and edits files, manages processes, fetches the web. Not a sandbox toy.
 - **Security built in, not bolted on** — every tool call from every agent routes through the Security Agent before it runs. There is no unreviewed path, and no setting to create one.
-- **Work is checked, not rubber-stamped** — each acceptance criterion is judged independently, by a different model than the one that did the work.
+- **Work is checked, not rubber-stamped** — each acceptance criterion is judged on its own, by a model assigned separately from the one doing the work.
 - **Multi-session** — run independent jobs side by side in their own tabs and windows.
 - **Persistent memory** — semantic-search-backed memory so the team remembers what it learned across runs.
 - **Agent inspector** — open any agent's full conversation, tool calls, and security verdicts, live or after the fact.
-- **Bring your own model** — Anthropic, OpenAI, Gemini, Mistral, xAI, Z.AI, Meta, Hugging Face, Alibaba Cloud, OpenRouter, local models via Ollama or LM Studio, and any OpenAI-compatible endpoint, via [SwiftLLMKit](https://github.com/drewster99/swift-llm-kit). Mix them freely — each role gets its own model. Keys live in the Keychain, never in config.
+- **Bring your own model** — thirteen providers built in, any OpenAI-compatible endpoint, and a different model per role. See [Models and providers](#models-and-providers).
 - **Usage & cost tracking** — every call is metered and grouped by run.
 - **MCP support** — extend the team with Model Context Protocol servers.
 
