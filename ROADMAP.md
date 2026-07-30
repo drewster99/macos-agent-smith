@@ -2,6 +2,209 @@
 
 ## Planned
 
+### OpenRouter routes and variants: one model is many routes, and we record one (found 2026-07-30)
+
+**Status:** investigated and fully characterized 2026-07-30; nothing built yet. Decided direction: the model JSON grows a `variants` collection under each model, holding both the upstream ROUTES and the dynamic `:option` suffixes. Phase 1 (synthesize `:floor` / `:nitro` into the models response so they reach the UI and the prober) is approved for immediate work; the route enumeration behind it is not yet scheduled.
+
+Everything below was verified against the live API and OpenRouter's own docs (`https://openrouter.ai/docs/llms-full.txt`) on 2026-07-30, not recalled.
+
+#### Two different things are called "variants", and we handle them oppositely
+
+| | appears in `/models`? | do we enumerate it? |
+| --- | --- | --- |
+| **Static variants** — `:free`, `:batch`, `:thinking`, `:extended` | YES, as distinct `id` entries with their own pricing | **All of them.** No filter, no dedup, no preference. |
+| **Dynamic variants** — `:nitro`, `:floor`, `:exacto`, `:online` | NEVER | **None.** Structurally impossible by enumeration. |
+| **Upstream routes** — Chutes, DeepInfra, Parasail, … | NO (only `top_provider`, a single object) | **None.** We collapse to one row. |
+
+The docs state the split outright: *"Static variants can only be used with specific models and these are listed in our models api"* vs *"Dynamic variants can be used on all models."*
+
+#### The complete `:option` list
+
+| Suffix | Kind | Meaning | In `/models` on 2026-07-30 |
+| --- | --- | --- | --- |
+| `:free` | static | Always free, low rate limits | ✅ 14 entries |
+| `:batch` | static | **Batch API — asynchronous, 24-hour completion window**; ~50% price | ✅ 28 entries |
+| `:thinking` | static | Reasoning enabled by default | ✅ 1 entry |
+| `:extended` | static | Longer than usual context | Documented; **0 entries today** |
+| `:nitro` | dynamic | Sort providers by throughput | ❌ 0 (counted explicitly) |
+| `:floor` | dynamic | Sort providers by price | ❌ 0 |
+| `:exacto` | dynamic | Quality-first sorting tuned for tool-calling reliability | ❌ 0 |
+| `:online` | dynamic | **DEPRECATED** — web-search injection; docs say use the `openrouter:web_search` server tool | ❌ 0 |
+
+**`:exacto` is UNVERIFIED BY US.** We have never sent a request using it, and its provider-object equivalent is inferred, not confirmed — see "the `sort` field" below. Treat as documented-but-untested until someone runs it.
+
+**`:batch` is a trap in a model picker.** The `/models` payload gives it the same `description`, the same `supported_parameters`, and the same context as the base model — only `name` says "(batch)" and the price is exactly half. So it reads as a strictly cheaper identical model. What `/v1/chat/completions` actually does with a `:batch` id is **untested by us**; the Batch API itself is a different endpoint (`POST /api/beta/batches`, returns `202 Accepted` with `status: "validating"`). Test before deciding whether to filter, mark, or leave these.
+
+#### What `/models` gives us (the call we already make)
+
+`GET https://openrouter.ai/api/v1/models` — no query params, no auth needed for the list. 367 entries on 2026-07-30. Complete per-model key set:
+
+```
+alias_target  architecture  benchmarks  canonical_slug  context_length  created
+default_parameters  description  expiration_date  hugging_face_id  id
+knowledge_cutoff  links  name  per_request_limits  pricing  reasoning
+supported_parameters  supported_voices  top_provider
+```
+
+There is **no `providers` array**. `top_provider` is a single object — the default route — and `ModelFetchService.decodeOpenRouterFacts` collapses to it:
+
+```swift
+facts.maxInputTokens  = model.topProvider?.contextLength ?? model.contextLength
+facts.maxOutputTokens = model.topProvider?.maxCompletionTokens
+```
+
+#### What the routes call gives us (the call we DO NOT make)
+
+```
+GET https://openrouter.ai/api/v1/models/{author}/{slug}/endpoints
+```
+
+Unauthenticated. Returns `data.endpoints[]`. Complete per-endpoint key set:
+
+```
+provider_name  model_id  model_name  name  tag  status  quantization
+context_length  max_prompt_tokens  max_completion_tokens
+pricing  supported_parameters  supports_implicit_caching
+throughput_last_30m  latency_last_30m
+uptime_last_5m  uptime_last_30m  uptime_last_1d
+```
+
+**`throughput_last_30m` and `latency_last_30m` are present but NULL on every route of every model tested** (`qwen/qwen3.5-397b-a17b` 0/11, `meta-llama/llama-3.3-70b-instruct` 0/13, `anthropic/claude-sonnet-4.5` 0/8). The website's speed charts come from a source this endpoint does not expose. `uptime_last_*` IS populated. So we can get reliability, price, context and quantization — **not speed**. `:nitro` sorts by a number we cannot see.
+
+**This is one HTTP call per model.** Enumerating all routes for the current catalog is ~367 additional requests.
+
+#### Worked example — `qwen/qwen3.5-397b-a17b`, 11 routes
+
+| provider | `tag` (routing slug) | ctx | max out | in $/Mtok | out $/Mtok | quant | uptime 30m |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| DigitalOcean | `digitalocean` | 131,072 | – | 0.385 | 2.450 | unknown | 89.7% (status −2) |
+| Alibaba | `alibaba/fp8` | 262,144 | 65,536 | 0.390 | 2.340 | fp8 | 100% |
+| Chutes | `chutes/fp8` | 262,144 | 65,536 | 0.450 | 3.000 | fp8 | 99.0% |
+| DeepInfra | `deepinfra/fp8` | 262,144 | 81,920 | 0.450 | 3.000 | fp8 | 99.0% |
+| Parasail | `parasail/fp8` | 262,144 | 262,144 | 0.500 | 3.600 | fp8 | 100% |
+| AtlasCloud | `atlas-cloud/fp8` | 262,144 | 65,536 | 0.550 | 3.500 | fp8 | 99.7% |
+| Phala | `phala` | 262,144 | 262,144 | 0.550 | 3.500 | unknown | 100% |
+| Novita | `novita` | 262,144 | 65,536 | 0.600 | 3.600 | unknown | 99.9% |
+| StreamLake | `streamlake` | 256,000 | 64,000 | 0.600 | 3.600 | unknown | – |
+| GMICloud | `gmicloud/fp8` | 262,144 | – | 0.600 | 3.600 | fp8 | – |
+| Venice | `venice` | 128,000 | 32,768 | 0.750 | 4.500 | unknown | 96.2% |
+
+What we store for all eleven: `maxInputTokens 262144`, `maxOutputTokens 65536`, `input 3.9e-07`, `output 2.34e-06` — the Alibaba row.
+
+Lost in the collapse even on this mild example: `max_completion_tokens` ranges 32,768–262,144 (Parasail and Phala serve 4× what we record), and quantization is invisible (6 fp8, 5 unspecified — same `modelID`, materially different output). A harsher case is `meta-llama/llama-3.3-70b-instruct`: 13 routes, context **6,000–131,072**, input price **10.4× spread**.
+
+#### What a bare model id actually does
+
+OpenRouter's documented default is **price-based load balancing**, not a fixed route:
+
+1. Drop providers with significant outages in the last 30 seconds.
+2. Among the stable ones, select **one weighted by the inverse square of price**.
+3. The remainder become fallbacks.
+
+For the qwen model above that is roughly DigitalOcean 15.4% / Alibaba 15.0% / Chutes 11.2% / DeepInfra 11.2% / Parasail 9.1% / six others 4–7.5% — **per request**.
+
+Three things narrow it in practice, which is why this has not visibly bitten us:
+
+- **Sticky routing.** OpenRouter hashes the first system (or developer) message and the first non-system message and pins that conversation to one provider. Within a single worker run we stay put; variance is *across* tasks, not within one.
+- **`max_tokens` filters routes.** Our 65,536 default already excludes Venice (32,768).
+- **`tools` filters routes.** Best-effort routing to tool-capable providers — every agent call we make carries tools.
+
+#### How to choose a route — the exact request change
+
+Nothing about the URL or the `model` value changes. **Add one top-level `provider` object to the chat-completions body.**
+
+```json
+{
+  "model": "qwen/qwen3.5-397b-a17b",
+  "messages": [ ... ],
+  "tools": [ ... ],
+  "max_tokens": 65536,
+  "stream": true,
+  "provider": { "order": ["chutes/fp8"] }
+}
+```
+
+The slug comes from the endpoint's `tag` field, **not** `provider_name` — `chutes/fp8`, not `Chutes`. Docs confirm `order` accepts variant-suffixed slugs ("including any variants like `/turbo`"), so the slug pins the quantization as well as the vendor.
+
+Complete `provider` object field list:
+
+| Field | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `order` | string[] | – | Provider slugs to try, in order |
+| `allow_fallbacks` | bool | `true` | Allow backup providers when the primary is unavailable |
+| `require_parameters` | bool | `false` | Only providers supporting every parameter in the request |
+| `data_collection` | "allow" \| "deny" | "allow" | Exclude providers that may store data |
+| `zdr` | bool | – | Restrict to Zero Data Retention endpoints |
+| `enforce_distillable_text` | bool | – | Restrict to models allowing text distillation |
+| `only` | string[] | – | Allowlist of provider slugs |
+| `ignore` | string[] | – | Denylist of provider slugs |
+| `quantizations` | string[] | – | Filter by quantization (e.g. `["fp8"]`) |
+| `sort` | string \| object | – | `"price"` / `"throughput"` / `"latency"`; or an object with `by` and `partition` |
+| `preferred_min_throughput` | number \| object | – | Min tok/s; number or percentile object (p50/p75/p90/p99) |
+| `preferred_max_latency` | number \| object | – | Max seconds; number or percentile object |
+| `max_price` | object | – | Ceiling, e.g. `{"prompt": 0.5}` |
+
+Combinations are unreachable through any suffix, e.g. cheapest-first, fp8 only, never above $0.50/Mtok:
+
+```json
+{"provider": {"sort": "price", "quantizations": ["fp8"], "max_price": {"prompt": 0.5}}}
+```
+
+**Verification:** the chat-completions response carries a top-level `provider` field naming the route that actually served the request (e.g. `"provider": "Anthropic"`), on both streaming chunks and non-streaming bodies. We do not currently parse or record it. Capturing it into `LLMTurnRecord` / `UsageRecord` is the only way to know what we were actually billed for.
+
+#### Suffix form vs provider-object form — NOT equivalent for us
+
+| want | suffix form | provider-object form |
+| --- | --- | --- |
+| cheapest | `:floor` | `{"provider":{"sort":"price"}}` |
+| fastest | `:nitro` | `{"provider":{"sort":"throughput"}}` |
+| lowest latency | *(no suffix exists)* | `{"provider":{"sort":"latency"}}` |
+| tool-call quality | `:exacto` | `{"provider":{"sort":"exacto"}}` — **INFERRED, UNVERIFIED**; the `sort` field documents only price/throughput/latency, while the exacto page calls the suffix "a shortcut for setting the provider sort to Exacto" |
+
+**The suffix form silently zeroes cost tracking unless the suffixed id is in the catalog.** `CostBoard.costOf` does:
+
+```swift
+guard let pricing = pricingLookup(record.providerID, record.modelID) else { return 0 }
+```
+
+and the lookup is an exact dictionary hit (`SharedAppState.pricingLookup`): `snapshot["\(providerID)/\(modelID)"]`. A `modelID` of `qwen/qwen3.5-397b-a17b:floor` is not a catalog key today, so every turn reports **$0.00** — no error, no warning. **This is a direct argument for the Phase 1 work below:** synthesizing the suffixed ids INTO the catalog gives them a pricing row and closes the silent zero.
+
+Residual accuracy problem either way: the price we store is the default route's. With `sort: "price"` the real route is ~1% cheaper than recorded; with `sort: "throughput"` it could be Venice at 0.750 recorded as 0.390 — **~48% understated**. Only per-route data or parsing the response `provider` field fixes that.
+
+#### Target shape — `variants` under a model
+
+The model JSON should carry, per model, a `variants` collection covering BOTH kinds:
+
+- **Route variants**, one per upstream endpoint: routing slug (`tag`), provider name, context, max completion tokens, per-route pricing, quantization, uptime, `supports_implicit_caching`, status.
+- **Option variants**, one per applicable dynamic suffix: the suffix, what it sorts by, and the equivalent `provider` object so a caller can use either form.
+
+Open design questions, not yet decided:
+
+1. **A route is not a model.** `ModelInfo` is keyed `(providerID, modelID)` and has nowhere to put "Parasail's fp8 build at 262k max output". Either `variants` is a new field on `ModelInfo`, or routes become synthetic `ModelInfo` rows with a parent pointer. The former keeps the catalog honest; the latter is what makes them appear in a picker and be probed.
+2. **Cost of enumeration.** ~367 extra HTTP calls per refresh. Options: fetch lazily only for models assigned to a role; fetch on demand from the model-detail UI; or fetch all behind an explicit user action.
+3. **Single-route models.** Many models have exactly one endpoint (e.g. `anthropic/claude-sonnet-4.5:batch`), where `:floor` / `:nitro` are meaningless. Suppressing them requires knowing the route count, which requires the per-model call — so Phase 1 will add them unconditionally and accept the noise.
+4. **Stacking.** `:free` / `:batch` / `:thinking` ids must not receive a further `:floor` / `:nitro` suffix — `foo/model:free:floor` is not a thing. Only base ids (no colon) get dynamic suffixes.
+
+#### Should OpenRouter stop being "OpenAI compatible"?
+
+It is **already its own `ProviderAPIType` case** (`.openRouter`) with its own decode path (`decodeOpenRouterFacts`, the richest of the family). What it shares is the *transport* — `OpenAICompatibleProvider` — and that sharing is correct: the wire format genuinely is OpenAI's, and this repo's own note warns that request-prep logic is already duplicated across `prepareRequest` and the per-provider adapters. Forking a whole `OpenRouterProvider` would duplicate message encoding, tool encoding and streaming to gain nothing.
+
+What is NOT correct is expressing OpenRouter-only concepts as `extraJSONOverrides` hand-edits. Routing preferences and the response's `provider` field are first-class OpenRouter semantics, and per the project's no-side-channels rule they deserve a typed home — a small `OpenRouterRouting` value on the configuration that the shared adapter serializes when `apiType == .openRouter`, and a parse of the response `provider` field into the turn/usage records. Keep one transport; give the extras a real type.
+
+#### Where the change has to happen — this is a SwiftLLMKit release
+
+`decodeOpenRouterFacts`, `ModelInfo`, and the catalog build all live in **`swift-llm-kit`**, a versioned git dependency — not in this repo. Any of this work means the full dance: change → build → commit → push → tag → push tag → bump the `from:` pin in `AgentSmithPackage/Package.swift`, then `cd AgentSmithPackage && swift package resolve` so the package lockfile (what `swift test` reads) moves too, not just the xcworkspace copy.
+
+#### Phase 1 — synthesize `:floor` and `:nitro` (approved 2026-07-30)
+
+Add the two dynamic suffixes to the decoded OpenRouter model list so they appear in the UI and are probeable. Rules:
+
+- Applied only to base ids (no existing `:` suffix) — 324 of today's 367, giving ~648 synthetic rows.
+- Each synthetic row inherits the base model's facts, with its own `modelID` (`<base>:floor`, `<base>:nitro`) so `pricingLookup` resolves and cost stops reading $0.00.
+- Display name should distinguish them; a raw suffixed id in a picker is not self-explanatory.
+- `:exacto` is deliberately EXCLUDED from Phase 1 until someone confirms it works.
+- Probing these costs real money per model — the prober is opt-in per target today, and must stay that way.
+
 ### Actor-isolation boundary: the app target is MainActor-by-default, the package is not (found 2026-07-28)
 
 **Status:** settled and DONE 2026-07-29. Both settings stay. Every no-op `MainActor.run` in the app target is gone; the three that remain are genuine. `MarkdownText` was resolved by measurement as *leave the work on main*, and the duplicated styling found while measuring it was removed. What remains is only the standing convention: say `@concurrent` when you mean off-main, and measure before assuming a hop helps.
