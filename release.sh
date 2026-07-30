@@ -35,6 +35,7 @@ SCHEME="AgentSmith"
 CONFIGURATION="Release"
 BUNDLE_IDENTIFIER="com.nuclearcyborg.AgentSmith"
 TEAM_ID="P8MA38JTXY"
+ENTITLEMENTS_SOURCE="AgentSmith/AgentSmith/AgentSmith.entitlements"
 # Entitlements the shipped app must actually carry. Agent Smith drives other apps via Apple
 # Events and stores provider API keys in the Keychain; if a signing change silently drops
 # either one, both features fail at runtime on the tester's machine and nowhere else. Checked
@@ -323,11 +324,45 @@ run_checked() {
   [[ -z "$output" ]] || echo "$output" >&2
 }
 
-# Agent Smith is signed BY xcodebuild during the build, not re-signed afterwards. A post-hoc
-# `codesign --deep --options runtime` drops the entitlements (there is no --entitlements to
-# hand it once the app is built), which would silently break Apple Events automation and
-# Keychain access in exactly the build testers get and no build we run locally. So the job
-# here is to prove xcodebuild produced what notarization requires.
+# Writes a copy of the entitlements with $(CFBundleIdentifier) expanded, so codesign can be
+# handed real entitlements rather than a template. The team prefix is already a literal in the
+# source file (see the comment there) precisely so nothing here needs a provisioning profile
+# to resolve it.
+resolve_entitlements() {
+  local output="$1"
+  /usr/bin/sed "s|\$(CFBundleIdentifier)|${BUNDLE_IDENTIFIER}|g" "$ENTITLEMENTS_SOURCE" > "$output"
+  run_checked "Entitlements plist validation" /usr/bin/plutil -lint "$output"
+  grep -q "${TEAM_ID}.${BUNDLE_IDENTIFIER}" "$output" \
+    || fail "Resolved entitlements do not contain the team-qualified keychain group '${TEAM_ID}.${BUNDLE_IDENTIFIER}'. Check ${ENTITLEMENTS_SOURCE}."
+}
+
+# Signed here rather than by xcodebuild, because asking xcodebuild to sign the app target
+# manually fails with "AgentSmith requires a provisioning profile" — an app target with
+# entitlements always wants one under manual style. Developer ID distribution does not
+# otherwise need a profile: Apple Events and a keychain group under the team's own prefix are
+# self-authorizing, unlike the entitlements that require Apple's sign-off (iCloud, push, App
+# Groups). So the build produces an unsigned app and we sign it ourselves, with --entitlements.
+#
+# Inside-out, and explicitly rather than with --deep: nested code must be signed before the
+# bundle that contains it, and only the outer app gets the entitlements. The SPM resource
+# bundles get none of their own.
+sign_app() {
+  local app_path="$1"
+  local entitlements="$2"
+  log "Signing nested code, then the app, with: ${SIGNING_IDENTITY}"
+
+  local nested
+  while IFS= read -r nested; do
+    [[ -n "$nested" ]] || continue
+    run_checked "Signing nested $(basename "$nested")" \
+      codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$nested"
+  done < <(find "$app_path/Contents" -maxdepth 3 \( -name "*.bundle" -o -name "*.framework" -o -name "*.dylib" -o -name "*.app" \))
+
+  run_checked "App code signing" \
+    codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$SIGNING_IDENTITY" "$app_path"
+}
+
+# Proves the signed app is what notarization requires, independent of how it got signed.
 verify_app_signature() {
   local app_path="$1"
   log "Verifying Developer ID signature, hardened runtime, and entitlements"
@@ -697,6 +732,7 @@ require_cmd awk
 require_cmd ditto
 require_cmd lipo
 require_file "$PROJECT_FILE"
+require_file "$ENTITLEMENTS_SOURCE"
 
 if [[ "$SKIP_GITHUB" -eq 0 ]]; then
   require_cmd gh
@@ -762,20 +798,10 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 XCODE_LOG="$LOG_DIR/xcodebuild-${TIMESTAMP}.log"
 mkdir -p "$LOG_DIR"
 
-# Signing happens here rather than as a post-build codesign pass so that entitlements and
-# nested code (SwiftPM frameworks, MLX's Metal bundles) are handled by Xcode's own inside-out
-# signing. See verify_app_signature for why the post-hoc alternative is unsafe here.
+# The build never signs; sign_app does, afterwards. See its comment for why — in short,
+# xcodebuild refuses to sign an entitled app target manually without a provisioning profile
+# that Developer ID distribution does not need.
 SIGNING_BUILD_SETTINGS=(CODE_SIGNING_ALLOWED=NO)
-if [[ "$SHOULD_SIGN_AND_NOTARIZE" -eq 1 ]]; then
-  SIGNING_BUILD_SETTINGS=(
-    CODE_SIGN_STYLE=Manual
-    CODE_SIGN_IDENTITY="$SIGNING_IDENTITY"
-    DEVELOPMENT_TEAM="$TEAM_ID"
-    PROVISIONING_PROFILE_SPECIFIER=""
-    ENABLE_HARDENED_RUNTIME=YES
-    OTHER_CODE_SIGN_FLAGS="--timestamp"
-  )
-fi
 
 log "Building ${APP_NAME} Release with xcodebuild"
 rm -rf "$DERIVED_DATA"
@@ -817,6 +843,9 @@ success "Built ${APP_NAME}.app version ${BUILT_VERSION} (${BUILT_BUILD}), arm64"
 if [[ "$SHOULD_SIGN_AND_NOTARIZE" -eq 1 ]]; then
   APP_NOTARY_ZIP="$BUILD_ROOT/${APP_NAME}-${NEW_VERSION}-app-notarization.zip"
   APP_NOTARY_JSON="$BUILD_ROOT/notary-${APP_NAME}-${NEW_VERSION}-app.json"
+  RESOLVED_ENTITLEMENTS="$BUILD_ROOT/${APP_NAME}-resolved.entitlements"
+  resolve_entitlements "$RESOLVED_ENTITLEMENTS"
+  sign_app "$APP_PATH" "$RESOLVED_ENTITLEMENTS"
   verify_app_signature "$APP_PATH"
   create_notarization_zip "$APP_PATH" "$APP_NOTARY_ZIP"
   notarize_artifact "$APP_NOTARY_ZIP" "${APP_NAME}.app" "$APP_NOTARY_JSON"
