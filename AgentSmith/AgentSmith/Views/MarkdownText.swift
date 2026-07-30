@@ -15,9 +15,16 @@ struct MarkdownText: View, Equatable {
     let content: String
     let baseFont: Font
 
-    /// Prevents body re-evaluation (and markdown re-parsing) when content is unchanged.
+    /// Prevents body re-evaluation (and markdown re-parsing) when nothing rendered has changed.
+    ///
+    /// Both stored properties participate. `baseFont` genuinely varies across call sites
+    /// (`.body`, `.callout`, `AppFonts.channelBody`, `.channelBody.italic()`, …), so omitting
+    /// it would let two views that render differently compare equal — the same defect a
+    /// hand-written `==` introduced in `LiveActivityTracker.Snapshot`. Every `AppFonts` member
+    /// is a `static let` today, so no instance's font actually changes; this keeps that from
+    /// being load-bearing.
     nonisolated static func == (lhs: MarkdownText, rhs: MarkdownText) -> Bool {
-        lhs.content == rhs.content
+        lhs.content == rhs.content && lhs.baseFont == rhs.baseFont
     }
 
     @State private var cachedBlocks: [ContentBlock] = []
@@ -227,15 +234,12 @@ struct MarkdownText: View, Equatable {
     
     /// Nested View struct for rendering tables (refactored from tableView(rows:columnCount:))
     private struct TableView: View {
-        let rows: [[String]]
-        let columnCount: Int
-        let baseFont: Font
+        /// Only the rendered cells are stored — `rows`/`columnCount`/`baseFont` are inputs to
+        /// that rendering, and keeping them as properties retained the raw `[[String]]` for the
+        /// view's lifetime while `body` never read them.
         private let renderedRows: [(isHeader: Bool, cells: [Text])]
-        
+
         init(rows: [[String]], columnCount: Int, baseFont: Font) {
-            self.rows = rows
-            self.columnCount = columnCount
-            self.baseFont = baseFont
             // Pre-compute all rendered cells at init time
             self.renderedRows = rows.enumerated().map { rowIdx, row in
                 let isHeader = rowIdx == 0
@@ -263,71 +267,78 @@ struct MarkdownText: View, Equatable {
         }
     }
     
+    /// What a single line renders as — exactly one thing, decided once.
+    ///
+    /// This was seven mutually-exclusive `Text?` properties, and the exclusivity was only
+    /// enforced by `body` picking the first non-nil one. It did not hold in `init`: a heading
+    /// fell through to the `else` branch and was styled a SECOND time into `plainText`, which
+    /// `body` then discarded. Styling is the expensive half of rendering a message (~29x the
+    /// block parse — see ROADMAP.md), so that was real duplicated work on every heading line.
+    /// Making the cases exclusive by construction means it cannot come back.
+    private enum LineContent {
+        case heading(Text)
+        case blank
+        case list(marker: Text, content: Text, indent: CGFloat)
+        case indented(Text, indent: CGFloat)
+        case plain(Text)
+    }
+
     /// Nested View struct for rendering a single line (refactored from renderLine(_:)
     private struct RenderLineView: View {
-        let line: String
-        let baseFont: Font
-        private let parsed: LineParseResult
-        private let trimmed: String
-        private let h1Text: Text?
-        private let h2Text: Text?
-        private let h3Text: Text?
-        private let listMarkerText: Text?
-        private let listContentText: Text?
-        private let indentedText: Text?
-        private let plainText: Text?
-        
+        private let content: LineContent
+
         init(line: String, baseFont: Font) {
-            self.line = line
-            self.baseFont = baseFont
-            self.trimmed = line.trimmingCharacters(in: .whitespaces)
-            self.parsed = LineParser.parse(line, baseFont: baseFont)
-            // Pre-compute all styled text variants at init time
-            self.h1Text = trimmed.hasPrefix("# ") ? InlineText.styled(String(trimmed.dropFirst(2)), font: AppFonts.markdownH1) : nil
-            self.h2Text = trimmed.hasPrefix("## ") ? InlineText.styled(String(trimmed.dropFirst(3)), font: AppFonts.markdownH2) : nil
-            self.h3Text = trimmed.hasPrefix("### ") ? InlineText.styled(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3) : nil
-            if parsed.isList {
-                self.listMarkerText = Text(parsed.isNumbered ? parsed.numberPrefix : "•").font(baseFont)
-                self.listContentText = InlineText.styled(parsed.content, font: baseFont)
-                self.indentedText = nil
-                self.plainText = nil
-            } else if parsed.indent > 0 {
-                self.listMarkerText = nil
-                self.listContentText = nil
-                self.indentedText = InlineText.styled(parsed.content, font: baseFont)
-                self.plainText = nil
-            } else {
-                self.listMarkerText = nil
-                self.listContentText = nil
-                self.indentedText = nil
-                self.plainText = InlineText.styled(line, font: baseFont)
-            }
+            self.content = Self.content(of: line, baseFont: baseFont)
         }
-        
+
+        /// Branch order is `body`'s old precedence exactly: headings, blank, list, indented,
+        /// plain. The three heading prefixes are mutually exclusive — the character after the
+        /// hashes disambiguates, so `"### x".hasPrefix("# ")` is already false — so their order
+        /// is not load-bearing; longest-first is for the reader.
+        private static func content(of line: String, baseFont: Font) -> LineContent {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("### ") {
+                return .heading(InlineText.styled(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3))
+            }
+            if trimmed.hasPrefix("## ") {
+                return .heading(InlineText.styled(String(trimmed.dropFirst(3)), font: AppFonts.markdownH2))
+            }
+            if trimmed.hasPrefix("# ") {
+                return .heading(InlineText.styled(String(trimmed.dropFirst(2)), font: AppFonts.markdownH1))
+            }
+            if trimmed.isEmpty { return .blank }
+
+            let parsed = LineParser.parse(line)
+            // Indent based on leading whitespace: 12pt per 2-space level.
+            let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
+            if parsed.isList {
+                return .list(marker: Text(parsed.isNumbered ? parsed.numberPrefix : "•").font(baseFont),
+                             content: InlineText.styled(parsed.content, font: baseFont),
+                             indent: depthPadding)
+            }
+            if parsed.indent > 0 {
+                // Indented non-list text — preserve the indent.
+                return .indented(InlineText.styled(parsed.content, font: baseFont), indent: depthPadding)
+            }
+            return .plain(InlineText.styled(line, font: baseFont))
+        }
+
         var body: some View {
-            if let h3Text = h3Text {
-                h3Text
-            } else if let h2Text = h2Text {
-                h2Text
-            } else if let h1Text = h1Text {
-                h1Text
-            } else if trimmed.isEmpty {
+            switch content {
+            case .heading(let text):
+                text
+            case .blank:
                 Color.clear.frame(height: 6)
-            } else if let listMarkerText = listMarkerText, let listContentText = listContentText {
-                // Indent based on leading whitespace: 12pt base + 12pt per 2-space level
-                let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
+            case .list(let marker, let text, let indent):
                 HStack(alignment: .top, spacing: 4) {
-                    listMarkerText
-                    listContentText
+                    marker
+                    text
                 }
-                .padding(.leading, depthPadding)
-            } else if let indentedText = indentedText {
-                // Indented non-list text — preserve the indent
-                let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
-                indentedText
-                    .padding(.leading, depthPadding)
-            } else if let plainText = plainText {
-                plainText
+                .padding(.leading, indent)
+            case .indented(let text, let indent):
+                text.padding(.leading, indent)
+            case .plain(let text):
+                text
             }
         }
     }
@@ -343,7 +354,7 @@ struct MarkdownText: View, Equatable {
     
     /// Helper namespace for line parsing logic
     private enum LineParser {
-        static func parse(_ line: String, baseFont: Font) -> LineParseResult {
+        static func parse(_ line: String) -> LineParseResult {
             let stripped = line.drop(while: { $0 == " " || $0 == "\t" })
             let indent = line.count - stripped.count
             

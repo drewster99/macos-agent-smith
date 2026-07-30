@@ -4,7 +4,7 @@
 
 ### Actor-isolation boundary: the app target is MainActor-by-default, the package is not (found 2026-07-28)
 
-**Status:** measured and settled 2026-07-29. Both settings stay. `MarkdownText` is resolved as *leave the work on main* (measurement below). What remains is a 3-line no-op deletion and adopting `@concurrent` as the way to say "off main."
+**Status:** settled and DONE 2026-07-29. Both settings stay. Every no-op `MainActor.run` in the app target is gone; the three that remain are genuine. `MarkdownText` was resolved by measurement as *leave the work on main*, and the duplicated styling found while measuring it was removed. What remains is only the standing convention: say `@concurrent` when you mean off-main, and measure before assuming a hop helps.
 
 #### The settings — there are TWO, and the second one is the one nobody mentions
 
@@ -77,14 +77,18 @@ Fixed: generation is detached, `DiffGenerator.lcsDiff` checks `Task.isCancelled`
    | `parseContentBlocks()` — the `@concurrent` candidate | 0.001ms | 0.013ms | 0.076ms | 0.247ms |
    | `InlineMarkdownStyler.styledLine` — runs in View `init`, main | 0.060ms | 0.298ms | 1.530ms | 6.471ms |
 
-   **Styling is 29× parsing**, and that ratio is a **lower bound**: the benchmark charged one `styledLine` per line, but `RenderLineView.init` eagerly styles a heading line *twice* — once into `h1Text`/`h2Text`/`h3Text` and again into `plainText`, since the heading branch does not suppress the plain branch — and `body` then renders one and discards the other. `parseContentBlocks` only splits lines and sniffs prefixes; the expensive work is `InlineMarkdownStyler.styledLine` (regex linkification + emphasis), called per line and per table cell from `RenderLineView.init` / `TableView.init` — which is **structurally main-actor**, because it builds SwiftUI `Text`/`AttributedString` inside a View initializer. Marking `updateBlocks()` `@concurrent` would move ~3% of the cost off main and add a hop plus `Sendable` constraints per message.
+   **Styling is 29× parsing**, and the measurement above understates it, because at the time `RenderLineView.init` styled some lines *twice*. `parseContentBlocks` only splits lines and sniffs prefixes; the expensive work is `InlineMarkdownStyler.styledLine` (regex linkification + emphasis), called per line and per table cell from `RenderLineView.init` / `TableView.init` — which is **structurally main-actor**, because it builds SwiftUI `Text`/`AttributedString` inside a View initializer. Marking `updateBlocks()` `@concurrent` would move ~3% of the cost off main and add a hop plus `Sendable` constraints per message.
 
-   The correct fix is therefore just **delete the no-op `MainActor.run`** and assign directly (the compiler enforces this: direct assignment only compiles if the function really is main-actor). If message rendering ever does need optimizing, the target is caching styled `AttributedString`s — a memoization problem, not an isolation one.
+   The correct fix is therefore just **delete the no-op `MainActor.run`** and assign directly (the compiler enforces this: direct assignment only compiles if the function really is main-actor). Done 2026-07-29.
+
+   **The wasted styling was then removed too (2026-07-29).** `RenderLineView` held seven mutually-exclusive `Text?` properties whose exclusivity only held in `body`, which picked the first non-nil. It did **not** hold in `init`: a heading fell through to the `else` branch and was styled a second time into `plainText`, and a blank line was styled once into `plainText`/`indentedText` — in both cases `body` discarded the result. Collapsing them into a `LineContent` enum makes the cases exclusive by construction. Verified by differential over **13,611 real corpus lines: zero classification changes**, `styledLine` calls 13,879 → 11,677 (**−15.9%**), styling wall-clock **−11.6%**. The differential was confirmed to have teeth (a one-character mutation to the heading drop produced 223 mismatches); note that reordering the three heading checks produces none, because the prefixes are already mutually exclusive.
+
+   If message rendering ever needs more, the remaining target is caching styled `AttributedString`s — a memoization problem, not an isolation one. Not done: p99 is 1.5ms/message, which is not yet a symptom.
 
 2. **The `MainActor.run` audit is COMPLETE (2026-07-29).** Three live sites in the whole app target; `DiffView.swift:154, :179` match a grep but are comments describing the removed hop, not calls.
    - `SharedAppState.swift:718, :721` — inside `@Sendable` callbacks invoked from off-main (the `CostBoard` actor). **Genuine.**
    - `ExportDefaults/main.swift:16` — top-level CLI code, which is nonisolated. **Genuine.**
-   - `MarkdownText.swift:67` — **confirmed no-op**; delete per item 1.
+   - `MarkdownText.swift` — was a confirmed no-op, **deleted 2026-07-29** (`de79a41`). The line now matching a grep there is the comment explaining its absence.
 
 3. **Make isolation visible at the declaration — with `@concurrent`, not `nonisolated`.** Anything deliberately off-main in the app target must say `@concurrent` rather than relying on a `Task.detached` at the call site to imply it. `nonisolated` alone is **not** sufficient here and reads as if it were (see the table above) — that is the trap, not the fix. The target currently has 23 `nonisolated` uses, 8 `Task.detached`, and **zero** `@concurrent`.
 
