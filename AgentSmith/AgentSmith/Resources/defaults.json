@@ -1,115 +1,179 @@
 {
-  "agentAssignments" : {
-    "brown" : "B0000002-0000-0000-0000-000000000002",
-    "securityAgent" : "B0000003-0000-0000-0000-000000000003",
-    "smith" : "B0000001-0000-0000-0000-000000000001"
+  "agentAssignments": {
+    "brown": "B0000002-0000-0000-0000-000000000002",
+    "securityAgent": "B0000003-0000-0000-0000-000000000003",
+    "smith": "B0000001-0000-0000-0000-000000000001",
+    "summarizer": "B0000005-0000-0000-0000-000000000005",
+    "validator": "B0000004-0000-0000-0000-000000000004"
   },
-  "agentTuning" : {
-    "brown" : {
-      "maxToolCalls" : 100,
-      "messageDebounceInterval" : 1,
-      "pollInterval" : 25
+  "agentTuning": {
+    "brown": {
+      "maxToolCalls": 100,
+      "messageDebounceInterval": 1,
+      "pollInterval": 25
     },
-    "securityAgent" : {
-      "maxToolCalls" : 100,
-      "messageDebounceInterval" : 1,
-      "pollInterval" : 13
+    "securityAgent": {
+      "maxToolCalls": 100,
+      "messageDebounceInterval": 1,
+      "pollInterval": 13
     },
-    "smith" : {
-      "maxToolCalls" : 100,
-      "messageDebounceInterval" : 1,
-      "pollInterval" : 20
+    "smith": {
+      "maxToolCalls": 100,
+      "messageDebounceInterval": 1,
+      "pollInterval": 20
     }
   },
-  "modelConfigurations" : [
+  "modelConfigurations": [
     {
-      "id" : "B0000001-0000-0000-0000-000000000001",
-      "isValid" : true,
-      "maxContextTokens" : 200000,
-      "maxOutputTokens" : 8192,
-      "modelID" : "claude-sonnet-4-5",
-      "name" : "Smith Default",
-      "providerID" : "builtin.anthropic",
-      "streaming" : true,
-      "temperature" : 0.1
+      "id": "B0000001-0000-0000-0000-000000000001",
+      "isValid": true,
+      "maxContextTokens": 128000,
+      "maxOutputTokens": 8192,
+      "modelID": "claude-opus-4-8",
+      "name": "Smith — Anthropic",
+      "providerID": "builtin.anthropic",
+      "streaming": true
     },
     {
-      "id" : "B0000002-0000-0000-0000-000000000002",
-      "isValid" : true,
-      "maxContextTokens" : 200000,
-      "maxOutputTokens" : 8192,
-      "modelID" : "claude-sonnet-4-5",
-      "name" : "Brown Default",
-      "providerID" : "builtin.anthropic",
-      "streaming" : true,
-      "temperature" : 0.3
+      "id": "B0000002-0000-0000-0000-000000000002",
+      "isValid": true,
+      "maxContextTokens": 128000,
+      "maxOutputTokens": 8192,
+      "modelID": "claude-sonnet-5",
+      "name": "Brown — Anthropic",
+      "providerID": "builtin.anthropic",
+      "streaming": true
     },
     {
-      "id" : "B0000003-0000-0000-0000-000000000003",
-      "isValid" : true,
-      "maxContextTokens" : 200000,
-      "maxOutputTokens" : 8192,
-      "modelID" : "claude-haiku-4-5",
-      "name" : "Security Agent Default",
-      "providerID" : "builtin.anthropic",
-      "streaming" : true,
-      "temperature" : 0.1
+      "id": "B0000003-0000-0000-0000-000000000003",
+      "isValid": true,
+      "maxContextTokens": 128000,
+      "maxOutputTokens": 4096,
+      "modelID": "claude-haiku-4-5",
+      "name": "Security Agent — Anthropic",
+      "providerID": "builtin.anthropic",
+      "streaming": true
+    },
+    {
+      "id": "B0000004-0000-0000-0000-000000000004",
+      "isValid": true,
+      "maxContextTokens": 128000,
+      "maxOutputTokens": 4096,
+      "modelID": "claude-sonnet-5",
+      "name": "Validator — Anthropic",
+      "providerID": "builtin.anthropic",
+      "streaming": true
+    },
+    {
+      "id": "B0000005-0000-0000-0000-000000000005",
+      "isValid": true,
+      "maxContextTokens": 128000,
+      "maxOutputTokens": 4096,
+      "modelID": "claude-haiku-4-5",
+      "name": "Summarizer — Anthropic",
+      "providerID": "builtin.anthropic",
+      "streaming": true
     }
   ],
-  "providerAPIKeys" : {},
-  "providers" : [],
-  "speech" : {
-    "agents" : {
-      "brown" : {
-        "categories" : {
-          "error" : { "soundName" : "", "speakEnabled" : false },
-          "public" : { "soundName" : "", "speakEnabled" : false },
-          "toAgent" : { "soundName" : "", "speakEnabled" : false },
-          "tool" : { "soundName" : "", "speakEnabled" : false },
-          "toUser" : { "soundName" : "", "speakEnabled" : false }
+  "providerAPIKeys": {},
+  "providers": [],
+  "speech": {
+    "agents": {
+      "brown": {
+        "categories": {
+          "error": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "public": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "toAgent": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "toUser": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "tool": {
+            "soundName": "",
+            "speakEnabled": false
+          }
         },
-        "enabled" : false,
-        "voiceIdentifier" : ""
+        "enabled": false,
+        "voiceIdentifier": ""
       },
-      "securityAgent" : {
-        "categories" : {
-          "error" : { "soundName" : "", "speakEnabled" : false },
-          "public" : { "soundName" : "", "speakEnabled" : false },
-          "toAgent" : { "soundName" : "", "speakEnabled" : false },
-          "tool" : { "soundName" : "", "speakEnabled" : false },
-          "toUser" : { "soundName" : "", "speakEnabled" : false }
+      "securityAgent": {
+        "categories": {
+          "error": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "public": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "toAgent": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "toUser": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "tool": {
+            "soundName": "",
+            "speakEnabled": false
+          }
         },
-        "enabled" : false,
-        "voiceIdentifier" : ""
+        "enabled": false,
+        "voiceIdentifier": ""
       },
-      "smith" : {
-        "categories" : {
-          "error" : { "soundName" : "", "speakEnabled" : false },
-          "public" : { "soundName" : "", "speakEnabled" : false },
-          "toAgent" : { "soundName" : "", "speakEnabled" : false },
-          "tool" : { "soundName" : "", "speakEnabled" : false },
-          "toUser" : { "soundName" : "", "speakEnabled" : false }
+      "smith": {
+        "categories": {
+          "error": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "public": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "toAgent": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "toUser": {
+            "soundName": "",
+            "speakEnabled": false
+          },
+          "tool": {
+            "soundName": "",
+            "speakEnabled": false
+          }
         },
-        "enabled" : false,
-        "voiceIdentifier" : ""
+        "enabled": false,
+        "voiceIdentifier": ""
       }
     },
-    "globalEnabled" : true,
-    "narrator" : {
-      "enabled" : false,
-      "voiceIdentifier" : ""
+    "globalEnabled": true,
+    "narrator": {
+      "enabled": false,
+      "voiceIdentifier": ""
     },
-    "security" : {
-      "abortSoundName" : "",
-      "denySoundName" : "",
-      "safeSoundName" : "",
-      "warnSoundName" : ""
+    "security": {
+      "abortSoundName": "",
+      "denySoundName": "",
+      "safeSoundName": "",
+      "warnSoundName": ""
     },
-    "user" : {
-      "soundName" : "",
-      "speakEnabled" : false,
-      "voiceIdentifier" : ""
+    "user": {
+      "soundName": "",
+      "speakEnabled": false,
+      "voiceIdentifier": ""
     }
   },
-  "version" : 2
+  "version": 2
 }
