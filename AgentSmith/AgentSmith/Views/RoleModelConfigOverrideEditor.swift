@@ -31,16 +31,16 @@ struct RoleModelConfigOverrideEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            header
+            header()
 
-            temperatureRow
-            maxOutputRow
-            maxContextRow
+            temperatureRow()
+            maxOutputRow()
+            maxContextRow()
             if selectedProviderSupportsThinking {
-                effortRow
-                thinkingBudgetRow
+                effortRow()
+                thinkingBudgetRow()
             }
-            togglesRow
+            togglesRow()
         }
         .onAppear {
             override = shared.roleModelConfigOverride(role: role, providerID: providerID, modelID: modelID)
@@ -53,7 +53,7 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
-    private var header: some View {
+    private func header() -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Runtime settings — \(role.displayName)")
                 .font(.subheadline.bold())
@@ -67,7 +67,7 @@ struct RoleModelConfigOverrideEditor: View {
 
     // MARK: Rows
 
-    private var temperatureRow: some View {
+    private func temperatureRow() -> some View {
         overrideRow(
             title: "Temperature",
             help: "Sampling randomness. Model default is used when off.",
@@ -85,7 +85,7 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
-    private var maxOutputRow: some View {
+    private func maxOutputRow() -> some View {
         overrideRow(
             title: "Max output tokens",
             help: "Ceiling for a single response. Off = the model's reported maximum.",
@@ -98,7 +98,7 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
-    private var maxContextRow: some View {
+    private func maxContextRow() -> some View {
         overrideRow(
             title: "Max context tokens",
             help: "Conversation-pruning budget. Off = the model's reported context window.",
@@ -111,7 +111,7 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
-    private var effortRow: some View {
+    private func effortRow() -> some View {
         overrideRow(
             title: "Thinking effort",
             help: "Adaptive-thinking depth. Off = the model / provider default.",
@@ -130,7 +130,7 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
-    private var thinkingBudgetRow: some View {
+    private func thinkingBudgetRow() -> some View {
         overrideRow(
             title: "Thinking budget",
             help: "Extended-thinking token budget (0 = off). On adaptive models it's a boolean on/off signal.",
@@ -143,7 +143,7 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
-    private var togglesRow: some View {
+    private func togglesRow() -> some View {
         VStack(alignment: .leading, spacing: 8) {
             optionalToggleRow(title: "Extended cache TTL (1 hour)",
                               help: "Anthropic only; cached tokens cost 2× base input.",
