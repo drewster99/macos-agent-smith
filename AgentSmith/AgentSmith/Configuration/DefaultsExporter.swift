@@ -8,7 +8,7 @@ enum DefaultsExporter {
     @MainActor
     static func exportCurrentSettings(
         llmKit: LLMKitManager,
-        agentAssignments: [AgentRole: UUID],
+        agentAssignments: [AgentRole: ModelAssignment],
         pollIntervals: [AgentRole: TimeInterval],
         maxToolCalls: [AgentRole: Int],
         messageDebounceIntervals: [AgentRole: TimeInterval],

@@ -13,10 +13,14 @@ public struct AppDefaults: Codable, Sendable {
     /// API keys for providers, keyed by provider ID. Only used in bundled defaults
     /// to bootstrap first-launch state — at runtime keys live in Keychain.
     public var providerAPIKeys: [String: String]
-    /// User-defined model configurations.
+    /// Retired config pool. Still decoded/encoded so a shipped `defaults.json` that still carries
+    /// the old UUID `agentAssignments` (into this pool) can be migrated to direct `(provider, model)`
+    /// at decode time, and so an existing install's persisted pool keeps seeding legacy-session
+    /// migration. The pool + UUID indirection was retired 2026-07-31.
     public var modelConfigurations: [ModelConfiguration]
-    /// Maps each agent role to a `ModelConfiguration.id`.
-    public var agentAssignments: [AgentRole: UUID]
+    /// Each agent role's model, as a direct `(provider, model)`. A shipped `defaults.json` still
+    /// carrying UUID `agentAssignments` is migrated here at decode time via ``modelConfigurations``.
+    public var agentAssignments: [AgentRole: ModelAssignment]
     /// Per-role agent tuning parameters (poll intervals, tool-call limits, etc.).
     public var agentTuning: [AgentRole: AgentTuningDefaults]
     /// Speech and sound configuration.
@@ -27,7 +31,7 @@ public struct AppDefaults: Codable, Sendable {
         providers: [ModelProvider] = [],
         providerAPIKeys: [String: String] = [:],
         modelConfigurations: [ModelConfiguration] = [],
-        agentAssignments: [AgentRole: UUID] = [:],
+        agentAssignments: [AgentRole: ModelAssignment] = [:],
         agentTuning: [AgentRole: AgentTuningDefaults],
         speech: SpeechDefaults
     ) {
@@ -38,6 +42,49 @@ public struct AppDefaults: Codable, Sendable {
         self.agentAssignments = agentAssignments
         self.agentTuning = agentTuning
         self.speech = speech
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, providers, providerAPIKeys, modelConfigurations
+        /// New direct `(provider, model)` assignments — the only key written from now on.
+        case agentModelAssignments
+        /// Retired pool-UUID assignments. Decoded only to migrate a pre-retirement bundled file.
+        case agentAssignments
+        case agentTuning, speech
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 2
+        providers = try c.decodeIfPresent([ModelProvider].self, forKey: .providers) ?? []
+        providerAPIKeys = try c.decodeIfPresent([String: String].self, forKey: .providerAPIKeys) ?? [:]
+        let configs = try c.decodeIfPresent([ModelConfiguration].self, forKey: .modelConfigurations) ?? []
+        modelConfigurations = configs
+        agentTuning = try c.decodeIfPresent([AgentRole: AgentTuningDefaults].self, forKey: .agentTuning) ?? [:]
+        speech = try c.decode(SpeechDefaults.self, forKey: .speech)
+        if let direct = try c.decodeIfPresent([AgentRole: ModelAssignment].self, forKey: .agentModelAssignments) {
+            agentAssignments = direct
+        } else {
+            // Migrate the retired pool-UUID form: map each UUID → its config's (provider, model).
+            let legacy = try c.decodeIfPresent([AgentRole: UUID].self, forKey: .agentAssignments) ?? [:]
+            var mapped: [AgentRole: ModelAssignment] = [:]
+            for (role, id) in legacy {
+                guard let config = configs.first(where: { $0.id == id }) else { continue }
+                mapped[role] = ModelAssignment(providerID: config.providerID, modelID: config.modelID)
+            }
+            agentAssignments = mapped
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(providers, forKey: .providers)
+        try c.encode(providerAPIKeys, forKey: .providerAPIKeys)
+        try c.encode(modelConfigurations, forKey: .modelConfigurations)
+        try c.encode(agentAssignments, forKey: .agentModelAssignments)
+        try c.encode(agentTuning, forKey: .agentTuning)
+        try c.encode(speech, forKey: .speech)
     }
 }
 

@@ -2,38 +2,23 @@ import SwiftUI
 import SwiftLLMKit
 import AgentSmithKit
 
-/// Agent-centric model settings — provider, model, temperature, token limits, etc.
+/// Agent-centric model picker — choose the `(provider, model)` this role runs.
 ///
 /// Mounted at the top of `AgentConfigSheet` (the gear-icon sheet on each agent card).
-/// The user picks a model from a single dropdown sectioned by provider; the underlying
-/// `ModelConfiguration` is created/cloned/updated transparently so the user never has
-/// to think about configuration objects.
+/// The user picks a model from a single dropdown sectioned by provider; the choice is written
+/// straight to `viewModel.agentAssignments[role]` as a ``ModelAssignment``. The shared-config
+/// pool and its clone-on-edit / UUID indirection were retired 2026-07-31 — there is no longer a
+/// `ModelConfiguration` object to own per role.
 ///
-/// On appear, calls `viewModel.ensureDedicatedConfig(for:)` so any edits go to a config
-/// owned exclusively by this role (clone-on-first-edit if shared).
-///
-/// Edits are auto-saved on commit — there is no separate Save button. The hosting sheet's
-/// Done button only dismisses.
+/// Runtime tuning (temperature, token ceilings, thinking, effort) is a separate per-`(role, model)`
+/// override, edited just below by ``RoleModelConfigOverrideEditor`` and resolved fresh against the
+/// model's live facts when providers are (re)built.
 struct AgentModelSettingsSection: View {
     @Bindable var viewModel: AppViewModel
     let role: AgentRole
 
-    @Environment(\.undoManager) private var undoManager
-
-    @State private var configID: UUID?
     @State private var providerID: String = ""
     @State private var modelID: String = ""
-    @State private var temperature: Double = 0.7
-    @State private var maxOutputTokens: Int = 4096
-    @State private var maxContextTokens: Int = 128_000
-    @State private var thinkingBudget: Int = 0
-    @State private var extendedCacheTTL: Bool = false
-    @State private var useDefaultTemperature: Bool = false
-    @State private var lastSavedAt: Date?
-
-    /// Set during loadFromViewModel/syncDraftsFromConfig so that field `onChange`
-    /// handlers don't fire `commit()` and create a phantom undo entry.
-    @State private var isSyncingFromExternal = false
 
     private var llmKit: LLMKitManager { viewModel.shared.llmKit }
 
@@ -41,58 +26,15 @@ struct AgentModelSettingsSection: View {
         llmKit.providers.first { $0.id == providerID }
     }
 
-    private var selectedAPIType: ProviderAPIType? {
-        selectedProvider?.apiType
-    }
-
     private var selectedModelInfo: ModelInfo? {
         llmKit.modelInfo(providerID: providerID, modelID: modelID)
     }
 
-    /// All configured providers, sorted alphabetically. Previously this filtered to
-    /// providers with at least one cached model, but that silently hid providers whose
-    /// model fetch hadn't run (e.g. keys entered before per-provider refresh wiring,
-    /// or days-old cached state that `refreshIfNeeded`'s YYYYMMDD gate skipped).
-    /// We now show every provider and mark empty ones with a refresh affordance so
-    /// the user can recover without leaving the sheet.
+    /// All configured providers, sorted alphabetically. Every provider is shown (even one whose
+    /// model fetch hasn't run) with a refresh affordance, so a user can recover without leaving
+    /// the sheet.
     private var sortedProviders: [ModelProvider] {
         llmKit.providers.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private var thinkingSupported: Bool {
-        guard let api = selectedAPIType else { return false }
-        return api == .anthropic || api == .alibabaCloud
-    }
-
-    private var thinkingActiveLocksTemperature: Bool {
-        selectedAPIType == .anthropic && thinkingBudget > 0
-    }
-
-    /// Warning text for the security gatekeeper when its output budget is too tight
-    /// to clear the thinking budget. With extended thinking enabled, Anthropic counts
-    /// thinking tokens against `max_tokens`, so Security Agent needs headroom above the thinking
-    /// budget to actually emit its SAFE/WARN/UNSAFE/ABORT verdict line — otherwise the
-    /// model spends the whole budget thinking and returns empty, unparseable text (the
-    /// "failed to parse security response" failure mode). Returns nil when this role
-    /// isn't Security Agent, thinking is off, or there's enough headroom.
-    private var securityAgentThinkingHeadroomWarning: String? {
-        guard role == .securityAgent, thinkingBudget > 0 else { return nil }
-        let responseSlack = 250
-        let warningThreshold = thinkingBudget + responseSlack
-        guard maxOutputTokens < warningThreshold else { return nil }
-        return "Max Output Tokens (\(maxOutputTokens)) is too close to the thinking budget (\(thinkingBudget)). Extended thinking counts thinking tokens against the output budget, so Security Agent needs headroom to emit its verdict — set Max Output Tokens to at least \(warningThreshold). Otherwise evaluations fail with “failed to parse security response.”"
-    }
-
-    private var anthropicCacheVisible: Bool {
-        selectedAPIType == .anthropic || isOpenRouterAnthropicModel
-    }
-
-    /// True when the current selection is an Anthropic-lineage model routed via
-    /// OpenRouter (model IDs are prefixed with "anthropic/" in OpenRouter's catalog).
-    /// OpenRouter passes top-level `cache_control` through to Anthropic, so the
-    /// extended-cache toggle is meaningful for these configurations.
-    private var isOpenRouterAnthropicModel: Bool {
-        selectedAPIType == .openRouter && modelID.lowercased().hasPrefix("anthropic/")
     }
 
     var body: some View {
@@ -102,12 +44,6 @@ struct AgentModelSettingsSection: View {
                     .font(AppFonts.inspectorLabel.weight(.bold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                if lastSavedAt != nil {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                        .help("Saved")
-                }
             }
 
             modelDropdown()
@@ -115,42 +51,33 @@ struct AgentModelSettingsSection: View {
             if let info = selectedModelInfo {
                 modelInfoBar(for: info)
             } else if !modelID.isEmpty {
-                Text("Model '\(modelID)' not found in the catalog. Refresh models in Settings → Configurations.")
+                Text("Model '\(modelID)' not found in the catalog. Refresh models from the provider's submenu above.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
 
-            // Runtime settings are now per-(role, model) overrides that resolve against the model's
-            // live facts (temperature, token caps, thinking, effort) — see RoleModelConfigOverrideEditor.
-            // The old inline parameter/thinking/cache sections are superseded by it.
             if !modelID.isEmpty, !providerID.isEmpty {
                 Divider().padding(.vertical, 2)
                 RoleModelConfigOverrideEditor(shared: viewModel.shared, role: role,
                                               providerID: providerID, modelID: modelID)
+                    // Remount on model change so the editor reloads that model's stored override
+                    // (its state loads once in onAppear).
+                    .id("\(providerID)/\(modelID)")
             }
         }
         .onAppear { loadFromViewModel() }
-        // Reflect external mutations of the assigned config (undo, redo, edits made
-        // through the Configurations tab in another window) back into the local drafts.
-        .onChange(of: observedConfig) { _, newConfig in
-            if let newConfig {
-                syncDraftsFromConfig(newConfig)
-            }
+        // Reflect external mutations of this role's assignment (undo, a change made in another
+        // window) back into the local drafts.
+        .onChange(of: viewModel.agentAssignments[role]) { _, newValue in
+            guard let newValue else { return }
+            providerID = newValue.providerID
+            modelID = newValue.modelID
         }
     }
 
-    /// The currently-assigned `ModelConfiguration` for this role, observed reactively
-    /// so that external mutations (e.g. via undo) trigger a draft re-sync.
-    private var observedConfig: ModelConfiguration? {
-        guard let id = configID else { return nil }
-        return llmKit.configurations.first { $0.id == id }
-    }
-
-    /// Human-readable summary of the current selection for the dropdown's
-    /// closed-state label. Always leads with the model id (that's the part the
-    /// user actually picks per agent) and trails with the provider name in
-    /// parentheses for disambiguation. Falls back to a hint when nothing is
-    /// selected yet.
+    /// Human-readable summary of the current selection for the dropdown's closed-state label.
+    /// Leads with the model id (the part the user actually picks per agent) and trails with the
+    /// provider name for disambiguation. Falls back to a hint when nothing is selected yet.
     private var menuLabelText: String {
         let providerName = selectedProvider?.name
         if modelID.isEmpty {
@@ -165,7 +92,6 @@ struct AgentModelSettingsSection: View {
     // MARK: - Model dropdown (hierarchical: provider → models submenu)
 
     @ViewBuilder
-
     private func modelDropdown() -> some View {
         Menu(content: {
             if sortedProviders.isEmpty {
@@ -177,11 +103,6 @@ struct AgentModelSettingsSection: View {
             }
         }, label: {
             HStack {
-                // One Text node, model-first. The previous version stacked three
-                // Text views in an HStack — under SwiftUI's `.borderlessButton`
-                // menu style on macOS, the system rendered only the first node,
-                // hiding the model name behind the provider. Building a single
-                // String guarantees the actual selected model is always visible.
                 Text(menuLabelText)
                     .foregroundStyle(modelID.isEmpty ? .secondary : .primary)
                     .lineLimit(1)
@@ -199,24 +120,20 @@ struct AgentModelSettingsSection: View {
         .menuStyle(.borderlessButton)
     }
 
-    /// One provider's submenu in the model dropdown. Providers with a populated
-    /// catalog get their model list. Providers with an empty catalog get a single
-    /// "Refresh" action and a warning label so the user can pull models without
-    /// leaving the sheet. A prior refresh error (from `llmKit.refreshErrors`) is
-    /// shown inline so the failure mode is visible.
+    /// One provider's submenu in the model dropdown. Providers with a populated catalog get their
+    /// model list. Providers with an empty catalog get a single "Refresh" action and a warning
+    /// label so the user can pull models without leaving the sheet. A prior refresh error (from
+    /// `llmKit.refreshErrors`) is shown inline so the failure mode is visible.
     @ViewBuilder
     private func providerSubmenu(for provider: ModelProvider) -> some View {
         let requirements = role.modelRequirements
         let cachedModels = llmKit.models(for: provider.id)
         let providerModels = cachedModels
-            // Two presentation filters, both with the same escape hatch — the config's CURRENT model
-            // always stays listed so the selection remains renderable and re-selectable. Hidden is
-            // presentation, not deletion (see the Model Metadata inspector). Role requirements are
-            // capability/availability gates: tri-state, so only a model KNOWN to fail is dropped.
+            // Two presentation filters, both with the same escape hatch — the CURRENT selection
+            // always stays listed so it remains renderable and re-selectable. Hidden is presentation,
+            // not deletion. Role requirements are capability/availability gates: tri-state, so only a
+            // model KNOWN to fail is dropped.
             .filter { model in
-                // The escape hatch is scoped to the ACTUAL current selection (this provider AND the
-                // selected model), not a bare id match — otherwise a same-id model under a different
-                // provider, or an empty-id catalog entry when nothing is selected, would slip the gate.
                 if provider.id == providerID && model.modelID == modelID { return true }
                 guard model.hidden != true else { return false }
                 return model.satisfies(
@@ -273,8 +190,8 @@ struct AgentModelSettingsSection: View {
     }
 
     /// Kicks off a per-provider model refresh. `refreshModels(forProviderID:)` sets
-    /// `llmKit.isRefreshing = true` for the duration, which the Refresh buttons
-    /// key off via `.disabled(llmKit.isRefreshing)` so double-taps are prevented.
+    /// `llmKit.isRefreshing = true` for the duration, which the Refresh buttons key off via
+    /// `.disabled(llmKit.isRefreshing)` so double-taps are prevented.
     private func refreshProvider(_ provider: ModelProvider) {
         let providerID = provider.id
         Task { @MainActor in
@@ -309,188 +226,15 @@ struct AgentModelSettingsSection: View {
         }
     }
 
-    // MARK: - Parameters
-
-    @ViewBuilder
-
-    private func parametersSection() -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            LabeledContent("Temperature") {
-                HStack {
-                    Slider(value: $temperature, in: 0...2, step: 0.1)
-                        .disabled(thinkingActiveLocksTemperature || useDefaultTemperature)
-                    Text(String(format: "%.1f", temperature))
-                        .monospacedDigit()
-                        .frame(width: 30)
-                        .foregroundStyle((thinkingActiveLocksTemperature || useDefaultTemperature) ? .secondary : .primary)
-                }
-            }
-            .onChange(of: temperature) { _, newValue in
-                guard !isSyncingFromExternal else { return }
-                // Project rule: don't mutate @State directly inside .onChange.
-                // For Anthropic models, dropping below temp=1.0 also forces thinking off
-                // — that's a TWO-variable cascade, so we defer both the assignment and
-                // the commit to the same async block, with `isSyncingFromExternal`
-                // suppressing the cascading thinkingBudget onChange's redundant commit.
-                // Result: one atomic commit that reflects both new values, instead of
-                // a stale-thinkingBudget commit followed by a corrective second commit.
-                if selectedAPIType == .anthropic && newValue != 1.0 {
-                    DispatchQueue.main.async {
-                        self.isSyncingFromExternal = true
-                        self.thinkingBudget = 0
-                        self.isSyncingFromExternal = false
-                        self.commit()
-                    }
-                    return
-                }
-                commit()
-            }
-
-            Toggle("Use model default temperature", isOn: $useDefaultTemperature)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .disabled(thinkingActiveLocksTemperature)
-                .onChange(of: useDefaultTemperature) { _, _ in
-                    guard !isSyncingFromExternal else { return }
-                    commit()
-                }
-
-            LabeledContent("Max Output Tokens") {
-                TextField("4096", value: $maxOutputTokens, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .onSubmit { commit() }
-                    .onChange(of: maxOutputTokens) { _, newValue in
-                        // Clamp on next runloop tick so we don't mutate @State inside
-                        // .onChange (project rule).
-                        if newValue < 1 {
-                            DispatchQueue.main.async { self.maxOutputTokens = 1 }
-                        }
-                        guard !isSyncingFromExternal else { return }
-                        commit()
-                    }
-            }
-
-            LabeledContent("Max Context Tokens") {
-                TextField("128000", value: $maxContextTokens, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .onSubmit { commit() }
-                    .onChange(of: maxContextTokens) { _, newValue in
-                        if newValue < 1 {
-                            DispatchQueue.main.async { self.maxContextTokens = 1 }
-                        }
-                        guard !isSyncingFromExternal else { return }
-                        commit()
-                    }
-            }
-        }
-    }
-
-    @ViewBuilder
-
-    private func thinkingSection() -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            LabeledContent("Thinking Budget") {
-                HStack(spacing: 8) {
-                    TextField("0 = disabled", value: $thinkingBudget, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 120)
-                        .onSubmit { commit() }
-                        .onChange(of: thinkingBudget) { _, newValue in
-                            // Project rule: never mutate @State directly inside .onChange —
-                            // wrap with DispatchQueue.main.async so the assignment happens
-                            // on the next runloop tick. The clamps below skip commit() and
-                            // let the post-clamp .onChange re-fire (with the corrected
-                            // value) handle the commit.
-                            if newValue > 0 && newValue < 1024 {
-                                DispatchQueue.main.async { self.thinkingBudget = 1024 }
-                                return
-                            }
-                            if newValue < 0 {
-                                DispatchQueue.main.async { self.thinkingBudget = 0 }
-                                return
-                            }
-                            // Anthropic cascade: enabling thinking forces temperature=1.0.
-                            // Use the same atomic pattern as the temperature .onChange so
-                            // both @State variables and the persisted config update in one
-                            // transaction (single undo entry, no stale-temperature commit).
-                            if newValue > 0 && selectedAPIType == .anthropic {
-                                DispatchQueue.main.async {
-                                    self.isSyncingFromExternal = true
-                                    self.temperature = 1.0
-                                    self.isSyncingFromExternal = false
-                                    self.commit()
-                                }
-                                return
-                            }
-                            guard !isSyncingFromExternal else { return }
-                            commit()
-                        }
-
-                    Button("1K") { thinkingBudget = 1_024 }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    Button("4K") { thinkingBudget = 4_096 }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    Button("16K") { thinkingBudget = 16_384 }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    Button("Off") { thinkingBudget = 0 }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
-            }
-            if thinkingActiveLocksTemperature {
-                Text("Thinking enabled — temperature locked to 1.0 (Anthropic requirement). Minimum budget: 1,024 tokens.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            } else if selectedAPIType == .alibabaCloud && thinkingBudget > 0 {
-                Text("Thinking enabled for Alibaba Cloud (Qwen3/3.5). Minimum budget: 1,024 tokens.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            } else {
-                Text("Extended thinking token budget. Set to 0 to disable.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let warning = securityAgentThinkingHeadroomWarning {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                    Text(warning)
-                }
-                .font(.caption)
-                .foregroundStyle(.red)
-            }
-        }
-    }
-
-    @ViewBuilder
-
-    private func cacheTTLSection() -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle("Extended Prompt Cache (1 hour)", isOn: $extendedCacheTTL)
-                .onChange(of: extendedCacheTTL) { _, _ in
-                    guard !isSyncingFromExternal else { return }
-                    commit()
-                }
-            Text("1-hour cache TTL instead of 5-minute. Cached input tokens cost 2x base price.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
     // MARK: - Model info bar
 
     private func modelInfoBar(for info: ModelInfo) -> some View {
-        // Use a wrapping flow so the chips ride to subsequent rows when the
-        // sheet is narrow rather than truncating into "Max ou…", "Conte…", etc.
+        // A wrapping flow so the chips ride to subsequent rows when the sheet is narrow rather
+        // than truncating into "Max ou…", "Conte…", etc.
         WrappingHStack(spacing: 8, lineSpacing: 4) {
             if let maxOut = info.maxOutputTokens {
-                let exceeds = maxOutputTokens > maxOut
                 Text("Max output: \(formatTokenCount(maxOut))")
-                    .foregroundStyle(exceeds ? .red : .secondary)
+                    .foregroundStyle(.secondary)
             }
             if let maxIn = info.maxInputTokens {
                 Text("Context: \(formatTokenCount(maxIn))")
@@ -521,82 +265,24 @@ struct AgentModelSettingsSection: View {
         return "\(count)"
     }
 
-    // MARK: - Load / save
+    // MARK: - Load / select
 
     private func loadFromViewModel() {
-        let config = viewModel.ensureDedicatedConfig(for: role)
-        configID = config.id
-        syncDraftsFromConfig(config)
-    }
-
-    /// Copies field values from a `ModelConfiguration` into the local `@State` drafts
-    /// without triggering field `onChange` handlers (which would re-commit and stack
-    /// duplicate undo entries). Use this for initial load and external-change refresh.
-    private func syncDraftsFromConfig(_ config: ModelConfiguration) {
-        isSyncingFromExternal = true
-        defer {
-            // Defer back to the next runloop turn so all the @State setters above
-            // have flushed their `onChange` notifications before we re-enable commit.
-            DispatchQueue.main.async {
-                self.isSyncingFromExternal = false
-            }
-        }
-        providerID = config.providerID
-        modelID = config.modelID
-        temperature = config.temperature ?? 0.7
-        maxOutputTokens = config.maxOutputTokens
-        maxContextTokens = config.maxContextTokens
-        thinkingBudget = config.thinkingBudget ?? 0
-        extendedCacheTTL = config.extendedCacheTTL
-        useDefaultTemperature = config.temperature == nil
+        guard let assignment = viewModel.agentAssignments[role] else { return }
+        providerID = assignment.providerID
+        modelID = assignment.modelID
     }
 
     private func selectModel(provider: ModelProvider, model: ModelInfo) {
         providerID = provider.id
         modelID = model.modelID
-        if let maxOut = model.maxOutputTokens {
-            maxOutputTokens = maxOut
-        }
-        if let maxIn = model.maxInputTokens {
-            maxContextTokens = maxIn
-        }
-        commit()
-    }
-
-    /// Writes the current draft state back through `viewModel.updateAgentConfig` and
-    /// registers an undo action that restores the previous configuration. Called from
-    /// every field's `onChange` / `onSubmit`, plus from explicit-action buttons (model
-    /// selection, thinking presets).
-    ///
-    /// No-op while `isSyncingFromExternal` is true so that draft updates from undo /
-    /// external mutation don't recursively register fresh undo entries.
-    private func commit() {
-        guard !isSyncingFromExternal else { return }
-        guard let configID else { return }
-        guard let previous = llmKit.configurations.first(where: { $0.id == configID }) else { return }
-
-        var updated = previous
-        updated.providerID = providerID
-        updated.modelID = modelID
-        updated.temperature = useDefaultTemperature ? nil : temperature
-        updated.maxOutputTokens = max(1, maxOutputTokens)
-        updated.maxContextTokens = max(1, maxContextTokens)
-        updated.thinkingBudget = (thinkingSupported && thinkingBudget > 0) ? thinkingBudget : nil
-        updated.extendedCacheTTL = anthropicCacheVisible && extendedCacheTTL
-
-        // Skip if nothing meaningfully changed — saves both a redundant write and a
-        // useless undo entry.
-        if updated == previous { return }
-
-        // updateAgentConfig handles undo registration internally when given a manager.
-        viewModel.shared.updateAgentConfig(updated, undoManager: undoManager)
-        lastSavedAt = Date()
+        viewModel.agentAssignments[role] = ModelAssignment(providerID: provider.id, modelID: model.modelID)
     }
 }
 
-/// Horizontal stack that wraps to additional rows when its proposed width is too
-/// narrow for the next subview. Drop-in replacement for a single-row `HStack` in
-/// places like the model-info chips bar where truncation is worse than wrapping.
+/// Horizontal stack that wraps to additional rows when its proposed width is too narrow for the
+/// next subview. Drop-in replacement for a single-row `HStack` in places like the model-info chips
+/// bar where truncation is worse than wrapping.
 private struct WrappingHStack: Layout {
     let spacing: CGFloat
     let lineSpacing: CGFloat

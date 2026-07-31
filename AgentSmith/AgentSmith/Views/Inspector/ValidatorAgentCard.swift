@@ -18,9 +18,10 @@ struct ValidatorAgentCard: View {
 
     private static let roleColor = AppColors.validatorAgent
 
+    /// The validator's effective config — its `(provider, model)` assignment resolved with the
+    /// per-`(role, model)` override, or nil when no model is assigned.
     private var assignedConfig: ModelConfiguration? {
-        guard let id = viewModel.agentAssignments[.validator] else { return nil }
-        return viewModel.shared.llmKit.configurations.first { $0.id == id }
+        viewModel.resolvedAgentConfigs[.validator]
     }
 
     var body: some View {

@@ -24,9 +24,25 @@ public struct Session: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+/// A role's model choice — provider + model directly, no shared-config-pool / UUID indirection.
+public struct ModelAssignment: Codable, Sendable, Equatable, Hashable {
+    public var providerID: String
+    public var modelID: String
+    public init(providerID: String, modelID: String) {
+        self.providerID = providerID
+        self.modelID = modelID
+    }
+}
+
 /// Per-session settings blob persisted to `sessions/<id>/state.json`.
 public struct SessionState: Codable, Sendable {
-    public var agentAssignments: [AgentRole: UUID]
+    /// Which model each role runs. Direct `(provider, model)` — the config pool + UUID indirection
+    /// was retired 2026-07-31; runtime tuning now lives in the per-(role, model) override store.
+    public var agentAssignments: [AgentRole: ModelAssignment]
+    /// Decode-only: a pre-retirement session's `[AgentRole: UUID]` config-pool assignments. Carried
+    /// so the load path can map each UUID → its config's `(provider, model)` (the pool is still
+    /// loaded for exactly this migration) and populate `agentAssignments`. Never encoded.
+    public var legacyConfigAssignments: [AgentRole: UUID] = [:]
     public var agentPollIntervals: [AgentRole: TimeInterval]
     public var agentMaxToolCalls: [AgentRole: Int]
     public var agentMessageDebounceIntervals: [AgentRole: TimeInterval]
@@ -34,7 +50,7 @@ public struct SessionState: Codable, Sendable {
     public var autoRunNextTask: Bool
     public var autoRunInterruptedTasks: Bool
     public init(
-        agentAssignments: [AgentRole: UUID] = [:],
+        agentAssignments: [AgentRole: ModelAssignment] = [:],
         agentPollIntervals: [AgentRole: TimeInterval] = [:],
         agentMaxToolCalls: [AgentRole: Int] = [:],
         agentMessageDebounceIntervals: [AgentRole: TimeInterval] = [:],
@@ -52,18 +68,22 @@ public struct SessionState: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        /// New direct `(provider, model)` assignments. `agentAssignments` (below) is the RETIRED
+        /// pool-UUID key, decoded for one-time migration and never written.
+        case agentModelAssignments
         case agentAssignments, agentPollIntervals, agentMaxToolCalls
         case agentMessageDebounceIntervals, toolsEnabled, autoRunNextTask
         case autoRunInterruptedTasks
         /// Retired. The validator's model used to live in its own scalar because `AgentRole`
-        /// had no validator case; it is now an ordinary `agentAssignments[.validator]` entry.
-        /// Decoded (never encoded) so an existing session file's assignment survives.
+        /// had no validator case. Decoded (never encoded) so an existing session file's assignment
+        /// survives — into the legacy pool-UUID set, migrated at load like the rest.
         case validatorAssignment
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        agentAssignments = try c.decodeIfPresent([AgentRole: UUID].self, forKey: .agentAssignments) ?? [:]
+        agentAssignments = try c.decodeIfPresent([AgentRole: ModelAssignment].self, forKey: .agentModelAssignments) ?? [:]
+        legacyConfigAssignments = try c.decodeIfPresent([AgentRole: UUID].self, forKey: .agentAssignments) ?? [:]
         agentPollIntervals = try c.decodeIfPresent([AgentRole: TimeInterval].self, forKey: .agentPollIntervals) ?? [:]
         agentMaxToolCalls = try c.decodeIfPresent([AgentRole: Int].self, forKey: .agentMaxToolCalls) ?? [:]
         agentMessageDebounceIntervals = try c.decodeIfPresent([AgentRole: TimeInterval].self, forKey: .agentMessageDebounceIntervals) ?? [:]
@@ -72,15 +92,15 @@ public struct SessionState: Codable, Sendable {
         autoRunInterruptedTasks = try c.decodeIfPresent(Bool.self, forKey: .autoRunInterruptedTasks) ?? true
         // One-way migration of the retired scalar. An explicit `agentAssignments[.validator]`
         // always wins — once the new key is written the legacy one is stale by definition.
-        if agentAssignments[.validator] == nil,
+        if legacyConfigAssignments[.validator] == nil,
            let legacy = try c.decodeIfPresent(UUID.self, forKey: .validatorAssignment) {
-            agentAssignments[.validator] = legacy
+            legacyConfigAssignments[.validator] = legacy
         }
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(agentAssignments, forKey: .agentAssignments)
+        try c.encode(agentAssignments, forKey: .agentModelAssignments)   // legacy pool-UUID key never rewritten
         try c.encode(agentPollIntervals, forKey: .agentPollIntervals)
         try c.encode(agentMaxToolCalls, forKey: .agentMaxToolCalls)
         try c.encode(agentMessageDebounceIntervals, forKey: .agentMessageDebounceIntervals)

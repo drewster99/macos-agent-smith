@@ -446,7 +446,7 @@ final class SharedAppState {
     private static let attachmentsMigratedKey = "didMigrateAttachmentsToGlobalStore"
 
     /// Default agent assignments (from bundled defaults) — used when creating a new session.
-    private(set) var defaultAgentAssignments: [AgentRole: UUID] = [:]
+    private(set) var defaultAgentAssignments: [AgentRole: ModelAssignment] = [:]
     /// Default agent tunings (from bundled defaults) — used when creating a new session.
     private(set) var defaultAgentPollIntervals: [AgentRole: TimeInterval] = [
         .smith: 20, .brown: 25, .securityAgent: 13

@@ -210,12 +210,10 @@ final class SessionManager {
         return nil
     }
 
-    /// Deletes a configuration from the shared LLM catalog AND clears any per-session
-    /// assignments that reference it.
+    /// Deletes a configuration from the shared LLM catalog. Per-session role assignments are direct
+    /// `(provider, model)` values (the pool + UUID indirection was retired 2026-07-31), so deleting
+    /// a catalog config no longer touches any assignment.
     func deleteConfiguration(id: UUID) {
-        for vm in viewModels.values {
-            vm.clearAssignment(forConfigID: id)
-        }
         shared.deleteConfiguration(id: id)
     }
 

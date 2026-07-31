@@ -344,21 +344,13 @@ struct OnboardingView: View {
     private func confirmAndFinish() {
         guard allRolesResolved else { return }
         let profile = selectedProfile
-        var newAssignments: [AgentRole: UUID] = [:]
+        var newAssignments: [AgentRole: ModelAssignment] = [:]
 
+        // Direct (provider, model) — the config pool was retired 2026-07-31. Per-role runtime tuning
+        // is a per-(role, model) override set later, not a property of the assignment.
         for role in OnboardingRole.allCases {
             guard let modelID = roleSelections[role] else { continue }
-            let config = ModelConfiguration(
-                id: UUID(),
-                name: "\(role.configNamePrefix) — \(profile.displayName)",
-                providerID: profile.providerID,
-                modelID: modelID,
-                temperature: nil,
-                maxOutputTokens: role.maxOutputTokens,
-                maxContextTokens: role.maxContextTokens
-            )
-            shared.llmKit.addConfiguration(config)
-            newAssignments[role.agentRole] = config.id
+            newAssignments[role.agentRole] = ModelAssignment(providerID: profile.providerID, modelID: modelID)
         }
 
         commitNickname()

@@ -232,8 +232,13 @@ final class AppViewModel {
     ] {
         didSet { persistSessionStateAsync() }
     }
-    /// Per-session: maps each agent role to a `ModelConfiguration.id`.
-    var agentAssignments: [AgentRole: UUID] = [:] {
+    /// Per-session: maps each agent role to its `(provider, model)` directly.
+    ///
+    /// The shared-config-pool + `ModelConfiguration.id` indirection was retired 2026-07-31.
+    /// A role's runtime tuning (temperature, token ceilings, thinking) is no longer a property of
+    /// a shared config object — it lives in the per-`(role, model)` override store on `SharedAppState`
+    /// and is resolved fresh against the latest model facts when providers are (re)built.
+    var agentAssignments: [AgentRole: ModelAssignment] = [:] {
         didSet { persistSessionStateAsync(); scheduleProviderRefresh() }
     }
     /// Per-session tool allowlist. Missing/true = enabled. Currently no UI; data model only.
@@ -365,6 +370,9 @@ final class AppViewModel {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) loaded autoRunNextTask=\(state.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(state.autoRunInterruptedTasks, privacy: .public)")
                 if !state.agentAssignments.isEmpty {
                     agentAssignments = state.agentAssignments
+                } else if !state.legacyConfigAssignments.isEmpty {
+                    // Pre-retirement session: map each pool-UUID → its config's (provider, model).
+                    agentAssignments = modelAssignments(fromConfigIDs: state.legacyConfigAssignments)
                 }
                 if !state.agentPollIntervals.isEmpty {
                     agentPollIntervals = state.agentPollIntervals
@@ -380,8 +388,9 @@ final class AppViewModel {
                 autoRunInterruptedTasks = state.autoRunInterruptedTasks
             } else {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
-                // No per-session state — fall back to the shared default assignments (from
-                // bundled defaults). New sessions get this the first time they're opened.
+                // No per-session state — fall back to the shared default assignments (from bundled
+                // defaults, already migrated to (provider, model) by AppDefaults). New sessions get
+                // this the first time they're opened.
                 agentAssignments = shared.defaultAgentAssignments
             }
         } catch {
@@ -389,42 +398,26 @@ final class AppViewModel {
             agentAssignments = shared.defaultAgentAssignments
         }
 
-        // Prune stale assignments that reference configurations that no longer exist.
-        let validConfigIDs = Set(shared.llmKit.configurations.map(\.id))
-        for (role, configID) in agentAssignments {
-            if !validConfigIDs.contains(configID) {
+        // Prune assignments whose provider is no longer configured (or that carry no model).
+        let configuredProviderIDs = Set(shared.llmKit.providers.map(\.id))
+        for (role, assignment) in agentAssignments {
+            if assignment.modelID.isEmpty || !configuredProviderIDs.contains(assignment.providerID) {
                 agentAssignments[role] = nil
-                logger.notice("Cleared stale assignment in session \(self.session.name, privacy: .public) for \(role.rawValue, privacy: .public) → \(configID, privacy: .public)")
+                logger.notice("Cleared stale assignment in session \(self.session.name, privacy: .public) for \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public)")
             }
         }
 
-        // Auto-heal missing required-role assignments. Prefer a config whose
-        // name starts with the role name (e.g. "Smith — …" for the smith role)
-        // so that a catalog re-seed/prune doesn't silently bind every role to
-        // whichever config happens to be first in the list. Only fall back to
-        // `validConfigs.first` when no role-named config exists for that role —
-        // that keeps the original "never get stuck on ‘no configuration’" goal
-        // without entangling roles. Logged so a future regression is visible
-        // in the runtime output.
-        let validConfigs = shared.llmKit.configurations.filter(\.isValid)
+        // Auto-heal missing required-role assignments from the bundled defaults, so a catalog
+        // re-seed can't leave a role stuck on "no model". Only fills a role whose default resolves
+        // to a currently-configured provider — otherwise the role stays unassigned and the UI asks
+        // the user to pick, rather than binding to an arbitrary provider.
+        let defaultAssignments = shared.defaultAgentAssignments
         for role in AgentRole.requiredRoles where agentAssignments[role] == nil {
-            let roleName = role.displayName
-            let nameMatch = validConfigs.first { config in
-                let lowered = config.name.lowercased()
-                let prefix = roleName.lowercased()
-                return lowered == prefix
-                    || lowered.hasPrefix("\(prefix) —")
-                    || lowered.hasPrefix("\(prefix) -")
-                    || lowered.hasPrefix("\(prefix):")
-                    || lowered.hasPrefix("\(prefix) ")
-            }
-            if let chosen = nameMatch {
-                agentAssignments[role] = chosen.id
-                logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(chosen.name, privacy: .public) (\(chosen.id, privacy: .public)) [name match] in session \(self.session.name, privacy: .public)")
-            } else if let fallback = validConfigs.first {
-                agentAssignments[role] = fallback.id
-                logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(fallback.name, privacy: .public) (\(fallback.id, privacy: .public)) [first-valid fallback; no \(roleName, privacy: .public)-named config found] in session \(self.session.name, privacy: .public)")
-            }
+            guard let fallback = defaultAssignments[role],
+                  !fallback.modelID.isEmpty,
+                  configuredProviderIDs.contains(fallback.providerID) else { continue }
+            agentAssignments[role] = fallback
+            logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(fallback.providerID, privacy: .public)/\(fallback.modelID, privacy: .public) [bundled default] in session \(self.session.name, privacy: .public)")
         }
 
         // Load message history for up-arrow recall (per-session).
@@ -609,15 +602,15 @@ final class AppViewModel {
         var visionByRole: [AgentRole: Bool] = [:]
         var documentsByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
-            guard let configID = agentAssignments[role],
-                  let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) else { continue }
-            // Resolve the effective config FRESH (model facts + the per-(role, model) override; the
-            // pool config's own stored tuning is ignored) and build the provider from IT — permissive,
-            // no pool-side clamp of the output cap.
-            let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-            let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-                ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
-            let resolved = override.resolved(against: facts, name: modelConfig.name)
+            guard let assignment = agentAssignments[role], !assignment.modelID.isEmpty else { continue }
+            let providerID = assignment.providerID
+            let modelID = assignment.modelID
+            // Resolve the effective config FRESH (model facts + the per-(role, model) override) and
+            // build the provider from IT — permissive, no clamp of the output cap.
+            let override = shared.roleModelConfigOverride(role: role, providerID: providerID, modelID: modelID)
+            let facts = shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)
+                ?? ModelInfo(providerID: providerID, modelID: modelID, displayName: modelID)
+            let resolved = override.resolved(against: facts, name: facts.displayName)
             configurations[role] = resolved
             do {
                 providers[role] = try shared.llmKit.makeProvider(configuration: resolved)
@@ -625,10 +618,10 @@ final class AppViewModel {
                 shared.startupError = "Failed to create provider for \(role.displayName): \(error.localizedDescription)"
                 return
             }
-            if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
+            if let modelProvider = shared.llmKit.providers.first(where: { $0.id == providerID }) {
                 apiTypes[role] = modelProvider.apiType
             }
-            let injection = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
+            let injection = resolveInjectionCapabilities(providerID: providerID, modelID: modelID, roleLabel: role.displayName)
             visionByRole[role] = injection.vision
             documentsByRole[role] = injection.documents
         }
@@ -1668,15 +1661,15 @@ final class AppViewModel {
         var visionByRole: [AgentRole: Bool] = [:]
         var documentsByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
-            guard let configID = agentAssignments[role],
-                  let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) else { continue }
-            // Resolve the effective config FRESH (model facts + the per-(role, model) override; the
-            // pool config's own stored tuning is ignored) and build the provider from IT — permissive,
-            // no pool-side clamp of the output cap.
-            let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-            let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-                ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
-            let resolved = override.resolved(against: facts, name: modelConfig.name)
+            guard let assignment = agentAssignments[role], !assignment.modelID.isEmpty else { continue }
+            let providerID = assignment.providerID
+            let modelID = assignment.modelID
+            // Resolve the effective config FRESH (model facts + the per-(role, model) override) and
+            // build the provider from IT — permissive, no clamp of the output cap.
+            let override = shared.roleModelConfigOverride(role: role, providerID: providerID, modelID: modelID)
+            let facts = shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)
+                ?? ModelInfo(providerID: providerID, modelID: modelID, displayName: modelID)
+            let resolved = override.resolved(against: facts, name: facts.displayName)
             configurations[role] = resolved
             do {
                 providers[role] = try shared.llmKit.makeProvider(configuration: resolved)
@@ -1684,10 +1677,10 @@ final class AppViewModel {
                 logger.error("Provider refresh: failed to rebuild \(role.displayName, privacy: .public) provider: \(error.localizedDescription, privacy: .public)")
                 continue
             }
-            if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
+            if let modelProvider = shared.llmKit.providers.first(where: { $0.id == providerID }) {
                 apiTypes[role] = modelProvider.apiType
             }
-            let injection = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
+            let injection = resolveInjectionCapabilities(providerID: providerID, modelID: modelID, roleLabel: role.displayName)
             visionByRole[role] = injection.vision
             documentsByRole[role] = injection.documents
         }
@@ -2216,78 +2209,43 @@ final class AppViewModel {
 
     // MARK: - Configuration helpers (per-session)
 
-    /// Resolves each agent role to its assigned ModelConfiguration, for inspector display.
+    /// Resolves each agent role to the effective `ModelConfiguration` it would run — its
+    /// `(provider, model)` assignment overlaid with the per-`(role, model)` override, resolved
+    /// against the model's live facts. For inspector display; mirrors the provider-build path.
     var resolvedAgentConfigs: [AgentRole: ModelConfiguration] {
         var result: [AgentRole: ModelConfiguration] = [:]
-        for (role, configID) in agentAssignments {
-            if let config = shared.llmKit.configurations.first(where: { $0.id == configID }) {
-                result[role] = config
-            }
+        for (role, assignment) in agentAssignments where !assignment.modelID.isEmpty {
+            let override = shared.roleModelConfigOverride(role: role, providerID: assignment.providerID, modelID: assignment.modelID)
+            let facts = shared.llmKit.modelInfo(providerID: assignment.providerID, modelID: assignment.modelID)
+                ?? ModelInfo(providerID: assignment.providerID, modelID: assignment.modelID, displayName: assignment.modelID)
+            result[role] = override.resolved(against: facts, name: facts.displayName)
         }
         return result
     }
 
-    /// Whether all required agent roles in this session have valid assigned configurations.
+    /// Whether all required agent roles in this session are assigned a model whose provider is
+    /// currently configured.
     var allAgentConfigsValid: Bool {
-        AgentRole.requiredRoles.allSatisfy { role in
-            guard let configID = agentAssignments[role],
-                  let config = shared.llmKit.configurations.first(where: { $0.id == configID }),
-                  config.isValid else { return false }
+        let configuredProviderIDs = Set(shared.llmKit.providers.map(\.id))
+        return AgentRole.requiredRoles.allSatisfy { role in
+            guard let assignment = agentAssignments[role],
+                  !assignment.modelID.isEmpty,
+                  configuredProviderIDs.contains(assignment.providerID) else { return false }
             return true
         }
     }
 
-    /// Clears any assignment in this session that references the deleted config ID.
-    func clearAssignment(forConfigID id: UUID) {
-        for (role, configID) in agentAssignments where configID == id {
-            agentAssignments[role] = nil
+    /// Maps pool-`ModelConfiguration.id` assignments to direct `(provider, model)` assignments. The
+    /// config pool was retired 2026-07-31; this is the one-way bridge used at load to migrate a
+    /// pre-retirement session's persisted UUIDs and to read the still-UUID-keyed bundled defaults.
+    /// A UUID with no matching config is dropped (the config is gone; nothing to point at).
+    private func modelAssignments(fromConfigIDs configIDs: [AgentRole: UUID]) -> [AgentRole: ModelAssignment] {
+        var result: [AgentRole: ModelAssignment] = [:]
+        for (role, configID) in configIDs {
+            guard let config = shared.llmKit.configurations.first(where: { $0.id == configID }) else { continue }
+            result[role] = ModelAssignment(providerID: config.providerID, modelID: config.modelID)
         }
-    }
-
-    /// Returns a `ModelConfiguration` dedicated to this role within this session.
-    ///
-    /// Creates or clones as needed so edits to the returned config don't affect this session's
-    /// other roles. Edits *may* affect roles in other sessions that point at the same config —
-    /// the config catalog is global and sessions can intentionally share configs. Users wanting
-    /// full isolation can duplicate the config via Settings → Configurations.
-    @discardableResult
-    func ensureDedicatedConfig(for role: AgentRole) -> ModelConfiguration {
-        if let existingID = agentAssignments[role],
-           let existing = shared.llmKit.configurations.first(where: { $0.id == existingID }) {
-            let sharedWithinSession = agentAssignments.filter { $0.value == existingID && $0.key != role }
-            if sharedWithinSession.isEmpty {
-                return existing
-            }
-            var clone = existing
-            clone.id = UUID()
-            clone.name = "\(role.displayName) — \(existing.modelID)"
-            shared.llmKit.addConfiguration(clone)
-            agentAssignments[role] = clone.id
-            return clone
-        }
-
-        let starter: ModelConfiguration
-        if let firstProvider = shared.llmKit.providers.first {
-            starter = ModelConfiguration(
-                id: UUID(),
-                name: "\(role.displayName) — \(firstProvider.name)",
-                providerID: firstProvider.id,
-                modelID: "",
-                temperature: 0.7,
-                maxOutputTokens: 4096,
-                maxContextTokens: 128_000
-            )
-        } else {
-            starter = ModelConfiguration(
-                id: UUID(),
-                name: "\(role.displayName)",
-                providerID: "",
-                modelID: ""
-            )
-        }
-        shared.llmKit.addConfiguration(starter)
-        agentAssignments[role] = starter.id
-        return starter
+        return result
     }
 
     // MARK: - Private

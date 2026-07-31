@@ -50,8 +50,9 @@ struct ConfigValidationView: View {
     }
 
     private func agentRow(role: AgentRole, label: String, color: Color) -> some View {
-        let configID = viewModel.agentAssignments[role]
-        let config = configID.flatMap { id in viewModel.shared.llmKit.configurations.first { $0.id == id } }
+        let assignment = viewModel.agentAssignments[role]
+        let provider = assignment.flatMap { a in viewModel.shared.llmKit.providers.first { $0.id == a.providerID } }
+        let hasModel = (assignment?.modelID.isEmpty == false)
 
         return GroupBox {
             HStack {
@@ -61,22 +62,22 @@ struct ConfigValidationView: View {
 
                 Spacer()
 
-                if let config {
+                if let assignment, hasModel {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(config.name)
+                        Text(provider.map { "\(assignment.modelID)  ·  \($0.name)" } ?? assignment.modelID)
                             .font(.subheadline)
-                        if config.isValid {
+                        if provider != nil {
                             Label("Valid", systemImage: "checkmark.circle.fill")
                                 .font(.caption)
                                 .foregroundStyle(.green)
                         } else {
-                            Label(config.validationError ?? "Invalid", systemImage: "xmark.circle.fill")
+                            Label("Provider not configured", systemImage: "xmark.circle.fill")
                                 .font(.caption)
                                 .foregroundStyle(.red)
                         }
                     }
                 } else {
-                    Label("No configuration assigned", systemImage: "exclamationmark.triangle.fill")
+                    Label("No model assigned", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
