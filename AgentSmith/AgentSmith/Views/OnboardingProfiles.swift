@@ -42,19 +42,6 @@ enum OnboardingRole: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Prefix used when naming the configuration this role creates. For the four `AgentRole`
-    /// roles it matches `AgentRole.displayName` so the load-time auto-heal can re-bind a role
-    /// to its config by name after a catalog reshuffle.
-    var configNamePrefix: String {
-        switch self {
-        case .smith: return "Smith"
-        case .brown: return "Brown"
-        case .securityAgent: return "Security Agent"
-        case .validator: return "Validator"
-        case .summarizer: return "Summarizer"
-        }
-    }
-
     /// One-line description plus a consideration to help the user pick a model.
     var considerations: String {
         switch self {
@@ -141,18 +128,6 @@ enum OnboardingRole: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Generation cap for configs this role creates during onboarding. The orchestrator and
-    /// worker produce longer output; the reviewer roles are terse. The runtime clamps these
-    /// down if a model reports a lower ceiling, so a generous value here is safe.
-    var maxOutputTokens: Int {
-        switch self {
-        case .smith, .brown: return 8192
-        case .securityAgent, .validator, .summarizer: return 4096
-        }
-    }
-
-    /// Conversation-pruning budget for configs this role creates during onboarding.
-    var maxContextTokens: Int { 128_000 }
 }
 
 /// A tested per-provider mapping of each onboarding role to a recommended model. Authored by
