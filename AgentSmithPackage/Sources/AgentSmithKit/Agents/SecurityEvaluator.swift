@@ -370,6 +370,9 @@ actor SecurityEvaluator {
     /// Resolves whether tool calls FROM `role` are reviewed (Orchestration setting). Fail-closed
     /// default (review on) so a runtime that never wires it evaluates every call.
     private let reviewsToolCalls: @Sendable (AgentRole) async -> Bool
+    /// Resolved retrieval entry point (Orchestration settings) for the security paths — scoping and
+    /// per-call review. Default no-op so a runtime that never wires it retrieves nothing.
+    private let retrieveContext: @Sendable (RetrievalSource, String) async -> SemanticSearchResults
 
     public init(
         provider: any LLMProvider,
@@ -398,7 +401,8 @@ actor SecurityEvaluator {
             assertionFailure("SecurityEvaluator.hasToolFailed was not configured — wire it through to a ToolExecutionTracker before evaluating tools.")
             return false
         },
-        reviewsToolCalls: @escaping @Sendable (AgentRole) async -> Bool = { _ in true }
+        reviewsToolCalls: @escaping @Sendable (AgentRole) async -> Bool = { _ in true },
+        retrieveContext: @escaping @Sendable (RetrievalSource, String) async -> SemanticSearchResults = { _, _ in SemanticSearchResults(memories: [], taskSummaries: []) }
     ) {
         self.provider = provider
         self.systemPrompt = systemPrompt
@@ -416,6 +420,7 @@ actor SecurityEvaluator {
         self.hasToolSucceeded = hasToolSucceeded
         self.hasToolFailed = hasToolFailed
         self.reviewsToolCalls = reviewsToolCalls
+        self.retrieveContext = retrieveContext
     }
 
     /// Returns the evaluation history for inspector display.
@@ -588,6 +593,12 @@ actor SecurityEvaluator {
             }
         }
 
+        // Optional retrieved context for this review (Orchestration `.securityToolReview`; memory on by
+        // default). Runs only on a REAL review — the two auto-approve fast paths above returned already,
+        // so auto-approved calls never pay for it.
+        let reviewQuery = "\(toolName) \(toolParams) \(taskTitle ?? "") \(taskDescription ?? "")"
+        let reviewRetrieval = await retrieveContext(.securityToolReview, reviewQuery).formattedForInjection()
+
         let evalPrompt = await buildEvalPrompt(
             toolName: toolName,
             toolParams: toolParams,
@@ -599,7 +610,8 @@ actor SecurityEvaluator {
             taskDescription: taskDescription,
             siblingCalls: siblingCalls,
             agentContext: agentContext,
-            sanctionedDirectories: sanctionedDirectories
+            sanctionedDirectories: sanctionedDirectories,
+            retrievedContext: reviewRetrieval
         )
 
         // Security-side content inspection: when the call under review is `attach_file`, show the
@@ -884,12 +896,16 @@ actor SecurityEvaluator {
             return ToolScopingResult(approvedNames: [], rawResponse: "(no candidate tools)", succeeded: true)
         }
 
-        let prompt = Self.buildScopingPrompt(
+        var prompt = Self.buildScopingPrompt(
             candidateTools: candidateTools,
             taskTitle: taskTitle,
             taskID: taskID,
             taskDescription: taskDescription
         )
+        // Optional retrieved context (Orchestration `.securityScoping`; default off = a cheap no-op).
+        if let block = await retrieveContext(.securityScoping, "\(taskTitle) \(taskDescription)").formattedForInjection() {
+            prompt += "\n\n# Possibly relevant context (memories / prior tasks)\n\(block)"
+        }
         let messages: [LLMMessage] = [
             .system(SecurityAgentBehavior.toolScopingSystemPrompt),
             .user(prompt)
@@ -1350,7 +1366,8 @@ actor SecurityEvaluator {
         taskDescription: String?,
         siblingCalls: String?,
         agentContext: String? = nil,
-        sanctionedDirectories: [String] = []
+        sanctionedDirectories: [String] = [],
+        retrievedContext: String? = nil
     ) async -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss zzz"
@@ -1358,6 +1375,9 @@ actor SecurityEvaluator {
 
         var sections: [String] = []
         sections.append("The current date and time are \(dateStr)")
+        if let retrievedContext, !retrievedContext.isEmpty {
+            sections.append("# Possibly relevant context (memories / prior tasks)\n\(retrievedContext)")
+        }
 
         if let title = taskTitle, let id = taskID {
             sections.append("""

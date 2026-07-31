@@ -70,6 +70,23 @@ public struct SemanticSearchResults: Sendable {
 
     /// True when both result sets are empty.
     public var isEmpty: Bool { memories.isEmpty && taskSummaries.isEmpty }
+
+    /// Renders the retrieved memories + prior tasks as a compact labeled block for injection into a
+    /// one-shot evaluation prompt (validator / security), or nil when nothing was retrieved. The one
+    /// formatter shared by every new retrieval-injection site so they read identically.
+    public func formattedForInjection() -> String? {
+        if isEmpty { return nil }
+        var lines: [String] = []
+        if !memories.isEmpty {
+            lines.append("Relevant memories:")
+            for result in memories { lines.append("- \(result.memory.content)") }
+        }
+        if !taskSummaries.isEmpty {
+            lines.append("Relevant prior tasks:")
+            for result in taskSummaries { lines.append("- \(result.summary.title): \(result.summary.summary)") }
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
 }
 
 /// Lightweight struct for attaching relevant memories to tasks.

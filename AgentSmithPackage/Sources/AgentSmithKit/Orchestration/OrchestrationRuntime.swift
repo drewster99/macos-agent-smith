@@ -3279,6 +3279,10 @@ public actor OrchestrationRuntime {
             },
             reviewsToolCalls: { [weak self] role in
                 await self?.orchestrationSettings.reviewsToolCalls(by: role) ?? true
+            },
+            retrieveContext: { [weak self] source, query in
+                await self?.retrieveContext(source: source, query: query)
+                    ?? SemanticSearchResults(memories: [], taskSummaries: [])
             }
         )
     }

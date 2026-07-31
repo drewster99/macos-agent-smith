@@ -790,6 +790,15 @@ extension OrchestrationRuntime {
             "workerActivity": await workerActivityDigest(for: task),
             "workerSteps": Self.renderSteps(task.steps)
         ]
+        // Optional retrieved context (Orchestration `.validatorReview`; default off = a cheap no-op).
+        // Injecting these makes a verdict depend on the live memory corpus, which the validator audit
+        // hash does NOT cover — hence off by default.
+        if let block = await retrieveContext(
+            source: .validatorReview,
+            query: "\(task.title) \(task.renderedDescriptionWithTemplateInputs()) \(task.result ?? "")"
+        ).formattedForInjection() {
+            fields["relevantContext"] = block
+        }
         // The worker's evidence directory: a criterion may reference an evidence file by name, and
         // the validator resolves it here with `file_read`/`directory_listing`.
         if let evidenceDir = taskWorkspace(for: task.id).evidenceDirectory {
