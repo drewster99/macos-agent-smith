@@ -1,24 +1,19 @@
 import SwiftUI
 import SwiftLLMKit
 
-/// Per-(provider, model) `BehaviorFlags` editor.
+/// Per-(provider, model) `BehaviorFlags` editor — the twin of `CapabilitiesEditorSheet`, but for
+/// runtime behavior knobs (GLM salvage, `max_completion_tokens`, reasoning replay, …).
 ///
-/// The user picks one of three states for each typed flag:
-///   - **Default** — no override; the resolved value comes from bundled defaults
-///                   (provider-wide / per-model / apiType-keyed) plus any
-///                   gap-fill from LiteLLM. This is the safe choice for almost
-///                   everything; the bundled JSON has good defaults for known
-///                   GLM hosts, OpenAI, and Mistral.
-///   - **Force on** — a force-replace override that turns the flag on regardless
-///                    of what the bundled layer says. Useful when a new GLM
-///                    variant ships and the bundled JSON hasn't caught up.
-///   - **Force off** — a force-replace override that turns the flag off. Useful
-///                     if a bundled flag misfires on a particular model.
+/// Rows are driven directly from `BehaviorFlag.allCases` (title/description from the enum, the
+/// override value from `BehaviorFlagsOverride`'s subscript), so every flag — and any future one —
+/// appears here automatically with no hand-maintained list to drift. (The old hardcoded version
+/// only exposed three of the eight flags.)
 ///
-/// Edits write through `SharedAppState.setUserModelOverride(...)`, which updates
-/// `LLMKitManager`'s in-memory user overrides and persists to the user model
-/// overrides JSON file on disk. Entries with every flag back at "Default" are
-/// removed from the override file entirely so the disk state stays tidy.
+/// Each flag is tri-state: **Default** (inherit bundled / LiteLLM resolution), **Force on**,
+/// **Force off**. Force values force-replace the resolved flag. Edits write through
+/// `SharedAppState.setUserModelOverride(...)`, which updates `LLMKitManager`'s in-memory overrides
+/// and persists to the user model overrides JSON. An all-default entry is removed so the file
+/// stays tidy.
 struct BehaviorFlagsEditorSheet: View {
     @Bindable var shared: SharedAppState
     let providerID: String
@@ -26,12 +21,9 @@ struct BehaviorFlagsEditorSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    /// Tri-state for a single flag.
+    /// Tri-state for a single flag. Mirrors `CapabilitiesEditorSheet.FlagState`.
     private enum FlagState: String, CaseIterable, Identifiable {
-        case `default`
-        case forceOn
-        case forceOff
-
+        case `default`, forceOn, forceOff
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -40,30 +32,23 @@ struct BehaviorFlagsEditorSheet: View {
             case .forceOff: return "Force off"
             }
         }
-
-        /// Initializes from an optional override field — `nil` means default.
         init(_ optional: Bool?) {
             switch optional {
-            case nil:    self = .default
-            case true?:  self = .forceOn
+            case nil: self = .default
+            case true?: self = .forceOn
             case false?: self = .forceOff
             }
         }
-
-        /// Renders back to an optional override field. `.default` becomes nil so
-        /// the override patch carries no value for this flag.
         var asOptional: Bool? {
             switch self {
-            case .default:  return nil
-            case .forceOn:  return true
+            case .default: return nil
+            case .forceOn: return true
             case .forceOff: return false
             }
         }
     }
 
-    @State private var glmTemplateSalvage: FlagState = .default
-    @State private var useMaxCompletionTokens: FlagState = .default
-    @State private var disableParallelToolCalls: FlagState = .default
+    @State private var states: [String: FlagState] = [:]
 
     private var key: String { "\(providerID)/\(modelID)" }
 
@@ -71,10 +56,8 @@ struct BehaviorFlagsEditorSheet: View {
         shared.llmKit.behaviorFlags(forProviderID: providerID, modelID: modelID)
     }
 
-    private var hasUnsavedDefault: Bool {
-        glmTemplateSalvage == .default
-            && useMaxCompletionTokens == .default
-            && disableParallelToolCalls == .default
+    private var hasAnyOverride: Bool {
+        states.values.contains { $0 != .default }
     }
 
     var body: some View {
@@ -89,51 +72,29 @@ struct BehaviorFlagsEditorSheet: View {
                         .textSelection(.enabled)
                 }
                 Spacer()
-                Button("Cancel") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-                Button("Done") {
-                    save()
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Done") { save(); dismiss() }
+                    .keyboardShortcut(.defaultAction)
             }
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 14) {
-                flagRow(
-                    title: "GLM template salvage",
-                    description: "Recover tool-call args from `<arg_key>/<arg_value>` blocks in `content` and strip GLM chat-template control tokens. Required for GLM-4 / GLM-5 models on most adapters; harmless on non-GLM responses.",
-                    state: $glmTemplateSalvage,
-                    resolved: resolvedFlags.glmTemplateSalvage
-                )
-
-                flagRow(
-                    title: "Use `max_completion_tokens`",
-                    description: "Send `max_completion_tokens` instead of `max_tokens` on chat completions. Required for OpenAI GPT-5 / o-series; rejected by DeepSeek and most other OpenAI-compatible backends.",
-                    state: $useMaxCompletionTokens,
-                    resolved: resolvedFlags.useMaxCompletionTokens
-                )
-
-                flagRow(
-                    title: "Disable parallel tool calls",
-                    description: "Omit `parallel_tool_calls` from the request. `parallel_tool_calls: true` is sent by default; turn this ON only for a strict endpoint that rejects the field with HTTP 400.",
-                    state: $disableParallelToolCalls,
-                    resolved: resolvedFlags.disableParallelToolCalls
-                )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(BehaviorFlag.allCases, id: \.self) { flag in
+                        flagRow(flag)
+                    }
+                }
             }
 
             Divider()
 
             HStack {
                 Button("Reset to defaults") {
-                    glmTemplateSalvage = .default
-                    useMaxCompletionTokens = .default
-                    disableParallelToolCalls = .default
+                    for flag in BehaviorFlag.allCases { states[flag.rawValue] = .default }
                 }
-                .disabled(hasUnsavedDefault)
+                .disabled(!hasAnyOverride)
                 Spacer()
                 Text("Default = use bundled / LiteLLM resolution. Force on/off writes a per-model override.")
                     .font(.caption2)
@@ -142,30 +103,28 @@ struct BehaviorFlagsEditorSheet: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 540, idealWidth: 640, minHeight: 420)
+        .frame(minWidth: 540, idealWidth: 640, minHeight: 420, idealHeight: 620)
         .onAppear { loadFromShared() }
     }
 
-    private func flagRow(
-        title: String,
-        description: String,
-        state: Binding<FlagState>,
-        resolved: Bool
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private func flagRow(_ flag: BehaviorFlag) -> some View {
+        let resolved = resolvedFlags[flag]
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text(title)
-                    .font(.headline)
+                Text(flag.editorTitle).font(.headline)
                 Spacer()
                 Text("Resolved: \(resolved ? "ON" : "off")")
                     .font(.caption.monospaced())
                     .foregroundStyle(resolved ? .green : .secondary)
             }
-            Text(description)
+            Text(flag.editorDescription)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Picker(selection: state, label: EmptyView()) {
+            Picker(selection: Binding(
+                get: { states[flag.rawValue] ?? .default },
+                set: { states[flag.rawValue] = $0 }
+            ), label: EmptyView()) {
                 ForEach(FlagState.allCases) { value in
                     Text(value.label).tag(value)
                 }
@@ -175,45 +134,36 @@ struct BehaviorFlagsEditorSheet: View {
         }
     }
 
-    /// Reads the existing user override (if any) for this (provider, model) pair and
-    /// initializes each tri-state to match. Missing override → all `.default`.
+    /// Reads the existing user override (if any) for this (provider, model) pair and initializes
+    /// each tri-state to match. Missing override → all `.default`.
     private func loadFromShared() {
         let existing = shared.userModelOverrides[key]?.behaviorFlags
-        glmTemplateSalvage = FlagState(existing?.glmTemplateSalvage)
-        useMaxCompletionTokens = FlagState(existing?.useMaxCompletionTokens)
-        disableParallelToolCalls = FlagState(existing?.disableParallelToolCalls)
+        for flag in BehaviorFlag.allCases {
+            states[flag.rawValue] = FlagState(existing?[flag] ?? nil)
+        }
     }
 
-    /// Builds an override patch from the tri-state pickers and writes it. If every
-    /// picker is at `.default` the call removes the entry (or no-ops if there wasn't
-    /// one), keeping the on-disk overrides JSON tidy.
+    /// Builds an override patch from the tri-state pickers and writes it. Every non-flag field the
+    /// user already had on this entry is carried through — this sheet only edits `behaviorFlags`.
+    /// An all-default patch stores nil so `setUserModelOverride` can drop an emptied entry.
     private func save() {
-        // Preserve any non-flag override fields the user already had on this entry —
-        // we only edit `behaviorFlags`, not `displayName` / `maxInputTokens` / etc.
+        var flagsPatch = BehaviorFlagsOverride()
+        for flag in BehaviorFlag.allCases {
+            flagsPatch[flag] = (states[flag.rawValue] ?? .default).asOptional
+        }
         let existing = shared.userModelOverrides[key]
-        let flagsPatch = BehaviorFlagsOverride(
-            glmTemplateSalvage: glmTemplateSalvage.asOptional,
-            useMaxCompletionTokens: useMaxCompletionTokens.asOptional,
-            disableParallelToolCalls: disableParallelToolCalls.asOptional
-        )
-        let merged = ModelMetadataOverride(
+        var merged = ModelMetadataOverride(
             displayName: existing?.displayName,
             maxInputTokens: existing?.maxInputTokens,
             maxOutputTokens: existing?.maxOutputTokens,
             sizeLabel: existing?.sizeLabel,
             capabilities: existing?.capabilities,
             pricing: existing?.pricing,
-            supportsChatCompletions: existing?.supportsChatCompletions,
-            behaviorFlags: flagsPatch.isEmpty ? nil : flagsPatch,
-            // Every newer override field must ride along or a save here silently drops it.
-            hidden: existing?.hidden,
-            isAvailable: existing?.isAvailable,
-            isAccessDenied: existing?.isAccessDenied
+            behaviorFlags: flagsPatch.isEmpty ? nil : flagsPatch
         )
-        shared.setUserModelOverride(
-            providerID: providerID,
-            modelID: modelID,
-            override: merged
-        )
+        merged.hidden = existing?.hidden
+        merged.isAvailable = existing?.isAvailable
+        merged.isAccessDenied = existing?.isAccessDenied
+        shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }
 }
