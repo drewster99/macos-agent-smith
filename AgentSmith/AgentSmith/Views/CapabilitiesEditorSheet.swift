@@ -27,7 +27,6 @@ struct CapabilitiesEditorSheet: View {
     @State private var resetToken = 0
 
     private var key: String { "\(providerID)/\(modelID)" }
-    private var targetKey: String { "\(providerID)/\(modelID)" }
 
     private var resolvedModelInfo: ModelInfo? {
         shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)
@@ -88,7 +87,7 @@ struct CapabilitiesEditorSheet: View {
                                               catalog: info?.maxOutputTokens, userOverride: maxOutputOverride),
                 fallbackName: modelID,
                 probeRunner: probeRunner,
-                targetKey: targetKey,
+                targetKey: key,
                 providerAvailable: provider != nil,
                 onProbe: { runProbe() },
                 resetToken: resetToken,

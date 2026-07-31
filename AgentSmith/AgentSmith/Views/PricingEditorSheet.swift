@@ -74,19 +74,20 @@ struct PricingEditorSheet: View {
     }
 
     var body: some View {
-        // Fresh for the reference DISPLAY (no first-frame "no pricing" flash before onAppear); save
-        // and the no-op comparison use the load-time capture instead.
-        let catalog = computeCatalogPricing()
+        // The reference display, the field-seed defaults, and save all read the SAME load-time
+        // catalog capture, so what the user sees is exactly what a Default rate saves as — even if a
+        // background refresh moves the catalog while the sheet is open. (First frame before onAppear
+        // shows "no pricing" briefly; harmless, and consistent with the other sheets' onAppear load.)
         let defaults = CatalogBaseDefaults(
-            input: Self.perMillion(catalog?.base.input),
-            output: Self.perMillion(catalog?.base.output),
-            cacheRead: Self.perMillion(catalog?.base.cacheRead),
-            cacheWrite: Self.perMillion(catalog?.base.cacheWrite))
+            input: Self.perMillion(catalogAtLoad?.base.input),
+            output: Self.perMillion(catalogAtLoad?.base.output),
+            cacheRead: Self.perMillion(catalogAtLoad?.base.cacheRead),
+            cacheWrite: Self.perMillion(catalogAtLoad?.base.cacheWrite))
         VStack(alignment: .leading, spacing: 16) {
             OverrideSheetHeader(title: "Pricing Override", subtitle: "\(providerID) — \(modelID)",
                                 onCancel: { dismiss() }, onDone: { save(); dismiss() })
             PricingForm(editable: $editable, catalogDefaults: defaults, resetToken: resetToken,
-                        noPricingKnown: catalog?.base.hasAnyRate != true && !hasCurrentBaseOverride,
+                        noPricingKnown: catalogAtLoad?.base.hasAnyRate != true && !hasCurrentBaseOverride,
                         expandThresholds: $expandThresholds, expandService: $expandService,
                         expandExtended: $expandExtended)
             OverrideSheetFooter(
@@ -117,16 +118,7 @@ struct PricingEditorSheet: View {
         result.cacheReadOverride = Self.baseOverride(userPricing?.base.cacheRead, catalog?.base.cacheRead)
         result.cacheWriteOverride = Self.baseOverride(userPricing?.base.cacheWrite, catalog?.base.cacheWrite)
         // Advanced tiers are carried from the RESOLVED pricing so a base-rate edit doesn't drop them.
-        result.thresholdTiers = (resolved?.tokenThresholdTiers ?? []).map {
-            EditableThresholdTier(threshold: $0.tokenThreshold, rates: Self.editableRates($0.rates))
-        }
-        result.serviceTiers = (resolved?.serviceTiers ?? [:]).sorted { $0.key < $1.key }.map {
-            EditableServiceTier(name: $0.key, rates: Self.editableRates($0.value))
-        }
-        result.extendedCacheWrite = Self.perMillion(resolved?.extendedCacheTier?.cacheWrite)
-        result.extendedThresholds = (resolved?.extendedCacheTier?.thresholdOverrides ?? []).map {
-            EditableCacheThreshold(threshold: $0.tokenThreshold, cacheWrite: Self.perMillion($0.cacheWrite))
-        }
+        Self.applyAdvancedSeed(resolved, to: &result)
         catalogAtLoad = catalog
         resolvedAtLoad = resolved
         editable = result
@@ -138,7 +130,12 @@ struct PricingEditorSheet: View {
     }
 
     private func clearOverride() {
-        editable = EditablePricing()
+        // Base overrides go back to Default, but keep the advanced tiers seeded from the resolved
+        // pricing: if the user changes their mind and re-authors a base rate, those catalog tiers
+        // must not vanish. A Done while the clear intent still stands stores nil — a full revert.
+        var cleared = EditablePricing()
+        Self.applyAdvancedSeed(resolvedAtLoad, to: &cleared)
+        editable = cleared
         explicitlyCleared = true
         resetToken += 1
     }
@@ -232,10 +229,25 @@ struct PricingEditorSheet: View {
             && pricing.serviceTiers.isEmpty && pricing.extendedCacheTier == nil
     }
 
+    /// True when every BASE rate is at Default. The clear intent is cancelled only when the user
+    /// re-authors a base rate; advanced tiers are seeded on clear (so they survive a re-author) and
+    /// intentionally do NOT count toward this.
     private static func isClearedShape(_ e: EditablePricing) -> Bool {
-        e.inputOverride == nil && e.outputOverride == nil && e.cacheReadOverride == nil
-            && e.cacheWriteOverride == nil && e.thresholdTiers.isEmpty && e.serviceTiers.isEmpty
-            && e.extendedCacheWrite == nil && e.extendedThresholds.isEmpty
+        e.inputOverride == nil && e.outputOverride == nil
+            && e.cacheReadOverride == nil && e.cacheWriteOverride == nil
+    }
+
+    private static func applyAdvancedSeed(_ resolved: ModelPricing?, to result: inout EditablePricing) {
+        result.thresholdTiers = (resolved?.tokenThresholdTiers ?? []).map {
+            EditableThresholdTier(threshold: $0.tokenThreshold, rates: editableRates($0.rates))
+        }
+        result.serviceTiers = (resolved?.serviceTiers ?? [:]).sorted { $0.key < $1.key }.map {
+            EditableServiceTier(name: $0.key, rates: editableRates($0.value))
+        }
+        result.extendedCacheWrite = perMillion(resolved?.extendedCacheTier?.cacheWrite)
+        result.extendedThresholds = (resolved?.extendedCacheTier?.thresholdOverrides ?? []).map {
+            EditableCacheThreshold(threshold: $0.tokenThreshold, cacheWrite: perMillion($0.cacheWrite))
+        }
     }
 }
 

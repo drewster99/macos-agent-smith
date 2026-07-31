@@ -129,7 +129,10 @@ struct OverrideSheetHeader: View {
 enum OverrideValueParsing {
     static func tokenCount(_ raw: String) -> Int? {
         let cleaned = raw.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
-        return cleaned.isEmpty ? nil : Int(cleaned)
+        // A token limit must be positive — 0 or negative is nonsensical (and would resolve
+        // "permissive/no-clamp" downstream, producing a broken ceiling rather than being rejected).
+        guard !cleaned.isEmpty, let value = Int(cleaned), value > 0 else { return nil }
+        return value
     }
 
     static func tokenDraft(_ value: Int) -> String { String(value) }
@@ -144,7 +147,11 @@ enum OverrideValueParsing {
     }
 
     static func usdDraft(_ value: Double) -> String {
-        value.formatted(.number.precision(.fractionLength(0...4)).grouping(.never))
+        // Pin to a period-decimal locale: this draft is seeded into the editable field and parsed
+        // back by `usdPerMillion`, which strips commas and parses with `Double` (always a period
+        // decimal). A comma-decimal system locale would otherwise seed "1,5" and read it back as 15.
+        value.formatted(.number.precision(.fractionLength(0...4)).grouping(.never)
+            .locale(Locale(identifier: "en_US_POSIX")))
     }
 
     static func usdLabel(_ value: Double) -> String {
