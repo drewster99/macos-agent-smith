@@ -3276,6 +3276,9 @@ public actor OrchestrationRuntime {
             },
             hasToolFailed: { [executionTracker] toolCallID in
                 await executionTracker.hasFailed(toolCallID: toolCallID)
+            },
+            reviewsToolCalls: { [weak self] role in
+                await self?.orchestrationSettings.reviewsToolCalls(by: role) ?? true
             }
         )
     }

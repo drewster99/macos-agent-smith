@@ -2835,6 +2835,11 @@ public actor AgentActor {
         if disposition.approved && disposition.isAutoApproval {
             statusContent = "Auto-approved\(disposition.message.map { " (\($0))" } ?? "")"
             securityDisposition = "autoApproved"
+        } else if disposition.approved && !disposition.wasEvaluated {
+            // Approved WITHOUT review because review is disabled for this emitter. Never "SAFE" — the
+            // call was not judged; the transcript must say so.
+            statusContent = "Review disabled → \(roleName): approved without review\(disposition.message.map { " (\($0))" } ?? "")"
+            securityDisposition = "reviewDisabled"
         } else if disposition.approved {
             statusContent = "Security Agent → \(roleName): SAFE\(disposition.message.map { " \($0)" } ?? "")"
             securityDisposition = "approved"

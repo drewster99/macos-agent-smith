@@ -15,14 +15,20 @@ public struct SecurityDisposition: Sendable, Equatable {
     /// before Security Agent could finish. Inspector rendering treats this as a neutral
     /// "CANCELLED" label rather than red UNSAFE.
     public let isCancelled: Bool
+    /// False ONLY when per-emitter tool-call review was DISABLED (Orchestration setting) and the call
+    /// was approved WITHOUT being evaluated. Distinct from `isAutoApproval` (cheap-but-recorded via
+    /// the auto-approve table): a `wasEvaluated == false` call was never judged, and must render as
+    /// "review disabled", never as SAFE.
+    public let wasEvaluated: Bool
 
     /// Creates a security disposition with the given approval state and optional metadata.
-    public init(approved: Bool, message: String? = nil, isWarning: Bool = false, isAutoApproval: Bool = false, isCancelled: Bool = false) {
+    public init(approved: Bool, message: String? = nil, isWarning: Bool = false, isAutoApproval: Bool = false, isCancelled: Bool = false, wasEvaluated: Bool = true) {
         self.approved = approved
         self.message = message
         self.isWarning = isWarning
         self.isAutoApproval = isAutoApproval
         self.isCancelled = isCancelled
+        self.wasEvaluated = wasEvaluated
     }
 }
 
@@ -361,6 +367,9 @@ actor SecurityEvaluator {
     /// Bumps the live-activity counter while an LLM-backed evaluation is in flight, feeding the
     /// inspector's concurrency strip. Nil in tests / callers that don't wire it.
     private let activityTracker: LiveActivityTracker?
+    /// Resolves whether tool calls FROM `role` are reviewed (Orchestration setting). Fail-closed
+    /// default (review on) so a runtime that never wires it evaluates every call.
+    private let reviewsToolCalls: @Sendable (AgentRole) async -> Bool
 
     public init(
         provider: any LLMProvider,
@@ -388,7 +397,8 @@ actor SecurityEvaluator {
         hasToolFailed: @escaping @Sendable (String) async -> Bool = { _ in
             assertionFailure("SecurityEvaluator.hasToolFailed was not configured — wire it through to a ToolExecutionTracker before evaluating tools.")
             return false
-        }
+        },
+        reviewsToolCalls: @escaping @Sendable (AgentRole) async -> Bool = { _ in true }
     ) {
         self.provider = provider
         self.systemPrompt = systemPrompt
@@ -405,6 +415,7 @@ actor SecurityEvaluator {
         self.activityTracker = activityTracker
         self.hasToolSucceeded = hasToolSucceeded
         self.hasToolFailed = hasToolFailed
+        self.reviewsToolCalls = reviewsToolCalls
     }
 
     /// Returns the evaluation history for inspector display.
@@ -490,6 +501,25 @@ actor SecurityEvaluator {
         toolCallID: String? = nil,
         evaluatingForAgentID: UUID
     ) async -> SecurityDisposition {
+        // Review DISABLED for this emitter (Orchestration setting): approve WITHOUT evaluating, but
+        // stay visible — recorded and posted as "review disabled", never as a SAFE verdict. The call
+        // still routes here; the evaluator checks the resolved setting first. Fail-closed default is
+        // review-on, so a new emitter is judged until deliberately cleared. This is the ONE way a call
+        // reaches approval without a verdict; it is intentionally loud in the transcript.
+        if await reviewsToolCalls(callerRole) == false {
+            let disposition = SecurityDisposition(
+                approved: true, message: "review disabled for \(callerRole.displayName)", wasEvaluated: false)
+            appendSummary(toolName: toolName, toolParams: toolParams,
+                          verdict: "APPROVED (review disabled for \(callerRole.displayName))", toolCallID: toolCallID)
+            recordEvaluation(
+                toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
+                prompt: "(tool-call review disabled for \(callerRole.displayName))",
+                response: "APPROVED — review disabled for \(callerRole.displayName)",
+                disposition: disposition, startTime: Date(), toolCallID: toolCallID ?? ""
+            )
+            return disposition
+        }
+
         let parsedParams = Self.parseToolParams(toolParams)
 
         // Fast-path: a call pre-cleared for this caller by `autoApprovedToolsByRole` is approved
