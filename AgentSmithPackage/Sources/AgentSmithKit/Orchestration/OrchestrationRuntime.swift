@@ -70,14 +70,9 @@ public actor OrchestrationRuntime {
 
     private var smith: AgentActor? { supervisor.firstHandle(role: .smith)?.agent }
     private var smithID: UUID? { supervisor.firstHandle(role: .smith)?.id }
-    /// Global tool-security configuration (user Settings); applied to each Brown at spawn.
-    /// `preflightScopingEnabled` gates the Security Agent pre-flight scoping pass; `globalToolPolicy`
-    /// is the per-tool Always/Never map.
-    ///
-    /// There is deliberately no per-call-evaluation switch here. Whether a tool call reaches the
-    /// Security Agent is not a user setting — every call does — and which calls are cheap to clear
-    /// is `SecurityEvaluator.autoApprovedToolsByRole`, a hardcoded table rather than configuration.
-    private var preflightScopingEnabled = true
+    /// Global per-tool Always/Never policy (user Settings), applied to each Brown at spawn. Tool-set
+    /// scoping on task start is NOT here — it moved to `orchestrationSettings.scopeToolSetOnTaskStart`
+    /// (read at spawn, propagated to live workers), replacing the retired `preflightScopingEnabled`.
     private var globalToolPolicy: [String: ToolPolicy] = [:]
 
     /// The resolved orchestration settings this runtime reads at each OFF-behavior chokepoint —
@@ -1571,24 +1566,26 @@ public actor OrchestrationRuntime {
         maxConsecutiveValidationsWithoutNewApprovals = max(1, rounds)
     }
 
-    public func setToolSecurity(preflightScoping: Bool, globalPolicy: [String: ToolPolicy]) async {
-        preflightScopingEnabled = preflightScoping
+    /// Updates the global per-tool Always/Never policy. Tool-set scoping on task start is driven
+    /// separately by `orchestrationSettings.scopeToolSetOnTaskStart` (see `setOrchestrationSettings`).
+    public func setToolSecurity(globalPolicy: [String: ToolPolicy]) async {
         globalToolPolicy = globalPolicy
-        // Apply to every live worker so changes take effect immediately (no session restart) —
-        // picked up on the worker's next turn (policy / scoping flag) or next tool call
-        // (per-call review).
+        // Apply to every live worker so a policy change takes effect immediately (no session restart).
         for workerHandle in supervisor.handles(role: .brown) {
-            let brown = workerHandle.agent
-            await brown.setGlobalToolPolicy(globalPolicy)
-            await brown.setPreflightScopingActive(preflightScoping)
+            await workerHandle.agent.setGlobalToolPolicy(globalPolicy)
         }
     }
 
     /// Updates the resolved orchestration settings this runtime reads at each chokepoint. Pushed by
     /// the owning session whenever the app-wide effective default or this session's override changes,
     /// so an edit takes effect on the next chokepoint with no session restart.
-    public func setOrchestrationSettings(_ settings: OrchestrationSettings) {
+    public func setOrchestrationSettings(_ settings: OrchestrationSettings) async {
         orchestrationSettings = settings
+        // Tool-set scoping on task start lives here now; push it to live workers so a change takes
+        // effect on their next re-scope without a session restart (mirrors the tool-policy push).
+        for workerHandle in supervisor.handles(role: .brown) {
+            await workerHandle.agent.setPreflightScopingActive(settings.scopeToolSetOnTaskStart)
+        }
     }
 
     /// How many memories / prior-tasks a single ENABLED retrieval axis pulls.
@@ -3434,7 +3431,7 @@ public actor OrchestrationRuntime {
             let builtIns = BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot)
             let mcpTools = mcpHost != nil ? await mcpHost!.currentBridgedTools() : []
             let candidateNames = Set((builtIns + mcpTools).map(\.name))
-            if preflightScopingEnabled {
+            if orchestrationSettings.scopeToolSetOnTaskStart {
                 // Circuit breaker: after repeated consecutive scoping failures (usually a
                 // dead/unreachable backend), stop attempting for a cooldown window instead
                 // of hammering it once per restart.
@@ -3533,7 +3530,7 @@ public actor OrchestrationRuntime {
         await brownAgent.setSecurityEvaluator(evaluator)
         if let scopedApprovedNames, let task {
             await brownAgent.enableToolScoping(approvedNames: scopedApprovedNames)
-            await brownAgent.setPreflightScopingActive(preflightScopingEnabled)
+            await brownAgent.setPreflightScopingActive(orchestrationSettings.scopeToolSetOnTaskStart)
             await brownAgent.setGlobalToolPolicy(globalToolPolicy)
             await brownAgent.setUserToolOverrides(task.userToolOverrides ?? [:])
             let scopedTaskID = task.id

@@ -148,17 +148,6 @@ struct SettingsView: View {
 
             Divider()
 
-            Text("Security")
-                .font(AppFonts.sectionHeader)
-
-            Toggle("Pre-flight tool scoping (Security Agent picks each task's tools)", isOn: $shared.enablePreflightScoping)
-
-            Text("Pre-flight scoping has the security agent choose which tools the worker may use for a task before it starts. The per-call check reviews each individual tool call (SAFE/WARN/UNSAFE/ABORT). Turning either off reduces oversight. Per-tool Always/Never overrides live in the Tools tab. Changes apply immediately to active sessions.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
             Text("Display")
                 .font(AppFonts.sectionHeader)
 

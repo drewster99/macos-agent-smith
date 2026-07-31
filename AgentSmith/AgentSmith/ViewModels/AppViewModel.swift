@@ -737,7 +737,6 @@ final class AppViewModel {
         // Tool-security configuration (Settings). Applied to each Brown at spawn; changes take
         // effect on the next session start (consistent with the other start-time settings).
         await newRuntime.setToolSecurity(
-            preflightScoping: shared.enablePreflightScoping,
             globalPolicy: shared.globalToolPolicies
         )
         // Orchestration settings (summarizer / retrieval / validation / security behavior): the
@@ -1653,9 +1652,8 @@ final class AppViewModel {
     /// Pushes the current global tool-security settings to this session's runtime. Called on a
     /// Settings change (via the registered observer) so changes take effect without a session restart.
     private func pushToolSecurity() {
-        let pre = shared.enablePreflightScoping
         let pol = shared.globalToolPolicies
-        Task { await runtime?.setToolSecurity(preflightScoping: pre, globalPolicy: pol) }
+        Task { await runtime?.setToolSecurity(globalPolicy: pol) }
     }
 
     /// Debounced trigger for a provider rebuild. A model swap (`agentAssignments.didSet`) or a

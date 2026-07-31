@@ -216,16 +216,9 @@ final class SharedAppState {
     /// that no overlay is shown — it just blocks briefly during startup.
     static let migrationOverlayThreshold = 8
 
-    /// Security: whether Security Agent runs the per-task pre-flight tool-scoping pass. Off ⇒ Brown starts
-    /// with all candidate tools (subject to global policy + per-task overrides). Takes effect on the
-    /// next session start. Persisted.
-    var enablePreflightScoping: Bool = SharedAppState.boolDefault(key: "enablePreflightScoping", default: true) {
-        didSet { UserDefaults.standard.set(enablePreflightScoping, forKey: "enablePreflightScoping"); notifyToolSecurityChanged() }
-    }
-    /// Security: whether Security Agent evaluates each individual Brown tool call (SAFE/WARN/UNSAFE/ABORT).
-    /// Off ⇒ Brown's approved tools run without per-call review. Applied immediately to active sessions.
     /// Global per-tool availability policy (Default/Always/Never), keyed by tool name. Overrides the
     /// automatic scoping verdict for Brown. Persisted as JSON; applied immediately to active sessions.
+    /// (Tool-set scoping on task start and per-call review moved to the Orchestration settings tab.)
     var globalToolPolicies: [String: ToolPolicy] = SharedAppState.loadToolPolicies() {
         didSet { SharedAppState.saveToolPolicies(globalToolPolicies); notifyToolSecurityChanged() }
     }
