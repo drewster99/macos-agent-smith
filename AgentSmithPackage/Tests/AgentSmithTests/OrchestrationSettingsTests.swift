@@ -90,3 +90,35 @@ import Foundation
         #expect(none.reviewsToolCalls(by: .summarizer) == true)
     }
 }
+
+/// Guards the per-session override field on `SessionState`, whose hand-rolled `CodingKeys` are the
+/// exact "missing case → silently never persisted" footgun CLAUDE.md warns about.
+@Suite struct SessionStateOrchestrationOverrideTests {
+
+    @Test func overrideRoundTrips() throws {
+        var s = SessionState(autoRunNextTask: false)
+        s.orchestrationOverride = OrchestrationSettingsOverride(enableTaskCompletionValidators: false)
+        let back = try JSONDecoder().decode(SessionState.self, from: JSONEncoder().encode(s))
+        #expect(back.orchestrationOverride == s.orchestrationOverride)
+        #expect(back.autoRunNextTask == false)   // existing fields still round-trip
+    }
+
+    @Test func nilOverrideOmitsKeyAndDecodesAsInherit() throws {
+        let data = try JSONEncoder().encode(SessionState())
+        let json = String(decoding: data, as: UTF8.self)
+        #expect(!json.contains("orchestrationOverride"))   // encodeIfPresent omits it entirely
+        let back = try JSONDecoder().decode(SessionState.self, from: data)
+        #expect(back.orchestrationOverride == nil)
+    }
+
+    @Test func preFeatureStateMigratesToNil() throws {
+        // A pre-feature state.json carrying no orchestrationOverride key must decode, not throw.
+        let oldJSON = """
+        {"agentModelAssignments":{},"agentPollIntervals":{},"agentMaxToolCalls":{},\
+        "agentMessageDebounceIntervals":{},"toolsEnabled":{},"autoRunNextTask":true,\
+        "autoRunInterruptedTasks":true}
+        """
+        let back = try JSONDecoder().decode(SessionState.self, from: Data(oldJSON.utf8))
+        #expect(back.orchestrationOverride == nil)
+    }
+}

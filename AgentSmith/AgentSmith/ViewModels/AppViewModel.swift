@@ -89,6 +89,29 @@ final class AppViewModel {
             Task { await runtime?.setAutoAdvance(autoRunNextTask) }
         }
     }
+    /// This session's sparse orchestration override, layered over the app-wide effective default.
+    /// `nil` (the common case) means this session inherits the app-wide orchestration settings.
+    /// Written by the per-session overrides sheet; persisted per session.
+    var orchestrationOverride: OrchestrationSettingsOverride? {
+        didSet {
+            persistSessionStateAsync()
+            pushOrchestrationSettingsToRuntime()
+        }
+    }
+
+    /// The orchestration settings this session actually runs under: the app-wide effective default
+    /// with this session's override overlaid. The engine reads a snapshot of this at each chokepoint.
+    var resolvedOrchestrationSettings: OrchestrationSettings {
+        shared.effectiveOrchestrationDefault.applying(orchestrationOverride ?? OrchestrationSettingsOverride())
+    }
+
+    /// Pushes the freshly-resolved orchestration settings to this session's runtime so a change takes
+    /// effect on the next chokepoint with no restart. Safe before `start()` (runtime is nil then; the
+    /// initial snapshot is handed over at construction).
+    func pushOrchestrationSettingsToRuntime() {
+        let resolved = resolvedOrchestrationSettings
+        Task { await runtime?.setOrchestrationSettings(resolved) }
+    }
     /// Whether interrupted tasks are automatically resumed on launch. Defaults ON so a
     /// relaunch picks up where it left off without a manual play.
     var autoRunInterruptedTasks: Bool = true {
@@ -386,6 +409,7 @@ final class AppViewModel {
                 toolsEnabled = state.toolsEnabled
                 autoRunNextTask = state.autoRunNextTask
                 autoRunInterruptedTasks = state.autoRunInterruptedTasks
+                orchestrationOverride = state.orchestrationOverride
             } else {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
                 // No per-session state — fall back to the shared default assignments (from bundled
@@ -2009,7 +2033,8 @@ final class AppViewModel {
             agentMessageDebounceIntervals: agentMessageDebounceIntervals,
             toolsEnabled: toolsEnabled,
             autoRunNextTask: autoRunNextTask,
-            autoRunInterruptedTasks: autoRunInterruptedTasks
+            autoRunInterruptedTasks: autoRunInterruptedTasks,
+            orchestrationOverride: orchestrationOverride
         )
         logger.notice("flushPersistence: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(finalState.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(finalState.autoRunInterruptedTasks, privacy: .public)")
         await sessionStateWriter.enqueue(finalState)
@@ -2346,7 +2371,8 @@ final class AppViewModel {
             agentMessageDebounceIntervals: agentMessageDebounceIntervals,
             toolsEnabled: toolsEnabled,
             autoRunNextTask: autoRunNextTask,
-            autoRunInterruptedTasks: autoRunInterruptedTasks
+            autoRunInterruptedTasks: autoRunInterruptedTasks,
+            orchestrationOverride: orchestrationOverride
         )
         logger.notice("persistSessionStateAsync: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(state.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(state.autoRunInterruptedTasks, privacy: .public) caller=\(callerFunction, privacy: .public)@\(callerFile, privacy: .public):\(callerLine, privacy: .public)")
         let writer = sessionStateWriter

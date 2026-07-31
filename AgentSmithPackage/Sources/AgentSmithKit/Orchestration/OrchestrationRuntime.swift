@@ -80,6 +80,12 @@ public actor OrchestrationRuntime {
     private var preflightScopingEnabled = true
     private var globalToolPolicy: [String: ToolPolicy] = [:]
 
+    /// The resolved orchestration settings this runtime reads at each OFF-behavior chokepoint —
+    /// summarizer, retrieval, validation, and security. Pushed by the owning session (app-wide
+    /// effective default + this session's override) and refreshed live on change. Defaults to
+    /// `.builtIn` so a runtime that is never handed settings behaves exactly as before this feature.
+    private var orchestrationSettings: OrchestrationSettings = .builtIn
+
     /// Set synchronously at the top of `start()` (before its first `await`) and cleared via
     /// `defer`. `smith` isn't assigned until ~190 lines and several suspension points into
     /// `start()`, so `guard smith == nil` alone lets a second concurrently-admitted `start()`
@@ -1566,6 +1572,13 @@ public actor OrchestrationRuntime {
             await brown.setGlobalToolPolicy(globalPolicy)
             await brown.setPreflightScopingActive(preflightScoping)
         }
+    }
+
+    /// Updates the resolved orchestration settings this runtime reads at each chokepoint. Pushed by
+    /// the owning session whenever the app-wide effective default or this session's override changes,
+    /// so an edit takes effect on the next chokepoint with no session restart.
+    public func setOrchestrationSettings(_ settings: OrchestrationSettings) {
+        orchestrationSettings = settings
     }
 
     /// Sets (or clears, with `enabled == nil`) a per-task user tool override: persists it on the task
