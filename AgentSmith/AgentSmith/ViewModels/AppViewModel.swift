@@ -398,26 +398,35 @@ final class AppViewModel {
             agentAssignments = shared.defaultAgentAssignments
         }
 
-        // Prune assignments whose provider is no longer configured (or that carry no model).
+        // Prune assignments whose provider is no longer configured (or that carry no model), then
+        // auto-heal missing required roles from the bundled defaults.
+        //
+        // DATA-SAFETY GUARD: skip the whole pass when NO provider is configured. Clearing an
+        // assignment sets `agentAssignments[role] = nil`, which `didSet` PERSISTS to disk — so an
+        // empty provider list here (almost always the catalog not having finished loading, not the
+        // user having deleted every provider) would wipe every saved assignment irrecoverably once
+        // providers return. With zero providers there is also nothing to heal to. A genuinely
+        // removed single provider still prunes normally below, since the list is then non-empty.
         let configuredProviderIDs = Set(shared.llmKit.providers.map(\.id))
-        for (role, assignment) in agentAssignments {
-            if assignment.modelID.isEmpty || !configuredProviderIDs.contains(assignment.providerID) {
-                agentAssignments[role] = nil
-                logger.notice("Cleared stale assignment in session \(self.session.name, privacy: .public) for \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public)")
+        if !configuredProviderIDs.isEmpty {
+            for (role, assignment) in agentAssignments {
+                if assignment.modelID.isEmpty || !configuredProviderIDs.contains(assignment.providerID) {
+                    agentAssignments[role] = nil
+                    logger.notice("Cleared stale assignment in session \(self.session.name, privacy: .public) for \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public)")
+                }
             }
-        }
 
-        // Auto-heal missing required-role assignments from the bundled defaults, so a catalog
-        // re-seed can't leave a role stuck on "no model". Only fills a role whose default resolves
-        // to a currently-configured provider — otherwise the role stays unassigned and the UI asks
-        // the user to pick, rather than binding to an arbitrary provider.
-        let defaultAssignments = shared.defaultAgentAssignments
-        for role in AgentRole.requiredRoles where agentAssignments[role] == nil {
-            guard let fallback = defaultAssignments[role],
-                  !fallback.modelID.isEmpty,
-                  configuredProviderIDs.contains(fallback.providerID) else { continue }
-            agentAssignments[role] = fallback
-            logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(fallback.providerID, privacy: .public)/\(fallback.modelID, privacy: .public) [bundled default] in session \(self.session.name, privacy: .public)")
+            // Only fills a role whose default resolves to a currently-configured provider — otherwise
+            // the role stays unassigned and the UI asks the user to pick, rather than binding to an
+            // arbitrary provider.
+            let defaultAssignments = shared.defaultAgentAssignments
+            for role in AgentRole.requiredRoles where agentAssignments[role] == nil {
+                guard let fallback = defaultAssignments[role],
+                      !fallback.modelID.isEmpty,
+                      configuredProviderIDs.contains(fallback.providerID) else { continue }
+                agentAssignments[role] = fallback
+                logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(fallback.providerID, privacy: .public)/\(fallback.modelID, privacy: .public) [bundled default] in session \(self.session.name, privacy: .public)")
+            }
         }
 
         // Load message history for up-arrow recall (per-session).
