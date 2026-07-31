@@ -1616,9 +1616,10 @@ final class AppViewModel {
         Task { await runtime?.setToolSecurity(preflightScoping: pre, globalPolicy: pol) }
     }
 
-    /// Debounced trigger for a provider rebuild. A single model-field edit fires `updateAgentConfig`
-    /// repeatedly (every field commits), so coalesce the burst into one rebuild ~400ms after editing
-    /// settles — avoiding a `makeProvider`/keychain pass per keystroke. No-op when not running.
+    /// Debounced trigger for a provider rebuild. A model swap (`agentAssignments.didSet`) or a
+    /// runtime-override edit (relayed via `notifyModelAssignmentsChanged`) can arrive in a burst, so
+    /// coalesce into one rebuild ~400ms after editing settles — avoiding a `makeProvider`/keychain
+    /// pass per keystroke. No-op when not running.
     private func scheduleProviderRefresh() {
         guard isRunning else { return }
         providerRefreshTask?.cancel()

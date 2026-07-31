@@ -29,9 +29,9 @@ struct SettingsView: View {
                 }
             }
 
-            Tab("Configurations", systemImage: "slider.horizontal.3", value: SettingsTab.configurations) {
+            Tab("Models", systemImage: "slider.horizontal.3", value: SettingsTab.models) {
                 ScrollView {
-                    configurationsTab()
+                    modelsTab()
                         .padding()
                 }
             }
@@ -213,24 +213,29 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Configurations Tab
+    // MARK: - Models Tab
 
-    @State private var editingConfig: ModelConfiguration?
-    @State private var isCreatingConfig = false
-    @State private var configFilterText = ""
-    @State private var configSortOrder: ConfigSortOrder = .created
+    @State private var modelFilterText = ""
+    @State private var modelSortOrder: ModelSortOrder = .provider
 
-    /// Display order for the configurations list. `.created` is the stored order (new
-    /// configurations append at the bottom, where the New button just put them).
-    private enum ConfigSortOrder: String, CaseIterable, Identifiable {
-        case created = "Created"
-        case name = "Name"
+    /// Display order for the models list.
+    private enum ModelSortOrder: String, CaseIterable, Identifiable {
         case provider = "Provider"
         case model = "Model"
         var id: String { rawValue }
     }
-    /// (providerID, modelID) of the model whose behavior flags are being edited.
-    /// Drives the `BehaviorFlagsEditorSheet` presentation.
+
+    /// One (provider, model) pair — the unit the Models tab lists and edits. The config pool was
+    /// retired 2026-07-31, so this tab edits per-model metadata (flags / capabilities / pricing)
+    /// keyed on `(providerID, modelID)`, not `ModelConfiguration` objects.
+    private struct ProviderModel: Identifiable {
+        let provider: ModelProvider
+        let model: ModelInfo
+        var id: String { "\(provider.id)/\(model.modelID)" }
+    }
+
+    /// (providerID, modelID) of the model whose per-model flags / capabilities / pricing are being
+    /// edited. Drives the corresponding editor-sheet presentations.
     @State private var editingFlagsFor: FlagsEditTarget?
     @State private var editingCapabilitiesFor: FlagsEditTarget?
     @State private var editingPricingFor: FlagsEditTarget?
@@ -243,42 +248,41 @@ struct SettingsView: View {
 
     @ViewBuilder
 
-    private func configurationsTab() -> some View {
+    private func modelsTab() -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Model Configurations")
+                Text("Models")
                     .font(AppFonts.sectionHeader)
                 Spacer()
-                Button(action: { isCreatingConfig = true }, label: {
-                    Label("New Configuration", systemImage: "plus")
-                })
             }
 
-            if shared.llmKit.configurations.isEmpty {
-                Text("No configurations yet. Create one to assign to agents.")
+            if shared.llmKit.providers.isEmpty {
+                Text("No providers configured. Add one in Settings → Providers.")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
             } else {
                 HStack(spacing: 8) {
-                    TextField("Filter by name, provider, or model", text: $configFilterText)
+                    TextField("Filter by provider or model", text: $modelFilterText)
                         .textFieldStyle(.roundedBorder)
-                    Picker("Sort", selection: $configSortOrder) {
-                        ForEach(ConfigSortOrder.allCases) { order in
+                    Picker("Sort", selection: $modelSortOrder) {
+                        ForEach(ModelSortOrder.allCases) { order in
                             Text(order.rawValue).tag(order)
                         }
                     }
                     .fixedSize()
                 }
-                let displayed = displayedConfigurations()
+                let displayed = displayedModels()
                 if displayed.isEmpty {
-                    Text("No configurations match \u{201C}\(configFilterText)\u{201D}.")
+                    Text(modelFilterText.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "No models cached. Use Refresh Models below."
+                         : "No models match \u{201C}\(modelFilterText)\u{201D}.")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.vertical, 20)
                 } else {
-                    ForEach(displayed) { config in
-                        configRow(config)
+                    ForEach(displayed) { pair in
+                        modelRow(provider: pair.provider, model: pair.model)
                     }
                 }
             }
@@ -309,26 +313,6 @@ struct SettingsView: View {
                     }
                 }
             }
-        }
-        .sheet(isPresented: $isCreatingConfig) {
-            ModelConfigurationEditorView(
-                llmKit: shared.llmKit,
-                existingConfig: nil,
-                onSave: { config in
-                    shared.llmKit.addConfiguration(config)
-                },
-                onDismiss: { isCreatingConfig = false }
-            )
-        }
-        .sheet(item: $editingConfig) { config in
-            ModelConfigurationEditorView(
-                llmKit: shared.llmKit,
-                existingConfig: config,
-                onSave: { updated in
-                    shared.llmKit.updateConfiguration(updated)
-                },
-                onDismiss: { editingConfig = nil }
-            )
         }
         .sheet(item: $editingFlagsFor) { target in
             BehaviorFlagsEditorSheet(
@@ -361,125 +345,98 @@ struct SettingsView: View {
         })
     }
 
-    /// The configurations list as filtered and ordered by the tab's controls. Filtering
-    /// matches the configuration name, the provider's display name, and the model ID,
+    /// Every cached (provider, model) pair, filtered and ordered by the tab's controls. Filtering
+    /// matches the provider's display name, the model ID, and the model's display name,
     /// case-insensitively.
-    private func displayedConfigurations() -> [ModelConfiguration] {
-        var configs = shared.llmKit.configurations
-        let query = configFilterText.trimmingCharacters(in: .whitespaces)
-        if !query.isEmpty {
-            configs = configs.filter { config in
-                let providerName = shared.llmKit.providers.first { $0.id == config.providerID }?.name ?? ""
-                return config.name.localizedCaseInsensitiveContains(query)
-                    || providerName.localizedCaseInsensitiveContains(query)
-                    || config.modelID.localizedCaseInsensitiveContains(query)
+    private func displayedModels() -> [ProviderModel] {
+        var pairs: [ProviderModel] = []
+        for provider in shared.llmKit.providers {
+            for model in shared.llmKit.models(for: provider.id) {
+                pairs.append(ProviderModel(provider: provider, model: model))
             }
         }
-        switch configSortOrder {
-        case .created:
-            return configs
-        case .name:
-            return configs.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let query = modelFilterText.trimmingCharacters(in: .whitespaces)
+        if !query.isEmpty {
+            pairs = pairs.filter { pair in
+                pair.provider.name.localizedCaseInsensitiveContains(query)
+                    || pair.model.modelID.localizedCaseInsensitiveContains(query)
+                    || pair.model.displayName.localizedCaseInsensitiveContains(query)
+            }
+        }
+        switch modelSortOrder {
         case .provider:
-            return configs.sorted { lhs, rhs in
-                let lhsProvider = shared.llmKit.providers.first { $0.id == lhs.providerID }?.name ?? lhs.providerID
-                let rhsProvider = shared.llmKit.providers.first { $0.id == rhs.providerID }?.name ?? rhs.providerID
-                if lhsProvider.localizedCaseInsensitiveCompare(rhsProvider) != .orderedSame {
-                    return lhsProvider.localizedCaseInsensitiveCompare(rhsProvider) == .orderedAscending
+            return pairs.sorted { lhs, rhs in
+                if lhs.provider.name.localizedCaseInsensitiveCompare(rhs.provider.name) != .orderedSame {
+                    return lhs.provider.name.localizedCaseInsensitiveCompare(rhs.provider.name) == .orderedAscending
                 }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                return lhs.model.displayName.localizedCaseInsensitiveCompare(rhs.model.displayName) == .orderedAscending
             }
         case .model:
-            return configs.sorted { $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending }
+            return pairs.sorted { $0.model.displayName.localizedCaseInsensitiveCompare($1.model.displayName) == .orderedAscending }
         }
     }
 
-    private func configRow(_ config: ModelConfiguration) -> some View {
-        let provider = shared.llmKit.providers.first { $0.id == config.providerID }
-        let modelInfo = shared.llmKit.modelInfo(providerID: config.providerID, modelID: config.modelID)
-        let behaviorFlags = shared.llmKit.behaviorFlags(forProviderID: config.providerID, modelID: config.modelID)
+    private func modelRow(provider: ModelProvider, model: ModelInfo) -> some View {
+        let behaviorFlags = shared.llmKit.behaviorFlags(forProviderID: provider.id, modelID: model.modelID)
         return GroupBox {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(config.name)
+                        Text(model.displayName)
                             .font(.headline)
-                        if !config.isValid {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                                .help(config.validationError ?? "Invalid configuration")
+                        if model.isNew {
+                            Text("New")
+                                .font(.caption2)
+                                .foregroundStyle(.green)
                         }
                     }
                     HStack(spacing: 8) {
-                        if let provider {
-                            Text(provider.name)
+                        Text(provider.name)
+                            .font(.caption)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                        Text(model.modelID)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let maxOut = model.maxOutputTokens {
+                            Text("max \(formatTokenCount(maxOut))")
                                 .font(.caption)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(.quaternary)
-                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                .foregroundStyle(.secondary)
                         }
-                        Text(config.modelID)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(config.temperature.map { "temp \(String(format: "%.1f", $0))" } ?? "temp (default)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("max \(formatTokenCount(config.maxOutputTokens))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if let budget = config.thinkingBudget, budget > 0 {
-                            Text("think \(formatTokenCount(budget))")
+                        if let maxIn = model.maxInputTokens {
+                            Text("ctx \(formatTokenCount(maxIn))")
                                 .font(.caption)
-                                .foregroundStyle(.purple)
+                                .foregroundStyle(.secondary)
                         }
-                        if let info = modelInfo {
-                            pricingLabel(for: info)
-                        }
+                        pricingLabel(for: model)
+                    }
+                    if !model.capabilities.enabledLabels.isEmpty {
+                        Text(model.capabilities.enabledLabels.joined(separator: ", "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if !behaviorFlags.isAllDefault {
                         behaviorFlagRow(behaviorFlags)
                     }
                 }
                 Spacer()
-                Button("Duplicate") {
-                    shared.llmKit.duplicateConfiguration(id: config.id)
-                }
-                .buttonStyle(.borderless)
                 Button("Flags") {
-                    editingFlagsFor = FlagsEditTarget(
-                        providerID: config.providerID,
-                        modelID: config.modelID
-                    )
+                    editingFlagsFor = FlagsEditTarget(providerID: provider.id, modelID: model.modelID)
                 }
                 .buttonStyle(.borderless)
                 .help("Edit per-model behavior flags (GLM salvage, max_completion_tokens, parallel tools)")
                 Button("Caps") {
-                    editingCapabilitiesFor = FlagsEditTarget(
-                        providerID: config.providerID,
-                        modelID: config.modelID
-                    )
+                    editingCapabilitiesFor = FlagsEditTarget(providerID: provider.id, modelID: model.modelID)
                 }
                 .buttonStyle(.borderless)
                 .help("Override per-model capability flags (vision, tool use, …) when the catalog is wrong")
                 Button("Pricing") {
-                    editingPricingFor = FlagsEditTarget(
-                        providerID: config.providerID,
-                        modelID: config.modelID
-                    )
+                    editingPricingFor = FlagsEditTarget(providerID: provider.id, modelID: model.modelID)
                 }
                 .buttonStyle(.borderless)
                 .help("View resolved pricing and override input/output rates (USD per 1M tokens)")
-                Button("Edit") {
-                    editingConfig = config
-                }
-                .buttonStyle(.borderless)
-                Button(role: .destructive, action: {
-                    sessionManager.deleteConfiguration(id: config.id)
-                }, label: {
-                    Image(systemName: "trash")
-                })
-                .buttonStyle(.borderless)
             }
             .padding(4)
         }
@@ -487,7 +444,7 @@ struct SettingsView: View {
 
     // MARK: - (Agent Assignments moved to InspectorView)
 
-    /// Read-only display of resolved behavior flags for this config's model.
+    /// Read-only display of resolved behavior flags for this model.
     /// Resolved by `LLMKitManager.behaviorFlags(forProviderID:modelID:)` —
     /// merged from bundled provider-defaults, bundled per-model entries,
     /// LiteLLM (where applicable), and user overrides. Editing flows through

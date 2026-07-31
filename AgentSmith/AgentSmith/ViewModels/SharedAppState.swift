@@ -14,7 +14,7 @@ import os
 /// instances receive `sharedMemoryStore` so each Smith reads and writes the same pool.
 /// Identifies a tab in the Settings window, for selection binding and deep-linking.
 enum SettingsTab: Hashable {
-    case general, providers, configurations, metadata, audio, mcp, tools
+    case general, providers, models, metadata, audio, mcp, tools
 }
 
 @Observable
@@ -1102,29 +1102,6 @@ final class SharedAppState {
         UserDefaults.standard.set(true, forKey: Self.didCompleteOnboardingKey)
     }
 
-    // MARK: - Model Configuration (shared catalog)
-
-    /// Deletes a model configuration from the shared catalog. Callers should iterate the
-    /// session list (via `SessionManager`) and clear per-session assignments that point at
-    /// the deleted ID — `SessionManager.deleteConfiguration(id:)` does both.
-    func deleteConfiguration(id: UUID) {
-        llmKit.deleteConfiguration(id: id)
-    }
-
-    /// Updates a model configuration in place. Supports undo through the supplied UndoManager.
-    func updateAgentConfig(_ config: ModelConfiguration, undoManager: UndoManager? = nil) {
-        let previous = llmKit.configurations.first { $0.id == config.id }
-        llmKit.updateConfiguration(config)
-        // Push the edited config to any running session that uses it (debounced on the VM side), so a
-        // model/provider change reaches the live runtime instead of stranding it on the prior provider.
-        if previous != config { notifyModelAssignmentsChanged() }
-        guard let previous, let undoManager, previous != config else { return }
-        undoManager.registerUndo(withTarget: self) { target in
-            target.updateAgentConfig(previous, undoManager: undoManager)
-        }
-        undoManager.setActionName("Change \(config.name)")
-    }
-
     /// Updates a single per-(providerID, modelID) user override entry. Pushes the merged
     /// dictionary to `llmKit` so it takes effect immediately, then persists to disk so
     /// the change survives restart. Pass `nil` to remove the entry entirely (revert to
@@ -1170,6 +1147,10 @@ final class SharedAppState {
         } else {
             roleModelConfigOverrides[key] = override
         }
+        // Push the new tuning to every running session using this (role, model) so an override edit
+        // takes effect on the next task without a session restart. Overrides are global, so this is
+        // the cross-session notification the per-session `agentAssignments.didSet` can't provide.
+        notifyModelAssignmentsChanged()
         let snapshot = roleModelConfigOverrides
         let writer = roleModelConfigOverridesWriter
         Task { await writer.enqueue(snapshot) }
