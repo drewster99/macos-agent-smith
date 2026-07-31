@@ -337,6 +337,9 @@ public struct ToolContext: Sendable {
     /// Whether Smith should automatically run the next pending task after completing one.
     /// Closure so the value reflects the current setting, not the value at init time.
     public let autoAdvanceEnabled: @Sendable () async -> Bool
+    /// The one memory/prior-task retrieval entry point (resolved-setting-driven). The CALL is uniform
+    /// at every point; the source selects the per-point limits (both off = a cheap empty result).
+    public let retrieveContext: @Sendable (RetrievalSource, String) async -> SemanticSearchResults
     /// Records that a file at the given path was successfully read during this agent session.
     public let recordFileRead: @Sendable (String) -> Void
     /// Returns true if the file at the given path was read during this agent session.
@@ -440,6 +443,7 @@ public struct ToolContext: Sendable {
         reconcileMemory: @escaping @Sendable (String, String) async -> MemoryReconciliation = { _, _ in .distinct },
         extractWebContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
         autoAdvanceEnabled: @escaping @Sendable () async -> Bool = { true },
+        retrieveContext: @escaping @Sendable (RetrievalSource, String) async -> SemanticSearchResults = { _, _ in SemanticSearchResults(memories: [], taskSummaries: []) },
         recordFileRead: @escaping @Sendable (String) -> Void = { _ in },
         hasFileBeenRead: @escaping @Sendable (String) -> Bool = { _ in false },
         // Every production code path wires these through to the shared ToolExecutionTracker.
@@ -502,6 +506,7 @@ public struct ToolContext: Sendable {
         self.reconcileMemory = reconcileMemory
         self.extractWebContent = extractWebContent
         self.autoAdvanceEnabled = autoAdvanceEnabled
+        self.retrieveContext = retrieveContext
         self.recordFileRead = recordFileRead
         self.hasFileBeenRead = hasFileBeenRead
         self.setToolExecutionStatus = setToolExecutionStatus

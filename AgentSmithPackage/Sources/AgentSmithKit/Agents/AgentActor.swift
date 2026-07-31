@@ -3247,28 +3247,12 @@ public actor AgentActor {
         // raw index could become stale if `pendingChannelMessages` is mutated.
         let targetMessageID = userMessage.id
 
-        // Memory search failure is non-fatal — Smith just doesn't get the auto-context this time.
-        let results: SemanticSearchResults
-        do {
-            // MEMORIES ONLY on a user message. Prior-task summaries are retrieved when a TASK is
-            // created or started (`TaskContextRetrieval`), where "what did we do before that
-            // resembles this work?" is the question being asked. A conversational turn is not
-            // that question, and searching the task corpus here cost a second query embedding
-            // and a second corpus scan on every single thing the user typed.
-            //
-            // `taskLimit: 0` is load-bearing, not cosmetic: `searchAll` skips both the task
-            // embedding and the task scan when the limit is zero.
-            results = try await toolContext.memoryStore.searchAll(
-                query: query,
-                memoryLimit: 3,
-                taskLimit: 0,
-                memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
-                memoryInstruction: MemoryStore.memoryRetrievalInstruction,
-                source: "auto-context"
-            )
-        } catch {
-            return
-        }
+        // Resolved-setting-driven retrieval for a user message (`.smithUserMessage`): memories on /
+        // prior-tasks off by default, so this is normally one embedding + one memory scan, and a
+        // cheap no-op when disabled. Prior-task summaries default off here because "what earlier work
+        // resembles this?" is a question about a TASK (`.newTask` retrieval), not a conversational
+        // turn. Failure degrades to empty inside `retrieveContext` — no auto-context this time.
+        let results = await toolContext.retrieveContext(.smithUserMessage, query)
 
         guard !results.isEmpty else { return }
 

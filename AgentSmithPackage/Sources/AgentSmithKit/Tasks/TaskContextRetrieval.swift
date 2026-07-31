@@ -11,57 +11,43 @@ import Foundation
 ///
 /// Retrieval failure is non-fatal — the task simply starts without attached context.
 public enum TaskContextRetrieval {
-    /// Searches with the same caps and cosine gates the auto-context injection uses (top 3 memories
-    /// + 3 prior tasks, relevance-gated), attaches the matches to `taskID`, and returns what was
-    /// attached so the caller can surface a note or channel metadata. Empty arrays when nothing
-    /// cleared the gates or the search failed.
+    /// Attaches already-retrieved matches to `taskID` and returns what was attached so the caller can
+    /// surface a note or channel metadata. Retrieval itself is done by the caller through the resolved
+    /// `retrieveContext(.newTask, …)` entry point — so whether memories and/or prior tasks are searched
+    /// (and the empty-when-disabled short-circuit) follows the orchestration settings. Empty arrays
+    /// when nothing cleared the relevance gates or retrieval was off.
     @discardableResult
     public static func attachRelevantContext(
         taskID: UUID,
-        query: String,
-        memoryStore: MemoryStore,
+        results: SemanticSearchResults,
         taskStore: TaskStore
     ) async -> (memories: [RelevantMemory], priorTasks: [RelevantPriorTask]) {
-        do {
-            let results = try await memoryStore.searchAll(
-                query: query,
-                memoryLimit: 3,
-                taskLimit: 3,
-                memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
-                taskCosineGate: MemoryStore.taskInjectionCosineGate,
-                memoryInstruction: MemoryStore.memoryRetrievalInstruction,
-                taskInstruction: MemoryStore.taskRetrievalInstruction,
-                source: "task-context"
-            )
-            guard !results.isEmpty else { return ([], []) }
+        guard !results.isEmpty else { return ([], []) }
 
-            let memories = results.memories.map {
-                RelevantMemory(
-                    content: $0.memory.content,
-                    tags: $0.memory.tags,
-                    similarity: $0.similarity,
-                    createdAt: $0.memory.createdAt,
-                    lastUpdatedAt: $0.memory.lastUpdatedAt,
-                    memoryID: $0.memory.id
-                )
-            }
-            let priorTasks = results.taskSummaries.map {
-                RelevantPriorTask(
-                    taskID: $0.summary.id,
-                    title: $0.summary.title,
-                    summary: $0.summary.summary,
-                    similarity: $0.similarity,
-                    latestDate: $0.summary.createdAt
-                )
-            }
-            await taskStore.setRelevantContext(
-                id: taskID,
-                memories: memories.isEmpty ? nil : memories,
-                priorTasks: priorTasks.isEmpty ? nil : priorTasks
+        let memories = results.memories.map {
+            RelevantMemory(
+                content: $0.memory.content,
+                tags: $0.memory.tags,
+                similarity: $0.similarity,
+                createdAt: $0.memory.createdAt,
+                lastUpdatedAt: $0.memory.lastUpdatedAt,
+                memoryID: $0.memory.id
             )
-            return (memories, priorTasks)
-        } catch {
-            return ([], [])
         }
+        let priorTasks = results.taskSummaries.map {
+            RelevantPriorTask(
+                taskID: $0.summary.id,
+                title: $0.summary.title,
+                summary: $0.summary.summary,
+                similarity: $0.similarity,
+                latestDate: $0.summary.createdAt
+            )
+        }
+        await taskStore.setRelevantContext(
+            id: taskID,
+            memories: memories.isEmpty ? nil : memories,
+            priorTasks: priorTasks.isEmpty ? nil : priorTasks
+        )
+        return (memories, priorTasks)
     }
 }

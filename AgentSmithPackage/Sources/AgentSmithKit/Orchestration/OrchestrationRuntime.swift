@@ -553,6 +553,9 @@ public actor OrchestrationRuntime {
         guard let smithAgent = supervisor.firstHandle(role: .smith)?.agent else { return }
         let messageCount = await smithAgent.contextSnapshot().count
         guard messageCount > Self.smithAutoCompactMessageThreshold else { return }
+        // Discretionary task-boundary compaction. When LLM compaction is disabled the run-loop prune
+        // handles reduction, so skip the call (and its channel note) rather than post "disabled" each time.
+        guard orchestrationSettings.summarizeForContextCompaction else { return }
         let result = await compactSmithContext(trigger: .auto)
         stopLogger.notice("Auto-compact after task termination: \(result, privacy: .public)")
         await channel.post(ChannelMessage(
@@ -574,6 +577,11 @@ public actor OrchestrationRuntime {
     public func compactSmithContext(trigger: CompactionDiffCapture.Trigger = .manual) async -> String {
         guard let smith = supervisor.firstHandle(role: .smith)?.agent else {
             return "System is not running — there is no agent context to compact."
+        }
+        // LLM compaction disabled: Smith's context is bounded by the deterministic run-loop prune
+        // (`pruneNonBrownHistory`) instead. Do no summarization work here.
+        guard orchestrationSettings.summarizeForContextCompaction else {
+            return "LLM context compaction is disabled; Smith's context is bounded by automatic pruning instead."
         }
         let captureThisCompaction = captureCompactionDiffsEnabled || trigger == .forcedDebug
         let snapshot = await smith.contextSnapshot()
@@ -1581,6 +1589,37 @@ public actor OrchestrationRuntime {
         orchestrationSettings = settings
     }
 
+    /// How many memories / prior-tasks a single ENABLED retrieval axis pulls.
+    private static let retrievalPoolLimit = 3
+
+    /// The single memory/prior-task retrieval entry point, shared by every point (task creation,
+    /// user message, validator review, security scoping, security tool review). The CALL is uniform;
+    /// the resolved per-point ``RetrievalToggle`` only sets the pool limits (0 = that corpus is off),
+    /// and both-off is a cheap no-op because `searchAll` skips the embed + scan for a zero limit.
+    /// Failure degrades to empty — retrieval is advisory context, never load-bearing.
+    func retrieveContext(source: RetrievalSource, query: String) async -> SemanticSearchResults {
+        let toggle = orchestrationSettings.retrieval.toggle(for: source)
+        let memoryLimit = toggle.memory ? Self.retrievalPoolLimit : 0
+        let taskLimit = toggle.task ? Self.retrievalPoolLimit : 0
+        guard memoryLimit > 0 || taskLimit > 0 else {
+            return SemanticSearchResults(memories: [], taskSummaries: [])
+        }
+        do {
+            return try await memoryStore.searchAll(
+                query: query,
+                memoryLimit: memoryLimit,
+                taskLimit: taskLimit,
+                memoryCosineGate: MemoryStore.memoryInjectionCosineGate,
+                taskCosineGate: MemoryStore.taskInjectionCosineGate,
+                memoryInstruction: MemoryStore.memoryRetrievalInstruction,
+                taskInstruction: MemoryStore.taskRetrievalInstruction,
+                source: source.rawValue
+            )
+        } catch {
+            return SemanticSearchResults(memories: [], taskSummaries: [])
+        }
+    }
+
     /// Sets (or clears, with `enabled == nil`) a per-task user tool override: persists it on the task
     /// and, if that task's worker is live, pushes the updated set so it takes effect next turn. A
     /// later re-evaluation will NOT clobber it — the live registry re-applies overrides each refresh.
@@ -1787,10 +1826,11 @@ public actor OrchestrationRuntime {
         let announced = await taskStore.task(id: instance.id) ?? instance
         // Fetch relevant context for THIS run (not just at template authoring) so a repeatedly-run
         // template picks up memories accumulated since — attached before the worker's briefing reads it.
+        let retrievedContext = await retrieveContext(
+            source: .newTask, query: announced.title + " " + announced.renderedDescriptionWithTemplateInputs())
         await TaskContextRetrieval.attachRelevantContext(
             taskID: instance.id,
-            query: announced.title + " " + announced.renderedDescriptionWithTemplateInputs(),
-            memoryStore: memoryStore,
+            results: retrievedContext,
             taskStore: taskStore
         )
         await taskStore.addUpdate(id: taskID, message: "Started instance \(instance.id.uuidString) from this template.")
@@ -3671,6 +3711,10 @@ public actor OrchestrationRuntime {
         guard let task = await taskStore.task(id: taskID) else { return }
         guard task.status == .completed || (task.status == .failed && !task.updates.isEmpty) else { return }
 
+        // Summarization disabled: complete the task without writing a summary. Nothing is embedded,
+        // so prior-task search simply won't surface this task. The call graph is unchanged.
+        guard orchestrationSettings.summarizeCompletedTasks else { return }
+
         if let summarizer = taskSummarizer {
             await notifyProcessingStateChange(role: .summarizer, isProcessing: true)
             let summary = await summarizer.summarizeAndEmbed(task: task)
@@ -3891,6 +3935,10 @@ public actor OrchestrationRuntime {
                 return await self.taskSummarizer?.extractWebContent(content: content, prompt: prompt)
             },
             autoAdvanceEnabled: { [weak self] in await self?.autoAdvanceEnabled ?? false },
+            retrieveContext: { [weak self] source, query in
+                await self?.retrieveContext(source: source, query: query)
+                    ?? SemanticSearchResults(memories: [], taskSummaries: [])
+            },
             recordFileRead: { path in
                 filesReadInSession?.record(PathNormalization.normalize(path))
             },

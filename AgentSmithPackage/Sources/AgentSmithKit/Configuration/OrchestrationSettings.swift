@@ -114,6 +114,29 @@ extension RetrievalSettings {
             beforeSecurityToolReview: beforeSecurityToolReview.applying(override.beforeSecurityToolReview)
         )
     }
+
+    /// The toggle governing retrieval at `source`.
+    public func toggle(for source: RetrievalSource) -> RetrievalToggle {
+        switch source {
+        case .newTask: return newTask
+        case .smithUserMessage: return userMessage
+        case .validatorReview: return beforeValidatorReview
+        case .securityScoping: return beforeSecurityScoping
+        case .securityToolReview: return beforeSecurityToolReview
+        }
+    }
+}
+
+/// The point in orchestration at which a retrieval runs. The `rawValue` is the provenance string
+/// recorded on the memory query (kept identical to the pre-unification `source:` strings so query
+/// logs stay continuous), and it selects the per-point ``RetrievalToggle``. One call shape at every
+/// point — only the source (and thus the resolved limits) differs.
+public enum RetrievalSource: String, Sendable, CaseIterable {
+    case newTask = "task-context"
+    case smithUserMessage = "auto-context"
+    case validatorReview = "validator-review"
+    case securityScoping = "security-scoping"
+    case securityToolReview = "security-tool-review"
 }
 
 // MARK: - Orchestration settings (the resolved value)

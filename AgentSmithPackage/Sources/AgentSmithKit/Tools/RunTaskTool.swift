@@ -262,10 +262,11 @@ struct RunTaskTool: AgentTool {
             let announced = await context.taskStore.task(id: instance.id) ?? instance
             // Fetch relevant context for THIS run (not just at template authoring) so a repeatedly-run
             // template picks up memories accumulated since — attached before the worker's briefing reads it.
+            let retrieved = await context.retrieveContext(
+                .newTask, announced.title + " " + announced.renderedDescriptionWithTemplateInputs())
             await TaskContextRetrieval.attachRelevantContext(
                 taskID: instance.id,
-                query: announced.title + " " + announced.renderedDescriptionWithTemplateInputs(),
-                memoryStore: context.memoryStore,
+                results: retrieved,
                 taskStore: context.taskStore
             )
             await context.post(ChannelMessage(

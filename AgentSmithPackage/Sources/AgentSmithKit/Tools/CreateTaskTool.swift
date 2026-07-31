@@ -414,11 +414,12 @@ public struct CreateTaskTool: AgentTool {
             }
         }
 
-        // Search semantic memory + prior tasks for relevant context to attach to this task.
+        // Search semantic memory + prior tasks for relevant context to attach to this task (the
+        // `.newTask` retrieval settings decide which corpora, if any, are searched).
+        let retrieved = await context.retrieveContext(.newTask, title + " " + description)
         let attached = await TaskContextRetrieval.attachRelevantContext(
             taskID: task.id,
-            query: title + " " + description,
-            memoryStore: context.memoryStore,
+            results: retrieved,
             taskStore: context.taskStore
         )
         var contextNote = ""
