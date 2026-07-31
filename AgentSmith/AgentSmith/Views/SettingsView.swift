@@ -21,6 +21,13 @@ struct SettingsView: View {
                 }
             }
 
+            Tab("Orchestration", systemImage: "point.3.connected.trianglepath.dotted", value: SettingsTab.orchestration) {
+                ScrollView {
+                    OrchestrationSettingsView(shared: shared)
+                        .padding()
+                }
+            }
+
             Tab("Providers", systemImage: "server.rack", value: SettingsTab.providers) {
                 ScrollView {
                     ProviderManagementView(llmKit: shared.llmKit)
