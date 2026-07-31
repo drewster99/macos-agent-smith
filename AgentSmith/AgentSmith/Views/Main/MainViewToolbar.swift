@@ -13,6 +13,7 @@ struct MainViewToolbar: ToolbarContent {
     let onResetAndRestart: () -> Void
     let onOpenMemoryBrowser: () -> Void
     let onNewTask: () -> Void
+    let onOpenOrchestrationOverrides: () -> Void
 
     var body: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
@@ -61,6 +62,10 @@ struct MainViewToolbar: ToolbarContent {
             Button("Memory Browser", systemImage: "brain", action: onOpenMemoryBrowser)
 
             Button("New Task", systemImage: "plus.circle", action: onNewTask)
+
+            Button("Orchestration Overrides", systemImage: "point.3.connected.trianglepath.dotted",
+                   action: onOpenOrchestrationOverrides)
+                .help("Override this session's orchestration settings (summarizer, retrieval, validator, security)")
 
             Button("Clear Conversation", systemImage: "trash") {
                 Task { await viewModel.clearConversation() }

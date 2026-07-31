@@ -60,7 +60,8 @@ struct MainView: View {
                 onStart: handleStart,
                 onResetAndRestart: handleAbortReset,
                 onOpenMemoryBrowser: { openWindow(id: "memory-browser") },
-                onNewTask: { taskCreatorPresentation = .creating() }
+                onNewTask: { taskCreatorPresentation = .creating() },
+                onOpenOrchestrationOverrides: { showingOrchestrationOverrides = true }
             )
         }
         .navigationTitle(viewModel.session.name)
