@@ -214,7 +214,10 @@ struct AgentModelSettingsSection: View {
             // presentation, not deletion (see the Model Metadata inspector). Role requirements are
             // capability/availability gates: tri-state, so only a model KNOWN to fail is dropped.
             .filter { model in
-                if model.modelID == modelID { return true }
+                // The escape hatch is scoped to the ACTUAL current selection (this provider AND the
+                // selected model), not a bare id match — otherwise a same-id model under a different
+                // provider, or an empty-id catalog entry when nothing is selected, would slip the gate.
+                if provider.id == providerID && model.modelID == modelID { return true }
                 guard model.hidden != true else { return false }
                 return model.satisfies(
                     requiredCapabilities: requirements.requiredCapabilities,
@@ -225,8 +228,9 @@ struct AgentModelSettingsSection: View {
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         let refreshError = llmKit.refreshErrors[provider.name]
         let isEmpty = providerModels.isEmpty
-        // Distinguish "provider has no catalog yet" from "the catalog has models but none fit this role".
-        let filteredOutByRole = isEmpty && !cachedModels.isEmpty
+        // "No models meet this role" only when there ARE visible (non-hidden) models that were all
+        // role-rejected — an all-hidden provider is not a role mismatch, so it isn't claimed as one.
+        let filteredOutByRole = isEmpty && cachedModels.contains { $0.hidden != true }
 
         Menu(
             content: {
