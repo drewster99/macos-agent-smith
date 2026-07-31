@@ -92,7 +92,6 @@ struct CapabilitiesEditorSheet: View {
                 onProbe: { runProbe() },
                 resetToken: resetToken,
                 states: $states,
-                displayNameOverride: $displayNameOverride,
                 maxContextOverride: $maxContextOverride,
                 maxOutputOverride: $maxOutputOverride)
             OverrideSheetFooter(
@@ -205,7 +204,6 @@ private struct CapabilitiesForm: View {
     let onProbe: () -> Void
     let resetToken: Int
     @Binding var states: [String: TriStateOverride]
-    @Binding var displayNameOverride: String
     @Binding var maxContextOverride: Int?
     @Binding var maxOutputOverride: Int?
 
@@ -238,7 +236,7 @@ private struct CapabilitiesForm: View {
                                 statusText: probeStatusText, isRunning: probeRunner.isRunning, onProbe: onProbe)
             }
             Section("Status & Identity") {
-                DisplayNameRow(resolvedName: modelInfo?.displayName ?? fallbackName, text: $displayNameOverride)
+                DisplayNameRow(resolvedName: modelInfo?.displayName ?? fallbackName)
                 ForEach(CapabilityStatusDescriptor.sorted) { descriptor in
                     OverrideTriStateRow(title: descriptor.title, resolved: descriptor.resolved(modelInfo),
                                         description: descriptor.description, selection: binding(for: descriptor.id))
@@ -292,26 +290,18 @@ private struct TimestampRow: View {
 
 // MARK: - Rows
 
+/// Read-only for now — display-name overriding is deferred. Any existing override still resolves
+/// into `resolvedName` and is preserved on save; there's just no editing surface.
 private struct DisplayNameRow: View {
     let resolvedName: String
-    @Binding var text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Display name").font(.headline)
-                Spacer()
-                Text("Resolved: \(resolvedName)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Text("Override how this model is named in pickers and lists. Empty = keep the catalog's name.")
-                .font(.caption)
+        LabeledContent("Display name") {
+            Text(resolvedName)
+                .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
-            TextField("e.g. GLM 5.2 (Ollama Cloud)", text: $text)
-                .textFieldStyle(.roundedBorder)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 }
