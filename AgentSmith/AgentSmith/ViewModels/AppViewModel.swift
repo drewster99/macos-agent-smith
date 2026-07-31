@@ -740,6 +740,10 @@ final class AppViewModel {
             preflightScoping: shared.enablePreflightScoping,
             globalPolicy: shared.globalToolPolicies
         )
+        // Orchestration settings (summarizer / retrieval / validation / security behavior): the
+        // resolved app-wide-default-with-this-session's-override snapshot, applied at start and
+        // pushed live on change (below + orchestrationOverride.didSet).
+        await newRuntime.setOrchestrationSettings(resolvedOrchestrationSettings)
         // Worker-pool capacity ("Max simultaneous tasks" in Settings): applied at start
         // and pushed live on change.
         await newRuntime.setWorkerCapacity(shared.maxSimultaneousTasks)
@@ -772,6 +776,11 @@ final class AppViewModel {
         // model swap takes effect on the next task without a session restart.
         shared.registerModelAssignmentObserver(session.id) { [weak self] in
             self?.scheduleProviderRefresh()
+        }
+        // Push app-wide orchestration-setting changes to this session's runtime immediately (a
+        // per-session override change is pushed directly by orchestrationOverride.didSet).
+        shared.registerOrchestrationSettingsObserver(session.id) { [weak self] in
+            self?.pushOrchestrationSettingsToRuntime()
         }
 
         // Per-session MCP host: create once and reuse across runtime restarts so a task
