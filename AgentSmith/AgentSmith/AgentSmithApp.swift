@@ -131,6 +131,11 @@ struct AgentSmithApp: App {
                 if sessionManager.sessions.isEmpty {
                     Text("No sessions").disabled(true)
                 }
+                Divider()
+                Button("Orchestration Overrides…") {
+                    shared.sessionOverridesRequestID = shared.focusedSessionID
+                }
+                .disabled(shared.focusedSessionID == nil)
             }
             CommandGroup(after: .appInfo) {
                 Button("Emergency Stop") {

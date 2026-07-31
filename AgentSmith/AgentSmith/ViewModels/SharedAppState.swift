@@ -442,6 +442,10 @@ final class SharedAppState {
     /// Signal from the File menu to the focused `MainView` that it should show the
     /// manual task creation sheet for this session ID.
     var createTaskRequestID: UUID?
+    /// Signal from the Session menu to the focused `MainView` that it should show the
+    /// per-session orchestration overrides sheet for this session ID. Cleared after handling,
+    /// so only the frontmost tab (whose id matches) presents it.
+    var sessionOverridesRequestID: UUID?
     /// Set to true after `loadPersistedState()` finishes.
     var hasLoadedPersistedState = false
     /// Whether the launch splash should currently render. Starts true at process start and

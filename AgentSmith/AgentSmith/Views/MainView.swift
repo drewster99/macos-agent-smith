@@ -18,6 +18,7 @@ struct MainView: View {
     @State private var showWelcomeSheet = false
     @State private var showOnboarding = false
     @State private var taskCreatorPresentation: TaskEditorPresentation?
+    @State private var showingOrchestrationOverrides = false
     @State private var isDropTargeted = false
     /// The attachment currently shown in the full-screen image viewer.
     @State private var selectedImageAttachment: Attachment?
@@ -77,6 +78,14 @@ struct MainView: View {
                 taskCreatorPresentation = .creating()
             }
         }
+        .onChange(of: shared.sessionOverridesRequestID) { _, newValue in
+            guard newValue == viewModel.session.id else { return }
+            // Project rule: defer @State / @Observable mutations out of `.onChange`.
+            DispatchQueue.main.async {
+                shared.sessionOverridesRequestID = nil
+                showingOrchestrationOverrides = true
+            }
+        }
         .onAppear {
             // Project rule: defer @State mutations out of lifecycle closures.
             DispatchQueue.main.async { installEscapeMonitor() }
@@ -125,6 +134,11 @@ struct MainView: View {
         .sheet(item: $taskCreatorPresentation) { presentation in
             TaskEditorSheet(mode: presentation.mode, viewModel: viewModel) {
                 taskCreatorPresentation = nil
+            }
+        }
+        .sheet(isPresented: $showingOrchestrationOverrides) {
+            SessionOrchestrationOverridesView(viewModel: viewModel) {
+                showingOrchestrationOverrides = false
             }
         }
     }
