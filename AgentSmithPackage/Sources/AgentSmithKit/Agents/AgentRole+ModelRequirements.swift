@@ -18,19 +18,21 @@ extension AgentRole {
     /// ``SwiftLLMKit/LLMKitManager/availableModels(requiredCapabilities:mustNotBePresent:alsoIncludingAvailabilityStates:)``.
     public var modelRequirements: ModelRequirements {
         // Every role talks to the chat endpoint and accepts a model that is scheduled for a future
-        // deprecation but still live.
+        // deprecation but still live. No role can use a batch-only variant (async batch API), so
+        // every role forbids `.batch`.
         let tolerated: Set<ModelAvailabilityState> = [.isFutureDeprecated]
+        let forbidden: Set<ModelCapability> = [.batch]
         switch self {
         case .smith, .brown:
             // Orchestrator and worker are entirely tool-driven and cannot function without tools.
-            return ModelRequirements(requiredCapabilities: [.chat, .toolUse], includedAvailabilityStates: tolerated)
+            return ModelRequirements(requiredCapabilities: [.chat, .toolUse], mustNotBePresent: forbidden, includedAvailabilityStates: tolerated)
         case .securityAgent, .validator:
             // Text/grammar verdicts, but both gather evidence via read-only tool calls. Requiring
             // `.toolUse` (tri-state) excludes only models KNOWN to lack tools, never the unprobed.
-            return ModelRequirements(requiredCapabilities: [.chat, .toolUse], includedAvailabilityStates: tolerated)
+            return ModelRequirements(requiredCapabilities: [.chat, .toolUse], mustNotBePresent: forbidden, includedAvailabilityStates: tolerated)
         case .summarizer:
             // Reads a transcript, writes a summary. No tools — chat is the only floor.
-            return ModelRequirements(requiredCapabilities: [.chat], includedAvailabilityStates: tolerated)
+            return ModelRequirements(requiredCapabilities: [.chat], mustNotBePresent: forbidden, includedAvailabilityStates: tolerated)
         }
     }
 }
