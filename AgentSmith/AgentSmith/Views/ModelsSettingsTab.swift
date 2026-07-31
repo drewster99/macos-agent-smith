@@ -107,7 +107,9 @@ struct ModelsSettingsTab: View {
     }
 
     /// Builds + sorts the rows off the main actor, publishes them, then applies the current filter.
-    /// Runs inside `.task(id:)`, so a change to any build input cancels this before it can publish.
+    /// Runs inside `.task(id:)`, which cancels this when a build input changes — but cancellation may
+    /// not be registered by the time this resumes, so it also re-checks `inputs == buildInputs` to
+    /// avoid publishing rows built from superseded inputs (the newer build publishes instead).
     private func rebuild() async {
         let inputs = buildInputs
         let rows = await Self.buildSortedRows(
@@ -115,8 +117,13 @@ struct ModelsSettingsTab: View {
             catalog: inputs.catalog,
             order: inputs.order
         )
-        if Task.isCancelled { return }
+        if Task.isCancelled || inputs != buildInputs { return }
         sortedRows = rows
+        // Drop a provider filter whose provider was deleted since it was chosen: its picker tag is
+        // gone, and leaving it set would silently filter the list to nothing against a vanished pick.
+        if let id = providerFilterID, !inputs.providers.contains(where: { $0.id == id }) {
+            providerFilterID = nil
+        }
         applyFilter()
     }
 
@@ -153,10 +160,14 @@ struct ModelsSettingsTab: View {
         }
         var rows: [ModelRowContent] = []
         for provider in providers {
+            // Superseded builds (rapid sort toggles / catalog updates) bail instead of building and
+            // sorting all ~1,700 rows; the caller ignores a canceled build's result anyway.
+            if Task.isCancelled { return [] }
             for model in modelsByProvider[provider.id] ?? [] {
                 rows.append(ModelRowContent(provider: provider, model: model))
             }
         }
+        if Task.isCancelled { return [] }
         switch order {
         case .provider:
             rows.sort { lhs, rhs in
