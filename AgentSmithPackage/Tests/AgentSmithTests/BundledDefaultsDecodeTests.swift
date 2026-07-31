@@ -46,14 +46,18 @@ struct BundledDefaultsDecodeTests {
         }
     }
 
-    /// An assignment is a `ModelConfiguration.id`. One pointing at a configuration the file does
-    /// not also carry is a dangling reference that seeds a role with nothing.
+    /// The config pool was retired 2026-07-31: an assignment is now a direct `(provider, model)`,
+    /// which `AppDefaults` derives at decode from the file's still-UUID `agentAssignments` via its
+    /// `modelConfigurations`. Each derived assignment must therefore name a `(providerID, modelID)`
+    /// the file actually carries — otherwise a UUID pointed at a configuration the file lacks and
+    /// the role was silently dropped from the seeded map.
     @Test("Each assignment resolves to a configuration in the same file")
     func assignmentsResolve() throws {
         let defaults = try loadDefaults()
-        let configIDs = Set(defaults.modelConfigurations.map(\.id))
-        for (role, id) in defaults.agentAssignments {
-            #expect(configIDs.contains(id), "\(role.rawValue) points at a configuration not in the file")
+        let configPairs = Set(defaults.modelConfigurations.map { "\($0.providerID)/\($0.modelID)" })
+        for (role, assignment) in defaults.agentAssignments {
+            let pair = "\(assignment.providerID)/\(assignment.modelID)"
+            #expect(configPairs.contains(pair), "\(role.rawValue) points at a (provider, model) not in the file")
         }
     }
 
