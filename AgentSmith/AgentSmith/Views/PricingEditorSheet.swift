@@ -65,6 +65,14 @@ struct PricingEditorSheet: View {
         shared.userModelOverrides[key]?.pricing != nil
     }
 
+    /// Any base rate currently overridden in the sheet — so the "$0 until you set rates" warning
+    /// clears the moment the user prices a rate, rather than lingering because the CATALOG is still
+    /// empty for a model that has no catalog pricing.
+    private var hasCurrentBaseOverride: Bool {
+        editable.inputOverride != nil || editable.outputOverride != nil
+            || editable.cacheReadOverride != nil || editable.cacheWriteOverride != nil
+    }
+
     var body: some View {
         // Fresh for the reference DISPLAY (no first-frame "no pricing" flash before onAppear); save
         // and the no-op comparison use the load-time capture instead.
@@ -78,7 +86,7 @@ struct PricingEditorSheet: View {
             OverrideSheetHeader(title: "Pricing Override", subtitle: "\(providerID) — \(modelID)",
                                 onCancel: { dismiss() }, onDone: { save(); dismiss() })
             PricingForm(editable: $editable, catalogDefaults: defaults, resetToken: resetToken,
-                        noPricingKnown: catalog?.base.hasAnyRate != true,
+                        noPricingKnown: catalog?.base.hasAnyRate != true && !hasCurrentBaseOverride,
                         expandThresholds: $expandThresholds, expandService: $expandService,
                         expandExtended: $expandExtended)
             OverrideSheetFooter(
