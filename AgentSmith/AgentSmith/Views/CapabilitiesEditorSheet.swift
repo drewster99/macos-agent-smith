@@ -2,9 +2,8 @@ import SwiftUI
 import SwiftLLMKit
 
 /// Per-(provider, model) capability-flag and status override editor — the twin of
-/// `BehaviorFlagsEditorSheet`, but for `ModelCapabilities` (vision, tool use, …) plus the
-/// top-level status fields (`hidden`, `isAvailable`, `isAccessDenied`,
-/// `supportsChatCompletions`) and the display-name override.
+/// `BehaviorFlagsEditorSheet`, but for `ModelCapabilities` (chat, vision, tool use, …) plus the
+/// top-level status fields (`hidden`, `isAvailable`, `isAccessDenied`) and the display-name override.
 ///
 /// The catalog's capability flags come from LiteLLM + provider-reported abilities, which are
 /// frequently WRONG for self-hosted / cloud models (e.g. ollama-cloud reports `toolUse: false`

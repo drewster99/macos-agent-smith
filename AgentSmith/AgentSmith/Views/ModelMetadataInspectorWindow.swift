@@ -408,7 +408,7 @@ struct ModelCompositionDetailView: View {
             "isFree": "Free",
             "isAvailable": "Available",
             "isAccessDenied": "Access denied",
-            "supportsChatCompletions": "Chat completions",
+            "capabilities.chat": "Chat completions",
             "pdfInput": "PDF input",
             "modelDescription": "Description"
         ]
