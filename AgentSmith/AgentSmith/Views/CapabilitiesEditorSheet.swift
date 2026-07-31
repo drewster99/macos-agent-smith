@@ -48,68 +48,9 @@ struct CapabilitiesEditorSheet: View {
         }
     }
 
-    /// One editable capability: how to read its resolved value and how to read/write its override.
-    private struct Descriptor: Identifiable {
-        let id: String
-        let title: String
-        let description: String
-        let resolved: KeyPath<ModelCapabilities, Bool>
-        let override: WritableKeyPath<ModelCapabilitiesOverride, Bool?>
-    }
-
-    private static let descriptors: [Descriptor] = [
-        Descriptor(id: "vision", title: "Vision (image input)",
-                   description: "Model can accept images in the prompt. Off means a pasted image is rejected (HTTP 400).",
-                   resolved: \.vision, override: \.vision),
-        Descriptor(id: "toolUse", title: "Tool use",
-                   description: "Model can call tools. Frequently mis-reported as off for cloud/self-hosted models that do support it.",
-                   resolved: \.toolUse, override: \.toolUse),
-        Descriptor(id: "parallelToolCalls", title: "Parallel tool calls",
-                   description: "Model can emit multiple tool calls in one turn.",
-                   resolved: \.parallelToolCalls, override: \.parallelToolCalls),
-        Descriptor(id: "reasoning", title: "Reasoning / thinking",
-                   description: "Model supports extended reasoning (thinking budget / effort).",
-                   resolved: \.reasoning, override: \.reasoning),
-        Descriptor(id: "pdfInput", title: "PDF input",
-                   description: "Model can accept PDF documents as input.",
-                   resolved: \.pdfInput, override: \.pdfInput),
-        Descriptor(id: "audioInput", title: "Audio input",
-                   description: "Model can accept audio as input.",
-                   resolved: \.audioInput, override: \.audioInput),
-        Descriptor(id: "audioOutput", title: "Audio output",
-                   description: "Model can produce audio output.",
-                   resolved: \.audioOutput, override: \.audioOutput),
-        Descriptor(id: "videoInput", title: "Video input",
-                   description: "Model can accept video as input.",
-                   resolved: \.videoInput, override: \.videoInput),
-        Descriptor(id: "promptCaching", title: "Prompt caching",
-                   description: "Provider supports prompt/context caching for this model.",
-                   resolved: \.promptCaching, override: \.promptCaching),
-        Descriptor(id: "webSearch", title: "Web search",
-                   description: "Model has a built-in web-search tool.",
-                   resolved: \.webSearch, override: \.webSearch),
-        Descriptor(id: "codeExecution", title: "Code execution",
-                   description: "Model has a built-in code-execution tool.",
-                   resolved: \.codeExecution, override: \.codeExecution),
-        Descriptor(id: "computerUse", title: "Computer use",
-                   description: "Model supports computer-use / GUI-control tooling.",
-                   resolved: \.computerUse, override: \.computerUse),
-        Descriptor(id: "responseSchema", title: "Response schema",
-                   description: "Model supports structured-output / JSON-schema responses.",
-                   resolved: \.responseSchema, override: \.responseSchema),
-        Descriptor(id: "systemMessages", title: "System messages",
-                   description: "Model accepts a system message (some backends fold it into the first user turn).",
-                   resolved: \.systemMessages, override: \.systemMessages),
-        Descriptor(id: "assistantPrefill", title: "Assistant prefill",
-                   description: "Model supports prefilling the start of the assistant's reply.",
-                   resolved: \.assistantPrefill, override: \.assistantPrefill),
-        Descriptor(id: "toolResultRoundTrip", title: "Tool result round-trip",
-                   description: "Model consumes tool RESULTS, not just emits calls — the half an agent depends on. Probe-established; force only to correct a stale verdict.",
-                   resolved: \.toolResultRoundTrip, override: \.toolResultRoundTrip),
-        Descriptor(id: "toolChoice", title: "Tool choice",
-                   description: "Model honors an explicit `tool_choice` selection.",
-                   resolved: \.toolChoice, override: \.toolChoice)
-    ]
+    // Capability rows are driven directly from `ModelCapability.allCases` (title/description come
+    // from the enum, the override value from `ModelCapabilitiesOverride`'s subscript), so a new
+    // capability appears here automatically — no hand-maintained list to drift. Chat is one of them.
 
     /// One editable model-status field. These live at the top level of `ModelMetadataOverride`
     /// (not inside the capabilities container) and their resolved values are tri-state on
@@ -131,10 +72,8 @@ struct CapabilitiesEditorSheet: View {
                          resolved: { $0?.isAvailable }, override: \.isAvailable),
         StatusDescriptor(id: "isAccessDenied", title: "Access denied",
                          description: "Whether YOUR account/key is denied for this model. Account-scoped — force off after a plan change un-denies you.",
-                         resolved: { $0?.isAccessDenied }, override: \.isAccessDenied),
-        StatusDescriptor(id: "supportsChatCompletions", title: "Chat completions",
-                         description: "Model serves the chat-completions surface Agent Smith talks to. Off means it's responses-/embeddings-only.",
-                         resolved: { $0?.supportsChatCompletions }, override: \.supportsChatCompletions)
+                         resolved: { $0?.isAccessDenied }, override: \.isAccessDenied)
+        // Chat lives in the Capabilities section now — it's a ModelCapability like the rest.
     ]
 
     @State private var states: [String: FlagState] = [:]
@@ -230,8 +169,8 @@ struct CapabilitiesEditorSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     sectionHeader("Capabilities")
-                    ForEach(Self.descriptors) { descriptor in
-                        flagRow(descriptor)
+                    ForEach(ModelCapability.allCases, id: \.self) { capability in
+                        flagRow(capability)
                     }
 
                     Divider().padding(.vertical, 4)
@@ -262,7 +201,7 @@ struct CapabilitiesEditorSheet: View {
 
             HStack {
                 Button("Reset to defaults") {
-                    for descriptor in Self.descriptors { states[descriptor.id] = .default }
+                    for capability in ModelCapability.allCases { states[capability.rawValue] = .default }
                     for descriptor in Self.statusDescriptors { states[descriptor.id] = .default }
                     displayNameOverride = ""
                     maxContextOverride = nil
@@ -376,20 +315,7 @@ struct CapabilitiesEditorSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(descriptor.title).font(.headline)
                 Spacer()
-                switch resolved {
-                case true?:
-                    Text("Resolved: ON")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.green)
-                case false?:
-                    Text("Resolved: off")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                case nil:
-                    Text("Resolved: unknown")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.tertiary)
-                }
+                resolvedStatusText(resolved)
             }
             Text(descriptor.description)
                 .font(.caption)
@@ -408,23 +334,34 @@ struct CapabilitiesEditorSheet: View {
         }
     }
 
-    private func flagRow(_ descriptor: Descriptor) -> some View {
-        let resolved = resolvedCapabilities[keyPath: descriptor.resolved]
+    /// Tri-state "Resolved: ON / off / unknown" label, shared by capability and status rows.
+    @ViewBuilder
+    private func resolvedStatusText(_ resolved: Bool?) -> some View {
+        switch resolved {
+        case true?:
+            Text("Resolved: ON").font(.caption.monospaced()).foregroundStyle(.green)
+        case false?:
+            Text("Resolved: off").font(.caption.monospaced()).foregroundStyle(.secondary)
+        case nil:
+            Text("Resolved: unknown").font(.caption.monospaced()).foregroundStyle(.tertiary)
+        }
+    }
+
+    private func flagRow(_ capability: ModelCapability) -> some View {
+        let resolved = resolvedCapabilities[capability]   // tri-state, straight from the enum
         return VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text(descriptor.title).font(.headline)
+                Text(capability.editorTitle).font(.headline)
                 Spacer()
-                Text("Resolved: \(resolved ? "ON" : "off")")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(resolved ? .green : .secondary)
+                resolvedStatusText(resolved)
             }
-            Text(descriptor.description)
+            Text(capability.editorDescription)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Picker(selection: Binding(
-                get: { states[descriptor.id] ?? .default },
-                set: { states[descriptor.id] = $0 }
+                get: { states[capability.rawValue] ?? .default },
+                set: { states[capability.rawValue] = $0 }
             ), label: EmptyView()) {
                 ForEach(FlagState.allCases) { value in
                     Text(value.label).tag(value)
@@ -437,8 +374,8 @@ struct CapabilitiesEditorSheet: View {
 
     private func loadFromShared() {
         let existing = shared.userModelOverrides[key]
-        for descriptor in Self.descriptors {
-            states[descriptor.id] = FlagState(existing?.capabilities?[keyPath: descriptor.override] ?? nil)
+        for capability in ModelCapability.allCases {
+            states[capability.rawValue] = FlagState(existing?.capabilities?[capability] ?? nil)
         }
         for descriptor in Self.statusDescriptors {
             states[descriptor.id] = FlagState(existing?[keyPath: descriptor.override] ?? nil)
@@ -469,9 +406,9 @@ struct CapabilitiesEditorSheet: View {
     private func save() {
         var patch = ModelCapabilitiesOverride()
         var anyForced = false
-        for descriptor in Self.descriptors {
-            let value = (states[descriptor.id] ?? .default).asOptional
-            patch[keyPath: descriptor.override] = value
+        for capability in ModelCapability.allCases {
+            let value = (states[capability.rawValue] ?? .default).asOptional
+            patch[capability] = value
             if value != nil { anyForced = true }
         }
         // This sheet now owns capabilities, status flags, display name, AND token limits; only the
