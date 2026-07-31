@@ -7,12 +7,17 @@ import SwiftLLMKit
 /// Settings → Models tab.
 ///
 /// Extracted from `SettingsView` so its `@Observable` dependency tracking is scoped to the model
-/// catalog alone: cost-board / usage / speech ticks on `SharedAppState` (read by the other tabs)
-/// no longer invalidate this view. The filtered + sorted list is cached in `displayed` and
-/// recomputed only when its inputs change — filter text, sort order, catalog, or provider set —
-/// never on every body evaluation. Rows read per-model metadata (`behaviorFlags`, `pricing`,
-/// `capabilities`) directly off the `ModelInfo` they already hold, so no row performs a
-/// full-catalog lookup.
+/// catalog alone. The list derives in two stages:
+///
+/// 1. **Build + sort** (`buildSortedRows`, off the main actor): every (provider, model) becomes a
+///    `ModelRowContent` — display segments plus the derived searchable strings — sorted once. Runs
+///    only when the provider set, catalog, or sort order changes.
+/// 2. **Filter** (`applyFilter`, on the main actor): the pre-sorted rows are filtered by the parsed
+///    query on every keystroke. Filtering preserves order, so no re-sort per keystroke; matching is
+///    substring tests over precomputed strings, so it stays realtime.
+///
+/// Matched text is highlighted live: each on-screen row maps the parsed query back to per-segment
+/// character ranges (`ModelRowContent.highlightRanges`) and renders them as attributed runs.
 struct ModelsSettingsTab: View {
     @Bindable var shared: SharedAppState
     let sessionManager: SessionManager
@@ -20,11 +25,18 @@ struct ModelsSettingsTab: View {
     @State private var filterText = ""
     @State private var sortOrder: ModelSortOrder = .provider
 
-    /// The filtered + sorted catalog. Computed OFF the main thread (`computeRows`, below) and
-    /// assigned here; the gather + locale-aware sort never touch the main actor. `nil` means "not
-    /// yet computed" — distinct from `[]` ("computed, nothing to show") — so the first frame renders
-    /// no list rather than briefly flashing the empty-catalog message before the first compute runs.
-    @State private var displayed: [ProviderModel]?
+    /// Provider chosen in the left-hand dropdown; `nil` = "All".
+    @State private var providerFilterID: String?
+
+    /// Every (provider, model) built and sorted, off-main. `nil` until the first build completes.
+    @State private var sortedRows: [ModelRowContent]?
+
+    /// `sortedRows` filtered by the current query — what the list renders. `nil` = not yet built
+    /// (renders no list rather than flashing the empty message before the first build).
+    @State private var displayed: [ModelRowContent]?
+
+    /// The parsed query, kept so on-screen rows can compute their highlights.
+    @State private var search = PreparedModelSearch([])
 
     @State private var editingFlagsFor: ModelEditTarget?
     @State private var editingCapabilitiesFor: ModelEditTarget?
@@ -40,10 +52,12 @@ struct ModelsSettingsTab: View {
             }
 
             ModelCatalogSection(
-                providersEmpty: shared.llmKit.providers.isEmpty,
+                providers: shared.llmKit.providers,
                 filterText: $filterText,
                 sortOrder: $sortOrder,
+                providerFilterID: $providerFilterID,
                 displayed: displayed,
+                search: search,
                 onEditFlags: { editingFlagsFor = $0 },
                 onEditCapabilities: { editingCapabilitiesFor = $0 },
                 onEditPricing: { editingPricingFor = $0 }
@@ -59,7 +73,9 @@ struct ModelsSettingsTab: View {
 
             ModelsRefreshErrorList(errors: shared.llmKit.refreshErrors)
         }
-        .task(id: recomputeInputs) { await recompute() }
+        .task(id: buildInputs) { await rebuild() }
+        .onChange(of: filterText) { applyFilter() }
+        .onChange(of: providerFilterID) { applyFilter() }
         .sheet(item: $editingFlagsFor) { target in
             BehaviorFlagsEditorSheet(shared: shared, providerID: target.providerID, modelID: target.modelID)
         }
@@ -79,66 +95,71 @@ struct ModelsSettingsTab: View {
         })
     }
 
-    /// The inputs the displayed list derives from. Used as the `.task(id:)` key so any change —
-    /// filter text, sort order, a catalog refresh, or a provider edit — cancels the in-flight
-    /// compute/reveal and starts a fresh one. Comparing it is an array-equality check over the
-    /// catalog, which SwiftUI only performs on a body update, not while scrolling.
-    private var recomputeInputs: RecomputeInputs {
-        RecomputeInputs(
-            query: filterText,
-            order: sortOrder,
+    /// The inputs the built+sorted rows derive from. Used as the `.task(id:)` key so a catalog
+    /// refresh, a provider edit, or a sort-order change cancels the in-flight build and starts fresh.
+    /// The query is deliberately absent — it only drives the (cheap, on-main) filter, not the build.
+    private var buildInputs: BuildInputs {
+        BuildInputs(
             providers: shared.llmKit.providers,
-            catalog: shared.llmKit.models
+            catalog: shared.llmKit.models,
+            order: sortOrder
         )
     }
 
-    /// Snapshots the inputs on the main actor, computes the filtered + sorted rows OFF the main
-    /// thread, then publishes them. Runs inside `.task(id:)`, so a change to any input cancels this
-    /// (via `Task.isCancelled`) before it can publish stale rows. The list itself is a `LazyVStack`,
-    /// so only the on-screen rows realize — no need to stream the full set in.
-    private func recompute() async {
-        let inputs = recomputeInputs
-        let rows = await Self.computeRows(
+    /// Builds + sorts the rows off the main actor, publishes them, then applies the current filter.
+    /// Runs inside `.task(id:)`, so a change to any build input cancels this before it can publish.
+    private func rebuild() async {
+        let inputs = buildInputs
+        let rows = await Self.buildSortedRows(
             providers: inputs.providers,
             catalog: inputs.catalog,
-            query: inputs.query,
             order: inputs.order
         )
         if Task.isCancelled { return }
-        displayed = rows
+        sortedRows = rows
+        applyFilter()
     }
 
-    /// The gather + filter + sort, run off the main actor (`@concurrent`). Takes value snapshots so
-    /// it never touches `shared`/`llmKit` (both main-isolated); groups the catalog by provider once
-    /// (O(n)) rather than filtering it per provider, then filters and locale-sorts.
+    /// Filters the pre-sorted rows by the selected provider AND the parsed query. Cheap enough to run
+    /// on the main actor on every keystroke (substring tests over precomputed strings); keeps
+    /// `displayed` and `search` updated together so highlighting never lags the filtered set.
+    private func applyFilter() {
+        let prepared = PreparedModelSearch(parseModelSearchQuery(filterText))
+        search = prepared
+        guard let sortedRows else { return }
+        let providerID = providerFilterID
+        if providerID == nil && prepared.isEmpty {
+            displayed = sortedRows
+        } else {
+            displayed = sortedRows.filter { row in
+                (providerID == nil || row.provider.id == providerID)
+                    && (prepared.isEmpty || row.matches(prepared))
+            }
+        }
+    }
+
+    /// The gather + build + sort, run off the main actor (`@concurrent`). Groups the catalog by
+    /// provider once (O(n)), builds each `ModelRowContent` (display segments + searchable strings),
+    /// then locale-sorts. Everything it touches is a value snapshot, never `shared`/`llmKit`.
     @concurrent
-    nonisolated private static func computeRows(
+    nonisolated private static func buildSortedRows(
         providers: [ModelProvider],
         catalog: [ModelInfo],
-        query: String,
         order: ModelSortOrder
-    ) async -> [ProviderModel] {
+    ) async -> [ModelRowContent] {
         var modelsByProvider: [String: [ModelInfo]] = [:]
         for model in catalog {
             modelsByProvider[model.providerID, default: []].append(model)
         }
-        var pairs: [ProviderModel] = []
+        var rows: [ModelRowContent] = []
         for provider in providers {
             for model in modelsByProvider[provider.id] ?? [] {
-                pairs.append(ProviderModel(provider: provider, model: model))
-            }
-        }
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        if !trimmed.isEmpty {
-            pairs = pairs.filter { pair in
-                pair.provider.name.localizedCaseInsensitiveContains(trimmed)
-                    || pair.model.modelID.localizedCaseInsensitiveContains(trimmed)
-                    || pair.model.displayName.localizedCaseInsensitiveContains(trimmed)
+                rows.append(ModelRowContent(provider: provider, model: model))
             }
         }
         switch order {
         case .provider:
-            pairs.sort { lhs, rhs in
+            rows.sort { lhs, rhs in
                 let byProvider = lhs.provider.name.localizedCaseInsensitiveCompare(rhs.provider.name)
                 if byProvider != .orderedSame {
                     return byProvider == .orderedAscending
@@ -146,9 +167,9 @@ struct ModelsSettingsTab: View {
                 return lhs.model.displayName.localizedCaseInsensitiveCompare(rhs.model.displayName) == .orderedAscending
             }
         case .model:
-            pairs.sort { $0.model.displayName.localizedCaseInsensitiveCompare($1.model.displayName) == .orderedAscending }
+            rows.sort { $0.model.displayName.localizedCaseInsensitiveCompare($1.model.displayName) == .orderedAscending }
         }
-        return pairs
+        return rows
     }
 
     private func exportDefaults() {
@@ -198,22 +219,11 @@ private enum ModelSortOrder: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// One (provider, model) pair — the unit the Models tab lists and edits. The config pool was
-/// retired 2026-07-31, so this tab edits per-model metadata (flags / capabilities / pricing)
-/// keyed on `(providerID, modelID)`, not `ModelConfiguration` objects. `Sendable` so the
-/// off-main `computeRows` can hand the result back to the main actor.
-private struct ProviderModel: Identifiable, Sendable {
-    let provider: ModelProvider
-    let model: ModelInfo
-    var id: String { "\(provider.id)/\(model.modelID)" }
-}
-
-/// The value snapshot the displayed list derives from — the `.task(id:)` key that drives recompute.
-private struct RecomputeInputs: Equatable {
-    let query: String
-    let order: ModelSortOrder
+/// The value snapshot the built+sorted rows derive from — the `.task(id:)` key that drives rebuild.
+private struct BuildInputs: Equatable {
     let providers: [ModelProvider]
     let catalog: [ModelInfo]
+    let order: ModelSortOrder
 }
 
 /// (providerID, modelID) of the model whose per-model editor sheet is open.
@@ -223,34 +233,51 @@ private struct ModelEditTarget: Identifiable {
     var id: String { "\(providerID)/\(modelID)" }
 }
 
-/// The filter/sort controls plus the model list (or the appropriate empty-state message).
+/// Detailed search-syntax help shown as the search field's tooltip.
+private let modelSearchHelp = """
+Filter the model list. Terms are combined with AND.
+
+• Unquoted words match anywhere in the row, case-insensitively (e.g. vision, 128k, $10).
+• "Quoted text" matches exactly and case-sensitively, within one display line (e.g. "max 6").
+
+Example: vis "max 6" — models with "vision" AND an exact "max 6…".
+"""
+
+/// The provider dropdown + search field + sort control, plus the model list (or the appropriate
+/// empty-state message).
 private struct ModelCatalogSection: View {
-    let providersEmpty: Bool
+    let providers: [ModelProvider]
     @Binding var filterText: String
     @Binding var sortOrder: ModelSortOrder
-    let displayed: [ProviderModel]?
+    @Binding var providerFilterID: String?
+    let displayed: [ModelRowContent]?
+    let search: PreparedModelSearch
     let onEditFlags: (ModelEditTarget) -> Void
     let onEditCapabilities: (ModelEditTarget) -> Void
     let onEditPricing: (ModelEditTarget) -> Void
 
     var body: some View {
-        if providersEmpty {
+        if providers.isEmpty {
             ModelsCenteredMessage(text: "No providers configured. Add one in Settings → Providers.")
         } else {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    TextField("Filter by provider or model", text: $filterText)
-                        .textFieldStyle(.roundedBorder)
+                    ProviderFilterPicker(providers: providers, selection: $providerFilterID)
+                    MacSearchField(text: $filterText, placeholder: "Search", help: modelSearchHelp)
+                        .frame(maxWidth: .infinity)
                     Picker("Sort", selection: $sortOrder) {
                         ForEach(ModelSortOrder.allCases) { order in
                             Text(order.rawValue).tag(order)
                         }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                     .fixedSize()
                 }
                 ModelCatalogList(
                     filterText: filterText,
                     displayed: displayed,
+                    search: search,
                     onEditFlags: onEditFlags,
                     onEditCapabilities: onEditCapabilities,
                     onEditPricing: onEditPricing
@@ -260,15 +287,35 @@ private struct ModelCatalogSection: View {
     }
 }
 
+/// Left-hand "All / <provider>" dropdown. Providers are listed alphabetically; `nil` = All.
+private struct ProviderFilterPicker: View {
+    let providers: [ModelProvider]
+    @Binding var selection: String?
+
+    var body: some View {
+        let sorted = providers.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        Picker("Provider", selection: $selection) {
+            Text("All").tag(String?.none)
+            ForEach(sorted) { provider in
+                Text(provider.name).tag(Optional(provider.id))
+            }
+        }
+        .labelsHidden()
+        .fixedSize()
+    }
+}
+
 /// The list of matching model rows, or the empty-state message when nothing matches.
 ///
 /// A `LazyVStack` (user-approved 2026-07-31, overriding the project's default "avoid lazy" rule):
 /// the catalog runs to ~1,700 rows, so eager realization froze the tab. Rows are short and uniform,
 /// well under a screen dimension, so the sizing pitfall that rule guards against does not apply.
-/// Only on-screen rows realize, so both opening the tab and scrolling stay smooth.
+/// Only on-screen rows realize, so both opening the tab and scrolling stay smooth — and only
+/// on-screen rows compute their search highlights.
 private struct ModelCatalogList: View {
     let filterText: String
-    let displayed: [ProviderModel]?
+    let displayed: [ModelRowContent]?
+    let search: PreparedModelSearch
     let onEditFlags: (ModelEditTarget) -> Void
     let onEditCapabilities: (ModelEditTarget) -> Void
     let onEditPricing: (ModelEditTarget) -> Void
@@ -281,10 +328,10 @@ private struct ModelCatalogList: View {
                     : "No models match \u{201C}\(filterText)\u{201D}.")
             } else {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(rows) { pair in
+                    ForEach(rows) { content in
                         ModelRow(
-                            provider: pair.provider,
-                            model: pair.model,
+                            content: content,
+                            search: search,
                             onEditFlags: onEditFlags,
                             onEditCapabilities: onEditCapabilities,
                             onEditPricing: onEditPricing
@@ -307,24 +354,26 @@ private struct ModelsCenteredMessage: View {
 }
 
 /// One model's row: name, provenance/metadata line, resolved capabilities and behavior flags, and
-/// the three per-model editor buttons. Reads all metadata off the passed-in `ModelInfo` — no
-/// catalog lookup — and takes plain value types so it observes nothing and re-renders only when its
-/// own inputs change.
+/// the three per-model editor buttons. Renders from precomputed display segments and highlights the
+/// current query's matches. Takes plain value types, so it observes nothing.
 private struct ModelRow: View {
-    let provider: ModelProvider
-    let model: ModelInfo
+    let content: ModelRowContent
+    let search: PreparedModelSearch
     let onEditFlags: (ModelEditTarget) -> Void
     let onEditCapabilities: (ModelEditTarget) -> Void
     let onEditPricing: (ModelEditTarget) -> Void
 
     private var target: ModelEditTarget {
-        ModelEditTarget(providerID: provider.id, modelID: model.modelID)
+        ModelEditTarget(providerID: content.provider.id, modelID: content.model.modelID)
     }
 
     var body: some View {
-        GroupBox {
+        // Only on-screen rows exist (LazyVStack), so computing highlights here is bounded to the
+        // visible set — a few hundred character comparisons per row, per keystroke.
+        let highlights = content.highlightRanges(search)
+        return GroupBox {
             HStack {
-                ModelRowInfo(provider: provider, model: model)
+                ModelRowInfo(lines: content.lines, highlights: highlights)
                 Spacer()
                 Button("Flags") { onEditFlags(target) }
                     .buttonStyle(.borderless)
@@ -341,92 +390,109 @@ private struct ModelRow: View {
     }
 }
 
-/// The left-hand info column of a model row.
+/// The left-hand info column of a model row, rendered from precomputed segments with highlighting.
 private struct ModelRowInfo: View {
-    let provider: ModelProvider
-    let model: ModelInfo
+    let lines: [[ModelRowSegment]]
+    let highlights: [ModelRowSegmentKey: IndexSet]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(model.displayName)
-                    .font(.headline)
-                if model.isNew {
-                    Text("New")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                }
+            ModelSegmentsLine(segments: lines[0], lineIndex: 0, spacing: 6, highlights: highlights)
+            ModelSegmentsLine(segments: lines[1], lineIndex: 1, spacing: 8, highlights: highlights)
+            if !lines[2].isEmpty {
+                ModelSegmentsLine(segments: lines[2], lineIndex: 2, spacing: 8, highlights: highlights)
             }
-            ModelRowMetadataLine(provider: provider, model: model)
-            if !model.capabilities.enabledLabels.isEmpty {
-                Text(model.capabilities.enabledLabels.joined(separator: ", "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if !model.behaviorFlags.isAllDefault {
-                ModelBehaviorFlagChips(flags: model.behaviorFlags)
+            if !lines[3].isEmpty {
+                ModelRowFlagChips(segments: lines[3], highlights: highlights)
             }
         }
     }
 }
 
-/// Provider chip, model ID, token limits, and pricing summary.
-private struct ModelRowMetadataLine: View {
-    let provider: ModelProvider
-    let model: ModelInfo
+/// A single row-line laid out as its segments, each highlighted per the query.
+private struct ModelSegmentsLine: View {
+    let segments: [ModelRowSegment]
+    let lineIndex: Int
+    let spacing: CGFloat
+    let highlights: [ModelRowSegmentKey: IndexSet]
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(provider.name)
-                .font(.caption)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(.quaternary)
-                .clipShape(RoundedRectangle(cornerRadius: 3))
-            Text(model.modelID)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let maxOut = model.maxOutputTokens {
-                Text("max \(formatTokenCount(maxOut))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let maxIn = model.maxInputTokens {
-                Text("ctx \(formatTokenCount(maxIn))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let pricing = model.pricing, pricing.base.hasAnyRate {
-                Text(PricingFormatter.summary(pricing))
-                    .font(.caption)
-                    .foregroundStyle(.green)
+        HStack(spacing: spacing) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                ModelSegmentView(
+                    segment: segment,
+                    highlightOffsets: highlights[ModelRowSegmentKey(line: lineIndex, segment: index)]
+                )
             }
         }
     }
 }
 
-/// Read-only chips for the model's non-default behavior flags. Resolved value lives on the
-/// `ModelInfo` (merged from bundled provider-defaults, bundled per-model entries, LiteLLM, and
-/// user overrides); editing flows through the Flags editor sheet, not this row.
-private struct ModelBehaviorFlagChips: View {
-    let flags: BehaviorFlags
+/// The behavior-flags line: the icon followed by the flag chips (line index 3).
+private struct ModelRowFlagChips: View {
+    let segments: [ModelRowSegment]
+    let highlights: [ModelRowSegmentKey: IndexSet]
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "slider.horizontal.below.rectangle")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            ForEach(flags.displayLabels, id: \.self) { label in
-                Text(label)
-                    .font(.caption2)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(AppColors.flagChipBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
-                    .foregroundStyle(AppColors.flagChipForeground)
+            ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                ModelSegmentView(
+                    segment: segment,
+                    highlightOffsets: highlights[ModelRowSegmentKey(line: 3, segment: index)]
+                )
             }
         }
         .help("Per-model behavior flags resolved from bundled defaults + user overrides. Edit via the Flags button.")
+    }
+}
+
+/// One styled text segment, rendered with the query's matched characters highlighted. Styling is
+/// driven by `segment.kind` so the look matches the original per-element formatting exactly.
+private struct ModelSegmentView: View {
+    let segment: ModelRowSegment
+    let highlightOffsets: IndexSet?
+
+    private var attributed: AttributedString {
+        attributedHighlighting(
+            segment.text,
+            highlightedOffsets: highlightOffsets,
+            background: AppColors.searchMatchBackground
+        )
+    }
+
+    var body: some View {
+        switch segment.kind {
+        case .title:
+            Text(attributed)
+                .font(.headline)
+        case .newBadge:
+            Text(attributed)
+                .font(.caption2)
+                .foregroundStyle(.green)
+        case .providerChip:
+            Text(attributed)
+                .font(.caption)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(AppColors.providerChipBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+        case .modelID, .maxTokens, .ctxTokens, .capabilities:
+            Text(attributed)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .pricing:
+            Text(attributed)
+                .font(.caption)
+                .foregroundStyle(.green)
+        case .flagChip:
+            Text(attributed)
+                .font(.caption2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(AppColors.flagChipBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .foregroundStyle(AppColors.flagChipForeground)
+        }
     }
 }
 

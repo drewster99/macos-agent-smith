@@ -149,7 +149,14 @@ enum AppColors {
 
     static let flagChipBackground = Color.blue.opacity(0.15)
     static let flagChipForeground = Color.blue
+    /// Provider "chip" pill background on the Models tab — a bit more present than `.quaternary`.
+    static let providerChipBackground = Color.secondary.opacity(0.22)
     static let summarySectionBackground = Color.purple.opacity(0.06)
+
+    /// Background behind characters matched by the Models-tab search filter. A warm amber that reads
+    /// against the dark list, the gray provider chip, AND the blue flag chips (so a single, consistent
+    /// highlight color works everywhere per the search design).
+    static let searchMatchBackground = Color(red: 1.0, green: 0.80, blue: 0.20).opacity(0.55)
 
     // MARK: - Task detail
     /// Tinted background for the AI Commentary inset inside the Result section.
@@ -292,7 +299,8 @@ enum AppFonts {
 /// Pricing display formatting.
 enum PricingFormatter {
     /// Compact pricing summary string for display (e.g., "$3.00 in / $15.0 out per M").
-    static func summary(_ pricing: ModelPricing) -> String {
+    /// `nonisolated` (pure) so the Models tab's off-main search-string builder can call it.
+    nonisolated static func summary(_ pricing: ModelPricing) -> String {
         var parts: [String] = []
         if let input = pricing.base.input {
             parts.append("\(costPerMillion(input * 1_000_000)) in")
@@ -309,7 +317,7 @@ enum PricingFormatter {
     }
 
     /// Formats a cost-per-million-tokens value as a compact dollar string.
-    static func costPerMillion(_ cost: Double) -> String {
+    nonisolated static func costPerMillion(_ cost: Double) -> String {
         if cost < 0.01 {
             return String(format: "$%.4f", cost)
         } else if cost < 1 {
