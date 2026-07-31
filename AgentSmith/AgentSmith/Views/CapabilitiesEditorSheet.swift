@@ -162,7 +162,7 @@ struct CapabilitiesEditorSheet: View {
             // Chat support is the GATING capability: when it's off the model can't be called at all,
             // so surface it as a pinned banner rather than leaving it as one buried row far below the
             // (now-misleading) Vision/Tool/Reasoning rows.
-            if resolvedModelInfo?.supportsChatCompletions == false {
+            if resolvedModelInfo?.capabilities.state(of: .chat) == false {
                 chatNotAChatModelBanner()
             }
 
@@ -242,7 +242,7 @@ struct CapabilitiesEditorSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Not a chat model")
                     .font(.subheadline.bold())
-                Text("This model doesn't serve the chat-completions endpoint Agent Smith uses (it's responses-/embeddings-only), so assigning it to an agent fails with HTTP 404. The capabilities below are unreachable defaults. Use “Chat completions” under Status & Identity to override if this is wrong.")
+                Text("This model doesn't serve the chat-completions endpoint Agent Smith uses (it's responses-/embeddings-only), so assigning it to an agent fails with HTTP 404. Force “Chat completions” on in the Capabilities section below if this is wrong.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

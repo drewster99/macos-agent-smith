@@ -24,7 +24,6 @@ set -Eeuo pipefail
 #   SIGNING_IDENTITY="Developer ID Application: ..." ./release.sh
 #   NOTARY_PROFILE="agent-smith" ./release.sh
 #   NOTARY_KEY=/path/AuthKey_ABC123.p8 NOTARY_KEY_ID=ABC123 NOTARY_ISSUER=UUID ./release.sh
-#   NOTARY_APPLE_ID=you@example.com NOTARY_PASSWORD=app-specific-password NOTARY_TEAM_ID=TEAMID ./release.sh
 
 APP_NAME="AgentSmith"
 DISPLAY_NAME="Agent Smith"
@@ -53,9 +52,6 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-${NOTARYTOOL_PROFILE:-ncc-cli-notarytool}}"
 NOTARY_KEY="${NOTARY_KEY:-}"
 NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"
 NOTARY_ISSUER="${NOTARY_ISSUER:-}"
-NOTARY_APPLE_ID="${NOTARY_APPLE_ID:-}"
-NOTARY_PASSWORD="${NOTARY_PASSWORD:-}"
-NOTARY_TEAM_ID="${NOTARY_TEAM_ID:-}"
 NOTARIZATION_TIMEOUT="${NOTARIZATION_TIMEOUT:-30m}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,8 +90,9 @@ Options:
                     or auto-detects when exactly one Developer ID Application identity exists.
   --notary-profile NAME
                     notarytool keychain profile name. Defaults to NOTARY_PROFILE or
-                    NOTARYTOOL_PROFILE. Alternative env auth: NOTARY_KEY/NOTARY_KEY_ID/
-                    NOTARY_ISSUER, or NOTARY_APPLE_ID/NOTARY_PASSWORD/NOTARY_TEAM_ID.
+                    NOTARYTOOL_PROFILE. Alternative auth: NOTARY_KEY (path to .p8)/
+                    NOTARY_KEY_ID/NOTARY_ISSUER. (No env-var password path — secrets
+                    must not ride in the environment.)
   --notarization-timeout DURATION
                     notarytool --wait timeout (default: ${NOTARIZATION_TIMEOUT}; examples: 30m, 1h).
   --yes             Do not prompt for confirmation before publishing to GitHub.
@@ -282,12 +279,13 @@ init_notary_auth() {
   if [[ -n "$NOTARY_PROFILE" ]]; then
     NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
   elif [[ -n "$NOTARY_KEY" && -n "$NOTARY_KEY_ID" ]]; then
+    # NOTARY_KEY is a PATH to a .p8 file, not the secret itself — no secret rides in the environment.
     NOTARY_ARGS=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID")
     [[ -z "$NOTARY_ISSUER" ]] || NOTARY_ARGS+=(--issuer "$NOTARY_ISSUER")
-  elif [[ -n "$NOTARY_APPLE_ID" && -n "$NOTARY_PASSWORD" && -n "$NOTARY_TEAM_ID" ]]; then
-    NOTARY_ARGS=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$NOTARY_TEAM_ID")
   else
-    fail "Notarization credentials are required for signed releases. Configure one of: --notary-profile/NOTARY_PROFILE (recommended; create with: xcrun notarytool store-credentials <profile>), NOTARY_KEY + NOTARY_KEY_ID (+ NOTARY_ISSUER), or NOTARY_APPLE_ID + NOTARY_PASSWORD + NOTARY_TEAM_ID."
+    # No app-specific-password path: passing a secret via an environment variable is disallowed.
+    # Use the keychain profile (secret stays in the keychain) or an on-disk API key.
+    fail "Notarization credentials are required for signed releases. Configure one of: --notary-profile/NOTARY_PROFILE (recommended; create with: xcrun notarytool store-credentials <profile>), or NOTARY_KEY (path to .p8) + NOTARY_KEY_ID (+ NOTARY_ISSUER)."
   fi
 }
 

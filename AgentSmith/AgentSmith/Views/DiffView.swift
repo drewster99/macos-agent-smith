@@ -162,9 +162,11 @@ struct DiffView: View {
             allLines = precomputedLines
         } else {
             let (old, new, context) = (oldContent, newContent, contextLines)
-            allLines = await Task.detached(priority: .userInitiated) {
-                DiffGenerator.generate(old: old, new: new, contextLines: context)
-            }.value
+            // `@concurrent` (not `Task.detached`) so the generate hops off-main AND stays part of
+            // THIS task: a superseded/dismissed diff's cancellation then reaches DiffGenerator's
+            // per-row `Task.isCancelled` and stops the O(m·n) work. A detached task is a fresh root
+            // that never sees `diffTask.cancel()`, so its cancellation check was unreachable.
+            allLines = await Self.generateDiffOffMain(old: old, new: new, contextLines: context)
         }
         let added = allLines.reduce(into: 0) { $0 += ($1.kind == .added ? 1 : 0) }
         let removed = allLines.reduce(into: 0) { $0 += ($1.kind == .removed ? 1 : 0) }
@@ -183,6 +185,13 @@ struct DiffView: View {
         cachedAddedCount = added
         cachedRemovedCount = removed
         cachedNeedsTruncation = needsTrunc
+    }
+
+    /// Runs the LCS off the main actor while remaining a structured child of the caller's task, so
+    /// cancellation propagates into `DiffGenerator.generate`'s per-row check. `@concurrent` is what
+    /// moves it off-main in this `MainActor`-by-default target.
+    @concurrent nonisolated private static func generateDiffOffMain(old: String, new: String, contextLines: Int) async -> [DiffLine] {
+        DiffGenerator.generate(old: old, new: new, contextLines: contextLines)
     }
 
     /// Nested View struct for diff line display (refactored from diffLineView(_:))
