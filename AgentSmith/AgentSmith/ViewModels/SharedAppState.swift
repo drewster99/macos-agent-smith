@@ -385,6 +385,13 @@ final class SharedAppState {
     /// `setUserModelOverride(...)` which also persists and re-pushes to `llmKit`.
     private(set) var userModelOverrides: [String: ModelMetadataOverride] = [:]
 
+    /// Per-(role, model) RUNTIME overrides (temperature, token caps, thinking, effort), keyed
+    /// "role/providerID/modelID". Sparse deltas — the effective `ModelConfiguration` is resolved
+    /// fresh from these plus the latest model facts (`ModelConfigurationOverride.resolved(against:)`),
+    /// never stored. Global, so a tuned (role, model) pairing applies wherever it runs. Writes flow
+    /// through `setRoleModelConfigOverride(...)`.
+    private(set) var roleModelConfigOverrides: [String: ModelConfigurationOverride] = [:]
+
     /// Set when a load/decode operation fails during startup; drives the error alert.
     var startupError: String?
     /// ID of the session whose window is currently key (frontmost). Updated by
@@ -493,6 +500,7 @@ final class SharedAppState {
     /// writers a burst of mutations collapses to at most a couple of writes,
     /// and the latest snapshot always wins.
     private let userModelOverridesWriter: SerialPersistenceWriter<[String: ModelMetadataOverride]>
+    private let roleModelConfigOverridesWriter: SerialPersistenceWriter<[String: ModelConfigurationOverride]>
     private let memoriesWriter: SerialPersistenceWriter<[MemoryEntry]>
     private let taskSummariesWriter: SerialPersistenceWriter<[TaskSummaryEntry]>
     private let mcpServersWriter: SerialPersistenceWriter<[MCPServerConfig]>
@@ -504,6 +512,9 @@ final class SharedAppState {
         self.usageStore = UsageStore(persistence: pm)
         self.userModelOverridesWriter = SerialPersistenceWriter(label: "userModelOverrides") { snapshot in
             try await pm.saveUserModelOverrides(snapshot)
+        }
+        self.roleModelConfigOverridesWriter = SerialPersistenceWriter(label: "roleModelConfigOverrides") { snapshot in
+            try await pm.saveRoleModelConfigOverrides(snapshot)
         }
         self.memoriesWriter = SerialPersistenceWriter(label: "memories") { snapshot in
             try await pm.saveMemories(snapshot)
@@ -672,6 +683,9 @@ final class SharedAppState {
         // Load user model metadata overrides and inject into LLMKitManager.
         // Keep a local copy (`userModelOverrides`) so the Settings UI can edit
         // individual entries without re-loading from disk every read.
+        // Per-(role, model) runtime overrides — best-effort; a missing/corrupt file is an empty set,
+        // which just means everything inherits the model defaults (the clean-slate baseline).
+        roleModelConfigOverrides = (try? await basePersistence.loadRoleModelConfigOverrides()) ?? [:]
         do {
             let overrides = try await basePersistence.loadUserModelOverrides()
             userModelOverrides = overrides
@@ -1132,6 +1146,32 @@ final class SharedAppState {
         llmKit.setUserOverrides(userModelOverrides)
         let snapshot = userModelOverrides
         let writer = userModelOverridesWriter
+        Task { await writer.enqueue(snapshot) }
+    }
+
+    /// Composite key for a per-(role, model) runtime override. `role` and `providerID` never contain
+    /// "/", so it stays unambiguous even when `modelID` does (OpenRouter slugs like `qwen/q:floor`).
+    func roleModelOverrideKey(role: AgentRole, providerID: String, modelID: String) -> String {
+        "\(role.rawValue)/\(providerID)/\(modelID)"
+    }
+
+    /// The per-(role, model) runtime override, or an empty one when none is set.
+    func roleModelConfigOverride(role: AgentRole, providerID: String, modelID: String) -> ModelConfigurationOverride {
+        roleModelConfigOverrides[roleModelOverrideKey(role: role, providerID: providerID, modelID: modelID)] ?? ModelConfigurationOverride()
+    }
+
+    /// Persists a per-(role, model) runtime override; an empty override removes the entry. Running
+    /// agents keep their resolved snapshot until rebuilt (same as metadata overrides) — the change
+    /// takes effect at the next config build / agent spawn.
+    func setRoleModelConfigOverride(role: AgentRole, providerID: String, modelID: String, override: ModelConfigurationOverride) {
+        let key = roleModelOverrideKey(role: role, providerID: providerID, modelID: modelID)
+        if override.isEmpty {
+            roleModelConfigOverrides.removeValue(forKey: key)
+        } else {
+            roleModelConfigOverrides[key] = override
+        }
+        let snapshot = roleModelConfigOverrides
+        let writer = roleModelConfigOverridesWriter
         Task { await writer.enqueue(snapshot) }
     }
 

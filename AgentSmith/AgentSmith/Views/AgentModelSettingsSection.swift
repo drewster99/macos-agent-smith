@@ -120,13 +120,13 @@ struct AgentModelSettingsSection: View {
                     .foregroundStyle(.orange)
             }
 
-            parametersSection()
-
-            if thinkingSupported {
-                thinkingSection()
-            }
-            if anthropicCacheVisible {
-                cacheTTLSection()
+            // Runtime settings are now per-(role, model) overrides that resolve against the model's
+            // live facts (temperature, token caps, thinking, effort) — see RoleModelConfigOverrideEditor.
+            // The old inline parameter/thinking/cache sections are superseded by it.
+            if !modelID.isEmpty, !providerID.isEmpty {
+                Divider().padding(.vertical, 2)
+                RoleModelConfigOverrideEditor(shared: viewModel.shared, role: role,
+                                              providerID: providerID, modelID: modelID)
             }
         }
         .onAppear { loadFromViewModel() }

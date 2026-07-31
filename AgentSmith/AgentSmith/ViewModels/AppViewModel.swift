@@ -617,7 +617,13 @@ final class AppViewModel {
                 return
             }
             if let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) {
-                configurations[role] = modelConfig
+                // Runtime tuning is resolved FRESH from the latest model facts + the per-(role, model)
+                // override (clean slate: the pool config's own stored tuning is ignored). The
+                // assignment — provider + model — still comes from the pool config.
+                let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+                let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+                    ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
+                configurations[role] = override.resolved(against: facts, name: modelConfig.name)
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }
@@ -1670,7 +1676,13 @@ final class AppViewModel {
                 continue
             }
             if let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) {
-                configurations[role] = modelConfig
+                // Runtime tuning is resolved FRESH from the latest model facts + the per-(role, model)
+                // override (clean slate: the pool config's own stored tuning is ignored). The
+                // assignment — provider + model — still comes from the pool config.
+                let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+                let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+                    ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
+                configurations[role] = override.resolved(against: facts, name: modelConfig.name)
                 if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
                     apiTypes[role] = modelProvider.apiType
                 }

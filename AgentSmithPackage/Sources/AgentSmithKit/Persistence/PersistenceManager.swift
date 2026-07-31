@@ -556,6 +556,26 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([String: ModelMetadataOverride].self, from: data)
     }
 
+    // MARK: - Per-(role, model) runtime config overrides (shared)
+    //
+    // Sparse runtime deltas keyed "role/providerID/modelID", global (they apply wherever that
+    // (role, model) pairing runs, across sessions) — the sibling store of the metadata overrides
+    // above. The effective ModelConfiguration is resolved fresh from these + the model facts.
+
+    public func saveRoleModelConfigOverrides(_ overrides: [String: ModelConfigurationOverride]) throws {
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(overrides)
+        let url = baseDirectory.appendingPathComponent("role_model_config_overrides.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadRoleModelConfigOverrides() throws -> [String: ModelConfigurationOverride] {
+        let url = baseDirectory.appendingPathComponent("role_model_config_overrides.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode([String: ModelConfigurationOverride].self, from: data)
+    }
+
     // MARK: - Attachments (global)
 
     /// One-time migration: moves every session's attachment files into the global attachments dir.
