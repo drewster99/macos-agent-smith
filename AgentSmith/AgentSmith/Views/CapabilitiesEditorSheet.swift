@@ -19,16 +19,9 @@ struct CapabilitiesEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var states: [String: TriStateOverride] = [:]
-    /// The override selections as they stood when the sheet opened, so Done can tell whether
-    /// anything actually changed (and only then surface the restart notice).
-    @State private var initialStates: [String: TriStateOverride] = [:]
     @State private var displayNameOverride: String = ""
-    @State private var initialDisplayNameOverride: String = ""
     @State private var maxContextOverride: Int?
     @State private var maxOutputOverride: Int?
-    @State private var initialMaxContextOverride: Int?
-    @State private var initialMaxOutputOverride: Int?
-    @State private var showRestartNotice = false
     @State private var probeRunner = ModelProbeRunner()
 
     private var key: String { "\(providerID)/\(modelID)" }
@@ -81,7 +74,7 @@ struct CapabilitiesEditorSheet: View {
         let info = resolvedModelInfo
         VStack(alignment: .leading, spacing: 16) {
             OverrideSheetHeader(title: "Model Capabilities & Status", subtitle: "\(providerID) — \(modelID)",
-                                onCancel: { dismiss() }, onDone: { commit() })
+                                onCancel: { dismiss() }, onDone: { save(); dismiss() })
             if info?.capabilities.state(of: .chat) == false {
                 NotAChatModelBanner()
             }
@@ -108,9 +101,6 @@ struct CapabilitiesEditorSheet: View {
         .padding(20)
         .frame(minWidth: 560, idealWidth: 660, minHeight: 480, idealHeight: 680)
         .onAppear { loadFromShared() }
-        .alert("Restart Required", isPresented: $showRestartNotice,
-               actions: { Button("OK") { dismiss() } },
-               message: { Text("Your capability changes were saved. They take effect the next time you restart Agent Smith.") })
     }
 
     /// Probes just this model, on demand. Reuses `ModelProbeRunner` (the same path the metadata
@@ -119,20 +109,6 @@ struct CapabilitiesEditorSheet: View {
     private func runProbe() {
         guard let provider else { return }
         Task { await probeRunner.probe(targets: [(provider: provider, modelID: modelID)], kit: shared.llmKit) }
-    }
-
-    /// Persists the edits. If they changed anything, surfaces the restart notice (whose OK
-    /// dismisses); otherwise dismisses straight through so an unchanged visit doesn't nag.
-    private func commit() {
-        let changed = states != initialStates || displayNameOverride != initialDisplayNameOverride
-            || maxContextOverride != initialMaxContextOverride
-            || maxOutputOverride != initialMaxOutputOverride
-        save()
-        if changed {
-            showRestartNotice = true
-        } else {
-            dismiss()
-        }
     }
 
     private func resetAll() {
@@ -154,10 +130,6 @@ struct CapabilitiesEditorSheet: View {
         displayNameOverride = existing?.displayName ?? ""
         maxContextOverride = existing?.maxInputTokens
         maxOutputOverride = existing?.maxOutputTokens
-        initialStates = states
-        initialDisplayNameOverride = displayNameOverride
-        initialMaxContextOverride = maxContextOverride
-        initialMaxOutputOverride = maxOutputOverride
     }
 
     private func save() {
@@ -235,6 +207,8 @@ private struct CapabilitiesForm: View {
 
     private static let sortedCapabilities = ModelCapability.allCases.sorted { $0.editorTitle < $1.editorTitle }
 
+    private var effortLevels: [String] { modelInfo?.validEffortLevels ?? [] }
+
     private var probeTitle: String {
         modelInfo?.lastProbedAt == nil ? "Probe this model now" : "Re-probe this model"
     }
@@ -275,6 +249,12 @@ private struct CapabilitiesForm: View {
                          reported: reportedOutput, value: $maxOutputOverride)
             }
             Section("Capabilities") {
+                LabeledContent("Effort levels") {
+                    Text(effortLevels.isEmpty ? "none reported" : effortLevels.joined(separator: ", "))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(effortLevels.isEmpty ? AnyShapeStyle(HierarchicalShapeStyle.tertiary)
+                                                              : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+                }
                 ForEach(Self.sortedCapabilities, id: \.self) { capability in
                     OverrideTriStateRow(title: capability.editorTitle, resolved: caps[capability],
                                         description: capability.editorDescription, selection: binding(for: capability.rawValue))
@@ -332,9 +312,10 @@ private struct DisplayNameRow: View {
     }
 }
 
-/// `reported` is the model's own ceiling (probe/catalog), shown as a persistent reference. `value`
-/// is a CORRECTION of the believed limit — set it when the catalog is wrong or missing. It is NOT a
-/// cost-cap preference; per-run caps belong on the configuration, not on the model's metadata.
+/// `reported` is the model's own ceiling (probe/catalog), shown as a persistent reference in the
+/// header. `value` is a CORRECTION of the believed limit, edited through the shared Default/Override
+/// control — set it when the catalog is wrong or missing. It is NOT a cost-cap preference; per-run
+/// caps belong on the configuration, not on the model's metadata.
 private struct LimitRow: View {
     let title: String
     let help: String
@@ -342,7 +323,7 @@ private struct LimitRow: View {
     @Binding var value: Int?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.headline)
                 Spacer()
@@ -355,21 +336,10 @@ private struct LimitRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                TextField(reported.map { "\($0)" } ?? "model's limit", value: $value, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 140)
-                if let reported, value != reported {
-                    Button("Prefill (\(reported.formatted()))") { value = reported }
-                        .controlSize(.small)
-                        .help("Fill the field with the model's reported value, then edit it down.")
-                }
-                if value != nil {
-                    Button("Inherit catalog") { value = nil }
-                        .controlSize(.small)
-                        .help("Remove the override and use the model's own reported limit.")
-                }
-            }
+            OverrideValueControl(override: $value, defaultValue: reported,
+                                 draftText: OverrideValueParsing.tokenDraft,
+                                 format: OverrideValueParsing.tokenLabel,
+                                 parse: OverrideValueParsing.tokenCount)
         }
     }
 }

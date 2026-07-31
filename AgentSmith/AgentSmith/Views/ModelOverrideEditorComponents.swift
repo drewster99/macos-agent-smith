@@ -122,6 +122,146 @@ struct OverrideSheetHeader: View {
     }
 }
 
+// MARK: - Default / Override value control
+
+/// Parsing + formatting helpers shared by the numeric override rows (token limits, prices), so the
+/// same comma/`$` leniency applies everywhere.
+enum OverrideValueParsing {
+    static func tokenCount(_ raw: String) -> Int? {
+        let cleaned = raw.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? nil : Int(cleaned)
+    }
+
+    static func tokenDraft(_ value: Int) -> String { String(value) }
+    static func tokenLabel(_ value: Int) -> String { value.formatted() }
+
+    static func usdPerMillion(_ raw: String) -> Double? {
+        let cleaned = raw.replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: "$", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard !cleaned.isEmpty, let value = Double(cleaned), value >= 0, value.isFinite else { return nil }
+        return value
+    }
+
+    static func usdDraft(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(0...4)).grouping(.never))
+    }
+
+    static func usdLabel(_ value: Double) -> String {
+        "$" + value.formatted(.number.precision(.fractionLength(2...4)))
+    }
+}
+
+/// A reusable "Default vs. Override" control for one optional value — a token limit or a price.
+///
+/// A two-segment Default / Override picker replaces the old "value + empty field + Prefill button"
+/// row. Choosing **Override** reveals a focused field seeded with the default, plus an **OK** commit
+/// (Enter commits too); OK validates via `parse`, stores the value, and flips to a clickable
+/// formatted label + a green check. Clicking the label re-opens editing. Switching back to
+/// **Default** reveals a **Confirm** button that clears the override (`override = nil`). The default
+/// itself is shown by the CALLER (e.g. "Model reports:" in the row header), not here.
+struct OverrideValueControl<Value: Equatable>: View {
+    @Binding var override: Value?
+    let defaultValue: Value?
+    /// Plain, editable text seeded into the field (no grouping / symbols).
+    let draftText: (Value) -> String
+    /// Pretty text for the committed, clickable label.
+    let format: (Value) -> String
+    let parse: (String) -> Value?
+
+    private enum Stage: Equatable { case inactive, editing, committed, pendingClear }
+    private enum Segment: Hashable { case useDefault, useOverride }
+
+    @State private var stage: Stage = .inactive
+    @State private var draft: String = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Picker("", selection: segmentSelection) {
+                Text("Default").tag(Segment.useDefault)
+                Text("Override").tag(Segment.useOverride)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+
+            switch stage {
+            case .inactive:
+                EmptyView()
+            case .editing:
+                TextField("value", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 130)
+                    .focused($fieldFocused)
+                    .onSubmit { commit() }
+                Button("OK", action: commit)
+                    .controlSize(.small)
+                    .disabled(parse(draft) == nil)
+            case .committed:
+                Button(action: reopen) {
+                    Text(override.map(format) ?? "—").font(.body.monospacedDigit())
+                }
+                .buttonStyle(.plain)
+                .help("Click to edit this override")
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .pendingClear:
+                Button("Confirm", action: clearOverride).controlSize(.small)
+            }
+        }
+        .onAppear { stage = override == nil ? .inactive : .committed }
+        .onChange(of: override) { _, newValue in
+            // Resync when the value is cleared from OUTSIDE (e.g. the sheet's Reset button).
+            if newValue == nil, stage == .committed || stage == .editing {
+                DispatchQueue.main.async { stage = .inactive }
+            }
+        }
+    }
+
+    private var segmentSelection: Binding<Segment> {
+        Binding(
+            get: { (stage == .editing || stage == .committed) ? .useOverride : .useDefault },
+            set: { newValue in
+                switch newValue {
+                case .useOverride:
+                    // From pendingClear, restore the committed value if there is one; otherwise
+                    // (or from inactive) open a fresh editing field seeded with the default.
+                    if stage == .pendingClear, override != nil {
+                        stage = .committed
+                    } else if stage != .editing && stage != .committed {
+                        draft = (override ?? defaultValue).map(draftText) ?? ""
+                        stage = .editing
+                        focusSoon()
+                    }
+                case .useDefault:
+                    if stage == .editing || stage == .committed { stage = .pendingClear }
+                }
+            })
+    }
+
+    private func commit() {
+        guard let parsed = parse(draft) else { return }
+        override = parsed
+        stage = .committed
+        fieldFocused = false
+    }
+
+    private func reopen() {
+        draft = override.map(draftText) ?? ""
+        stage = .editing
+        focusSoon()
+    }
+
+    private func clearOverride() {
+        override = nil
+        stage = .inactive
+    }
+
+    private func focusSoon() {
+        DispatchQueue.main.async { fieldFocused = true }
+    }
+}
+
 /// Pinned footer shared by the override sheets: a Reset-to-defaults button on the left and a
 /// right-hugged explanation whose LINES are left-aligned (so wrapped text lines up under its own
 /// first line rather than ragged-right).

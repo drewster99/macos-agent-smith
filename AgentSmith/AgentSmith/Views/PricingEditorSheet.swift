@@ -2,16 +2,16 @@ import SwiftUI
 import SwiftLLMKit
 
 /// Per-(provider, model) pricing override editor — the third twin alongside `BehaviorFlagsEditorSheet`
-/// and `CapabilitiesEditorSheet`, now covering the WHOLE `ModelPricing` model, not just base
-/// input/output: cache read/write, context-length threshold tiers, named service tiers, and the
-/// extended-cache write rate. (Reasoning/thinking has no rate of its own — every current provider
-/// bills it as output tokens.)
+/// and `CapabilitiesEditorSheet`, covering the WHOLE `ModelPricing` model: base input/output/cache
+/// read/write, context-length threshold tiers, named service tiers, and the extended-cache write
+/// rate. (Reasoning/thinking has no rate of its own — every current provider bills it as output.)
 ///
-/// Fields are seeded from the RESOLVED pricing (catalog + any existing override) so nothing is
-/// hidden and cache/tier rates aren't silently wiped by editing input/output. Rates are entered in
-/// USD per **1M tokens** (the industry quoting unit); storage stays USD per single token, like all
-/// of `ModelPricing`. Saving force-replaces this model's pricing; Clear Override reverts to catalog
-/// pricing. A no-op visit (nothing changed) writes nothing, so opening the sheet never pins pricing.
+/// **Base rates use the shared Default/Override control** (like the token limits): each shows the
+/// catalog rate as a reference and is overridden per-rate, so overriding input never wipes the
+/// catalog's cache/output rates. Rates are entered in USD per **1M tokens**; storage stays USD per
+/// single token. Advanced tiers are carried from the resolved pricing so they survive a base-rate
+/// edit. Saving force-replaces this model's pricing; Clear Override reverts to catalog pricing; an
+/// unchanged visit writes nothing.
 struct PricingEditorSheet: View {
     @Bindable var shared: SharedAppState
     let providerID: String
@@ -20,9 +20,12 @@ struct PricingEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var editable = EditablePricing()
-    /// The pricing built from the seed, so Done can no-op when nothing changed (never pinning a
-    /// catalog-priced model just because the sheet was opened and closed).
-    @State private var initialBuilt: ModelPricing = ModelPricing()
+    /// The pricing built from the seed, so Done no-ops when nothing changed (never pinning a
+    /// catalog-priced model just because the sheet was opened).
+    @State private var initialBuilt = ModelPricing()
+    /// Set by Clear Override so Done removes the pricing override even though the built pricing may
+    /// equal the catalog (a base rate defaulting back to the catalog value is not "empty").
+    @State private var explicitlyCleared = false
     @State private var expandThresholds = false
     @State private var expandService = false
     @State private var expandExtended = false
@@ -33,47 +36,95 @@ struct PricingEditorSheet: View {
         shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)?.pricing
     }
 
+    /// Catalog pricing WITHOUT this user's override — the reference each base rate defaults to.
+    /// Read from the composition's non-user layers, highest priority first (same approach the
+    /// capabilities sheet uses for reported token limits). `nil` when no source states pricing.
+    private var catalogPricing: ModelPricing? {
+        guard let composition = shared.llmKit.metadataCompositions[key] else { return nil }
+        for layer in [MetadataLayer.authoritative, .empirical, .downloadedOverrides, .enrichment] {
+            if let facts = composition.layers[layer], let pricing = facts.pricing { return pricing }
+        }
+        return nil
+    }
+
     private var hasPricingOverride: Bool {
         shared.userModelOverrides[key]?.pricing != nil
     }
 
-    private var noPricingKnown: Bool {
-        resolvedPricing?.base.hasAnyRate != true
-    }
-
     var body: some View {
+        let catalog = catalogPricing
+        let defaults = CatalogBaseDefaults(
+            input: Self.perMillion(catalog?.base.input),
+            output: Self.perMillion(catalog?.base.output),
+            cacheRead: Self.perMillion(catalog?.base.cacheRead),
+            cacheWrite: Self.perMillion(catalog?.base.cacheWrite))
         VStack(alignment: .leading, spacing: 16) {
             OverrideSheetHeader(title: "Pricing Override", subtitle: "\(providerID) — \(modelID)",
                                 onCancel: { dismiss() }, onDone: { save(); dismiss() })
-            PricingForm(editable: $editable, noPricingKnown: noPricingKnown,
+            PricingForm(editable: $editable, catalogDefaults: defaults,
+                        noPricingKnown: catalog?.base.hasAnyRate != true,
                         expandThresholds: $expandThresholds, expandService: $expandService,
                         expandExtended: $expandExtended)
             OverrideSheetFooter(
                 resetTitle: "Clear Override",
-                explanation: "Rates in USD per 1M tokens. Saving replaces the catalog's pricing for this model; Clear Override reverts to catalog pricing.",
+                explanation: "Rates in USD per 1M tokens. Overriding a rate replaces just that rate; Clear Override reverts the whole model to catalog pricing.",
                 resetDisabled: !hasPricingOverride,
-                onReset: { editable = EditablePricing() })
+                onReset: { clearOverride() })
         }
         .padding(20)
         .frame(minWidth: 560, idealWidth: 660, minHeight: 460, idealHeight: 680)
         .onAppear { loadFromShared() }
+        .onChange(of: editable) { _, newValue in
+            // A fresh edit after Clear Override cancels the clear intent.
+            if explicitlyCleared, !Self.isClearedShape(newValue) {
+                DispatchQueue.main.async { explicitlyCleared = false }
+            }
+        }
     }
 
     private func loadFromShared() {
-        editable = Self.editable(from: resolvedPricing)
-        initialBuilt = Self.pricing(from: editable)
-        expandThresholds = !editable.thresholdTiers.isEmpty
-        expandService = !editable.serviceTiers.isEmpty
-        expandExtended = editable.extendedCacheWrite != nil || !editable.extendedThresholds.isEmpty
+        let catalog = catalogPricing
+        let userPricing = shared.userModelOverrides[key]?.pricing
+        let resolved = resolvedPricing
+        var result = EditablePricing()
+        // A base rate is an OVERRIDE only when the stored value differs from the catalog default.
+        result.inputOverride = Self.baseOverride(userPricing?.base.input, catalog?.base.input)
+        result.outputOverride = Self.baseOverride(userPricing?.base.output, catalog?.base.output)
+        result.cacheReadOverride = Self.baseOverride(userPricing?.base.cacheRead, catalog?.base.cacheRead)
+        result.cacheWriteOverride = Self.baseOverride(userPricing?.base.cacheWrite, catalog?.base.cacheWrite)
+        // Advanced tiers are carried from the RESOLVED pricing so a base-rate edit doesn't drop them.
+        result.thresholdTiers = (resolved?.tokenThresholdTiers ?? []).map {
+            EditableThresholdTier(threshold: $0.tokenThreshold, rates: Self.editableRates($0.rates))
+        }
+        result.serviceTiers = (resolved?.serviceTiers ?? [:]).sorted { $0.key < $1.key }.map {
+            EditableServiceTier(name: $0.key, rates: Self.editableRates($0.value))
+        }
+        result.extendedCacheWrite = Self.perMillion(resolved?.extendedCacheTier?.cacheWrite)
+        result.extendedThresholds = (resolved?.extendedCacheTier?.thresholdOverrides ?? []).map {
+            EditableCacheThreshold(threshold: $0.tokenThreshold, cacheWrite: Self.perMillion($0.cacheWrite))
+        }
+        editable = result
+        initialBuilt = Self.pricing(from: result, catalog: catalog)
+        explicitlyCleared = false
+        expandThresholds = !result.thresholdTiers.isEmpty
+        expandService = !result.serviceTiers.isEmpty
+        expandExtended = result.extendedCacheWrite != nil || !result.extendedThresholds.isEmpty
     }
 
-    /// Writes the edited pricing as the user override — force-replacing the catalog's pricing.
-    /// Unchanged from the seed → no write. Emptied → the override's pricing is cleared (nil), which
-    /// reverts to catalog pricing. Every non-pricing field on the existing override is preserved.
+    private func clearOverride() {
+        editable = EditablePricing()
+        explicitlyCleared = true
+    }
+
     private func save() {
-        let built = Self.pricing(from: editable)
-        guard built != initialBuilt else { return }
-        let pricingOverride: ModelPricing? = Self.isEmpty(built) ? nil : built
+        let built = Self.pricing(from: editable, catalog: catalogPricing)
+        let pricingOverride: ModelPricing?
+        if explicitlyCleared {
+            pricingOverride = nil
+        } else {
+            guard built != initialBuilt else { return }
+            pricingOverride = Self.isEmpty(built) ? nil : built
+        }
         let existing = shared.userModelOverrides[key]
         let merged = ModelMetadataOverride(
             displayName: existing?.displayName,
@@ -96,6 +147,13 @@ struct PricingEditorSheet: View {
     private static func perMillion(_ perToken: Double?) -> Double? { perToken.map { $0 * 1_000_000 } }
     private static func perToken(_ perMillion: Double?) -> Double? { perMillion.map { $0 / 1_000_000 } }
 
+    /// A stored base rate is an override only when it differs from the catalog default; equal values
+    /// read back as "Default" so the control shows what the user actually changed. Returns per-1M.
+    private static func baseOverride(_ stored: Double?, _ catalog: Double?) -> Double? {
+        guard let stored, stored != catalog else { return nil }
+        return perMillion(stored)
+    }
+
     private static func editableRates(_ tier: PricingTier) -> EditableRates {
         EditableRates(input: perMillion(tier.input), output: perMillion(tier.output),
                       cacheRead: perMillion(tier.cacheRead), cacheWrite: perMillion(tier.cacheWrite))
@@ -106,23 +164,12 @@ struct PricingEditorSheet: View {
                     cacheRead: perToken(rates.cacheRead), cacheWrite: perToken(rates.cacheWrite))
     }
 
-    private static func editable(from pricing: ModelPricing?) -> EditablePricing {
-        var result = EditablePricing()
-        result.base = editableRates(pricing?.base ?? PricingTier())
-        result.thresholdTiers = (pricing?.tokenThresholdTiers ?? []).map {
-            EditableThresholdTier(threshold: $0.tokenThreshold, rates: editableRates($0.rates))
-        }
-        result.serviceTiers = (pricing?.serviceTiers ?? [:]).sorted { $0.key < $1.key }.map {
-            EditableServiceTier(name: $0.key, rates: editableRates($0.value))
-        }
-        result.extendedCacheWrite = perMillion(pricing?.extendedCacheTier?.cacheWrite)
-        result.extendedThresholds = (pricing?.extendedCacheTier?.thresholdOverrides ?? []).map {
-            EditableCacheThreshold(threshold: $0.tokenThreshold, cacheWrite: perMillion($0.cacheWrite))
-        }
-        return result
-    }
-
-    private static func pricing(from editable: EditablePricing) -> ModelPricing {
+    private static func pricing(from editable: EditablePricing, catalog: ModelPricing?) -> ModelPricing {
+        let base = PricingTier(
+            input: perToken(editable.inputOverride) ?? catalog?.base.input,
+            output: perToken(editable.outputOverride) ?? catalog?.base.output,
+            cacheRead: perToken(editable.cacheReadOverride) ?? catalog?.base.cacheRead,
+            cacheWrite: perToken(editable.cacheWriteOverride) ?? catalog?.base.cacheWrite)
         let tiers = editable.thresholdTiers.compactMap { tier -> TokenThresholdTier? in
             guard let threshold = tier.threshold else { return nil }
             let rates = pricingTier(tier.rates)
@@ -143,13 +190,18 @@ struct PricingEditorSheet: View {
             }
             extended = CacheWriteOverride(cacheWrite: cacheWrite, thresholdOverrides: overrides)
         }
-        return ModelPricing(base: pricingTier(editable.base), tokenThresholdTiers: tiers,
-                            serviceTiers: services, extendedCacheTier: extended)
+        return ModelPricing(base: base, tokenThresholdTiers: tiers, serviceTiers: services, extendedCacheTier: extended)
     }
 
     private static func isEmpty(_ pricing: ModelPricing) -> Bool {
         !pricing.base.hasAnyRate && pricing.tokenThresholdTiers.isEmpty
             && pricing.serviceTiers.isEmpty && pricing.extendedCacheTier == nil
+    }
+
+    private static func isClearedShape(_ e: EditablePricing) -> Bool {
+        e.inputOverride == nil && e.outputOverride == nil && e.cacheReadOverride == nil
+            && e.cacheWriteOverride == nil && e.thresholdTiers.isEmpty && e.serviceTiers.isEmpty
+            && e.extendedCacheWrite == nil && e.extendedThresholds.isEmpty
     }
 }
 
@@ -181,18 +233,32 @@ private struct EditableCacheThreshold: Identifiable, Equatable {
     var cacheWrite: Double?
 }
 
+/// Base rates carry per-rate OVERRIDES (USD per 1M); `nil` = use the catalog default. Advanced tiers
+/// are carried whole from the resolved pricing.
 private struct EditablePricing: Equatable {
-    var base = EditableRates()
+    var inputOverride: Double?
+    var outputOverride: Double?
+    var cacheReadOverride: Double?
+    var cacheWriteOverride: Double?
     var thresholdTiers: [EditableThresholdTier] = []
     var serviceTiers: [EditableServiceTier] = []
     var extendedCacheWrite: Double?
     var extendedThresholds: [EditableCacheThreshold] = []
 }
 
+/// Catalog base rates (USD per 1M) shown as the reference each base-rate control defaults to.
+private struct CatalogBaseDefaults: Equatable {
+    let input: Double?
+    let output: Double?
+    let cacheRead: Double?
+    let cacheWrite: Double?
+}
+
 // MARK: - Form
 
 private struct PricingForm: View {
     @Binding var editable: EditablePricing
+    let catalogDefaults: CatalogBaseDefaults
     let noPricingKnown: Bool
     @Binding var expandThresholds: Bool
     @Binding var expandService: Bool
@@ -207,10 +273,10 @@ private struct PricingForm: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
-                RateField(label: "Input", perMillion: $editable.base.input, placeholder: "e.g. 3.00")
-                RateField(label: "Output", perMillion: $editable.base.output, placeholder: "e.g. 15.00")
-                RateField(label: "Cache read", perMillion: $editable.base.cacheRead, placeholder: "e.g. 0.30")
-                RateField(label: "Cache write", perMillion: $editable.base.cacheWrite, placeholder: "e.g. 3.75")
+                PricingRateRow(label: "Input", catalogDefault: catalogDefaults.input, override: $editable.inputOverride)
+                PricingRateRow(label: "Output", catalogDefault: catalogDefaults.output, override: $editable.outputOverride)
+                PricingRateRow(label: "Cache read", catalogDefault: catalogDefaults.cacheRead, override: $editable.cacheReadOverride)
+                PricingRateRow(label: "Cache write", catalogDefault: catalogDefaults.cacheWrite, override: $editable.cacheWriteOverride)
             }
             Section("Advanced") {
                 ThresholdTiersDisclosure(tiers: $editable.thresholdTiers, isExpanded: $expandThresholds)
@@ -268,7 +334,7 @@ private struct ExtendedCacheDisclosure: View {
         DisclosureGroup(
             isExpanded: $isExpanded,
             content: {
-                RateField(label: "Cache write (extended TTL)", perMillion: $cacheWrite, placeholder: "e.g. 6.00")
+                RateField(label: "Cache write (extended TTL)", perMillion: $cacheWrite)
                 ForEach($thresholds) { $entry in
                     ExtendedThresholdRow(entry: $entry, onDelete: { thresholds.removeAll { $0.id == entry.id } })
                 }
@@ -281,15 +347,40 @@ private struct ExtendedCacheDisclosure: View {
 
 // MARK: - Rows
 
-/// One rate: label on the left, a right-aligned USD-per-1M number field.
+/// A base rate: the catalog rate as a reference in the header, edited through the shared
+/// Default/Override control so overriding one rate never disturbs the others.
+private struct PricingRateRow: View {
+    let label: String
+    let catalogDefault: Double?
+    @Binding var override: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label).font(.headline)
+                Spacer()
+                Text("Catalog: \(catalogDefault.map { OverrideValueParsing.usdLabel($0) } ?? "none")")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(catalogDefault == nil ? AnyShapeStyle(HierarchicalShapeStyle.tertiary)
+                                                           : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+            }
+            OverrideValueControl(override: $override, defaultValue: catalogDefault,
+                                 draftText: OverrideValueParsing.usdDraft,
+                                 format: OverrideValueParsing.usdLabel,
+                                 parse: OverrideValueParsing.usdPerMillion)
+        }
+    }
+}
+
+/// One advanced rate: label on the left, a right-aligned USD-per-1M number field. No placeholder
+/// clutter; a fixed width keeps the advanced fields aligned.
 private struct RateField: View {
     let label: String
     @Binding var perMillion: Double?
-    var placeholder: String = "—"
 
     var body: some View {
         LabeledContent(label) {
-            TextField(placeholder, value: $perMillion, format: .number)
+            TextField("", value: $perMillion, format: .number)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
                 .multilineTextAlignment(.trailing)
@@ -318,9 +409,9 @@ private struct ThresholdTierRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text("Above").font(.subheadline)
-                TextField("tokens, e.g. 200000", value: $tier.threshold, format: .number)
+                TextField("tokens", value: $tier.threshold, format: .number)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 160)
+                    .frame(width: 120)
                 Text("tokens").font(.subheadline).foregroundStyle(.secondary)
                 Spacer()
                 Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }
@@ -339,7 +430,7 @@ private struct ServiceTierRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                TextField("tier name, e.g. priority", text: $tier.name)
+                TextField("tier name", text: $tier.name)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
                 Spacer()
@@ -363,9 +454,9 @@ private struct ExtendedThresholdRow: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
             Text("→ cache write").font(.caption).foregroundStyle(.secondary)
-            TextField("per 1M", value: $entry.cacheWrite, format: .number)
+            TextField("", value: $entry.cacheWrite, format: .number)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 100)
+                .frame(width: 120)
             Spacer()
             Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }
                 .buttonStyle(.borderless)
