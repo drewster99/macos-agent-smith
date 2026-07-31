@@ -168,6 +168,8 @@ struct ModelsSettingsTab: View {
             }
         }
         if Task.isCancelled { return [] }
+        // Both orders are two-level: the chosen key first, the other as tiebreak (the model->provider
+        // tiebreak rarely matters, but keeps ordering stable and deterministic).
         switch order {
         case .provider:
             rows.sort { lhs, rhs in
@@ -178,7 +180,13 @@ struct ModelsSettingsTab: View {
                 return lhs.model.displayName.localizedCaseInsensitiveCompare(rhs.model.displayName) == .orderedAscending
             }
         case .model:
-            rows.sort { $0.model.displayName.localizedCaseInsensitiveCompare($1.model.displayName) == .orderedAscending }
+            rows.sort { lhs, rhs in
+                let byModel = lhs.model.displayName.localizedCaseInsensitiveCompare(rhs.model.displayName)
+                if byModel != .orderedSame {
+                    return byModel == .orderedAscending
+                }
+                return lhs.provider.name.localizedCaseInsensitiveCompare(rhs.provider.name) == .orderedAscending
+            }
         }
         return rows
     }
@@ -276,7 +284,13 @@ private struct ModelCatalogSection: View {
                     ProviderFilterPicker(providers: providers, selection: $providerFilterID)
                     MacSearchField(text: $filterText, placeholder: "Search", help: modelSearchHelp)
                         .frame(maxWidth: .infinity)
-                    Picker("Sort", selection: $sortOrder) {
+                    // With a single provider selected the list is inherently model-ordered, so the
+                    // control is disabled and shows "Model" — but via a derived binding that leaves the
+                    // stored sortOrder alone, so clearing the provider restores the prior choice.
+                    Picker("Sort", selection: Binding(
+                        get: { providerFilterID == nil ? sortOrder : .model },
+                        set: { sortOrder = $0 }
+                    )) {
                         ForEach(ModelSortOrder.allCases) { order in
                             Text(order.rawValue).tag(order)
                         }
@@ -284,6 +298,7 @@ private struct ModelCatalogSection: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
+                    .disabled(providerFilterID != nil)
                 }
                 ModelCatalogList(
                     filterText: filterText,
