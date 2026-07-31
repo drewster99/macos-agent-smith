@@ -255,6 +255,21 @@ final class SharedAppState {
     private func notifyModelAssignmentsChanged() {
         for observer in modelAssignmentObservers.values { observer() }
     }
+
+    /// Observers (one per active session) that re-resolve and push the effective orchestration
+    /// settings down to their runtime when the app-wide override (or downloaded defaults) changes —
+    /// so a Settings edit applies immediately, with no restart. A session's OWN per-session override
+    /// change is pushed by that session directly, not through here (mirrors the model-assignment split).
+    private var orchestrationSettingsObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerOrchestrationSettingsObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        orchestrationSettingsObservers[id] = observer
+    }
+    func removeOrchestrationSettingsObserver(_ id: UUID) {
+        orchestrationSettingsObservers.removeValue(forKey: id)
+    }
+    private func notifyOrchestrationSettingsChanged() {
+        for observer in orchestrationSettingsObservers.values { observer() }
+    }
     private static func loadToolPolicies() -> [String: ToolPolicy] {
         guard let data = UserDefaults.standard.data(forKey: "globalToolPolicies"),
               let decoded = try? JSONDecoder().decode([String: ToolPolicy].self, from: data) else { return [:] }
@@ -392,6 +407,27 @@ final class SharedAppState {
     /// through `setRoleModelConfigOverride(...)`.
     private(set) var roleModelConfigOverrides: [String: ModelConfigurationOverride] = [:]
 
+    /// The shipped orchestration defaults (bundled `orchestration_defaults.json`), or the compile-time
+    /// `.builtIn` when that file is missing/corrupt. Loaded once at launch, never edited at runtime.
+    private(set) var shippedOrchestrationDefaults: OrchestrationSettings = .builtIn
+    /// The downloaded orchestration defaults, if a refresh has ever landed one (the download feature
+    /// is not built yet, so this is `nil` today). When present it REPLACES the shipped baseline.
+    private(set) var downloadedOrchestrationDefaults: OrchestrationSettings?
+    /// The app-wide user override — a sparse delta the user edits in the Orchestration settings tab,
+    /// layered over ``systemOrchestrationDefault``. Written through ``setOrchestrationAppOverride(_:)``.
+    private(set) var orchestrationAppOverride: OrchestrationSettingsOverride = .init()
+
+    /// The system default the app sees — downloaded defaults win over shipped when present.
+    var systemOrchestrationDefault: OrchestrationSettings {
+        downloadedOrchestrationDefaults ?? shippedOrchestrationDefaults
+    }
+    /// The effective app-wide orchestration settings = system default with the app-wide override
+    /// overlaid. This is the baseline each session's per-session override resolves ON TOP of, and the
+    /// value shown as "inherited" in the per-session sheet.
+    var effectiveOrchestrationDefault: OrchestrationSettings {
+        systemOrchestrationDefault.applying(orchestrationAppOverride)
+    }
+
     /// Set when a load/decode operation fails during startup; drives the error alert.
     var startupError: String?
     /// ID of the session whose window is currently key (frontmost). Updated by
@@ -501,6 +537,7 @@ final class SharedAppState {
     /// and the latest snapshot always wins.
     private let userModelOverridesWriter: SerialPersistenceWriter<[String: ModelMetadataOverride]>
     private let roleModelConfigOverridesWriter: SerialPersistenceWriter<[String: ModelConfigurationOverride]>
+    private let orchestrationAppOverrideWriter: SerialPersistenceWriter<OrchestrationSettingsOverride>
     private let memoriesWriter: SerialPersistenceWriter<[MemoryEntry]>
     private let taskSummariesWriter: SerialPersistenceWriter<[TaskSummaryEntry]>
     private let mcpServersWriter: SerialPersistenceWriter<[MCPServerConfig]>
@@ -515,6 +552,9 @@ final class SharedAppState {
         }
         self.roleModelConfigOverridesWriter = SerialPersistenceWriter(label: "roleModelConfigOverrides") { snapshot in
             try await pm.saveRoleModelConfigOverrides(snapshot)
+        }
+        self.orchestrationAppOverrideWriter = SerialPersistenceWriter(label: "orchestrationAppOverride") { snapshot in
+            try await pm.saveOrchestrationAppOverride(snapshot)
         }
         self.memoriesWriter = SerialPersistenceWriter(label: "memories") { snapshot in
             try await pm.saveMemories(snapshot)
@@ -686,6 +726,14 @@ final class SharedAppState {
         // Per-(role, model) runtime overrides — best-effort; a missing/corrupt file is an empty set,
         // which just means everything inherits the model defaults (the clean-slate baseline).
         roleModelConfigOverrides = (try? await basePersistence.loadRoleModelConfigOverrides()) ?? [:]
+
+        // Orchestration settings: shipped bundled defaults (fallback to the compile-time `.builtIn`),
+        // the downloaded defaults if a refresh ever landed one (replaces shipped as the baseline), and
+        // the app-wide user override. All best-effort — a missing/corrupt file degrades to "inherit".
+        shippedOrchestrationDefaults = (try? DefaultsLoader.loadBundledOrchestrationDefaults()) ?? .builtIn
+        downloadedOrchestrationDefaults = (try? await basePersistence.loadDownloadedOrchestrationDefaults()) ?? nil
+        orchestrationAppOverride = (try? await basePersistence.loadOrchestrationAppOverride()) ?? .init()
+
         do {
             let overrides = try await basePersistence.loadUserModelOverrides()
             userModelOverrides = overrides
@@ -1154,6 +1202,22 @@ final class SharedAppState {
         let snapshot = roleModelConfigOverrides
         let writer = roleModelConfigOverridesWriter
         Task { await writer.enqueue(snapshot) }
+    }
+
+    /// Replaces the app-wide orchestration override, persists it, and pushes the newly-resolved
+    /// effective settings to every running session (each re-resolves its own per-session override on
+    /// top). An empty override is persisted as-is — it decodes back to "inherit every field".
+    func setOrchestrationAppOverride(_ override: OrchestrationSettingsOverride) {
+        orchestrationAppOverride = override
+        notifyOrchestrationSettingsChanged()
+        let snapshot = orchestrationAppOverride
+        let writer = orchestrationAppOverrideWriter
+        Task { await writer.enqueue(snapshot) }
+    }
+
+    /// Clears the app-wide override so every field inherits the shipped/downloaded default again.
+    func resetOrchestrationAppOverride() {
+        setOrchestrationAppOverride(OrchestrationSettingsOverride())
     }
 
     /// Records a model's true maximum output-token limit — learned at runtime when a backend

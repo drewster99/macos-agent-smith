@@ -1,0 +1,16 @@
+{
+  "summarizeCompletedTasks": true,
+  "summarizeForContextCompaction": true,
+  "retrieval": {
+    "newTask": { "memory": true, "task": true },
+    "userMessage": { "memory": true, "task": false },
+    "beforeValidatorReview": { "memory": false, "task": false },
+    "beforeSecurityScoping": { "memory": false, "task": false },
+    "beforeSecurityToolReview": { "memory": true, "task": false }
+  },
+  "enableTaskCompletionValidators": true,
+  "scopeToolSetOnTaskStart": true,
+  "reviewSmithToolCalls": true,
+  "reviewBrownToolCalls": true,
+  "reviewValidatorToolCalls": true
+}

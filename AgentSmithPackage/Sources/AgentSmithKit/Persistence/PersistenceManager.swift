@@ -576,6 +576,43 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([String: ModelConfigurationOverride].self, from: data)
     }
 
+    // MARK: - Orchestration settings (shared)
+    //
+    // The app-wide user override (a sparse delta over the shipped/downloaded defaults) and the
+    // downloaded defaults file (a complete value that, when present, replaces the shipped baseline).
+    // Both global — orchestration behavior is an app-level policy layered per-session elsewhere.
+
+    public func saveOrchestrationAppOverride(_ override: OrchestrationSettingsOverride) throws {
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(override)
+        let url = baseDirectory.appendingPathComponent("orchestration_settings_override.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadOrchestrationAppOverride() throws -> OrchestrationSettingsOverride {
+        let url = baseDirectory.appendingPathComponent("orchestration_settings_override.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return OrchestrationSettingsOverride() }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(OrchestrationSettingsOverride.self, from: data)
+    }
+
+    /// The downloaded orchestration defaults, if a refresh has ever landed one. `nil` (the common
+    /// case today, before the download feature exists) means the shipped bundled defaults are the
+    /// baseline the system sees.
+    public func saveDownloadedOrchestrationDefaults(_ settings: OrchestrationSettings) throws {
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(settings)
+        let url = baseDirectory.appendingPathComponent("orchestration_defaults_downloaded.json")
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadDownloadedOrchestrationDefaults() throws -> OrchestrationSettings? {
+        let url = baseDirectory.appendingPathComponent("orchestration_defaults_downloaded.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(OrchestrationSettings.self, from: data)
+    }
+
     // MARK: - Attachments (global)
 
     /// One-time migration: moves every session's attachment files into the global attachments dir.

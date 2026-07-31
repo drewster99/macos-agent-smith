@@ -23,4 +23,16 @@ enum DefaultsLoader {
         let data = try Data(contentsOf: url)
         return try JSONDecoder().decode(AppDefaults.self, from: data)
     }
+
+    /// Decodes and returns the bundled `OrchestrationSettings` from `orchestration_defaults.json`.
+    /// Its own file (not folded into `defaults.json`) so it can later be refreshed from a download.
+    /// Throwing rather than falling back keeps a corrupt shipped file visible; the caller degrades to
+    /// the compile-time `OrchestrationSettings.builtIn`.
+    static func loadBundledOrchestrationDefaults() throws -> OrchestrationSettings {
+        guard let url = Bundle.main.url(forResource: "orchestration_defaults", withExtension: "json") else {
+            throw DefaultsLoaderError.missingBundledFile
+        }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(OrchestrationSettings.self, from: data)
+    }
 }
