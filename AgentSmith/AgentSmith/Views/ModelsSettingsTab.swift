@@ -20,10 +20,10 @@ struct ModelsSettingsTab: View {
     @State private var filterText = ""
     @State private var sortOrder: ModelSortOrder = .provider
 
-    /// The filtered + sorted catalog, cached so the sort runs on input changes (below) rather than
-    /// on every render. `nil` means "not yet computed" — distinct from `[]` ("computed, nothing to
-    /// show") — so the first frame renders no list rather than briefly flashing the empty-catalog
-    /// message before `recompute()` runs.
+    /// The filtered + sorted catalog. Computed OFF the main thread (`computeRows`, below) and
+    /// assigned here; the gather + locale-aware sort never touch the main actor. `nil` means "not
+    /// yet computed" — distinct from `[]` ("computed, nothing to show") — so the first frame renders
+    /// no list rather than briefly flashing the empty-catalog message before the first compute runs.
     @State private var displayed: [ProviderModel]?
 
     @State private var editingFlagsFor: ModelEditTarget?
@@ -59,11 +59,7 @@ struct ModelsSettingsTab: View {
 
             ModelsRefreshErrorList(errors: shared.llmKit.refreshErrors)
         }
-        .task { recompute() }
-        .onChange(of: filterText) { recompute() }
-        .onChange(of: sortOrder) { recompute() }
-        .onChange(of: shared.llmKit.models) { recompute() }
-        .onChange(of: shared.llmKit.providers) { recompute() }
+        .task(id: recomputeInputs) { await recompute() }
         .sheet(item: $editingFlagsFor) { target in
             BehaviorFlagsEditorSheet(shared: shared, providerID: target.providerID, modelID: target.modelID)
         }
@@ -83,25 +79,64 @@ struct ModelsSettingsTab: View {
         })
     }
 
-    /// Rebuilds `displayed` from the current catalog, filter text, and sort order. Called from the
-    /// lifecycle/`onChange` hooks above — never from `body` — so the O(n log n) locale-aware sort
-    /// runs on real input changes, not on every render pass.
-    private func recompute() {
+    /// The inputs the displayed list derives from. Used as the `.task(id:)` key so any change —
+    /// filter text, sort order, a catalog refresh, or a provider edit — cancels the in-flight
+    /// compute/reveal and starts a fresh one. Comparing it is an array-equality check over the
+    /// catalog, which SwiftUI only performs on a body update, not while scrolling.
+    private var recomputeInputs: RecomputeInputs {
+        RecomputeInputs(
+            query: filterText,
+            order: sortOrder,
+            providers: shared.llmKit.providers,
+            catalog: shared.llmKit.models
+        )
+    }
+
+    /// Snapshots the inputs on the main actor, computes the filtered + sorted rows OFF the main
+    /// thread, then publishes them. Runs inside `.task(id:)`, so a change to any input cancels this
+    /// (via `Task.isCancelled`) before it can publish stale rows. The list itself is a `LazyVStack`,
+    /// so only the on-screen rows realize — no need to stream the full set in.
+    private func recompute() async {
+        let inputs = recomputeInputs
+        let rows = await Self.computeRows(
+            providers: inputs.providers,
+            catalog: inputs.catalog,
+            query: inputs.query,
+            order: inputs.order
+        )
+        if Task.isCancelled { return }
+        displayed = rows
+    }
+
+    /// The gather + filter + sort, run off the main actor (`@concurrent`). Takes value snapshots so
+    /// it never touches `shared`/`llmKit` (both main-isolated); groups the catalog by provider once
+    /// (O(n)) rather than filtering it per provider, then filters and locale-sorts.
+    @concurrent
+    nonisolated private static func computeRows(
+        providers: [ModelProvider],
+        catalog: [ModelInfo],
+        query: String,
+        order: ModelSortOrder
+    ) async -> [ProviderModel] {
+        var modelsByProvider: [String: [ModelInfo]] = [:]
+        for model in catalog {
+            modelsByProvider[model.providerID, default: []].append(model)
+        }
         var pairs: [ProviderModel] = []
-        for provider in shared.llmKit.providers {
-            for model in shared.llmKit.models(for: provider.id) {
+        for provider in providers {
+            for model in modelsByProvider[provider.id] ?? [] {
                 pairs.append(ProviderModel(provider: provider, model: model))
             }
         }
-        let query = filterText.trimmingCharacters(in: .whitespaces)
-        if !query.isEmpty {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty {
             pairs = pairs.filter { pair in
-                pair.provider.name.localizedCaseInsensitiveContains(query)
-                    || pair.model.modelID.localizedCaseInsensitiveContains(query)
-                    || pair.model.displayName.localizedCaseInsensitiveContains(query)
+                pair.provider.name.localizedCaseInsensitiveContains(trimmed)
+                    || pair.model.modelID.localizedCaseInsensitiveContains(trimmed)
+                    || pair.model.displayName.localizedCaseInsensitiveContains(trimmed)
             }
         }
-        switch sortOrder {
+        switch order {
         case .provider:
             pairs.sort { lhs, rhs in
                 let byProvider = lhs.provider.name.localizedCaseInsensitiveCompare(rhs.provider.name)
@@ -113,7 +148,7 @@ struct ModelsSettingsTab: View {
         case .model:
             pairs.sort { $0.model.displayName.localizedCaseInsensitiveCompare($1.model.displayName) == .orderedAscending }
         }
-        displayed = pairs
+        return pairs
     }
 
     private func exportDefaults() {
@@ -165,11 +200,20 @@ private enum ModelSortOrder: String, CaseIterable, Identifiable {
 
 /// One (provider, model) pair — the unit the Models tab lists and edits. The config pool was
 /// retired 2026-07-31, so this tab edits per-model metadata (flags / capabilities / pricing)
-/// keyed on `(providerID, modelID)`, not `ModelConfiguration` objects.
-private struct ProviderModel: Identifiable {
+/// keyed on `(providerID, modelID)`, not `ModelConfiguration` objects. `Sendable` so the
+/// off-main `computeRows` can hand the result back to the main actor.
+private struct ProviderModel: Identifiable, Sendable {
     let provider: ModelProvider
     let model: ModelInfo
     var id: String { "\(provider.id)/\(model.modelID)" }
+}
+
+/// The value snapshot the displayed list derives from — the `.task(id:)` key that drives recompute.
+private struct RecomputeInputs: Equatable {
+    let query: String
+    let order: ModelSortOrder
+    let providers: [ModelProvider]
+    let catalog: [ModelInfo]
 }
 
 /// (providerID, modelID) of the model whose per-model editor sheet is open.
@@ -216,11 +260,12 @@ private struct ModelCatalogSection: View {
     }
 }
 
-/// The eager list of matching model rows, or the empty-state message when nothing matches.
+/// The list of matching model rows, or the empty-state message when nothing matches.
 ///
-/// Rendering stays non-lazy per the project's SwiftUI rules; the surrounding view keeps the row
-/// data static during scroll (no observed state changes while scrolling) so the eager tree is not
-/// rebuilt on scroll.
+/// A `LazyVStack` (user-approved 2026-07-31, overriding the project's default "avoid lazy" rule):
+/// the catalog runs to ~1,700 rows, so eager realization froze the tab. Rows are short and uniform,
+/// well under a screen dimension, so the sizing pitfall that rule guards against does not apply.
+/// Only on-screen rows realize, so both opening the tab and scrolling stay smooth.
 private struct ModelCatalogList: View {
     let filterText: String
     let displayed: [ProviderModel]?
@@ -235,14 +280,16 @@ private struct ModelCatalogList: View {
                     ? "No models cached. Use Refresh Models below."
                     : "No models match \u{201C}\(filterText)\u{201D}.")
             } else {
-                ForEach(rows) { pair in
-                    ModelRow(
-                        provider: pair.provider,
-                        model: pair.model,
-                        onEditFlags: onEditFlags,
-                        onEditCapabilities: onEditCapabilities,
-                        onEditPricing: onEditPricing
-                    )
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(rows) { pair in
+                        ModelRow(
+                            provider: pair.provider,
+                            model: pair.model,
+                            onEditFlags: onEditFlags,
+                            onEditCapabilities: onEditCapabilities,
+                            onEditPricing: onEditPricing
+                        )
+                    }
                 }
             }
         }
