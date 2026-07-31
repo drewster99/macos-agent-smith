@@ -235,6 +235,15 @@ extension OrchestrationRuntime {
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard var task = await taskStore.task(id: taskID), task.status == .validating else { return }
 
+        // Validation disabled: complete the task WITHOUT judging its criteria (flagged so the banner
+        // and Smith's notice say so honestly). The call graph is unchanged — task_complete still routes
+        // here; validation simply doesn't run. Checked BEFORE the missing-model park: if the user turned
+        // validation off, a missing validator model is moot.
+        guard orchestrationSettings.enableTaskCompletionValidators else {
+            _ = await completeValidatedTask(taskID: taskID, validationWasRun: false)
+            return
+        }
+
         // No validator model, no validation. Park the task rather than letting each criterion
         // error its way into an escalation Smith would then be asked to resolve: this is a
         // configuration problem, and the only honest fix is configuration.
@@ -1248,7 +1257,8 @@ extension OrchestrationRuntime {
     private func completeValidatedTask(
         taskID: UUID,
         from allowedStatuses: Set<AgentTask.Status> = [.validating],
-        judgedInRound token: ValidationRoundToken? = nil
+        judgedInRound token: ValidationRoundToken? = nil,
+        validationWasRun: Bool = true
     ) async -> Bool {
         // CAS: only complete from an allowed state under the contract we judged — a pause/stop/
         // re-validate or a criteria edit that landed after the caller's snapshot must not be
@@ -1270,11 +1280,17 @@ extension OrchestrationRuntime {
         if let result = completed.result?.trimmingCharacters(in: .whitespacesAndNewlines), !result.isEmpty {
             bannerMetadata["taskResult"] = .string(result)
         }
+        if !validationWasRun {
+            bannerMetadata["validationSkipped"] = .bool(true)
+        }
         await channel.post(ChannelMessage(sender: .system, content: completed.title, metadata: bannerMetadata))
         await summarizeAndEmbedTask(taskID: taskID)
         if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
+            let completionNote = validationWasRun
+                ? "passed acceptance validation and is COMPLETE"
+                : "is COMPLETE — acceptance validation is disabled, so its criteria were NOT judged"
             await smithAgent.appendUserMessage("""
-                [System: Task "\(completed.title)" (ID: \(taskID.uuidString)) passed acceptance validation and is COMPLETE. \
+                [System: Task "\(completed.title)" (ID: \(taskID.uuidString)) \(completionNote). \
                 The result was already delivered to the user in the Task Completed banner — do not repeat it. \
                 No action is needed from you.]
                 """)

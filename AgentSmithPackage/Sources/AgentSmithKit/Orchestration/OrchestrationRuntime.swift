@@ -84,7 +84,9 @@ public actor OrchestrationRuntime {
     /// summarizer, retrieval, validation, and security. Pushed by the owning session (app-wide
     /// effective default + this session's override) and refreshed live on change. Defaults to
     /// `.builtIn` so a runtime that is never handed settings behaves exactly as before this feature.
-    private var orchestrationSettings: OrchestrationSettings = .builtIn
+    /// `private(set)`: read module-wide (the `TaskValidationCoordinator` / security extensions live in
+    /// other files), written only through `setOrchestrationSettings`.
+    private(set) var orchestrationSettings: OrchestrationSettings = .builtIn
 
     /// Set synchronously at the top of `start()` (before its first `await`) and cleared via
     /// `defer`. `smith` isn't assigned until ~190 lines and several suspension points into
