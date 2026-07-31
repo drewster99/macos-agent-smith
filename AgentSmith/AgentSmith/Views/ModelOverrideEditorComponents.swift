@@ -168,6 +168,9 @@ struct OverrideValueControl<Value: Equatable>: View {
     /// Pretty text for the committed, clickable label.
     let format: (Value) -> String
     let parse: (String) -> Value?
+    /// Bumped by the parent's Reset/Clear so the control fully resyncs — needed because a reset that
+    /// leaves an already-`nil` override unchanged emits no `override` change to observe.
+    var resetToken: Int = 0
 
     private enum Stage: Equatable { case inactive, editing, committed, pendingClear }
     private enum Segment: Hashable { case useDefault, useOverride }
@@ -211,10 +214,16 @@ struct OverrideValueControl<Value: Equatable>: View {
         }
         .onAppear { stage = override == nil ? .inactive : .committed }
         .onChange(of: override) { _, newValue in
-            // Resync when the value is cleared from OUTSIDE (e.g. the sheet's Reset button).
-            if newValue == nil, stage == .committed || stage == .editing {
+            // Resync when the value is cleared from OUTSIDE (e.g. the sheet's Reset button) from any
+            // non-inactive stage, including pendingClear.
+            if newValue == nil, stage != .inactive {
                 DispatchQueue.main.async { stage = .inactive }
             }
+        }
+        .onChange(of: resetToken) { _, _ in
+            // Catches the case `onChange(of: override)` cannot: a reset that leaves an uncommitted
+            // (already-nil) override in place, which would otherwise strand an open editing field.
+            DispatchQueue.main.async { stage = override == nil ? .inactive : .committed }
         }
     }
 

@@ -23,6 +23,8 @@ struct CapabilitiesEditorSheet: View {
     @State private var maxContextOverride: Int?
     @State private var maxOutputOverride: Int?
     @State private var probeRunner = ModelProbeRunner()
+    /// Bumped by Reset to defaults so each limit's Default/Override control fully resyncs.
+    @State private var resetToken = 0
 
     private var key: String { "\(providerID)/\(modelID)" }
     private var targetKey: String { "\(providerID)/\(modelID)" }
@@ -89,6 +91,7 @@ struct CapabilitiesEditorSheet: View {
                 targetKey: targetKey,
                 providerAvailable: provider != nil,
                 onProbe: { runProbe() },
+                resetToken: resetToken,
                 states: $states,
                 displayNameOverride: $displayNameOverride,
                 maxContextOverride: $maxContextOverride,
@@ -117,6 +120,7 @@ struct CapabilitiesEditorSheet: View {
         displayNameOverride = ""
         maxContextOverride = nil
         maxOutputOverride = nil
+        resetToken += 1
     }
 
     private func loadFromShared() {
@@ -200,6 +204,7 @@ private struct CapabilitiesForm: View {
     let targetKey: String
     let providerAvailable: Bool
     let onProbe: () -> Void
+    let resetToken: Int
     @Binding var states: [String: TriStateOverride]
     @Binding var displayNameOverride: String
     @Binding var maxContextOverride: Int?
@@ -243,10 +248,10 @@ private struct CapabilitiesForm: View {
             Section("Limits") {
                 LimitRow(title: "Max context (input) tokens",
                          help: "Correct the model's context window when the catalog is wrong or missing (e.g. Ollama Cloud reports no context window). Becomes the value the app uses everywhere. Empty = use the reported value.",
-                         reported: reportedContext, value: $maxContextOverride)
+                         reported: reportedContext, value: $maxContextOverride, resetToken: resetToken)
                 LimitRow(title: "Max output tokens",
                          help: "Correct the model's output-token ceiling when the catalog is wrong or missing. Becomes the value the app uses. Empty = use the reported value.",
-                         reported: reportedOutput, value: $maxOutputOverride)
+                         reported: reportedOutput, value: $maxOutputOverride, resetToken: resetToken)
             }
             Section("Capabilities") {
                 LabeledContent("Effort levels") {
@@ -321,6 +326,7 @@ private struct LimitRow: View {
     let help: String
     let reported: Int?
     @Binding var value: Int?
+    let resetToken: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -339,7 +345,8 @@ private struct LimitRow: View {
             OverrideValueControl(override: $value, defaultValue: reported,
                                  draftText: OverrideValueParsing.tokenDraft,
                                  format: OverrideValueParsing.tokenLabel,
-                                 parse: OverrideValueParsing.tokenCount)
+                                 parse: OverrideValueParsing.tokenCount,
+                                 resetToken: resetToken)
         }
     }
 }

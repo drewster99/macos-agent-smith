@@ -23,9 +23,16 @@ struct PricingEditorSheet: View {
     /// The pricing built from the seed, so Done no-ops when nothing changed (never pinning a
     /// catalog-priced model just because the sheet was opened).
     @State private var initialBuilt = ModelPricing()
+    /// Catalog + resolved pricing CAPTURED AT LOAD. Reused for every build so a background refresh
+    /// mid-sheet can't shift the reference out from under the no-op comparison (and the reference
+    /// display stays stable while the sheet is open).
+    @State private var catalogAtLoad: ModelPricing?
+    @State private var resolvedAtLoad: ModelPricing?
     /// Set by Clear Override so Done removes the pricing override even though the built pricing may
     /// equal the catalog (a base rate defaulting back to the catalog value is not "empty").
     @State private var explicitlyCleared = false
+    /// Bumped on Clear Override so each base-rate control fully resyncs (incl. an uncommitted field).
+    @State private var resetToken = 0
     @State private var expandThresholds = false
     @State private var expandService = false
     @State private var expandExtended = false
@@ -37,13 +44,20 @@ struct PricingEditorSheet: View {
     }
 
     /// Catalog pricing WITHOUT this user's override — the reference each base rate defaults to.
-    /// Read from the composition's non-user layers, highest priority first (same approach the
-    /// capabilities sheet uses for reported token limits). `nil` when no source states pricing.
-    private var catalogPricing: ModelPricing? {
-        guard let composition = shared.llmKit.metadataCompositions[key] else { return nil }
-        for layer in [MetadataLayer.authoritative, .empirical, .downloadedOverrides, .enrichment] {
-            if let facts = composition.layers[layer], let pricing = facts.pricing { return pricing }
+    ///
+    /// Read from the composition's non-user layers in the SAME precedence the merge applies:
+    /// `downloadedOverrides` (force) outranks the gap-fill layers authoritative → empirical →
+    /// enrichment. Compositions are in-memory and empty on a cached launch that never refreshed, so
+    /// when there is no user pricing override the resolved pricing IS the catalog (the fallback
+    /// `reportedLimit` uses for token limits). `nil` only when no source states pricing and an
+    /// override exists — the one case pre-override pricing genuinely can't be recovered.
+    private func computeCatalogPricing() -> ModelPricing? {
+        if let composition = shared.llmKit.metadataCompositions[key] {
+            for layer in [MetadataLayer.downloadedOverrides, .authoritative, .empirical, .enrichment] {
+                if let facts = composition.layers[layer], let pricing = facts.pricing { return pricing }
+            }
         }
+        if shared.userModelOverrides[key]?.pricing == nil { return resolvedPricing }
         return nil
     }
 
@@ -52,7 +66,9 @@ struct PricingEditorSheet: View {
     }
 
     var body: some View {
-        let catalog = catalogPricing
+        // Fresh for the reference DISPLAY (no first-frame "no pricing" flash before onAppear); save
+        // and the no-op comparison use the load-time capture instead.
+        let catalog = computeCatalogPricing()
         let defaults = CatalogBaseDefaults(
             input: Self.perMillion(catalog?.base.input),
             output: Self.perMillion(catalog?.base.output),
@@ -61,7 +77,7 @@ struct PricingEditorSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             OverrideSheetHeader(title: "Pricing Override", subtitle: "\(providerID) — \(modelID)",
                                 onCancel: { dismiss() }, onDone: { save(); dismiss() })
-            PricingForm(editable: $editable, catalogDefaults: defaults,
+            PricingForm(editable: $editable, catalogDefaults: defaults, resetToken: resetToken,
                         noPricingKnown: catalog?.base.hasAnyRate != true,
                         expandThresholds: $expandThresholds, expandService: $expandService,
                         expandExtended: $expandExtended)
@@ -83,9 +99,9 @@ struct PricingEditorSheet: View {
     }
 
     private func loadFromShared() {
-        let catalog = catalogPricing
-        let userPricing = shared.userModelOverrides[key]?.pricing
+        let catalog = computeCatalogPricing()
         let resolved = resolvedPricing
+        let userPricing = shared.userModelOverrides[key]?.pricing
         var result = EditablePricing()
         // A base rate is an OVERRIDE only when the stored value differs from the catalog default.
         result.inputOverride = Self.baseOverride(userPricing?.base.input, catalog?.base.input)
@@ -103,8 +119,10 @@ struct PricingEditorSheet: View {
         result.extendedThresholds = (resolved?.extendedCacheTier?.thresholdOverrides ?? []).map {
             EditableCacheThreshold(threshold: $0.tokenThreshold, cacheWrite: Self.perMillion($0.cacheWrite))
         }
+        catalogAtLoad = catalog
+        resolvedAtLoad = resolved
         editable = result
-        initialBuilt = Self.pricing(from: result, catalog: catalog)
+        initialBuilt = Self.pricing(from: result, catalog: catalog, resolved: resolved)
         explicitlyCleared = false
         expandThresholds = !result.thresholdTiers.isEmpty
         expandService = !result.serviceTiers.isEmpty
@@ -114,10 +132,11 @@ struct PricingEditorSheet: View {
     private func clearOverride() {
         editable = EditablePricing()
         explicitlyCleared = true
+        resetToken += 1
     }
 
     private func save() {
-        let built = Self.pricing(from: editable, catalog: catalogPricing)
+        let built = Self.pricing(from: editable, catalog: catalogAtLoad, resolved: resolvedAtLoad)
         let pricingOverride: ModelPricing?
         if explicitlyCleared {
             pricingOverride = nil
@@ -164,12 +183,15 @@ struct PricingEditorSheet: View {
                     cacheRead: perToken(rates.cacheRead), cacheWrite: perToken(rates.cacheWrite))
     }
 
-    private static func pricing(from editable: EditablePricing, catalog: ModelPricing?) -> ModelPricing {
+    /// A non-overridden base rate falls back to the catalog rate and, if that is unknown (compositions
+    /// empty on a cached launch), to the resolved rate — never to nil, so overriding ONE rate can
+    /// never wipe the others.
+    private static func pricing(from editable: EditablePricing, catalog: ModelPricing?, resolved: ModelPricing?) -> ModelPricing {
         let base = PricingTier(
-            input: perToken(editable.inputOverride) ?? catalog?.base.input,
-            output: perToken(editable.outputOverride) ?? catalog?.base.output,
-            cacheRead: perToken(editable.cacheReadOverride) ?? catalog?.base.cacheRead,
-            cacheWrite: perToken(editable.cacheWriteOverride) ?? catalog?.base.cacheWrite)
+            input: perToken(editable.inputOverride) ?? catalog?.base.input ?? resolved?.base.input,
+            output: perToken(editable.outputOverride) ?? catalog?.base.output ?? resolved?.base.output,
+            cacheRead: perToken(editable.cacheReadOverride) ?? catalog?.base.cacheRead ?? resolved?.base.cacheRead,
+            cacheWrite: perToken(editable.cacheWriteOverride) ?? catalog?.base.cacheWrite ?? resolved?.base.cacheWrite)
         let tiers = editable.thresholdTiers.compactMap { tier -> TokenThresholdTier? in
             guard let threshold = tier.threshold else { return nil }
             let rates = pricingTier(tier.rates)
@@ -184,10 +206,14 @@ struct PricingEditorSheet: View {
         }
         var extended: CacheWriteOverride?
         if let cacheWrite = perToken(editable.extendedCacheWrite) {
-            let overrides = editable.extendedThresholds.compactMap { entry -> TokenThresholdCacheWrite? in
-                guard let threshold = entry.threshold, let rate = perToken(entry.cacheWrite) else { return nil }
-                return TokenThresholdCacheWrite(tokenThreshold: threshold, cacheWrite: rate)
-            }
+            // Sort ascending: ModelPricing.effectiveRates applies threshold overrides last-match-wins
+            // WITHOUT sorting them, so an out-of-order entry would misprice.
+            let overrides = editable.extendedThresholds
+                .compactMap { entry -> TokenThresholdCacheWrite? in
+                    guard let threshold = entry.threshold, let rate = perToken(entry.cacheWrite) else { return nil }
+                    return TokenThresholdCacheWrite(tokenThreshold: threshold, cacheWrite: rate)
+                }
+                .sorted { $0.tokenThreshold < $1.tokenThreshold }
             extended = CacheWriteOverride(cacheWrite: cacheWrite, thresholdOverrides: overrides)
         }
         return ModelPricing(base: base, tokenThresholdTiers: tiers, serviceTiers: services, extendedCacheTier: extended)
@@ -259,6 +285,7 @@ private struct CatalogBaseDefaults: Equatable {
 private struct PricingForm: View {
     @Binding var editable: EditablePricing
     let catalogDefaults: CatalogBaseDefaults
+    let resetToken: Int
     let noPricingKnown: Bool
     @Binding var expandThresholds: Bool
     @Binding var expandService: Bool
@@ -273,10 +300,14 @@ private struct PricingForm: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
-                PricingRateRow(label: "Input", catalogDefault: catalogDefaults.input, override: $editable.inputOverride)
-                PricingRateRow(label: "Output", catalogDefault: catalogDefaults.output, override: $editable.outputOverride)
-                PricingRateRow(label: "Cache read", catalogDefault: catalogDefaults.cacheRead, override: $editable.cacheReadOverride)
-                PricingRateRow(label: "Cache write", catalogDefault: catalogDefaults.cacheWrite, override: $editable.cacheWriteOverride)
+                PricingRateRow(label: "Input", catalogDefault: catalogDefaults.input,
+                               override: $editable.inputOverride, resetToken: resetToken)
+                PricingRateRow(label: "Output", catalogDefault: catalogDefaults.output,
+                               override: $editable.outputOverride, resetToken: resetToken)
+                PricingRateRow(label: "Cache read", catalogDefault: catalogDefaults.cacheRead,
+                               override: $editable.cacheReadOverride, resetToken: resetToken)
+                PricingRateRow(label: "Cache write", catalogDefault: catalogDefaults.cacheWrite,
+                               override: $editable.cacheWriteOverride, resetToken: resetToken)
             }
             Section("Advanced") {
                 ThresholdTiersDisclosure(tiers: $editable.thresholdTiers, isExpanded: $expandThresholds)
@@ -353,6 +384,7 @@ private struct PricingRateRow: View {
     let label: String
     let catalogDefault: Double?
     @Binding var override: Double?
+    let resetToken: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -367,7 +399,8 @@ private struct PricingRateRow: View {
             OverrideValueControl(override: $override, defaultValue: catalogDefault,
                                  draftText: OverrideValueParsing.usdDraft,
                                  format: OverrideValueParsing.usdLabel,
-                                 parse: OverrideValueParsing.usdPerMillion)
+                                 parse: OverrideValueParsing.usdPerMillion,
+                                 resetToken: resetToken)
         }
     }
 }
