@@ -332,7 +332,7 @@ private struct LimitRow: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.headline)
                 Spacer()
-                Text("Model reports: \(reported.map { "\($0.formatted())" } ?? "unknown")")
+                Text("Model reports: \(reported.map { OverrideValueParsing.tokenLabel($0) } ?? "unknown")")
                     .font(.caption.monospaced())
                     .foregroundStyle(reported == nil ? AnyShapeStyle(HierarchicalShapeStyle.tertiary)
                                                      : AnyShapeStyle(HierarchicalShapeStyle.secondary))

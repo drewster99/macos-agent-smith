@@ -127,6 +127,12 @@ struct OverrideSheetHeader: View {
 /// Parsing + formatting helpers shared by the numeric override rows (token limits, prices), so the
 /// same comma/`$` leniency applies everywhere.
 enum OverrideValueParsing {
+    /// Fixed US (period-decimal, comma-grouping) locale. The app assumes period decimals regardless
+    /// of the system locale, so drafts, labels, the `Double`/`Int` parse, and the advanced pricing
+    /// number fields all format against this — a comma-decimal system locale would otherwise seed
+    /// "1,5" and read it back as 15.
+    static let usdLocale = Locale(identifier: "en_US")
+
     static func tokenCount(_ raw: String) -> Int? {
         let cleaned = raw.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
         // A token limit must be positive — 0 or negative is nonsensical (and would resolve
@@ -136,7 +142,7 @@ enum OverrideValueParsing {
     }
 
     static func tokenDraft(_ value: Int) -> String { String(value) }
-    static func tokenLabel(_ value: Int) -> String { value.formatted() }
+    static func tokenLabel(_ value: Int) -> String { value.formatted(.number.locale(usdLocale)) }
 
     static func usdPerMillion(_ raw: String) -> Double? {
         let cleaned = raw.replacingOccurrences(of: ",", with: "")
@@ -147,15 +153,11 @@ enum OverrideValueParsing {
     }
 
     static func usdDraft(_ value: Double) -> String {
-        // Pin to a period-decimal locale: this draft is seeded into the editable field and parsed
-        // back by `usdPerMillion`, which strips commas and parses with `Double` (always a period
-        // decimal). A comma-decimal system locale would otherwise seed "1,5" and read it back as 15.
-        value.formatted(.number.precision(.fractionLength(0...4)).grouping(.never)
-            .locale(Locale(identifier: "en_US_POSIX")))
+        value.formatted(.number.precision(.fractionLength(0...4)).grouping(.never).locale(usdLocale))
     }
 
     static func usdLabel(_ value: Double) -> String {
-        "$" + value.formatted(.number.precision(.fractionLength(2...4)))
+        "$" + value.formatted(.number.precision(.fractionLength(2...4)).locale(usdLocale))
     }
 }
 

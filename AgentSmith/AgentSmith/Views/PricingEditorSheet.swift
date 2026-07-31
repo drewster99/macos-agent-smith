@@ -337,6 +337,9 @@ private struct PricingForm: View {
             }
         }
         .formStyle(.grouped)
+        // The advanced rows use raw `.number` TextFields, which resolve their decimal separator from
+        // the environment locale — pin it to the same US period-decimal locale the base rates use.
+        .environment(\.locale, OverrideValueParsing.usdLocale)
     }
 }
 
