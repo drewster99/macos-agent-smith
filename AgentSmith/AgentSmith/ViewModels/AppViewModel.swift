@@ -609,28 +609,28 @@ final class AppViewModel {
         var visionByRole: [AgentRole: Bool] = [:]
         var documentsByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
-            guard let configID = agentAssignments[role] else { continue }
+            guard let configID = agentAssignments[role],
+                  let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) else { continue }
+            // Resolve the effective config FRESH (model facts + the per-(role, model) override; the
+            // pool config's own stored tuning is ignored) and build the provider from IT — permissive,
+            // no pool-side clamp of the output cap.
+            let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+            let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+                ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
+            let resolved = override.resolved(against: facts, name: modelConfig.name)
+            configurations[role] = resolved
             do {
-                providers[role] = try shared.llmKit.makeProvider(for: configID)
+                providers[role] = try shared.llmKit.makeProvider(configuration: resolved)
             } catch {
                 shared.startupError = "Failed to create provider for \(role.displayName): \(error.localizedDescription)"
                 return
             }
-            if let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) {
-                // Runtime tuning is resolved FRESH from the latest model facts + the per-(role, model)
-                // override (clean slate: the pool config's own stored tuning is ignored). The
-                // assignment — provider + model — still comes from the pool config.
-                let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-                let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-                    ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
-                configurations[role] = override.resolved(against: facts, name: modelConfig.name)
-                if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
-                    apiTypes[role] = modelProvider.apiType
-                }
-                let resolved = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
-                visionByRole[role] = resolved.vision
-                documentsByRole[role] = resolved.documents
+            if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
+                apiTypes[role] = modelProvider.apiType
             }
+            let injection = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
+            visionByRole[role] = injection.vision
+            documentsByRole[role] = injection.documents
         }
 
         var tuning: [AgentRole: AgentTuningConfig] = [:]
@@ -1668,28 +1668,28 @@ final class AppViewModel {
         var visionByRole: [AgentRole: Bool] = [:]
         var documentsByRole: [AgentRole: Bool] = [:]
         for role in AgentRole.allCases {
-            guard let configID = agentAssignments[role] else { continue }
+            guard let configID = agentAssignments[role],
+                  let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) else { continue }
+            // Resolve the effective config FRESH (model facts + the per-(role, model) override; the
+            // pool config's own stored tuning is ignored) and build the provider from IT — permissive,
+            // no pool-side clamp of the output cap.
+            let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+            let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
+                ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
+            let resolved = override.resolved(against: facts, name: modelConfig.name)
+            configurations[role] = resolved
             do {
-                providers[role] = try shared.llmKit.makeProvider(for: configID)
+                providers[role] = try shared.llmKit.makeProvider(configuration: resolved)
             } catch {
                 logger.error("Provider refresh: failed to rebuild \(role.displayName, privacy: .public) provider: \(error.localizedDescription, privacy: .public)")
                 continue
             }
-            if let modelConfig = shared.llmKit.configurations.first(where: { $0.id == configID }) {
-                // Runtime tuning is resolved FRESH from the latest model facts + the per-(role, model)
-                // override (clean slate: the pool config's own stored tuning is ignored). The
-                // assignment — provider + model — still comes from the pool config.
-                let override = shared.roleModelConfigOverride(role: role, providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-                let facts = shared.llmKit.modelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID)
-                    ?? ModelInfo(providerID: modelConfig.providerID, modelID: modelConfig.modelID, displayName: modelConfig.name)
-                configurations[role] = override.resolved(against: facts, name: modelConfig.name)
-                if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
-                    apiTypes[role] = modelProvider.apiType
-                }
-                let resolved = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
-                visionByRole[role] = resolved.vision
-                documentsByRole[role] = resolved.documents
+            if let modelProvider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }) {
+                apiTypes[role] = modelProvider.apiType
             }
+            let injection = resolveInjectionCapabilities(providerID: modelConfig.providerID, modelID: modelConfig.modelID, roleLabel: role.displayName)
+            visionByRole[role] = injection.vision
+            documentsByRole[role] = injection.documents
         }
         guard !providers.isEmpty else { return }
         await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes, supportsVisionByRole: visionByRole, supportsDocumentsByRole: documentsByRole)
