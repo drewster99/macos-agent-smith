@@ -50,6 +50,7 @@ struct AgentModelSettingsSection: View {
 
             if let info = selectedModelInfo {
                 modelInfoBar(for: info)
+                effectiveSettingsBar(for: info)
             } else if !modelID.isEmpty {
                 Text("Model '\(modelID)' not found in the catalog. Refresh models from the provider's submenu above.")
                     .font(.caption)
@@ -217,6 +218,14 @@ struct AgentModelSettingsSection: View {
         // A wrapping flow so the chips ride to subsequent rows when the sheet is narrow rather
         // than truncating into "Max ou…", "Conte…", etc.
         WrappingHStack(spacing: 8, lineSpacing: 4) {
+            if info.isDeprecated {
+                Text("Deprecated")
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(AppColors.warningRowBackground)
+                    .foregroundStyle(.orange)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
             if let maxOut = info.maxOutputTokens {
                 Text("Max output: \(formatTokenCount(maxOut))")
                     .foregroundStyle(.secondary)
@@ -231,6 +240,10 @@ struct AgentModelSettingsSection: View {
                     .padding(.vertical, 1)
                     .background(.quaternary)
                     .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+            if let priceText = pricingText(for: info) {
+                Text(priceText)
+                    .foregroundStyle(.secondary)
             }
         }
         .font(.caption)
@@ -248,6 +261,56 @@ struct AgentModelSettingsSection: View {
             return "\(count / 1_000)K"
         }
         return "\(count)"
+    }
+
+    /// Model pricing as a compact "$in · $out / 1M" chip, or nil when the model has no rates. Rates
+    /// are stored USD-per-token; the display converts to per-1M (the app's convention).
+    private func pricingText(for info: ModelInfo) -> String? {
+        guard let tier = info.pricing?.base, tier.hasAnyRate else { return nil }
+        let parts = [
+            tier.input.map { "$\(formatUSD($0 * 1_000_000)) in" },
+            tier.output.map { "$\(formatUSD($0 * 1_000_000)) out" }
+        ].compactMap { $0 }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " · ") + " / 1M"
+    }
+
+    private func formatUSD(_ value: Double) -> String {
+        value < 1 ? String(format: "%.3f", value) : String(format: "%.2f", value)
+    }
+
+    // MARK: - Effective (resolved) settings
+
+    /// A read-only summary of the RESOLVED per-(role, model) runtime settings — what this role will
+    /// actually run with (the override edited below, resolved against the model's facts). Surfaces the
+    /// knobs that are NOT model facts: temperature, thinking, effort, and any token ceilings overridden
+    /// below the model's own maxima.
+    private func effectiveSettingsBar(for info: ModelInfo) -> some View {
+        let override = viewModel.shared.roleModelConfigOverride(role: role, providerID: providerID, modelID: modelID)
+        let resolved = override.resolved(against: info, name: info.displayName)
+        return WrappingHStack(spacing: 8, lineSpacing: 4) {
+            Text("Effective:").foregroundStyle(.tertiary)
+            Text(resolved.temperature.map { "temp \(String(format: "%.2f", $0))" } ?? "temp default")
+                .foregroundStyle(.secondary)
+            Text(resolved.thinkingBudget.map { "thinking \(formatTokenCount($0))" } ?? "thinking off")
+                .foregroundStyle(.secondary)
+            if let effort = resolved.thinkingEffort, !effort.isEmpty {
+                Text("effort \(effort)").foregroundStyle(.secondary)
+            }
+            // Show a cap only when the user explicitly overrode it (keyed on the override's presence,
+            // not resolved-vs-model — the model may report no max, which the resolved fallback hides).
+            if let cap = override.maxOutputTokens {
+                Text("output cap \(formatTokenCount(cap))").foregroundStyle(.secondary)
+            }
+            if let cap = override.maxContextTokens {
+                Text("context cap \(formatTokenCount(cap))").foregroundStyle(.secondary)
+            }
+            if resolved.extendedCacheTTL {
+                Text("1h cache").foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Load / select
