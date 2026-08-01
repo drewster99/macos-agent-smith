@@ -337,9 +337,6 @@ private struct PricingForm: View {
             }
         }
         .formStyle(.grouped)
-        // The advanced rows use raw `.number` TextFields, which resolve their decimal separator from
-        // the environment locale — pin it to the same US period-decimal locale the base rates use.
-        .environment(\.locale, OverrideValueParsing.usdLocale)
     }
 }
 
@@ -429,14 +426,15 @@ private struct PricingRateRow: View {
 }
 
 /// One advanced rate: label on the left, a right-aligned USD-per-1M number field. No placeholder
-/// clutter; a fixed width keeps the advanced fields aligned.
+/// clutter; a fixed width keeps the advanced fields aligned. The format is pinned to the same US
+/// period-decimal locale the base rates use (explicit, not via the environment).
 private struct RateField: View {
     let label: String
     @Binding var perMillion: Double?
 
     var body: some View {
         LabeledContent(label) {
-            TextField("", value: $perMillion, format: .number)
+            TextField("", value: $perMillion, format: .number.locale(OverrideValueParsing.usdLocale))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
                 .multilineTextAlignment(.trailing)
@@ -465,7 +463,7 @@ private struct ThresholdTierRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text("Above").font(.subheadline)
-                TextField("tokens", value: $tier.threshold, format: .number)
+                TextField("tokens", value: $tier.threshold, format: .number.locale(OverrideValueParsing.usdLocale))
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 120)
                 Text("tokens").font(.subheadline).foregroundStyle(.secondary)
@@ -506,11 +504,11 @@ private struct ExtendedThresholdRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Text("Above").font(.caption)
-            TextField("tokens", value: $entry.threshold, format: .number)
+            TextField("tokens", value: $entry.threshold, format: .number.locale(OverrideValueParsing.usdLocale))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
             Text("→ cache write").font(.caption).foregroundStyle(.secondary)
-            TextField("", value: $entry.cacheWrite, format: .number)
+            TextField("", value: $entry.cacheWrite, format: .number.locale(OverrideValueParsing.usdLocale))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
             Spacer()
