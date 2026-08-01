@@ -112,6 +112,35 @@ extension AgentTask {
         return blocks.joined(separator: "\n\n")
     }
 
+    /// The per-task tool scope, rendered for `get_task_details`: the Security Agent's approved
+    /// worker toolset (`approvedTools`) followed by any persisted user overrides that force a tool
+    /// on or off (`userToolOverrides`). This reads the SAME per-task state the task-detail screen's
+    /// tool editor (`TaskToolOverrideEditor`) shows — a **record** of what was scoped for this task's
+    /// worker, not the live enforcement gate (the running worker's `ToolRegistry` is authoritative,
+    /// and always-available forced lifecycle tools are not listed). The global `ToolPolicy` is
+    /// deliberately NOT folded in: it isn't carried on the task, so folding it here would fabricate a
+    /// resolved set from state `get_task_details` cannot see. An override-free line therefore reports
+    /// exactly the security verdict, and overrides are shown separately rather than merged.
+    ///
+    /// Returns `nil` when the task carries no scope information at all — never scoped and no
+    /// overrides — so `get_task_details` omits the section just as it does for absent criteria/steps.
+    func renderedToolScope() -> String? {
+        var lines: [String] = []
+        if let approvedTools {
+            let list = approvedTools.isEmpty ? "(none)" : approvedTools.sorted().joined(separator: ", ")
+            lines.append("Approved tools (security-scoped worker toolset): \(list)")
+        }
+        if let userToolOverrides, !userToolOverrides.isEmpty {
+            let forcedOn = userToolOverrides.filter { $0.value }.keys.sorted()
+            let forcedOff = userToolOverrides.filter { !$0.value }.keys.sorted()
+            var parts: [String] = []
+            if !forcedOn.isEmpty { parts.append("forced on: \(forcedOn.joined(separator: ", "))") }
+            if !forcedOff.isEmpty { parts.append("forced off: \(forcedOff.joined(separator: ", "))") }
+            lines.append("User tool overrides — \(parts.joined(separator: "; "))")
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
     /// The step list as a numbered list. Step N is its 1-based position among the ACTIVE
     /// (non-removed) steps. Removed steps are tombstones — counted for the validators' benefit
     /// but not numbered here. When `includeIDs` is true, each line also carries the step's UUID,

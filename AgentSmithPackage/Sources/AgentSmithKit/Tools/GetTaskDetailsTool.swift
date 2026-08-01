@@ -6,7 +6,8 @@ struct GetTaskDetailsTool: AgentTool {
     let toolDescription = """
         Fetch the full details of one or more tasks by their IDs, including title, description, \
         scheduling/template metadata, template input definitions/values, acceptance criteria, \
-        steps, commentary, progress updates, and result. Pass an array of task IDs (max 10) \
+        steps, the worker's approved tool list (per-task tool scope) plus any user tool overrides, \
+        commentary, progress updates, and result. Pass an array of task IDs (max 10) \
         to retrieve several tasks in a single call.
         """
 
@@ -130,6 +131,10 @@ struct GetTaskDetailsTool: AgentTool {
 
         if let steps = task.renderedSteps(includeIDs: true) {
             parts.append("Steps (your working plan; the number is stable):\n\(steps)")
+        }
+
+        if let toolScope = task.renderedToolScope() {
+            parts.append(toolScope)
         }
 
         if let commentary = task.commentary, !commentary.isEmpty {
