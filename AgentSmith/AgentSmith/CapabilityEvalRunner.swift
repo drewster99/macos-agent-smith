@@ -14,7 +14,7 @@ import SwiftLLMKit
 /// Usage — either `--eval-capabilities` or `--list-models` puts the app in headless mode:
 ///   AgentSmith --list-models                       print every providerID/modelID, then exit
 ///   AgentSmith --eval-capabilities [flags]
-///     --targets <provID/model,...>  probe these instead of the default diverse set
+///     --targets <provID/model,...>  probe these instead of every catalogued model (the default)
 ///     --effort                      with --targets, probe every known effort level per model
 ///     --no-seed                     probe everything even if the payload already answered it
 ///     --discard-non-chat            drop models the probe establishes can't chat (post-probe)
@@ -27,8 +27,8 @@ import SwiftLLMKit
 ///     --force-fetch-models          re-fetch every provider now, ignoring the daily gate
 ///     --no-fetch-models             never fetch; use the cached catalog
 ///
-/// With no `--targets`, probes a hand-picked diverse set (see `defaultTargets`): the real
-/// workhorses plus deliberate false-positive cases.
+/// With no `--targets`, probes EVERY catalogued model across all providers (run `--list-models`
+/// to see the exact IDs). Use `--targets` to narrow to specific models or a single provider.
 @MainActor
 enum CapabilityEvalRunner {
 
@@ -51,35 +51,16 @@ enum CapabilityEvalRunner {
         let note: String
     }
 
-    /// Diverse on purpose: two Anthropic (one with effort, one without, to see both the accept and
-    /// the reject side), the two Gemini that expose the image-model false positive, the real
-    /// Ollama-Cloud / z.ai workhorses that LiteLLM doesn't catalogue at all, and Grok.
-    static let defaultTargets: [Target] = [
-        .init(providerID: "builtin.anthropic", modelID: "claude-haiku-4-5-20251001",
-              effortLevels: ["low", "high", "max"],
-              note: "baseline; Anthropic's payload says NO effort — probe should see it rejected"),
-        .init(providerID: "builtin.anthropic", modelID: "claude-sonnet-5",
-              effortLevels: ["low", "medium", "high", "xhigh", "max"],
-              note: "full effort ladder + adaptive thinking; validates probe vs payload"),
-        .init(providerID: "builtin.gemini", modelID: "gemini-2.5-flash-lite",
-              effortLevels: [], note: "real usage; Gemini path"),
-        .init(providerID: "builtin.gemini", modelID: "gemini-2.5-flash-image",
-              effortLevels: [], note: "FALSE POSITIVE: image model LiteLLM claims can call tools"),
-        .init(providerID: "builtin.zai", modelID: "glm-5.2",
-              effortLevels: [], note: "workhorse; LiteLLM has no data — probe is the only truth"),
-        .init(providerID: "builtin.ollama-cloud", modelID: "glm-5.2",
-              effortLevels: [], note: "same model, different host — compare"),
-        .init(providerID: "builtin.ollama-cloud", modelID: "qwen3.5:397b",
-              effortLevels: [], note: "workhorse; LiteLLM has no data"),
-        .init(providerID: "builtin.xai", modelID: "grok-4.5",
-              effortLevels: [], note: "real usage; xAI path"),
-        .init(providerID: "builtin.openai", modelID: "gpt-5-mini",
-              effortLevels: ["none", "minimal", "low", "medium", "high"],
-              note: "OpenAI reasoning model — effort levels PROVEN via forced reasoning_effort"),
-        .init(providerID: "builtin.openai", modelID: "gpt-4o-mini",
-              effortLevels: ["low"],
-              note: "OpenAI NON-reasoning model — expect reasoning_effort rejected")
-    ]
+    /// Every catalogued model, across all providers — the default target set when no `--targets` is
+    /// given. Unconfigured / keyless providers are skipped in the probe loop (not filtered here), so
+    /// this is "probe everything the catalog knows about." `--effort` applies the full effort ladder
+    /// per model, same as an explicit `--targets` sweep.
+    private static func allCatalogTargets(kit: LLMKitManager) -> [Target] {
+        let levels = CommandLine.arguments.contains("--effort") ? EffortRank.allKnown : []
+        return kit.models
+            .sorted { ($0.providerID, $0.modelID) < ($1.providerID, $1.modelID) }
+            .map { Target(providerID: $0.providerID, modelID: $0.modelID, effortLevels: levels, note: "all catalogued models") }
+    }
 
     /// Runs the evaluation and terminates the process. Never returns.
     static func runAndExit() async -> Never {
@@ -129,7 +110,7 @@ enum CapabilityEvalRunner {
 
         // Computed after the fetch so a bare-provider `--targets builtin.alibabacloud` can expand
         // against a populated catalog.
-        let targets = parseTargets(kit: kit) ?? defaultTargets
+        let targets = parseTargets(kit: kit) ?? allCatalogTargets(kit: kit)
         print("targets: \(targets.count)\n")
         if targets.isEmpty {
             print("No targets to probe (an explicit --targets matched no catalogued models). Nothing to do.")
