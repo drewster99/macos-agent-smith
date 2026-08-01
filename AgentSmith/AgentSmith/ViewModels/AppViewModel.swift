@@ -2,7 +2,6 @@ import SwiftUI
 import AgentSmithKit
 import SwiftLLMKit
 import UniformTypeIdentifiers
-import CryptoKit
 import os
 
 /// Bridges one session's orchestration runtime to the SwiftUI UI.
@@ -2278,28 +2277,13 @@ final class AppViewModel {
             let override = shared.roleModelConfigOverride(role: role, providerID: assignment.providerID, modelID: assignment.modelID)
             let facts = shared.llmKit.modelInfo(providerID: assignment.providerID, modelID: assignment.modelID)
                 ?? ModelInfo(providerID: assignment.providerID, modelID: assignment.modelID, displayName: assignment.modelID)
-            var config = override.resolved(against: facts, name: facts.displayName)
-            // `resolved()` defaults its `id` to a FRESH `UUID()` on every call, and
-            // `ModelConfiguration`'s Equatable is synthesized (so it INCLUDES `id`). Because this is a
-            // computed property, that made it return a value that never compares equal to its previous
-            // self — so `.onChange(of: resolvedAgentConfigs[role])` and `.task(id: modelConfig.id)` in
-            // the inspector fired on EVERY body evaluation and drove a self-sustaining re-render loop
-            // (SwiftUI's "onChange/task action tried to update multiple times per frame"). A resolved
-            // config is a pure projection of (assignment, override, facts), so pin its identity to the
-            // model it configures; the id is otherwise unused (the config pool was retired 2026-07-31).
-            config.id = Self.stableResolvedConfigID(providerID: assignment.providerID, modelID: assignment.modelID)
-            result[role] = config
+            // `resolved()` is a pure projection with a DETERMINISTIC id (SwiftLLMKit ≥ 0.0.137), so
+            // this computed property is stably Equatable across recomputes. A fresh random id per call
+            // (the pre-0.0.137 behavior) made the inspector's `.onChange(of:)` / `.task(id:)` fire on
+            // every body evaluation and spin a self-sustaining re-render loop.
+            result[role] = override.resolved(against: facts, name: facts.displayName)
         }
         return result
-    }
-
-    /// A deterministic `ModelConfiguration.id` for a resolved config, so the value is stably
-    /// `Equatable` across recomputes of `resolvedAgentConfigs`. Derived from the (provider, model)
-    /// it configures — the same pair maps to the same id every time, a different model to a
-    /// different id. See `resolvedAgentConfigs` for why a stable id is load-bearing.
-    private static func stableResolvedConfigID(providerID: String, modelID: String) -> UUID {
-        let digest = SHA256.hash(data: Data("\(providerID)\n\(modelID)".utf8))
-        return digest.withUnsafeBytes { UUID(uuid: $0.load(as: uuid_t.self)) }
     }
 
     /// Whether all required agent roles in this session are assigned a model whose provider is
