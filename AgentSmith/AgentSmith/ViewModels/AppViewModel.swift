@@ -288,6 +288,32 @@ final class AppViewModel {
     /// Kept alive independently of `runtime` so task operations work even when agents aren't running.
     private var taskStore: TaskStore?
     private var channelStreamTask: Task<Void, Never>?
+    /// Channel messages received from the stream but not yet folded into `messages`. A single
+    /// Smith turn posts a burst of messages (public reply → tool_request → security verdict →
+    /// tool_output …) that all land within one display frame; appending them one at a time made
+    /// `messages` — an `@Observable` — mutate N times per frame, so every `.onChange(of:)`
+    /// watcher of it (or of a value derived from it) fired N times per frame, which is exactly
+    /// what SwiftUI's "onChange action tried to update multiple times per frame" runtime warning
+    /// reports. These are buffered and folded in ONE assignment per `ingestFlushInterval` (below),
+    /// so `messages` mutates at most once per frame regardless of how fast messages arrive.
+    private var pendingIngestMessages: [ChannelMessage] = []
+    /// True while a `flushIngestedMessages()` is already scheduled, so a burst schedules exactly
+    /// one flush rather than one per message.
+    private var ingestFlushScheduled = false
+    /// Fixed coalescing period for folding buffered channel messages into `messages`. One frame at
+    /// 60 Hz: long enough that a within-frame burst collapses into a single `messages` mutation,
+    /// short enough that the transcript still updates smoothly. A FIXED period (not a reset-on-each-
+    /// message debounce) bounds worst-case latency — continuous streaming still flushes ~60×/s
+    /// rather than starving the UI until the stream goes quiet. Shared by the live-context coalescer.
+    private static let ingestFlushInterval: TimeInterval = 1.0 / 60.0
+    /// Latest live-context snapshot per agent instance, awaiting a coalesced push into
+    /// `inspectorStore.liveContexts`. The run loop calls `pushLiveContext()` ~20 places per turn, so
+    /// `liveContexts[role]` (watched by each agent card's `.onChange`) mutated many times per frame —
+    /// the third source of the "multiple times per frame" warning. A context is a full snapshot, so
+    /// only the NEWEST per instance matters; intermediate snapshots within a frame are superseded.
+    private var pendingLiveContexts: [AgentInstanceRef: [LLMMessage]] = [:]
+    /// True while a `flushLiveContexts()` is already scheduled (one flush per burst, not per push).
+    private var liveContextFlushScheduled = false
     /// Coalesces channel-log persistence. Messages are appended to an on-disk JSONL log; the
     /// debounce batches a streaming burst into one append call rather than one per message.
     private var channelLogPersistTask: Task<Void, Never>?
@@ -905,8 +931,7 @@ final class AppViewModel {
         channelStreamTask = Task { @MainActor [weak self] in
             for await message in channel.stream() {
                 guard let self else { break }
-                self.appendToTranscript(message)
-                self.shared.speechController.handle(message)
+                self.enqueueIngestedMessage(message)
             }
         }
 
@@ -949,7 +974,7 @@ final class AppViewModel {
 
         await newRuntime.setOnContextChanged { [weak self] ref, messages in
             Task { @MainActor [weak self] in
-                self?.inspectorStore.updateLiveContext(messages, for: ref)
+                self?.enqueueLiveContext(messages, for: ref)
             }
         }
 
@@ -1959,6 +1984,11 @@ final class AppViewModel {
         agentToolNames.removeAll()
         agentToolNamesByInstance.removeAll()
         inspectorStore.clearAll()
+        // Drop any buffered live-context snapshot so a still-scheduled flush can't repopulate the
+        // just-cleared store with stale context. (The transcript coalescer is NOT cleared here —
+        // its buffered messages are real transcript that flushPersistence drains and persists.)
+        pendingLiveContexts.removeAll()
+        liveContextFlushScheduled = false
         // The channel stream is cancelled + awaited inside flushPersistence() below
         // (quiesceChannelStream), so any messages still buffered in the channel are drained
         // and persisted before we tear down rather than dropped here.
@@ -2035,10 +2065,16 @@ final class AppViewModel {
     /// and never get it drained before the app terminates. `MessageChannel.stream()` is an
     /// `AsyncStream`, so cancellation ends the `for await` and the task completes.
     private func quiesceChannelStream() async {
-        guard let task = channelStreamTask else { return }
-        task.cancel()
-        await task.value
-        channelStreamTask = nil
+        if let task = channelStreamTask {
+            task.cancel()
+            await task.value
+            channelStreamTask = nil
+        }
+        // The stream loop has exited, so no further message can enter `pendingIngestMessages`.
+        // Fold whatever the coalescer still holds into `messages`/`pendingChannelAppends` NOW —
+        // synchronously, on the main actor — so the subsequent `drainPendingChannelAppends()`
+        // persists it rather than a still-scheduled `asyncAfter` flush dropping it at quit.
+        flushIngestedMessages()
     }
 
     private func flushPersistence() async {
@@ -2152,22 +2188,85 @@ final class AppViewModel {
         appendToTranscript(ChannelMessage(sender: .system, content: content))
     }
 
-    /// Appends a message to the in-memory transcript and queues it for the on-disk JSONL log.
-    /// Trims the resident tail back to `residentMessageCap` unless the user has pulled in the
-    /// full history (then they've opted into holding everything until the next relaunch).
-    private func appendToTranscript(_ message: ChannelMessage) {
-        messages.append(message)
-        if let rid = toolRequestID(of: message) { renderedToolRequestIDs.insert(rid) }
-        persistedHistoryCount += 1
-        if !hasRestoredHistory && messages.count > Self.residentMessageCap {
-            let removeCount = messages.count - Self.residentMessageCap
-            for trimmed in messages.prefix(removeCount) {
+    /// Buffers a streamed channel message for coalesced folding into `messages`. Speech is handled
+    /// immediately (it's independent of the transcript array and shouldn't wait on the UI batch);
+    /// the visible/persisted append is deferred to `flushIngestedMessages()` so a within-frame
+    /// burst collapses into a single `messages` mutation. See `pendingIngestMessages`.
+    private func enqueueIngestedMessage(_ message: ChannelMessage) {
+        pendingIngestMessages.append(message)
+        shared.speechController.handle(message)
+        guard !ingestFlushScheduled else { return }
+        ingestFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.ingestFlushInterval) { [weak self] in
+            self?.flushIngestedMessages()
+        }
+    }
+
+    /// Folds every buffered channel message into the transcript in one `messages` assignment.
+    /// Idempotent and safe to call synchronously (e.g. from `quiesceChannelStream` to guarantee no
+    /// buffered message is lost at shutdown, or before a lone local append to preserve ordering).
+    private func flushIngestedMessages() {
+        ingestFlushScheduled = false
+        guard !pendingIngestMessages.isEmpty else { return }
+        let batch = pendingIngestMessages
+        pendingIngestMessages.removeAll(keepingCapacity: true)
+        appendBatchToTranscript(batch)
+    }
+
+    /// Appends a batch of messages to the in-memory transcript in a SINGLE `messages` mutation and
+    /// queues them for the on-disk JSONL log. Trims the resident tail back to `residentMessageCap`
+    /// unless the user has pulled in the full history (then they've opted into holding everything
+    /// until the next relaunch). One assignment per batch is the whole point: it keeps every
+    /// `.onChange(of:)` watcher of `messages` firing at most once per frame.
+    private func appendBatchToTranscript(_ batch: [ChannelMessage]) {
+        guard !batch.isEmpty else { return }
+        var working = messages
+        for message in batch {
+            working.append(message)
+            if let rid = toolRequestID(of: message) { renderedToolRequestIDs.insert(rid) }
+            persistedHistoryCount += 1
+            pendingChannelAppends.append(message)
+        }
+        if !hasRestoredHistory && working.count > Self.residentMessageCap {
+            let removeCount = working.count - Self.residentMessageCap
+            for trimmed in working.prefix(removeCount) {
                 if let rid = toolRequestID(of: trimmed) { renderedToolRequestIDs.remove(rid) }
             }
-            messages.removeFirst(removeCount)
+            working.removeFirst(removeCount)
         }
-        pendingChannelAppends.append(message)
+        messages = working
         persistMessages()
+    }
+
+    /// Appends a single message immediately, draining any buffered stream messages first so the
+    /// two never render out of order. Used for locally-authored system lines (`appendLocalSystemMessage`),
+    /// which are one-off and not part of a streaming burst.
+    private func appendToTranscript(_ message: ChannelMessage) {
+        flushIngestedMessages()
+        appendBatchToTranscript([message])
+    }
+
+    /// Buffers the newest live-context snapshot for `ref` and schedules a coalesced push into the
+    /// inspector store, so `liveContexts[role]` mutates at most once per frame no matter how often
+    /// the run loop reports a context change. Latest-wins per instance — see `pendingLiveContexts`.
+    private func enqueueLiveContext(_ messages: [LLMMessage], for ref: AgentInstanceRef) {
+        pendingLiveContexts[ref] = messages
+        guard !liveContextFlushScheduled else { return }
+        liveContextFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.ingestFlushInterval) { [weak self] in
+            self?.flushLiveContexts()
+        }
+    }
+
+    /// Pushes every buffered live-context snapshot into the inspector store.
+    private func flushLiveContexts() {
+        liveContextFlushScheduled = false
+        guard !pendingLiveContexts.isEmpty else { return }
+        let batch = pendingLiveContexts
+        pendingLiveContexts.removeAll(keepingCapacity: true)
+        for (ref, messages) in batch {
+            inspectorStore.updateLiveContext(messages, for: ref)
+        }
     }
 
     /// Loads the full transcript from disk into memory. Trimming stays suspended afterward
