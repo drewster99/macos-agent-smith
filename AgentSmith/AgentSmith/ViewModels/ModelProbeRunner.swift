@@ -71,8 +71,12 @@ final class ModelProbeRunner {
             // factory doc) while keeping request-forming necessity flags.
             let llm = kit.makeProbeProvider(configuration: throwawayConfig, provider: target.provider)
             let preferLowImageDetail = target.provider.endpoint.host?.contains("api.openai.com") == true
-            let profile = await ModelProber.probe(llm: llm, seed: seed,
+            var profile = await ModelProber.probe(llm: llm, seed: seed,
                                                   preferLowImageDetail: preferLowImageDetail)
+            // Trailing-system support isn't part of ModelProber.probe() (it needs a flag-on provider,
+            // which only the caller can build); run it here so the GUI probe measures it too.
+            profile = await TrailingSystemTurnProbe.probing(profile, provider: target.provider,
+                                                            modelID: target.modelID, kit: kit)
 
             do {
                 let outcome = try kit.storeProbeResult(profile: profile, provider: target.provider, modelID: target.modelID)
@@ -91,5 +95,41 @@ final class ModelProbeRunner {
         for provider in kit.providers where touchedProviderIDs.contains(provider.id) {
             await kit.refreshModels(provider: provider)
         }
+    }
+}
+
+/// The trailing-system-turn probe, shared by the GUI runner (above) and the CLI capability harness
+/// so `supportsTrailingSystemMessage` is measured identically in either path.
+///
+/// `ModelProber.probe()` can't do this itself: it's handed a ready `llm`, but this needs a provider
+/// built with the flag forced ON — on TOP of the model's other resolved flags, so request-forming
+/// quirks (mustNeverSendTemperatureParam, useMaxCompletionTokens, …) still apply — so the provider's
+/// own consumer emits the REAL trailing shape (base system + trailing turn). It then grades the nonce
+/// echo. Forcing the flag shapes only this probe call; the persisted finding is entirely the echo.
+///
+/// Returns `profile` untouched when there's nothing to do: an unestablished chat, a finding already
+/// known, or Gemini — whose consumer folds a trailing turn into `systemInstruction`, which would echo
+/// the nonce from the top and fabricate a pass, so we leave the flag unknown rather than assert it.
+enum TrailingSystemTurnProbe {
+    static func probing(_ profile: ModelProfile, provider: ModelProvider, modelID: String,
+                        kit: LLMKitManager) async -> ModelProfile {
+        guard provider.apiType != .gemini, profile.chat.value == true,
+              profile.trailingSystemMessage == nil else { return profile }
+        let test = ModelProber.makeTrailingSystemTurnTest()
+        // 5000 max_tokens: thinking + text share the cap on the Opus/Sonnet/Fable 5 family, and a
+        // starved budget returns an empty body that misgrades as inconclusive. The reply is nine
+        // chars; this is a ceiling, not an allocation, and billing follows tokens produced.
+        let config = ModelConfiguration(
+            name: "probe:\(modelID):trailing-system", providerID: provider.id,
+            modelID: modelID, temperature: nil, maxOutputTokens: 5000, streaming: false
+        )
+        var flags = kit.behaviorFlags(forProviderID: provider.id, modelID: modelID)
+        flags.supportsTrailingSystemMessage = true
+        let llm = kit.makeProvider(configuration: config, provider: provider, behaviorFlags: flags)
+        var updated = profile
+        updated.trailingSystemMessage = await ModelProber.probeTrailingSystemTurn(
+            llm: llm, test: test, modelID: modelID)
+        updated.callCount += 1
+        return updated
     }
 }

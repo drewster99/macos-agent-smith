@@ -204,13 +204,21 @@ enum CapabilityEvalRunner {
                 let (localRecord, _) = kit.probeRecords(provider: provider, modelID: target.modelID)
                 if let record = localRecord {
                     let age = Date().timeIntervalSince(record.recordedAt)
-                    if record.proberVersion != ModelProber.proberVersion {
+                    // v3→v4 changed ONLY the trailing-system methodology (isolated → realistic shape),
+                    // so a v3 record's other findings are still valid: reuse them and re-probe just
+                    // trailing-system, rather than a full re-sweep of every capability.
+                    let migratableV3 = record.proberVersion == 3
+                    if record.proberVersion != ModelProber.proberVersion && !migratableV3 {
                         reusedFindingSummary = "  reuse: SKIP — record is prober v\(record.proberVersion), current is v\(ModelProber.proberVersion); full re-probe"
                     } else if age > reuseMaxAge {
                         reusedFindingSummary = "  reuse: SKIP — record is \(Int(age / 86_400))d old (> \(Int(reuseMaxAgeDays))d); full re-probe"
                     } else {
-                        seed.seedProbedFindings(from: record.profile)
-                        reusedFindingSummary = "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
+                        var carried = record.profile
+                        if migratableV3 { carried.trailingSystemMessage = nil }  // re-measure in the v4 shape
+                        seed.seedProbedFindings(from: carried)
+                        reusedFindingSummary = migratableV3
+                            ? "  reuse: seeded v3 findings from a \(Int(age / 86_400))d-old record; re-probing trailing-system (v4 shape)"
+                            : "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
                     }
                 } else {
                     reusedFindingSummary = "  reuse: no prior record — full probe"
@@ -283,54 +291,13 @@ enum CapabilityEvalRunner {
                 }
             }
 
-            // A trailing {"role":"system"} steering turn — the placement a per-call system reminder
-            // needs. Probed for every provider whose request body is a `messages` array (Anthropic,
-            // OpenAI-compatible, Ollama). Gemini is the sole exclusion: its body is `contents` with
-            // only user/model roles plus a separate systemInstruction, so a trailing system turn is
-            // not expressible — the forced `messages` override below would be ignored, the model
-            // would answer the placeholder, and it would grade a meaningless "inconclusive" at the
-            // cost of a call. Nothing in any /models payload states this, so asking is the only way.
-            //
-            // The body is FORCED via extraJSONOverrides for the same reason effort is: our own
-            // providers hoist mid-array system messages to the front (and now leave a trailing one
-            // in place only once THIS flag is established), so a system message handed to send()
-            // can never reach the wire in trailing position on an unprobed model. Arrays replace
-            // outright in mergeJSONOverrides, so this measures the ENDPOINT rather than our kit —
-            // without it every model would report a uniform "no", including ones that support it.
-            // Gated on an ESTABLISHED chat, mirroring the reachability gate inside ModelProber:
-            // this block runs after probe() returns, so it does not inherit that skip on its own.
-            // Without the gate an unreachable model still costs a call here — a dead key or an
-            // empty credit balance 400s every request, and the sweep would spend one per model
-            // learning the same nothing the chat probe already learned.
-            if provider.apiType != .gemini, profile.chat.value == true, profile.trailingSystemMessage == nil {
-                let test = ModelProber.makeTrailingSystemTurnTest()
-                let forcedConfig = ModelConfiguration(
-                    name: "probe:\(target.modelID):trailing-system", providerID: target.providerID,
-                    // 5000, not the ~256 a nine-character echo needs. max_tokens caps thinking AND
-                    // text together, and on this family thinking is on by default (Opus 5, Sonnet 5)
-                    // or unconditional (Fable 5) with no way to switch it off — Fable 5 rejects
-                    // `thinking: {type: "disabled"}` outright. At 256 the reasoning consumed the
-                    // whole budget and the request returned 200 with an EMPTY body, which grades
-                    // inconclusive: "accepted but did not echo its code". Measured 2026-07-26 —
-                    // fable-5, sonnet-5 and opus-4-8 all failed this way while opus-5 passed, purely
-                    // because it finished thinking inside the budget. A starved probe that reads as
-                    // "couldn't find out" is the expensive kind of wrong: it looks like a real
-                    // measurement of the model rather than a misconfiguration of the harness.
-                    //
-                    // Sized for headroom rather than economy, and it costs nothing to be generous:
-                    // this is a ceiling, not an allocation. The reply is nine characters, so the
-                    // budget is only ever consumed by reasoning, and billing follows tokens
-                    // actually produced. Raise it before trimming it.
-                    modelID: target.modelID, temperature: nil, maxOutputTokens: 5000,
-                    streaming: false,
-                    extraJSONOverrides: test.overrides
-                )
-                let forcedLLM = kit.makeProvider(configuration: forcedConfig, provider: provider)
-                profile.trailingSystemMessage = await ModelProber.probeTrailingSystemTurn(
-                    llm: forcedLLM, test: test, modelID: target.modelID
-                )
-                profile.callCount += 1
-            }
+            // Trailing {"role":"system"} steering-turn support — shared with the GUI probe via
+            // TrailingSystemTurnProbe so the flag is measured identically. It runs AFTER probe()
+            // returns (gated on an established chat), excludes Gemini, forces the flag on for the one
+            // call, and probes the real production shape (base system + trailing turn). The helper
+            // carries the full rationale.
+            profile = await TrailingSystemTurnProbe.probing(profile, provider: provider,
+                                                            modelID: target.modelID, kit: kit)
 
             // Non-chat models are dropped AFTER probing (chat is a probed result, not known up
             // front). We'll likely discard these downstream anyway; the flag makes that explicit.
