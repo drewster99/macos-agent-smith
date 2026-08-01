@@ -284,22 +284,25 @@ enum CapabilityEvalRunner {
             }
 
             // A trailing {"role":"system"} steering turn — the placement a per-call system reminder
-            // needs. Anthropic-only for now: Gemini has no mid-conversation system mechanism at any
-            // model (contents is user/model only), and OpenAI-compatible endpoints need their own
-            // before/after variant because a chat template may honor one placement and mangle the
-            // other. Nothing in Anthropic's /models payload states this, so asking is the only way.
+            // needs. Probed for every provider whose request body is a `messages` array (Anthropic,
+            // OpenAI-compatible, Ollama). Gemini is the sole exclusion: its body is `contents` with
+            // only user/model roles plus a separate systemInstruction, so a trailing system turn is
+            // not expressible — the forced `messages` override below would be ignored, the model
+            // would answer the placeholder, and it would grade a meaningless "inconclusive" at the
+            // cost of a call. Nothing in any /models payload states this, so asking is the only way.
             //
             // The body is FORCED via extraJSONOverrides for the same reason effort is: our own
-            // providers hoist mid-array system messages to the front, so a system message handed to
-            // send() can never reach the wire in trailing position. Arrays replace outright in
-            // mergeJSONOverrides, so this measures the ENDPOINT rather than our kit — without it
-            // every model would report a uniform "no", including ones that support it.
+            // providers hoist mid-array system messages to the front (and now leave a trailing one
+            // in place only once THIS flag is established), so a system message handed to send()
+            // can never reach the wire in trailing position on an unprobed model. Arrays replace
+            // outright in mergeJSONOverrides, so this measures the ENDPOINT rather than our kit —
+            // without it every model would report a uniform "no", including ones that support it.
             // Gated on an ESTABLISHED chat, mirroring the reachability gate inside ModelProber:
             // this block runs after probe() returns, so it does not inherit that skip on its own.
             // Without the gate an unreachable model still costs a call here — a dead key or an
             // empty credit balance 400s every request, and the sweep would spend one per model
             // learning the same nothing the chat probe already learned.
-            if provider.apiType == .anthropic, profile.chat.value == true, profile.trailingSystemMessage == nil {
+            if provider.apiType != .gemini, profile.chat.value == true, profile.trailingSystemMessage == nil {
                 let test = ModelProber.makeTrailingSystemTurnTest()
                 let forcedConfig = ModelConfiguration(
                     name: "probe:\(target.modelID):trailing-system", providerID: target.providerID,

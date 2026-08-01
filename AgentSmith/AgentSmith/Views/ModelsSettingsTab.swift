@@ -502,7 +502,7 @@ private struct ModelSegmentView: View {
                 .padding(.vertical, 1)
                 .background(AppColors.providerChipBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
-        case .modelID, .maxTokens, .ctxTokens, .capabilities:
+        case .modelID, .sizeLabel, .maxTokens, .ctxTokens, .capabilities:
             Text(attributed)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -510,6 +510,22 @@ private struct ModelSegmentView: View {
             Text(attributed)
                 .font(.caption)
                 .foregroundStyle(.green)
+        case .freeBadge:
+            Text(attributed)
+                .font(.caption2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.green.opacity(0.18))
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .foregroundStyle(.green)
+        case .deprecatedBadge:
+            Text(attributed)
+                .font(.caption2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.orange.opacity(0.18))
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .foregroundStyle(.orange)
         case .flagChip:
             Text(attributed)
                 .font(.caption2)

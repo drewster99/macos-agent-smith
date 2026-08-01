@@ -84,11 +84,14 @@ nonisolated struct ModelRowSegment: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case title
         case newBadge
+        case deprecatedBadge
         case providerChip
         case modelID
+        case sizeLabel
         case maxTokens
         case ctxTokens
         case pricing
+        case freeBadge
         case capabilities
         case flagChip
     }
@@ -139,11 +142,17 @@ nonisolated struct ModelRowContent: Identifiable, Sendable {
         if model.isNew {
             line0.append(ModelRowSegment(text: "New", kind: .newBadge))
         }
+        if model.isDeprecated {
+            line0.append(ModelRowSegment(text: "Deprecated", kind: .deprecatedBadge))
+        }
 
         var line1: [ModelRowSegment] = [
             ModelRowSegment(text: provider.name, kind: .providerChip),
             ModelRowSegment(text: model.modelID, kind: .modelID),
         ]
+        if let size = model.sizeLabel {
+            line1.append(ModelRowSegment(text: size, kind: .sizeLabel))
+        }
         if let maxOut = model.maxOutputTokens {
             line1.append(ModelRowSegment(text: "max \(formatTokenCount(maxOut))", kind: .maxTokens))
         }
@@ -152,6 +161,9 @@ nonisolated struct ModelRowContent: Identifiable, Sendable {
         }
         if let pricing = model.pricing, pricing.base.hasAnyRate {
             line1.append(ModelRowSegment(text: PricingFormatter.summary(pricing), kind: .pricing))
+        }
+        if model.isFree == true {
+            line1.append(ModelRowSegment(text: "Free", kind: .freeBadge))
         }
 
         var line2: [ModelRowSegment] = []

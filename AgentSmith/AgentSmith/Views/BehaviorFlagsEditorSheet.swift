@@ -47,6 +47,7 @@ struct BehaviorFlagsEditorSheet: View {
                                             description: flag.editorDescription, selection: binding(for: flag.rawValue))
                     }
                 }
+                BehaviorFlagsExtrasSection(extras: resolved.extras)
             }
             .formStyle(.grouped)
             OverrideSheetFooter(
@@ -94,5 +95,32 @@ struct BehaviorFlagsEditorSheet: View {
         merged.isAvailable = existing?.isAvailable
         merged.isAccessDenied = existing?.isAccessDenied
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
+    }
+}
+
+/// Read-only display of a model's resolved `BehaviorFlags.extras` — the free-form key/value bag for
+/// one-off provider tweaks that haven't earned a typed flag. Shown so the values are visible even
+/// though the tri-state rows above (which iterate `BehaviorFlag.allCases`) can't reach them; making
+/// them editable is deferred.
+private struct BehaviorFlagsExtrasSection: View {
+    let extras: [String: String]
+
+    var body: some View {
+        Section("Extras (read-only)") {
+            if extras.isEmpty {
+                Text("No extra flags set for this model.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(extras.sorted(by: { $0.key < $1.key }), id: \.key) { key, value in
+                    LabeledContent(key) {
+                        Text(value)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
     }
 }
