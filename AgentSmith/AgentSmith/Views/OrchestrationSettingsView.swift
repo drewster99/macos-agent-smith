@@ -172,22 +172,27 @@ struct RetrievalSettingsSection: View {
             Text("Which retrieval runs at each point. Memory injects relevant saved memories; Prior tasks injects summaries of similar past work. Each cell inherits the baseline unless forced.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 40, verticalSpacing: 10) {
                 GridRow {
                     Color.clear.frame(width: 1, height: 1).gridColumnAlignment(.leading)
                     Text("Memory").font(.caption.bold()).frame(width: 190)
                     Text("Prior tasks").font(.caption.bold()).frame(width: 190)
                 }
                 RetrievalGridRow(target: target, title: "New task",
-                    memoryKeyPath: \.retrieval.newTask.memory, taskKeyPath: \.retrieval.newTask.task)
+                    memoryKeyPath: \.retrieval.newTask.memory, taskKeyPath: \.retrieval.newTask.task,
+                    memoryResolvedKeyPath: \.retrieval.newTask.memory, taskResolvedKeyPath: \.retrieval.newTask.task)
                 RetrievalGridRow(target: target, title: "User message",
-                    memoryKeyPath: \.retrieval.userMessage.memory, taskKeyPath: \.retrieval.userMessage.task)
+                    memoryKeyPath: \.retrieval.userMessage.memory, taskKeyPath: \.retrieval.userMessage.task,
+                    memoryResolvedKeyPath: \.retrieval.userMessage.memory, taskResolvedKeyPath: \.retrieval.userMessage.task)
                 RetrievalGridRow(target: target, title: "Before validator review",
-                    memoryKeyPath: \.retrieval.beforeValidatorReview.memory, taskKeyPath: \.retrieval.beforeValidatorReview.task)
+                    memoryKeyPath: \.retrieval.beforeValidatorReview.memory, taskKeyPath: \.retrieval.beforeValidatorReview.task,
+                    memoryResolvedKeyPath: \.retrieval.beforeValidatorReview.memory, taskResolvedKeyPath: \.retrieval.beforeValidatorReview.task)
                 RetrievalGridRow(target: target, title: "Before security scoping",
-                    memoryKeyPath: \.retrieval.beforeSecurityScoping.memory, taskKeyPath: \.retrieval.beforeSecurityScoping.task)
+                    memoryKeyPath: \.retrieval.beforeSecurityScoping.memory, taskKeyPath: \.retrieval.beforeSecurityScoping.task,
+                    memoryResolvedKeyPath: \.retrieval.beforeSecurityScoping.memory, taskResolvedKeyPath: \.retrieval.beforeSecurityScoping.task)
                 RetrievalGridRow(target: target, title: "Before security tool review",
-                    memoryKeyPath: \.retrieval.beforeSecurityToolReview.memory, taskKeyPath: \.retrieval.beforeSecurityToolReview.task)
+                    memoryKeyPath: \.retrieval.beforeSecurityToolReview.memory, taskKeyPath: \.retrieval.beforeSecurityToolReview.task,
+                    memoryResolvedKeyPath: \.retrieval.beforeSecurityToolReview.memory, taskResolvedKeyPath: \.retrieval.beforeSecurityToolReview.task)
             }
         }
     }
@@ -198,19 +203,40 @@ struct RetrievalGridRow: View {
     let title: String
     let memoryKeyPath: WritableKeyPath<OrchestrationSettingsOverride, Bool?>
     let taskKeyPath: WritableKeyPath<OrchestrationSettingsOverride, Bool?>
+    let memoryResolvedKeyPath: KeyPath<OrchestrationSettings, Bool>
+    let taskResolvedKeyPath: KeyPath<OrchestrationSettings, Bool>
 
     var body: some View {
         GridRow {
-            Text(title).gridColumnAlignment(.leading)
-            TriStatePicker(selection: Binding(
-                get: { TriStateOverride(target.override[keyPath: memoryKeyPath]) },
-                set: { target.write(memoryKeyPath, $0) }))
-                .frame(width: 190)
-            TriStatePicker(selection: Binding(
-                get: { TriStateOverride(target.override[keyPath: taskKeyPath]) },
-                set: { target.write(taskKeyPath, $0) }))
-                .frame(width: 190)
+            Text(title)
+                .gridColumnAlignment(.leading)
+                .gridCellAnchor(.topLeading)
+            RetrievalGridCell(
+                selection: Binding(
+                    get: { TriStateOverride(target.override[keyPath: memoryKeyPath]) },
+                    set: { target.write(memoryKeyPath, $0) }),
+                resolved: target.resolved[keyPath: memoryResolvedKeyPath])
+            RetrievalGridCell(
+                selection: Binding(
+                    get: { TriStateOverride(target.override[keyPath: taskKeyPath]) },
+                    set: { target.write(taskKeyPath, $0) }),
+                resolved: target.resolved[keyPath: taskResolvedKeyPath])
         }
+    }
+}
+
+/// One retrieval-matrix cell: the tri-state picker above its resolved effective value, so the grid
+/// carries the same "Resolved: ON/off" reference the single-switch rows show on their trailing edge.
+struct RetrievalGridCell: View {
+    @Binding var selection: TriStateOverride
+    let resolved: Bool
+
+    var body: some View {
+        VStack(spacing: 4) {
+            TriStatePicker(selection: $selection)
+            ResolvedValueLabel(resolved: resolved)
+        }
+        .frame(width: 190)
     }
 }
 
