@@ -126,38 +126,23 @@ struct AgentModelSettingsSection: View {
     /// `llmKit.refreshErrors`) is shown inline so the failure mode is visible.
     @ViewBuilder
     private func providerSubmenu(for provider: ModelProvider) -> some View {
-        let requirements = role.modelRequirements
-        let cachedModels = llmKit.models(for: provider.id)
-        let providerModels = cachedModels
-            // Two presentation filters, both with the same escape hatch — the CURRENT selection
-            // always stays listed so it remains renderable and re-selectable. Hidden is presentation,
-            // not deletion. Role requirements are capability/availability gates: tri-state, so only a
-            // model KNOWN to fail is dropped.
-            .filter { model in
-                if provider.id == providerID && model.modelID == modelID { return true }
-                guard model.hidden != true else { return false }
-                return model.satisfies(
-                    requiredCapabilities: requirements.requiredCapabilities,
-                    mustNotBePresent: requirements.mustNotBePresent,
-                    includedAvailabilityStates: requirements.includedAvailabilityStates
-                )
-            }
+        // The role's qualifying models for this provider, via the shared `availableModels(role)` filter
+        // (tri-state — only a model KNOWN to fail is dropped), minus hidden ones. No "keep the current
+        // selection" escape hatch: a model that no longer qualifies (or no longer exists) is simply not
+        // offered, and the config gate hard-fails until a valid one is picked.
+        let providerModels = llmKit.availableModels(role)
+            .filter { $0.providerID == provider.id && $0.hidden != true }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         let refreshError = llmKit.refreshErrors[provider.name]
         let isEmpty = providerModels.isEmpty
-        // "No models meet this role" only when there ARE visible (non-hidden) models that were all
-        // role-rejected — an all-hidden provider is not a role mismatch, so it isn't claimed as one.
-        let filteredOutByRole = isEmpty && cachedModels.contains { $0.hidden != true }
 
         Menu(
             content: {
                 if isEmpty {
                     if let refreshError {
                         Text("Last refresh failed: \(refreshError)")
-                    } else if filteredOutByRole {
-                        Text("No models meet \(role.displayName)'s requirements.")
                     } else {
-                        Text("No models cached.")
+                        Text("No models available for \(role.displayName).")
                     }
                     Button("Refresh \(provider.name)") {
                         refreshProvider(provider)

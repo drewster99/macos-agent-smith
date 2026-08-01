@@ -629,6 +629,23 @@ final class AppViewModel {
             return
         }
 
+        // Hard fail: a required role's assigned model must still QUALIFY for that role — i.e. appear
+        // in `availableModels(role)` (the same gate the picker and `allAgentConfigsValid` use). Enforced
+        // HERE, not just at the UI buttons, so EVERY start path is covered — auto-start, onboarding
+        // completion, and any direct `start()` call. `satisfies` is tri-state, so only a model KNOWN to
+        // fail is rejected; the escape hatch is the per-model Caps override or reassigning.
+        let unqualifiedRoles = AgentRole.requiredRoles.filter { role in
+            guard let assignment = agentAssignments[role] else { return false }
+            return !shared.llmKit.availableModels(role).contains {
+                $0.providerID == assignment.providerID && $0.modelID == assignment.modelID
+            }
+        }
+        if !unqualifiedRoles.isEmpty {
+            let names = unqualifiedRoles.map(\.displayName).joined(separator: ", ")
+            shared.startupError = "Cannot start — the assigned model doesn't meet requirements for: \(names)"
+            return
+        }
+
         var providers: [AgentRole: any LLMProvider] = [:]
         var configurations: [AgentRole: ModelConfiguration] = [:]
         var apiTypes: [AgentRole: ProviderAPIType] = [:]
@@ -2273,7 +2290,15 @@ final class AppViewModel {
             guard let assignment = agentAssignments[role],
                   !assignment.modelID.isEmpty,
                   configuredProviderIDs.contains(assignment.providerID) else { return false }
-            return true
+            // The assigned model must still QUALIFY for the role — i.e. appear in the same
+            // `availableModels(role)` list the picker offers. Catches a model that lost a required
+            // capability, moved to an availability state the role won't tolerate, or was assigned via
+            // bundled defaults / migration without ever passing through the (filtering) picker. Uses
+            // `availableModels(role)` itself, NOT the picker's displayed list, so a hidden-but-
+            // qualifying model still passes and a force-kept non-qualifying selection still fails.
+            return shared.llmKit.availableModels(role).contains {
+                $0.providerID == assignment.providerID && $0.modelID == assignment.modelID
+            }
         }
     }
 
