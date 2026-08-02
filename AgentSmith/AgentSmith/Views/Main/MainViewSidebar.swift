@@ -20,15 +20,6 @@ struct MainViewSidebar: View {
                 .padding(.top, 12)
                 .padding(.bottom, 8)
 
-            Toggle("Auto-run next task", isOn: $viewModel.autoRunNextTask)
-                .font(.caption)
-                .padding(.horizontal, 12)
-
-            Toggle("Auto-run interrupted tasks", isOn: $viewModel.autoRunInterruptedTasks)
-                .font(.caption)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 6)
-
             ScrollView {
                 TaskListView(viewModel: viewModel)
             }

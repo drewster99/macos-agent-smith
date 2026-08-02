@@ -1,4 +1,6 @@
 {
+  "autoRunNextTask": true,
+  "autoRunInterruptedTasks": true,
   "summarizeCompletedTasks": true,
   "summarizeForContextCompaction": true,
   "retrieval": {

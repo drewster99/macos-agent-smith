@@ -153,6 +153,14 @@ public enum RetrievalSource: String, Sendable, CaseIterable {
 /// doc comments and the OFF-behavior chokepoints for what each disabled branch does.
 public struct OrchestrationSettings: Codable, Sendable, Equatable {
 
+    // Task auto-run
+
+    /// Auto-start the next pending task after one completes. OFF → completion does not auto-advance;
+    /// the user starts the next task manually.
+    public var autoRunNextTask: Bool
+    /// Resume interrupted tasks on launch. OFF → an interrupted task stays stopped until a manual run.
+    public var autoRunInterruptedTasks: Bool
+
     // Summarizer
 
     /// Summarize completed/failed tasks (feeds prior-task semantic search). OFF → the summarizer
@@ -186,6 +194,8 @@ public struct OrchestrationSettings: Codable, Sendable, Equatable {
     public var reviewValidatorToolCalls: Bool
 
     public init(
+        autoRunNextTask: Bool,
+        autoRunInterruptedTasks: Bool,
         summarizeCompletedTasks: Bool,
         summarizeForContextCompaction: Bool,
         retrieval: RetrievalSettings,
@@ -195,6 +205,8 @@ public struct OrchestrationSettings: Codable, Sendable, Equatable {
         reviewBrownToolCalls: Bool,
         reviewValidatorToolCalls: Bool
     ) {
+        self.autoRunNextTask = autoRunNextTask
+        self.autoRunInterruptedTasks = autoRunInterruptedTasks
         self.summarizeCompletedTasks = summarizeCompletedTasks
         self.summarizeForContextCompaction = summarizeForContextCompaction
         self.retrieval = retrieval
@@ -223,6 +235,8 @@ public struct OrchestrationSettings: Codable, Sendable, Equatable {
     /// does not cover injected memories); security-scoping both OFF; security-tool-review memory ON /
     /// task OFF. This is the ultimate fallback when no shipped/downloaded defaults file loads.
     public static let builtIn = OrchestrationSettings(
+        autoRunNextTask: true,
+        autoRunInterruptedTasks: true,
         summarizeCompletedTasks: true,
         summarizeForContextCompaction: true,
         retrieval: RetrievalSettings(
@@ -246,6 +260,8 @@ public struct OrchestrationSettings: Codable, Sendable, Equatable {
 /// per-session layer are both this type. Every field is optional: `nil` means "inherit the resolved
 /// value from the layer below." Empty overrides are not persisted (indistinguishable from absent).
 public struct OrchestrationSettingsOverride: Codable, Sendable, Equatable {
+    public var autoRunNextTask: Bool?
+    public var autoRunInterruptedTasks: Bool?
     public var summarizeCompletedTasks: Bool?
     public var summarizeForContextCompaction: Bool?
     public var retrieval: RetrievalSettingsOverride
@@ -256,6 +272,8 @@ public struct OrchestrationSettingsOverride: Codable, Sendable, Equatable {
     public var reviewValidatorToolCalls: Bool?
 
     public init(
+        autoRunNextTask: Bool? = nil,
+        autoRunInterruptedTasks: Bool? = nil,
         summarizeCompletedTasks: Bool? = nil,
         summarizeForContextCompaction: Bool? = nil,
         retrieval: RetrievalSettingsOverride = .init(),
@@ -265,6 +283,8 @@ public struct OrchestrationSettingsOverride: Codable, Sendable, Equatable {
         reviewBrownToolCalls: Bool? = nil,
         reviewValidatorToolCalls: Bool? = nil
     ) {
+        self.autoRunNextTask = autoRunNextTask
+        self.autoRunInterruptedTasks = autoRunInterruptedTasks
         self.summarizeCompletedTasks = summarizeCompletedTasks
         self.summarizeForContextCompaction = summarizeForContextCompaction
         self.retrieval = retrieval
@@ -290,6 +310,8 @@ extension OrchestrationSettings {
     /// this on the layer below's result.
     public func applying(_ override: OrchestrationSettingsOverride) -> OrchestrationSettings {
         OrchestrationSettings(
+            autoRunNextTask: override.autoRunNextTask ?? autoRunNextTask,
+            autoRunInterruptedTasks: override.autoRunInterruptedTasks ?? autoRunInterruptedTasks,
             summarizeCompletedTasks: override.summarizeCompletedTasks ?? summarizeCompletedTasks,
             summarizeForContextCompaction: override.summarizeForContextCompaction ?? summarizeForContextCompaction,
             retrieval: retrieval.applying(override.retrieval),

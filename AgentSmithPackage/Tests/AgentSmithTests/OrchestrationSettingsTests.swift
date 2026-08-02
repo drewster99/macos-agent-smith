@@ -12,6 +12,7 @@ import Foundation
 
     @Test func builtInDefaultsMatchTheAgreedMatrix() {
         let d = OrchestrationSettings.builtIn
+        #expect(d.autoRunNextTask && d.autoRunInterruptedTasks)   // task auto-run defaults ON
         #expect(d.summarizeCompletedTasks)
         #expect(d.summarizeForContextCompaction)
         #expect(d.enableTaskCompletionValidators)

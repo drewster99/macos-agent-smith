@@ -83,6 +83,8 @@ struct OrchestrationOverrideForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            TaskAutoRunSettingsSection(target: target)
+            Divider()
             SummarizerSettingsSection(target: target)
             Divider()
             RetrievalSettingsSection(target: target)
@@ -136,6 +138,28 @@ struct BoolOverrideRow: View {
                 set: { target.write(overrideKeyPath, $0) }
             )
         )
+    }
+}
+
+// MARK: - Task auto-run
+
+struct TaskAutoRunSettingsSection: View {
+    let target: OrchestrationOverrideTarget
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Task Auto-run").font(AppFonts.sectionHeader)
+            BoolOverrideRow(target: target,
+                title: "Auto-run next task",
+                description: "After a task completes, automatically start the next pending task. Off leaves the next task for you to start.",
+                overrideKeyPath: \.autoRunNextTask,
+                resolvedKeyPath: \.autoRunNextTask)
+            BoolOverrideRow(target: target,
+                title: "Auto-run interrupted tasks",
+                description: "On launch, automatically resume tasks that were interrupted. Off leaves them stopped until you run them.",
+                overrideKeyPath: \.autoRunInterruptedTasks,
+                resolvedKeyPath: \.autoRunInterruptedTasks)
+        }
     }
 }
 

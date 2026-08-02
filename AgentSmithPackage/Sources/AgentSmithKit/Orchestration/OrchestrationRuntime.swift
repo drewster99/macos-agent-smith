@@ -112,10 +112,12 @@ public actor OrchestrationRuntime {
     var supportsDocumentsByRole: [AgentRole: Bool]
     private var agentTuning: [AgentRole: AgentTuningConfig]
     /// Whether Smith should automatically run the next pending task after completing one.
-    /// Mutable so the user can toggle it at runtime via `setAutoAdvance(_:)`.
+    /// Synced from `orchestrationSettings.autoRunNextTask` (the app's resolved app-wide + per-session
+    /// value) on every `setOrchestrationSettings`; also settable directly via `setAutoAdvance(_:)`.
     public private(set) var autoAdvanceEnabled: Bool
-    /// Whether interrupted tasks should be auto-resumed on launch.
-    private let autoRunInterruptedTasks: Bool
+    /// Whether interrupted tasks should be auto-resumed on launch. Synced from
+    /// `orchestrationSettings.autoRunInterruptedTasks` on every `setOrchestrationSettings`.
+    private var autoRunInterruptedTasks: Bool
     /// Persistent token usage tracking across all agents.
     public let usageStore: UsageStore
     /// Append-only judgment telemetry, written after each validation round's verdicts land.
@@ -1581,6 +1583,10 @@ public actor OrchestrationRuntime {
     /// so an edit takes effect on the next chokepoint with no session restart.
     public func setOrchestrationSettings(_ settings: OrchestrationSettings) async {
         orchestrationSettings = settings
+        // Auto-run is part of the resolved orchestration settings now; sync the stored fields the
+        // run/resume paths read. (The constructor still seeds them for tests that never push settings.)
+        autoAdvanceEnabled = settings.autoRunNextTask
+        autoRunInterruptedTasks = settings.autoRunInterruptedTasks
         // Tool-set scoping on task start lives here now; push it to live workers so a change takes
         // effect on their next re-scope without a session restart (mirrors the tool-policy push).
         for workerHandle in supervisor.handles(role: .brown) {
@@ -2279,6 +2285,13 @@ public actor OrchestrationRuntime {
                 // terminated task's play-by-play just became history (Phase 2).
                 await self?.autoCompactSmithIfNeeded()
             }
+        }
+
+        // Archive / soft-delete: cancel the task's scheduled wakes so an orphaned wake doesn't fire
+        // (and get skipped) later. Unlike the terminal-status path above, an inactivated task simply
+        // relinquishes its schedule — no queue drain, no compaction.
+        await taskStore.setOnTaskMovedToInactive { taskID in
+            Task { await scheduler.cancelWakesForTask(taskID) }
         }
 
         // Wire timer lifecycle callbacks from the WakeScheduler into the runtime's event log so the

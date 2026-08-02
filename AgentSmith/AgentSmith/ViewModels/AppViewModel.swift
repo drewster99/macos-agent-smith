@@ -79,16 +79,11 @@ final class AppViewModel {
     }
     /// Set to true after `loadPersistedState()` finishes for this session.
     var hasLoadedPersistedState = false
-    /// Whether Smith automatically runs the next pending task after completing one.
-    var autoRunNextTask: Bool = true {
-        didSet {
-            if autoRunNextTask != oldValue {
-                logAutoRunChange(name: "autoRunNextTask", old: oldValue, new: autoRunNextTask)
-            }
-            persistSessionStateAsync()
-            Task { await runtime?.setAutoAdvance(autoRunNextTask) }
-        }
-    }
+    /// Whether Smith automatically runs the next pending task after completing one. Derived from the
+    /// resolved orchestration settings (app-wide default + this session's override); the engine reads
+    /// it via the pushed `OrchestrationSettings`. Changes flow through `orchestrationOverride` and the
+    /// app-wide observer — no per-session stored bool, no `setAutoAdvance` didSet.
+    var autoRunNextTask: Bool { resolvedOrchestrationSettings.autoRunNextTask }
     /// This session's sparse orchestration override, layered over the app-wide effective default.
     /// `nil` (the common case) means this session inherits the app-wide orchestration settings.
     /// Written by the per-session overrides sheet; persisted per session.
@@ -112,25 +107,9 @@ final class AppViewModel {
         let resolved = resolvedOrchestrationSettings
         Task { await runtime?.setOrchestrationSettings(resolved) }
     }
-    /// Whether interrupted tasks are automatically resumed on launch. Defaults ON so a
-    /// relaunch picks up where it left off without a manual play.
-    var autoRunInterruptedTasks: Bool = true {
-        didSet {
-            if autoRunInterruptedTasks != oldValue {
-                logAutoRunChange(name: "autoRunInterruptedTasks", old: oldValue, new: autoRunInterruptedTasks)
-            }
-            persistSessionStateAsync()
-        }
-    }
-
-    /// Captures every change to the auto-run toggles with a brief stack snapshot.
-    /// The toggle flipping itself "from off to on" between launches has been observed
-    /// without a reproducible code path; this records who changed it so the next
-    /// occurrence is diagnosable from logs instead of guesswork.
-    private func logAutoRunChange(name: String, old: Bool, new: Bool) {
-        let stack = Thread.callStackSymbols.dropFirst().prefix(8).joined(separator: "\n  ")
-        logger.notice("\(name, privacy: .public) \(old, privacy: .public) -> \(new, privacy: .public) (session=\(self.session.name, privacy: .public))\n  \(stack, privacy: .public)")
-    }
+    /// Whether interrupted tasks are automatically resumed on launch. Derived from the resolved
+    /// orchestration settings (see `autoRunNextTask`).
+    var autoRunInterruptedTasks: Bool { resolvedOrchestrationSettings.autoRunInterruptedTasks }
 
     /// Recomputes the active sidebar bucket from `tasks`. Called from the `tasks` didSet so the
     /// sidebar's body never re-filters per render. `tasks` holds only this session's active tasks
@@ -407,9 +386,18 @@ final class AppViewModel {
                     agentMessageDebounceIntervals = state.agentMessageDebounceIntervals
                 }
                 toolsEnabled = state.toolsEnabled
-                autoRunNextTask = state.autoRunNextTask
-                autoRunInterruptedTasks = state.autoRunInterruptedTasks
-                orchestrationOverride = state.orchestrationOverride
+                // Auto-run moved into the orchestration-settings system (app-wide default + per-session
+                // override, default ON). Migrate a legacy per-session OFF into this session's override so
+                // a session deliberately set to no-auto-run keeps that intent; a legacy ON is the default
+                // and needs no override.
+                var migratedOverride = state.orchestrationOverride ?? OrchestrationSettingsOverride()
+                if !state.autoRunNextTask, migratedOverride.autoRunNextTask == nil {
+                    migratedOverride.autoRunNextTask = false
+                }
+                if !state.autoRunInterruptedTasks, migratedOverride.autoRunInterruptedTasks == nil {
+                    migratedOverride.autoRunInterruptedTasks = false
+                }
+                orchestrationOverride = migratedOverride.isEmpty ? nil : migratedOverride
             } else {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
                 // No per-session state — fall back to the shared default assignments (from bundled
@@ -518,18 +506,26 @@ final class AppViewModel {
                 savedTasks.removeAll { $0.disposition != .active }
             }
 
-            // Auto-archive stale completed tasks (older than 4h) out to the global store.
-            let cutoff = Date().addingTimeInterval(-4 * 3600)
-            var staleArchived: [AgentTask] = []
-            savedTasks.removeAll { task in
-                guard task.status == .completed, task.disposition == .active, task.updatedAt < cutoff else { return false }
-                var archived = task
-                archived.disposition = .archived
-                staleArchived.append(archived)
-                return true
-            }
-            if !staleArchived.isEmpty {
-                await inactiveStore.merge(staleArchived)
+            // Auto-archive stale completed tasks out to the global store — ONLY when the user has
+            // opted in via Settings. This load-time sweep previously ran UNCONDITIONALLY (it ignored
+            // `autoArchiveCompletedEnabled`), silently archiving recently-completed tasks on every
+            // launch; it now honors the setting and its configured cutoff, matching the task-create /
+            // session-start sweep (`TaskStore.autoArchiveStaleCompletedIfEnabled`).
+            var archivedAnyStale = false
+            if shared.autoArchiveCompletedEnabled {
+                let cutoff = Date().addingTimeInterval(-Double(shared.autoArchiveCutoffHours) * 3600)
+                var staleArchived: [AgentTask] = []
+                savedTasks.removeAll { task in
+                    guard task.status == .completed, task.disposition == .active, task.updatedAt < cutoff else { return false }
+                    var archived = task
+                    archived.disposition = .archived
+                    staleArchived.append(archived)
+                    return true
+                }
+                if !staleArchived.isEmpty {
+                    await inactiveStore.merge(staleArchived)
+                    archivedAnyStale = true
+                }
             }
 
             // Cross-store reconciliation for a crash mid-move: a task can transiently exist in BOTH
@@ -559,7 +555,7 @@ final class AppViewModel {
             // file durably has them. If the global store can't be persisted (corrupt/failed file),
             // KEEP the per-session copies — don't strip — so nothing is lost. The status-change-only
             // case (no inactive moved) always persists.
-            let movedToGlobal = !strayInactive.isEmpty || !staleArchived.isEmpty || removedStaleGlobal
+            let movedToGlobal = !strayInactive.isEmpty || archivedAnyStale || removedStaleGlobal
             let canStripSessionFile = movedToGlobal ? await shared.persistInactiveTasksNow() : true
 
             // `tasks` now holds only this session's active tasks.

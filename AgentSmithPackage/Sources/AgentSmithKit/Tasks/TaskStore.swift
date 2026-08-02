@@ -14,6 +14,11 @@ public actor TaskStore {
     /// Fired the first time a task transitions to a terminal status (`.completed` or `.failed`).
     /// Used by `OrchestrationRuntime` to cancel any scheduled wakes pinned to the task.
     private var onTaskTerminated: (@Sendable (UUID) -> Void)?
+    /// Fired when a task LEAVES the active store via archive or soft-delete (i.e. `move`). Used by
+    /// `OrchestrationRuntime` to cancel any scheduled wakes pinned to the task — a disposition change
+    /// is not a terminal STATUS change, so `onTaskTerminated` never fires for it, which used to leave
+    /// an archived/deleted scheduled task's wake orphaned (it fired later and was silently skipped).
+    private var onTaskMovedToInactive: (@Sendable (UUID) -> Void)?
     /// The shared global store for archived + recently-deleted tasks. See the type doc.
     private let inactiveStore: InactiveTaskStore?
     /// Durably writes the global inactive store to disk *now*, returning whether it succeeded.
@@ -73,6 +78,11 @@ public actor TaskStore {
     /// Registers a callback fired when a task transitions to a terminal status for the first time.
     public func setOnTaskTerminated(_ handler: @escaping @Sendable (UUID) -> Void) {
         onTaskTerminated = handler
+    }
+
+    /// Registers a callback fired when a task is archived or soft-deleted (leaves the active store).
+    public func setOnTaskMovedToInactive(_ handler: @escaping @Sendable (UUID) -> Void) {
+        onTaskMovedToInactive = handler
     }
 
     /// All tasks, newest first.
@@ -1562,6 +1572,9 @@ public actor TaskStore {
         }
         tasks.removeValue(forKey: task.id)
         onChange?()
+        // Archive / soft-delete must cancel the task's scheduled wakes: a disposition move is not a
+        // terminal STATUS change, so `onTaskTerminated` does not fire here.
+        onTaskMovedToInactive?(task.id)
         return true
     }
 
