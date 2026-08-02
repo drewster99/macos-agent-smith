@@ -196,35 +196,27 @@ public actor TranscriptStore {
 
     /// Loads the most-recent `residentCap` messages from the log into the resident tail and resets every
     /// subscriber to the freshly-loaded view. Called once at session start after persistence is wired.
-    public func loadInitialTail() async {
+    public func loadInitialTail() async throws {
         guard let loadLogTail else { return }
-        do {
-            let (tail, total) = try await loadLogTail(residentCap)
-            resident = tail
-            persistedHistoryCount = total
-            hasRestoredHistory = tail.count >= total
-            resetAllSubscribers()
-        } catch {
-            // Best-effort: a failed tail load leaves the store empty; the next append still works.
-        }
+        let (tail, total) = try await loadLogTail(residentCap)
+        resident = tail
+        persistedHistoryCount = total
+        hasRestoredHistory = tail.count >= total
+        resetAllSubscribers()
     }
 
     /// Pulls the ENTIRE on-disk history into the resident tail (user-initiated "Restore full history"),
     /// suspending trimming from here on, then resets every subscriber. Idempotent.
-    public func restoreFullHistory() async {
+    public func restoreFullHistory() async throws {
         guard !hasRestoredHistory, let loadFullLog else { return }
-        do {
-            let full = try await loadFullLog()
-            // Any resident message not yet on disk (a not-yet-persisted append) is kept after the
-            // authoritative history, deduped by id.
-            let fullIDs = Set(full.map(\.id))
-            let liveTail = resident.filter { !fullIDs.contains($0.id) }
-            resident = full + liveTail
-            persistedHistoryCount = resident.count
-            hasRestoredHistory = true
-            resetAllSubscribers()
-        } catch {
-            // Leave the resident tail as-is on failure.
-        }
+        let full = try await loadFullLog()
+        // Any resident message not yet on disk (a not-yet-persisted append) is kept after the
+        // authoritative history, deduped by id.
+        let fullIDs = Set(full.map(\.id))
+        let liveTail = resident.filter { !fullIDs.contains($0.id) }
+        resident = full + liveTail
+        persistedHistoryCount = resident.count
+        hasRestoredHistory = true
+        resetAllSubscribers()
     }
 }

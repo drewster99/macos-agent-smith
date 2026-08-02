@@ -15,27 +15,23 @@ final class AppViewModel {
     let session: Session
     let shared: SharedAppState
 
-    var messages: [ChannelMessage] = []
+    /// The per-session transcript owner, OFF the main actor: it holds the resident tail, coalesces the
+    /// channel stream, and fans each batch out to every subscribed pane (doing the filtering off-main).
+    /// Persistence — the JSONL append and its shutdown flush — stays here on the view model.
+    let transcriptStore: TranscriptStore
+    /// The main pane's unfiltered (`.all`) view onto the store. `messages` / `renderedToolRequestIDs` /
+    /// `hasRestoredHistory` / `persistedHistoryCount` forward to it, so `ChannelLogView` and the
+    /// inspector keep reading `viewModel.messages` unchanged while the filtering happens off-main.
+    let primaryTranscriptProvider: FilteredTranscriptProvider
 
-    /// Set of `requestID`s for every resident `tool_request` message, maintained incrementally as
-    /// `messages` mutates (O(1) per append) so `ChannelLogView` doesn't have to rebuild it over the
-    /// whole transcript on every render. It must cover ALL resident messages — not just the render
-    /// window — so a security-review / tool-output row whose parent scrolled out of the window still
-    /// collapses into that parent instead of leaking as a loose row.
-    private(set) var renderedToolRequestIDs: Set<String> = []
+    /// The resident transcript tail shown in the main pane — a forward to the primary provider (the
+    /// store owns the array off-main). Still `[ChannelMessage]`, so every existing reader is unchanged.
+    var messages: [ChannelMessage] { primaryTranscriptProvider.messages }
 
-    /// The `requestID` of `message` if it is a `tool_request`, else nil.
-    private func toolRequestID(of message: ChannelMessage) -> String? {
-        guard message.kind == .toolRequest,
-              case .string(let requestID)? = message.metadata?["requestID"] else { return nil }
-        return requestID
-    }
-
-    /// Rebuilds `renderedToolRequestIDs` from scratch — used by the infrequent bulk mutations
-    /// (initial load, restore-full-history, clear) where incremental maintenance doesn't apply.
-    private func rebuildRenderedToolRequestIDs() {
-        renderedToolRequestIDs = Set(messages.compactMap(toolRequestID(of:)))
-    }
+    /// `requestID`s of every resident `tool_request`, maintained incrementally by the primary provider
+    /// so `ChannelLogView` folds tool-output / security-review follow-ups into their parent row without
+    /// rebuilding the set each render. Covers ALL resident messages, not just the render window.
+    var renderedToolRequestIDs: Set<String> { primaryTranscriptProvider.toolRequestIDs }
 
     var tasks: [AgentTask] = [] {
         didSet { rebucketTasks() }
@@ -59,10 +55,12 @@ final class AppViewModel {
     private(set) var pendingWakesByTaskID: [UUID: [ScheduledWake]] = [:]
     /// Append-only timer history rows displayed in the Timers history pane. Newest first.
     var timerHistory: [TimerEvent] = []
-    /// Whether the user has restored the persisted history into the transcript.
-    var hasRestoredHistory = false
-    /// Number of messages loaded from disk at launch (available for restore).
-    var persistedHistoryCount = 0
+    /// Whether the full persisted history has been pulled into the transcript. Forwarded from the
+    /// primary provider (the store tracks it).
+    var hasRestoredHistory: Bool { primaryTranscriptProvider.hasRestoredHistory }
+    /// Total messages on disk (drives the "Restore full history" affordance). Forwarded from the
+    /// primary provider.
+    var persistedHistoryCount: Int { primaryTranscriptProvider.persistedHistoryCount }
     /// The first task currently parked for attention — a validator-error escalation the USER resolves
     /// (`.awaitingReview`) or a Brown blocker Smith answers (`.awaitingHelp`). Drives the banner.
     var taskAwaitingReview: AgentTask? {
@@ -342,6 +340,12 @@ final class AppViewModel {
         self.sessionStateWriter = SerialPersistenceWriter(label: "sessionState") { snapshot in
             try await pm.saveSessionState(snapshot)
         }
+        self.transcriptStore = TranscriptStore(residentCap: Self.residentMessageCap)
+        self.primaryTranscriptProvider = FilteredTranscriptProvider(filter: .all, cap: Self.residentMessageCap)
+        // The main pane subscribes now so it paints the moment the initial tail loads (readers are
+        // wired and the tail loaded in `loadPersistedState`). The store owns display; appends stay on
+        // this view model via the JSONL writer above.
+        primaryTranscriptProvider.attach(to: transcriptStore)
     }
 
     // MARK: - Lifecycle
@@ -447,18 +451,16 @@ final class AppViewModel {
             messageHistory = history
         }
 
-        // Load channel log.
+        // Load channel log. The transcript store owns the resident tail off-main: give it read access
+        // to the log, then load the initial tail (which resets the primary provider). Legacy
+        // channel_log.json migration happens inside the persistence layer on first access.
         do {
-            // Load only the most-recent tail into memory; the full transcript stays on disk.
-            // Migration of a legacy channel_log.json (including the one-time file_write metadata
-            // strip) happens inside the persistence layer on first access — see
-            // `migrateLegacyChannelLogIfNeeded`.
-            let (tail, total) = try await persistenceManager.loadChannelLogTail(limit: Self.residentMessageCap)
-            messages = tail
-            rebuildRenderedToolRequestIDs()
-            persistedHistoryCount = total
-            // If the whole transcript already fit in the tail there's nothing older to restore.
-            hasRestoredHistory = tail.count >= total
+            let pm = persistenceManager
+            await transcriptStore.setLogReaders(
+                loadFull: { try await pm.loadFullChannelLog() },
+                loadTail: { limit in try await pm.loadChannelLogTail(limit: limit) }
+            )
+            try await transcriptStore.loadInitialTail()
         } catch {
             let msg = "Failed to load channel log: \(error)"
             logger.error("\(msg, privacy: .public)")
@@ -901,7 +903,8 @@ final class AppViewModel {
         channelStreamTask = Task { @MainActor [weak self] in
             for await message in channel.stream() {
                 guard let self else { break }
-                self.appendToTranscript(message)
+                await self.transcriptStore.ingest(message)   // display (off-main fan-out + cap)
+                self.enqueueChannelAppendForPersist(message)  // disk (debounced JSONL)
                 self.shared.speechController.handle(message)
             }
         }
@@ -2080,17 +2083,18 @@ final class AppViewModel {
     /// here tore down live state the user never asked to discard and left every agent card
     /// reading "Not active" while its agent was still running.
     func clearLog() {
-        messages.removeAll()
-        renderedToolRequestIDs.removeAll()
-        // The full transcript is still on disk; re-offer the restore affordance.
-        hasRestoredHistory = false
+        // The store owns the resident tail off-main; wiping it resets the primary provider and
+        // re-offers the restore affordance (the full transcript is still on disk, untouched).
+        Task { await transcriptStore.clear() }
     }
 
     /// `/clear` and the toolbar trashcan: resets SMITH'S LLM CONTEXT (with a fresh
     /// task-state re-briefing) and starts a fresh screen. Distinct from Ctrl-L, which is
     /// display-only. Brown is untouched — clearing a worker mid-task would break the task.
     func clearConversation() async {
-        clearLog()
+        // Await the wipe directly (not the fire-and-forget `clearLog`) so it lands before the
+        // system-message append below, which would otherwise race back onto a just-cleared screen.
+        await transcriptStore.clear()
         guard let runtime else {
             appendLocalSystemMessage("Screen cleared. System is not running, so there was no agent context to clear.")
             return
@@ -2145,23 +2149,15 @@ final class AppViewModel {
     /// channel) to post through. Mirrors the channel-stream append path so the message
     /// also survives in the persisted history.
     private func appendLocalSystemMessage(_ content: String) {
-        appendToTranscript(ChannelMessage(sender: .system, content: content))
+        let message = ChannelMessage(sender: .system, content: content)
+        Task { await transcriptStore.ingest(message) }   // display (off-main fan-out + cap)
+        enqueueChannelAppendForPersist(message)           // disk (debounced JSONL)
     }
 
-    /// Appends a message to the in-memory transcript and queues it for the on-disk JSONL log.
-    /// Trims the resident tail back to `residentMessageCap` unless the user has pulled in the
-    /// full history (then they've opted into holding everything until the next relaunch).
-    private func appendToTranscript(_ message: ChannelMessage) {
-        messages.append(message)
-        if let rid = toolRequestID(of: message) { renderedToolRequestIDs.insert(rid) }
-        persistedHistoryCount += 1
-        if !hasRestoredHistory && messages.count > Self.residentMessageCap {
-            let removeCount = messages.count - Self.residentMessageCap
-            for trimmed in messages.prefix(removeCount) {
-                if let rid = toolRequestID(of: trimmed) { renderedToolRequestIDs.remove(rid) }
-            }
-            messages.removeFirst(removeCount)
-        }
+    /// Queues a message for the on-disk JSONL log (debounced by `persistMessages`). Display — the
+    /// resident tail, its cap, and the tool-request id set — is the transcript store's concern now;
+    /// the channel-stream consumer forwards each message to `transcriptStore.ingest`.
+    private func enqueueChannelAppendForPersist(_ message: ChannelMessage) {
         pendingChannelAppends.append(message)
         persistMessages()
     }
@@ -2169,23 +2165,12 @@ final class AppViewModel {
     /// Loads the full transcript from disk into memory. Trimming stays suspended afterward
     /// (`hasRestoredHistory`), so the whole history remains visible for the rest of the session.
     func restoreHistory() {
-        guard !hasRestoredHistory else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
+        let store = transcriptStore
+        Task { [weak self] in
             do {
-                let full = try await self.persistenceManager.loadFullChannelLog()
-                // Read `messages` AFTER the await: messages that streamed in during the load are
-                // now resident. `full` is the authoritative ordered history; any resident message
-                // not yet on disk (a not-yet-flushed live append) is appended after it, deduped
-                // by id so a message that flushed mid-load isn't duplicated.
-                let fullIDs = Set(full.map(\.id))
-                let liveTail = self.messages.filter { !fullIDs.contains($0.id) }
-                self.messages = full + liveTail
-                self.rebuildRenderedToolRequestIDs()
-                self.persistedHistoryCount = self.messages.count
-                self.hasRestoredHistory = true
+                try await store.restoreFullHistory()
             } catch {
-                self.logger.error("Failed to restore full channel history: \(error.localizedDescription, privacy: .public)")
+                self?.logger.error("Failed to restore full channel history: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
