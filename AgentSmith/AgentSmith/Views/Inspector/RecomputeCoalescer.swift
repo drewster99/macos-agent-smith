@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Collapses many change signals into ONE cache rebuild per frame.
+/// Collapses many change signals into ONE cache rebuild per main-queue turn.
 ///
 /// The inspector's views keep a `@State` cache rebuilt by a fan of `.onChange` handlers, and several
 /// fire together as a matter of course: one completed tool call changes the message list, the
@@ -12,14 +12,9 @@ import SwiftUI
 /// CPU down to 7.5s. Over the same run, body evaluations were 34,474 in BOTH arms and `@State`
 /// writes were 185,934 vs 88,374 — so twice the writes produced bit-identical render counts.
 /// SwiftUI marks dependents dirty and renders once per pass regardless; this changes none of that.
-/// Do not reach for it to reduce RENDERING.
-///
-/// It DOES silence SwiftUI's "onChange/task action tried to update multiple times per frame"
-/// logging, because the flush is delayed a full frame (`frameInterval`): every signal arriving in
-/// that window — across all the main-queue turns a frame contains — folds into one rebuild, so the
-/// `@State` write it performs happens at most once per frame. (The earlier version drained on the
-/// next main-queue TURN, and a frame holds several turns, so a card watching ~11 inputs still
-/// rebuilt several times per frame and still tripped the warning.)
+/// Do not reach for it to reduce rendering, and do not expect it to silence SwiftUI's "tried to
+/// update multiple times per frame" logging. A signal arriving in a LATER turn of the same frame
+/// still gets its own rebuild; the coalescing unit is a queue drain, not a frame.
 ///
 /// It therefore pays only where the REBUILD is expensive and the watchers fire TOGETHER. Where the
 /// shared work is a lookup, or the watchers write unrelated state, it buys nothing.
@@ -48,24 +43,13 @@ final class RecomputeCoalescer {
 
     init() {}
 
-    /// One frame at 60 Hz. The flush is delayed by this so EVERY signal arriving within the window —
-    /// across as many main-queue turns as a frame contains — collapses into ONE rebuild. See
-    /// `schedule`.
-    private static let frameInterval: TimeInterval = 1.0 / 60.0
-
-    /// Runs the most recently supplied `work` at most once per frame, absorbing every signal that
-    /// arrives in the window. A plain `DispatchQueue.main.async` drains on the NEXT main-queue turn,
-    /// and a frame contains several turns — so a card watching ~11 inputs still rebuilt several times
-    /// per frame when a burst touched several of them, which is precisely SwiftUI's "onChange action
-    /// tried to update multiple times per frame". Delaying by one frame makes the rebuild — and thus
-    /// the `@State` write it performs — happen at most once per frame, which silences the warning.
-    /// Safe here because a one-frame lag on inspector display is imperceptible; do NOT use where a
-    /// sibling reads the rebuilt value in the SAME pass (`ChannelLogView`'s auto-scroll — see below).
+    /// Runs the most recently supplied `work` on the next main-queue turn, absorbing any signals
+    /// that arrive before it drains.
     func schedule(_ work: @escaping @MainActor () -> Void) {
         let alreadyScheduled = pending != nil
         pending = work
         guard !alreadyScheduled else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.frameInterval) { [self] in
+        DispatchQueue.main.async { [self] in
             let work = pending
             pending = nil
             work?()

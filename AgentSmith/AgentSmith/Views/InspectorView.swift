@@ -33,9 +33,6 @@ struct InspectorView: View {
     @State private var brownMessages: [ChannelMessage] = []
     @State private var securityAgentMessages: [ChannelMessage] = []
     @State private var summarizerMessages: [ChannelMessage] = []
-    /// Coalesces the re-bucket to at most once per frame (see `RecomputeCoalescer`), so a burst of
-    /// appended messages assigns the per-role slices once, not once per turn-within-the-frame.
-    @State private var coalescer = RecomputeCoalescer()
 
     /// Buckets channel messages by the agent role they belong to, in one pass.
     /// One deliberate deviation from "sender == role": role-attributed SYSTEM diagnostics are
@@ -99,20 +96,16 @@ struct InspectorView: View {
         .onChange(of: viewModel.messages) { _, _ in rebucket() }
     }
 
-    /// Re-buckets `viewModel.messages` and assigns each per-role @State only if its slice actually
-    /// changed. Routed through the frame coalescer: a burst that appends several messages in one
-    /// frame re-buckets ONCE (the bucketing reads live `viewModel.messages` at flush time, so the
-    /// single run sees the freshest array), rather than once per turn — which is what let
-    /// `.onChange(of: viewModel.messages)` trip SwiftUI's "multiple times per frame" warning. The
-    /// coalesced block satisfies the project rule against synchronous @State writes in an `.onChange`
-    /// closure (it runs on a later main-queue hop, not inline).
+    /// Re-buckets `viewModel.messages` and assigns each per-role @State only if its slice
+    /// actually changed. Mutations are deferred via `DispatchQueue.main.async` per the
+    /// project rule (no synchronous @State mutation inside .onChange / .task closures).
     private func rebucket() {
-        coalescer.schedule {
-            let buckets = Self.bucketMessagesByRole(viewModel.messages)
-            let nextSmith = buckets[.smith] ?? []
-            let nextBrown = buckets[.brown] ?? []
-            let nextSecurityAgent = buckets[.securityAgent] ?? []
-            let nextSummarizer = buckets[.summarizer] ?? []
+        let buckets = Self.bucketMessagesByRole(viewModel.messages)
+        let nextSmith = buckets[.smith] ?? []
+        let nextBrown = buckets[.brown] ?? []
+        let nextSecurityAgent = buckets[.securityAgent] ?? []
+        let nextSummarizer = buckets[.summarizer] ?? []
+        DispatchQueue.main.async {
             if smithMessages != nextSmith { smithMessages = nextSmith }
             if brownMessages != nextBrown { brownMessages = nextBrown }
             if securityAgentMessages != nextSecurityAgent { securityAgentMessages = nextSecurityAgent }
