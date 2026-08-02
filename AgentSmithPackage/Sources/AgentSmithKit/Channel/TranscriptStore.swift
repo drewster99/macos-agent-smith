@@ -100,10 +100,16 @@ public actor TranscriptStore {
             resident.removeFirst(resident.count - residentCap)
         }
 
-        // Fan out to the panes FIRST (prompt UI), then durably persist — matching the old order where
-        // the visible array updated before the JSONL append landed.
         fanOut(appended: batch)
-        if let appendToLog { await appendToLog(batch) }
+    }
+
+    /// Wipes the resident tail and every subscriber's view (the `/clear` screen reset). Persistence is
+    /// the caller's concern — the store owns display only.
+    public func clear() {
+        resident.removeAll()
+        persistedHistoryCount = 0
+        hasRestoredHistory = false
+        resetAllSubscribers()
     }
 
     private func fanOut(appended batch: [ChannelMessage]) {
@@ -171,18 +177,19 @@ public actor TranscriptStore {
         }
     }
 
-    // MARK: Persistence (injected)
+    // MARK: Log readers (injected)
+    //
+    // The store owns DISPLAY (the resident tail + fan-out). Persistence — the JSONL append and its
+    // shutdown flush — stays with the session's view model; the store only READS the log, to seed the
+    // initial tail at launch and to satisfy a user-initiated "Restore full history".
 
-    private var appendToLog: (@Sendable ([ChannelMessage]) async -> Void)?
     private var loadFullLog: (@Sendable () async throws -> [ChannelMessage])?
     private var loadLogTail: (@Sendable (Int) async throws -> (messages: [ChannelMessage], totalCount: Int))?
 
-    public func setPersistence(
-        append: @escaping @Sendable ([ChannelMessage]) async -> Void,
+    public func setLogReaders(
         loadFull: @escaping @Sendable () async throws -> [ChannelMessage],
         loadTail: @escaping @Sendable (Int) async throws -> (messages: [ChannelMessage], totalCount: Int)
     ) {
-        appendToLog = append
         loadFullLog = loadFull
         loadLogTail = loadTail
     }
