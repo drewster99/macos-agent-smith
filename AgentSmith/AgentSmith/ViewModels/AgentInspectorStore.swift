@@ -54,8 +54,12 @@ final class AgentInspectorStore {
     func appendTurn(_ turn: LLMTurnRecord, for ref: AgentInstanceRef) {
         var turns = turnsByRole[ref.role] ?? []
         turns.append(turn)
+        // Cap + strip on the LOCAL copy, then assign ONCE. Assigning `turnsByRole[ref.role]` here
+        // and AGAIN inside a separate prune step wrote the same @Observable twice in one synchronous
+        // call, so `.onChange(of: turnsByRole[role])` fired twice per turn in a single frame
+        // (SwiftUI's "tried to update multiple times per frame").
+        Self.pruningOldSnapshots(&turns)
         turnsByRole[ref.role] = turns
-        pruneOldTurnSnapshots(for: ref.role)
 
         // Per-instance mirror (the re-key), bounded so a long run with many workers can't
         // grow it without limit: capped per instance, LRU-evicted by instance count (see
@@ -86,28 +90,20 @@ final class AgentInspectorStore {
         }
     }
 
-    /// Caps turn record count and strips contextSnapshot from older turns for a given role.
-    private func pruneOldTurnSnapshots(for role: AgentRole) {
-        guard var turns = turnsByRole[role] else { return }
-        var modified = false
-
+    /// Caps turn-record count and strips `contextSnapshot` from older turns, IN PLACE on the passed
+    /// array. Pure (no `@Observable` mutation) so the caller can fold it into a single assignment —
+    /// see `appendTurn`, where writing `turnsByRole` twice tripped SwiftUI's per-frame warning.
+    private static func pruningOldSnapshots(_ turns: inout [LLMTurnRecord]) {
         // Drop oldest records when exceeding the hard cap.
         if turns.count > Self.maxTurnRecords {
             turns.removeFirst(turns.count - Self.maxTurnRecords)
-            modified = true
         }
-
         // Strip heavy snapshots from turns outside the recent window.
         let stripCount = turns.count - Self.recentSnapshotWindow
         if stripCount > 0 {
             for i in 0..<stripCount where !turns[i].contextSnapshot.isEmpty {
                 turns[i].stripContextSnapshot()
-                modified = true
             }
-        }
-
-        if modified {
-            turnsByRole[role] = turns
         }
     }
 
