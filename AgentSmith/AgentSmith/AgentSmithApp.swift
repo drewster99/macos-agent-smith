@@ -182,6 +182,14 @@ struct AgentSmithApp: App {
                 .keyboardShortcut("t", modifiers: [.command, .option])
                 .disabled(sessionManager.sessions.isEmpty)
 
+                Button("Library") {
+                    if let id = shared.focusedSessionID ?? sessionManager.sessions.first?.id {
+                        openWindow(id: "library", value: id)
+                    }
+                }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .disabled(sessionManager.sessions.isEmpty)
+
                 Divider()
 
                 Toggle(
@@ -307,6 +315,19 @@ struct AgentSmithApp: App {
             }
         }
         .defaultSize(width: 1120, height: 760)
+
+        WindowGroup("Library", id: "library", for: UUID.self) { $sessionID in
+            if let id = sessionID, let vm = sessionManager.viewModel(for: id) {
+                LibraryWindow(viewModel: vm)
+            } else {
+                ContentUnavailableView(
+                    "Session Closed",
+                    systemImage: "books.vertical",
+                    description: Text("Open a session and try again.")
+                )
+            }
+        }
+        .defaultSize(width: 640, height: 720)
 
         Settings {
             SettingsView(shared: shared, sessionManager: sessionManager)
