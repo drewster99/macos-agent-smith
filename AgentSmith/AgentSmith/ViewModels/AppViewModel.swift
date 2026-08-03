@@ -26,6 +26,11 @@ final class AppViewModel {
     /// The TOP pane's view onto the SAME store, filtered to the currently `selectedTaskID`'s transcript.
     /// One store, two providers — this one re-filters (off-main) whenever the selection changes.
     let topTranscriptProvider: FilteredTranscriptProvider
+    /// The BOTTOM pane's view onto the SAME store, filtered by the user's `transcriptViewConfig`
+    /// (kind groups + senders + visibility). Deliberately separate from `primaryTranscriptProvider` —
+    /// which stays the unfiltered firehose the role-bucketed inspector reads — so narrowing the bottom
+    /// pane never hides messages from the inspector.
+    let bottomTranscriptProvider: FilteredTranscriptProvider
 
     /// The task whose transcript the top pane shows. `nil` = nothing selected (top pane shows a
     /// "Select a task" prompt). Set by clicking a task in the sidebar; auto-set when a task starts.
@@ -35,6 +40,17 @@ final class AppViewModel {
             guard selectedTaskID != oldValue else { return }
             topTranscriptProvider.filter = TranscriptFilter(
                 taskScope: selectedTaskID.map { TranscriptFilter.TaskScope.task($0) } ?? .matchNone)
+            persistSessionStateAsync()
+        }
+    }
+
+    /// The bottom (full-session) pane's filter configuration — which kind groups, senders, and
+    /// public/private the pane shows. Edited from the pane's filter popover; persisted per session.
+    /// Its didSet repoints the bottom provider's filter (off-main) and persists.
+    var transcriptViewConfig: TranscriptViewConfig {
+        didSet {
+            guard transcriptViewConfig != oldValue else { return }
+            bottomTranscriptProvider.filter = transcriptViewConfig.makeFilter()
             persistSessionStateAsync()
         }
     }
@@ -370,15 +386,19 @@ final class AppViewModel {
         self.sessionStateWriter = SerialPersistenceWriter(label: "sessionState") { snapshot in
             try await pm.saveSessionState(snapshot)
         }
+        self.transcriptViewConfig = .conversation
         self.transcriptStore = TranscriptStore(residentCap: Self.residentMessageCap)
         self.primaryTranscriptProvider = FilteredTranscriptProvider(filter: .all, cap: Self.residentMessageCap)
         self.topTranscriptProvider = FilteredTranscriptProvider(
             filter: TranscriptFilter(taskScope: .matchNone), cap: Self.residentMessageCap)
+        self.bottomTranscriptProvider = FilteredTranscriptProvider(
+            filter: TranscriptViewConfig.conversation.makeFilter(), cap: Self.residentMessageCap)
         // The main pane subscribes now so it paints the moment the initial tail loads (readers are
         // wired and the tail loaded in `loadPersistedState`). The store owns display; appends stay on
         // this view model via the JSONL writer above.
         primaryTranscriptProvider.attach(to: transcriptStore)
         topTranscriptProvider.attach(to: transcriptStore)
+        bottomTranscriptProvider.attach(to: transcriptStore)
     }
 
     // MARK: - Lifecycle
@@ -438,6 +458,9 @@ final class AppViewModel {
                 // Restore the top-pane selection. The didSet repoints the top provider's filter;
                 // its persist is suppressed here by isApplyingPersistedState.
                 selectedTaskID = state.selectedTaskID
+                // Restore the bottom-pane filter config (nil on old files → the shipped conversation
+                // default). The didSet repoints the bottom provider's filter; persist is suppressed.
+                transcriptViewConfig = state.transcriptViewConfig ?? .conversation
             } else {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
                 // No per-session state — fall back to the shared default assignments (from bundled
@@ -2126,7 +2149,8 @@ final class AppViewModel {
             autoRunNextTask: autoRunNextTask,
             autoRunInterruptedTasks: autoRunInterruptedTasks,
             orchestrationOverride: orchestrationOverride,
-            selectedTaskID: selectedTaskID
+            selectedTaskID: selectedTaskID,
+            transcriptViewConfig: transcriptViewConfig
         )
         logger.notice("flushPersistence: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(finalState.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(finalState.autoRunInterruptedTasks, privacy: .public)")
         await sessionStateWriter.enqueue(finalState)
@@ -2459,7 +2483,8 @@ final class AppViewModel {
             autoRunNextTask: autoRunNextTask,
             autoRunInterruptedTasks: autoRunInterruptedTasks,
             orchestrationOverride: orchestrationOverride,
-            selectedTaskID: selectedTaskID
+            selectedTaskID: selectedTaskID,
+            transcriptViewConfig: transcriptViewConfig
         )
         logger.notice("persistSessionStateAsync: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(state.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(state.autoRunInterruptedTasks, privacy: .public) caller=\(callerFunction, privacy: .public)@\(callerFile, privacy: .public):\(callerLine, privacy: .public)")
         let writer = sessionStateWriter

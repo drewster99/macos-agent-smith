@@ -55,6 +55,9 @@ public struct SessionState: Codable, Sendable {
     /// The task whose transcript the top pane shows, persisted so the selection survives relaunch.
     /// `nil` = nothing selected (top pane shows the "Select a task" prompt).
     public var selectedTaskID: UUID?
+    /// The bottom (full-session) pane's filter config. `nil` = the shipped default
+    /// (`TranscriptViewConfig.conversation`); a non-nil value is the user's edited config.
+    public var transcriptViewConfig: TranscriptViewConfig?
     public init(
         agentAssignments: [AgentRole: ModelAssignment] = [:],
         agentPollIntervals: [AgentRole: TimeInterval] = [:],
@@ -64,7 +67,8 @@ public struct SessionState: Codable, Sendable {
         autoRunNextTask: Bool = true,
         autoRunInterruptedTasks: Bool = true,
         orchestrationOverride: OrchestrationSettingsOverride? = nil,
-        selectedTaskID: UUID? = nil
+        selectedTaskID: UUID? = nil,
+        transcriptViewConfig: TranscriptViewConfig? = nil
     ) {
         self.agentAssignments = agentAssignments
         self.agentPollIntervals = agentPollIntervals
@@ -75,6 +79,7 @@ public struct SessionState: Codable, Sendable {
         self.autoRunInterruptedTasks = autoRunInterruptedTasks
         self.orchestrationOverride = orchestrationOverride
         self.selectedTaskID = selectedTaskID
+        self.transcriptViewConfig = transcriptViewConfig
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -83,7 +88,7 @@ public struct SessionState: Codable, Sendable {
         case agentModelAssignments
         case agentAssignments, agentPollIntervals, agentMaxToolCalls
         case agentMessageDebounceIntervals, toolsEnabled, autoRunNextTask
-        case autoRunInterruptedTasks, orchestrationOverride, selectedTaskID
+        case autoRunInterruptedTasks, orchestrationOverride, selectedTaskID, transcriptViewConfig
         /// Retired. The validator's model used to live in its own scalar because `AgentRole`
         /// had no validator case. Decoded (never encoded) so an existing session file's assignment
         /// survives — into the legacy pool-UUID set, migrated at load like the rest.
@@ -103,6 +108,7 @@ public struct SessionState: Codable, Sendable {
         // `nil` (key absent) is the inherit-everything state, not a default value — no `?? …`.
         orchestrationOverride = try c.decodeIfPresent(OrchestrationSettingsOverride.self, forKey: .orchestrationOverride)
         selectedTaskID = try c.decodeIfPresent(UUID.self, forKey: .selectedTaskID)
+        transcriptViewConfig = try c.decodeIfPresent(TranscriptViewConfig.self, forKey: .transcriptViewConfig)
         // One-way migration of the retired scalar. An explicit `agentAssignments[.validator]`
         // always wins — once the new key is written the legacy one is stale by definition.
         if legacyConfigAssignments[.validator] == nil,
@@ -122,5 +128,6 @@ public struct SessionState: Codable, Sendable {
         try c.encode(autoRunInterruptedTasks, forKey: .autoRunInterruptedTasks)
         try c.encodeIfPresent(orchestrationOverride, forKey: .orchestrationOverride)
         try c.encodeIfPresent(selectedTaskID, forKey: .selectedTaskID)
+        try c.encodeIfPresent(transcriptViewConfig, forKey: .transcriptViewConfig)
     }
 }

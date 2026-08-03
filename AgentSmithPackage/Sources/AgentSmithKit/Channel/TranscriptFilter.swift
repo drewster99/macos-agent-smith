@@ -40,7 +40,7 @@ public struct TranscriptFilter: Sendable, Equatable {
     }
 
     /// Public (channel-wide) vs private (addressed to a specific agent) messages.
-    public enum Visibility: Sendable, Equatable {
+    public enum Visibility: String, Sendable, Equatable, Codable, CaseIterable {
         case all
         case publicOnly
         case privateOnly

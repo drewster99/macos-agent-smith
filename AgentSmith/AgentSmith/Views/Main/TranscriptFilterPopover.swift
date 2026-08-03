@@ -1,0 +1,153 @@
+import SwiftUI
+import AgentSmithKit
+
+/// A thin header strip above the bottom transcript pane carrying the filter-config button. The funnel
+/// fills when the pane is showing anything less than the full firehose, so it's obvious at a glance that
+/// messages are being hidden.
+struct TranscriptFilterBar: View {
+    @Binding var config: TranscriptViewConfig
+    @State private var showPopover = false
+
+    private var isFiltering: Bool { config != .everything }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Session transcript")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                showPopover = true
+            } label: {
+                Image(systemName: isFiltering
+                    ? "line.3.horizontal.decrease.circle.fill"
+                    : "line.3.horizontal.decrease.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Choose which messages this pane shows")
+            .popover(isPresented: $showPopover, arrowEdge: .top) {
+                TranscriptFilterPopover(config: $config)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+    }
+}
+
+/// The bottom pane's filter configuration UI: toggle message-kind groups, senders, and public/private,
+/// with two one-click presets. Edits apply live — each toggle mutates the bound `TranscriptViewConfig`,
+/// whose didSet repoints the pane's provider off-main.
+struct TranscriptFilterPopover: View {
+    @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                TranscriptKindGroupSection(config: $config)
+                Divider()
+                TranscriptSenderSection(config: $config)
+                Divider()
+                TranscriptVisibilitySection(config: $config)
+                Divider()
+                TranscriptFilterPresetRow(config: $config)
+            }
+            .padding()
+        }
+        .frame(width: 320, height: 460)
+    }
+}
+
+/// The message-kind group checklist.
+private struct TranscriptKindGroupSection: View {
+    @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Message kinds")
+                .font(.headline)
+            ForEach(TranscriptKindGroup.allCases) { group in
+                Toggle(isOn: binding(for: group)) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(group.displayName)
+                        Text(group.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func binding(for group: TranscriptKindGroup) -> Binding<Bool> {
+        Binding(
+            get: { config.visibleGroups.contains(group) },
+            set: { isOn in
+                if isOn { config.visibleGroups.insert(group) } else { config.visibleGroups.remove(group) }
+            }
+        )
+    }
+}
+
+/// The sender allow-list. `nil` (every sender) is shown as all-on; turning any off materializes the
+/// explicit set, and turning them all back on collapses to `nil`.
+private struct TranscriptSenderSection: View {
+    @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Senders")
+                .font(.headline)
+            ForEach(TranscriptViewConfig.selectableSenders, id: \.self) { sender in
+                Toggle(sender.displayName, isOn: binding(for: sender))
+            }
+        }
+    }
+
+    private func binding(for sender: ChannelMessage.Sender) -> Binding<Bool> {
+        Binding(
+            get: {
+                guard let allowed = config.allowedSenders else { return true }
+                return allowed.contains(sender)
+            },
+            set: { isOn in
+                var allowed = config.allowedSenders ?? Set(TranscriptViewConfig.selectableSenders)
+                if isOn { allowed.insert(sender) } else { allowed.remove(sender) }
+                config.allowedSenders =
+                    allowed == Set(TranscriptViewConfig.selectableSenders) ? nil : allowed
+            }
+        )
+    }
+}
+
+/// The public / private / all selector.
+private struct TranscriptVisibilitySection: View {
+    @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Visibility")
+                .font(.headline)
+            Picker("Visibility", selection: $config.visibility) {
+                Text("All").tag(TranscriptFilter.Visibility.all)
+                Text("Public only").tag(TranscriptFilter.Visibility.publicOnly)
+                Text("Private only").tag(TranscriptFilter.Visibility.privateOnly)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+    }
+}
+
+/// One-click presets: the readable conversation default, or the full firehose.
+private struct TranscriptFilterPresetRow: View {
+    @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        HStack {
+            Button("Conversation") { config = .conversation }
+            Button("Show everything") { config = .everything }
+            Spacer()
+        }
+        .controlSize(.small)
+    }
+}

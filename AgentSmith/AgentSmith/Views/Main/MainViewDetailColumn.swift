@@ -64,19 +64,15 @@ struct MainViewDetailColumn: View {
                 )
                 .frame(minHeight: 120, idealHeight: 240)
 
-                // Bottom: the full session transcript (unchanged from the single-pane behavior).
-                ChannelLogView(
-                    messages: viewModel.messages,
-                    toolRequestIDs: viewModel.renderedToolRequestIDs,
-                    persistedHistoryCount: viewModel.persistedHistoryCount,
-                    hasRestoredHistory: viewModel.hasRestoredHistory,
-                    onRestoreHistory: { viewModel.restoreHistory() },
+                // Bottom: the full session transcript, filtered by the user's per-session config
+                // (its own provider — the inspector still reads the unfiltered firehose).
+                BottomTranscriptPane(
+                    viewModel: viewModel,
+                    displayPrefs: cachedDisplayPrefs,
                     onExportTaskPDF: exportTaskPDFAction,
                     onOpenMCPSettings: openMCPSettingsAction,
-                    displayPrefs: cachedDisplayPrefs,
                     selectedImageAttachment: $selectedImageAttachment
                 )
-                .equatable()
                 .frame(minHeight: 200)
             }
             // Update cached display preferences when any of the underlying shared preferences change.
@@ -183,6 +179,35 @@ struct MainViewDetailColumn: View {
                     return .handled
                 }
             }
+        }
+    }
+}
+
+/// The bottom transcript pane: a filter-config header strip over the full session transcript, rendered
+/// from `bottomTranscriptProvider` (the config-filtered view). Kept separate from the inspector's
+/// firehose so narrowing this pane never hides messages from the role buckets.
+private struct BottomTranscriptPane: View {
+    @Bindable var viewModel: AppViewModel
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TranscriptFilterBar(config: $viewModel.transcriptViewConfig)
+            ChannelLogView(
+                messages: viewModel.bottomTranscriptProvider.messages,
+                toolRequestIDs: viewModel.bottomTranscriptProvider.toolRequestIDs,
+                persistedHistoryCount: viewModel.persistedHistoryCount,
+                hasRestoredHistory: viewModel.hasRestoredHistory,
+                onRestoreHistory: { viewModel.restoreHistory() },
+                onExportTaskPDF: onExportTaskPDF,
+                onOpenMCPSettings: onOpenMCPSettings,
+                displayPrefs: displayPrefs,
+                selectedImageAttachment: $selectedImageAttachment
+            )
+            .equatable()
         }
     }
 }
