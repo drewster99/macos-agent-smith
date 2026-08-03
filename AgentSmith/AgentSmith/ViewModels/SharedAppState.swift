@@ -386,6 +386,12 @@ final class SharedAppState {
     /// Global deleted ("Recently Deleted") tasks (across all sessions), newest first. Mirrors
     /// `inactiveTaskStore`'s `.recentlyDeleted` bucket.
     private(set) var deletedTasks: [AgentTask] = []
+    /// Global template tasks (across all sessions), newest first. Mirrors `templateLibraryStore`'s
+    /// contents so every window's Library sidebar updates live. Templates are global — unlike active
+    /// instance tasks, which stay per-session on each `AppViewModel`.
+    private(set) var libraryTemplates: [AgentTask] = []
+    /// The Library's groups (single-membership, "Default" seeded), mirrored for the sidebar.
+    private(set) var libraryGroups: [TemplateGroup] = []
 
     /// User-edited model overrides cache, keyed by `"providerID/modelID"`. Mirrors what
     /// `llmKit` was last `setUserOverrides`'d with so the Settings UI can read individual
@@ -475,6 +481,18 @@ final class SharedAppState {
     /// is ever lost by clobbering a recoverable file or stripping before a durable global save.
     private var inactiveTasksPersistable = true
 
+    /// Shared global store of template tasks + their groups — one instance per process, injected into
+    /// every session's `TaskStore`. Created lazily in `ensureTemplateLibraryStore()`. Mirrors
+    /// `inactiveTaskStore`; the one-time per-session → global template migration runs on first create.
+    private(set) var templateLibraryStore: TemplateLibraryStore?
+    /// Tracks the in-flight `ensureTemplateLibraryStore()` call so concurrent windows share one
+    /// creation (and one migration run).
+    private var templateLibraryStoreTask: Task<TemplateLibraryStore, Error>?
+    /// Set false when the library must NOT be persisted this launch — a corrupt `template_library.json`
+    /// we refuse to overwrite, or a migration save that failed. While false, mutations aren't written
+    /// and per-session files aren't stripped, so no template is lost by clobbering or premature strip.
+    private var templateLibraryPersistable = true
+
     /// Tracks the in-flight one-time attachment migration so concurrent windows run it once.
     private var attachmentsMigrationTask: Task<Void, Never>?
     /// True once attachments have been migrated to the global store (or were already).
@@ -542,6 +560,7 @@ final class SharedAppState {
     private let taskSummariesWriter: SerialPersistenceWriter<[TaskSummaryEntry]>
     private let mcpServersWriter: SerialPersistenceWriter<[MCPServerConfig]>
     private let inactiveTasksWriter: SerialPersistenceWriter<[AgentTask]>
+    private let templateLibraryWriter: SerialPersistenceWriter<TemplateLibrarySnapshot>
 
     init() {
         let pm = PersistenceManager()
@@ -567,6 +586,9 @@ final class SharedAppState {
         }
         self.inactiveTasksWriter = SerialPersistenceWriter(label: "inactiveTasks") { snapshot in
             try await pm.saveInactiveTasks(snapshot)
+        }
+        self.templateLibraryWriter = SerialPersistenceWriter(label: "templateLibrary") { snapshot in
+            try await pm.saveTemplateLibrary(snapshot)
         }
 
         // Mirror the app-wide live-activity tracker onto the main thread for the inspector's
@@ -1066,6 +1088,98 @@ final class SharedAppState {
                     logger.error("Inactive-task strip: could not rewrite session \(session.id.uuidString, privacy: .public)'s tasks (\(error.localizedDescription, privacy: .public)) — will re-migrate next launch")
                 }
             }
+        }
+    }
+
+    // MARK: - Template library store (global templates + groups)
+
+    /// Returns the shared global template library, creating it on first call. Concurrent windows share
+    /// one in-flight creation via `templateLibraryStoreTask`, so every session's `TaskStore` is injected
+    /// with the same instance. Mirrors `ensureInactiveTaskStore()`.
+    func ensureTemplateLibraryStore() async throws -> TemplateLibraryStore {
+        if let store = templateLibraryStore { return store }
+        if let existing = templateLibraryStoreTask {
+            return try await existing.value
+        }
+        let task = Task { @MainActor [weak self] () -> TemplateLibraryStore in
+            guard let self else { throw CancellationError() }
+            return try await self.performEnsureTemplateLibraryStore()
+        }
+        templateLibraryStoreTask = task
+        defer { templateLibraryStoreTask = nil }
+        return try await task.value
+    }
+
+    private func performEnsureTemplateLibraryStore() async throws -> TemplateLibraryStore {
+        if let store = templateLibraryStore { return store }
+        let store = TemplateLibraryStore()
+
+        // `loadTemplateLibrary()` returns nil when `template_library.json` is absent → the one-time
+        // per-session → global migration hasn't run yet. It *throws* when the file exists but is
+        // corrupt: migrating then would rebuild from session files a prior migration already stripped,
+        // losing every template — so we quarantine (never delete) and start fresh instead.
+        //
+        // NOTE: the collect+strip migration is intentionally NOT run here yet. This build loads the
+        // file or starts empty, leaving templates in their per-session files; the migration lands only
+        // after every consumer reads the per-session ∪ library union, so nothing can vanish mid-move.
+        do {
+            if let loaded = try await basePersistence.loadTemplateLibrary() {
+                await store.restore(loaded)
+            }
+        } catch {
+            do {
+                let quarantined = try await basePersistence.quarantineCorruptTemplateLibraryFile()
+                logger.error("template_library.json was unreadable (\(error.localizedDescription, privacy: .public)); moved aside to \(quarantined?.lastPathComponent ?? "n/a", privacy: .public) and started a fresh library")
+            } catch {
+                templateLibraryPersistable = false
+                logger.error("template_library.json unreadable and could not be quarantined (\(error.localizedDescription, privacy: .public)) — not overwriting it; templates unavailable this launch")
+            }
+        }
+
+        // Wire persistence + UI mirror AFTER the initial restore so loading doesn't trigger a redundant
+        // write. Enqueue gated on `templateLibraryPersistable` so a corrupt/unwritable file is never
+        // clobbered by an in-session mutation.
+        let writer = templateLibraryWriter
+        await store.setOnChange { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let snapshot = await store.snapshot()
+                self.refreshLibraryBuckets(from: snapshot)
+                if self.templateLibraryPersistable {
+                    await writer.enqueue(snapshot)
+                }
+            }
+        }
+
+        templateLibraryStore = store
+        refreshLibraryBuckets(from: await store.snapshot())
+        return store
+    }
+
+    /// Mirrors the library snapshot into the published buckets the Library sidebar observes.
+    private func refreshLibraryBuckets(from snapshot: TemplateLibrarySnapshot) {
+        libraryTemplates = snapshot.templates.sorted { $0.createdAt > $1.createdAt }
+        libraryGroups = snapshot.groups
+    }
+
+    /// Flushes the library writer on termination (mirrors `flushInactiveTasks`).
+    public func flushTemplateLibrary() async {
+        guard let store = templateLibraryStore, templateLibraryPersistable else { return }
+        await templateLibraryWriter.enqueue(await store.snapshot())
+        await templateLibraryWriter.flush()
+    }
+
+    /// Durably persists the library now, returning success (mirrors `persistInactiveTasksNow`). Used
+    /// before a strip so a moved template is on disk before the session copy is removed.
+    @discardableResult
+    func persistTemplateLibraryNow() async -> Bool {
+        guard let store = templateLibraryStore, templateLibraryPersistable else { return false }
+        do {
+            try await basePersistence.saveTemplateLibrary(await store.snapshot())
+            return true
+        } catch {
+            logger.error("persistTemplateLibraryNow failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 

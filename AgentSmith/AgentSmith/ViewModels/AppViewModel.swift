@@ -531,6 +531,10 @@ final class AppViewModel {
             // The global archived/deleted store. First call runs the one-time per-session →
             // global migration; later calls return the shared instance.
             let inactiveStore = try await shared.ensureInactiveTaskStore()
+            // The global template library. Loads (or starts empty); the per-session → global template
+            // migration is deferred to a later build. Non-fatal — a failure just means no Library
+            // templates this launch, never a failed session load.
+            _ = try? await shared.ensureTemplateLibraryStore()
 
             var savedTasks: [AgentTask]
             do {

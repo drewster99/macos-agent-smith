@@ -228,6 +228,7 @@ final class SessionManager {
         // kill lands mid-flush, inactive-first preserves that ordering so a moved task can't be
         // stripped from its session file before it's durable in the global file.
         await shared.flushInactiveTasks()
+        await shared.flushTemplateLibrary()
         for vm in viewModels.values {
             await vm.flushForTermination()
         }

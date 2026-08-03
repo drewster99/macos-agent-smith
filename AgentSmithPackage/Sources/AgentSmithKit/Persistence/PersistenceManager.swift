@@ -171,6 +171,18 @@ public actor PersistenceManager {
         return dest
     }
 
+    /// Moves an unreadable `template_library.json` aside to a timestamped `.corrupt-…` name so a fresh
+    /// one can be written without destroying the original. Returns the destination URL, or nil if there
+    /// was no file. Throws on filesystem failure (the caller then refuses to overwrite). Never deletes.
+    public func quarantineCorruptTemplateLibraryFile() throws -> URL? {
+        let url = baseDirectory.appendingPathComponent("template_library.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let dest = baseDirectory.appendingPathComponent("template_library.corrupt-\(stamp)-\(UUID().uuidString.prefix(8)).json")
+        try FileManager.default.moveItem(at: url, to: dest)
+        return dest
+    }
+
     /// Deletes this session's subdirectory (channel_log, tasks, attachments, state).
     /// No-op if the directory doesn't exist. Only valid on a session-scoped manager.
     ///
