@@ -52,15 +52,41 @@ import Foundation
         #expect(filter.hideErrors == false)
     }
 
-    @Test func conversationDropsSecurityAgentToBrown() {
+    /// A REAL Security-review message about a Brown tool call is posted `sender: .system`, PUBLIC (no
+    /// recipient), with `taskID` stamped to the worker's task (see `AgentActor.postSecurityReviewToChannel`
+    /// + `ToolContext.post`). In the `.conversation` default it is therefore dropped by the TASK-SCOPE
+    /// axis, not the recipient axis — this asserts the shape the code actually produces.
+    @Test func conversationDropsRealSecurityReviewViaTaskScope() {
         let filter = TranscriptViewConfig.conversation.makeFilter()
-        let securityToBrown = ChannelMessage(
-            sender: .agent(.securityAgent),
+        let securityReview = ChannelMessage(
+            sender: .system,
+            content: "Security Agent → Brown: SAFE Internal task management metadata update",
+            taskID: UUID()
+        )
+        #expect(!filter.matches(securityReview))
+        // Prove it's the task-scope axis doing the work: the same message with no task shows.
+        let orchestrationScoped = ChannelMessage(
+            sender: .system,
+            content: "Security Agent → Brown: SAFE Internal task management metadata update"
+        )
+        #expect(filter.matches(orchestrationScoped))
+    }
+
+    /// The recipient axis is what drops a PRIVATE message ADDRESSED to a worker (e.g. `notify_brown`,
+    /// validation punch-lists) — the case the sender axis can't catch when it's sent by an allowed
+    /// sender. Exercised directly so it isn't conflated with the task-scope axis.
+    @Test func recipientAxisDropsMessagesAddressedToExcludedAgent() {
+        let filter = TranscriptFilter(allowedRecipients: [.user, .agent(.smith)])
+        let toBrown = ChannelMessage(
+            sender: .agent(.smith),
             recipientID: UUID(),
             recipient: .agent(.brown),
-            content: "SAFE Internal task management metadata update"
+            content: "New guidance for your task"
         )
-        #expect(!filter.matches(securityToBrown))
+        #expect(!filter.matches(toBrown))
+        // A public message (no recipient) always passes the recipient axis.
+        let publicMessage = ChannelMessage(sender: .agent(.brown), content: "Working on it")
+        #expect(filter.matches(publicMessage))
     }
 
     @Test func taskScopeThreadsThrough() {

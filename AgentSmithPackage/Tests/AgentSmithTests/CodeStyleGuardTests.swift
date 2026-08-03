@@ -100,9 +100,11 @@ struct CodeStyleGuardTests {
         // catalog runs to ~1,700 short, uniform rows, so eager realization froze the tab. The rows are
         // well under a screen dimension, so the sizing pitfall this rule guards against does not apply.
         // The approval is recorded at the usage site; this whitelist keeps the guard honoring it.
+        // Matched on the full relative path (the scan uses `hasSuffix`) so a differently-named file such
+        // as `CustomModelsSettingsTab.swift` can't slip through the exclusion.
         let hits = try Self.scan(
             regex: #"\bLazy(VStack|HStack|VGrid|HGrid)\b"#,
-            excluding: ["ModelsSettingsTab.swift"]
+            excluding: ["Views/ModelsSettingsTab.swift"]
         )
         if !hits.isEmpty {
             let formatted = hits.map { "  \($0.path):\($0.line) — \($0.text)" }.joined(separator: "\n")

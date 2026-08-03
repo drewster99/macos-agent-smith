@@ -3,8 +3,11 @@ import AgentSmithKit
 
 /// The time-of-day portion of a transcript timestamp: 12-hour with seconds and lowercase am/pm,
 /// e.g. "3:19:07pm". Used on its own for today's messages and as the tail of the relative-date form
-/// for older ones (see `transcriptTimestampString`).
-let sharedTimestampFormatter: DateFormatter = {
+/// for older ones (see `transcriptTimestampString`). All four formatters pin `en_US_POSIX` + Gregorian
+/// so the fixed English format renders identically under every user locale/calendar (a fixed
+/// `dateFormat` under a non-POSIX locale localizes month/weekday names and can print a non-Gregorian
+/// year — e.g. 2569 in a Buddhist calendar — welded onto the force-English am/pm time).
+private let sharedTimestampFormatter: DateFormatter = {
     let f = DateFormatter()
     f.locale = Locale(identifier: "en_US_POSIX")
     f.amSymbol = "am"
@@ -16,6 +19,8 @@ let sharedTimestampFormatter: DateFormatter = {
 /// Weekday name for a message 2–6 days old, e.g. "Friday".
 private let transcriptWeekdayFormatter: DateFormatter = {
     let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.calendar = Calendar(identifier: .gregorian)
     f.dateFormat = "EEEE"
     return f
 }()
@@ -23,6 +28,8 @@ private let transcriptWeekdayFormatter: DateFormatter = {
 /// Month/day for an older message in the current year, e.g. "Sun Jul 14".
 private let transcriptDateThisYearFormatter: DateFormatter = {
     let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.calendar = Calendar(identifier: .gregorian)
     f.dateFormat = "EEE MMM d"
     return f
 }()
@@ -30,6 +37,8 @@ private let transcriptDateThisYearFormatter: DateFormatter = {
 /// Month/day/year for an older message from a previous year, e.g. "Sun Jul 14 2025".
 private let transcriptDateOtherYearFormatter: DateFormatter = {
     let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.calendar = Calendar(identifier: .gregorian)
     f.dateFormat = "EEE MMM d yyyy"
     return f
 }()
@@ -43,20 +52,32 @@ func transcriptTimestampString(for date: Date, now: Date = Date()) -> String {
     let calendar = Calendar.current
     let time = sharedTimestampFormatter.string(from: date)
 
-    if calendar.isDate(date, inSameDayAs: now) {
-        return time
-    }
-    if calendar.isDateInYesterday(date) {
-        return "Yesterday, \(time)"
-    }
-
+    // ONE day-bucket decision, every bucket measured against the injected `now` (not the ambient
+    // clock), so pinning `now` fully determines the output — the purity the doc comment promises.
+    // `dateComponents(.day)` over start-of-day is calendar arithmetic (correct across DST) and yields
+    // the SIGNED day gap: a future `date` is negative, so it falls through to the dated form rather
+    // than landing in a wrong bucket.
     let startOfDate = calendar.startOfDay(for: date)
     let startOfNow = calendar.startOfDay(for: now)
-    if let daysApart = calendar.dateComponents([.day], from: startOfDate, to: startOfNow).day,
-       (2...6).contains(daysApart) {
-        return "\(transcriptWeekdayFormatter.string(from: date)), \(time)"
+    guard let daysApart = calendar.dateComponents([.day], from: startOfDate, to: startOfNow).day else {
+        return datedTranscriptTimestamp(for: date, now: now, time: time, calendar: calendar)
     }
 
+    switch daysApart {
+    case 0:
+        return time
+    case 1:
+        return "Yesterday, \(time)"
+    case 2...6:
+        return "\(transcriptWeekdayFormatter.string(from: date)), \(time)"
+    default:
+        return datedTranscriptTimestamp(for: date, now: now, time: time, calendar: calendar)
+    }
+}
+
+/// The fully-dated form ("Sun Jul 14, 3:19:07pm"), with the year appended only when `date`'s year
+/// differs from `now`'s. Shared by the older-than-a-week branch and the defensive nil-gap branch.
+private func datedTranscriptTimestamp(for date: Date, now: Date, time: String, calendar: Calendar) -> String {
     let sameYear = calendar.isDate(date, equalTo: now, toGranularity: .year)
     let datePart = sameYear
         ? transcriptDateThisYearFormatter.string(from: date)
