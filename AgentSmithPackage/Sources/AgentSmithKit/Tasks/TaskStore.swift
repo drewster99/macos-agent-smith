@@ -137,8 +137,14 @@ public actor TaskStore {
     /// (prior result preserved into history) so it's startable and carries no stale
     /// run-state — a template never runs itself.
     @discardableResult
-    public func setTemplate(id: UUID, isTemplate: Bool) -> String? {
-        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+    public func setTemplate(id: UUID, isTemplate: Bool) async -> String? {
+        // A task being promoted is a local session task; a template being demoted may live locally
+        // (pre-migration) or in the global library.
+        let localTask = tasks[id]
+        let inLibrary = localTask == nil
+        guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else {
+            return "Task not found: \(id.uuidString)"
+        }
         guard !task.status.isInProgress else {
             return "Task '\(task.title)' cannot be converted while it is \(task.status.rawValue). Stop or finish it first."
         }
@@ -152,9 +158,41 @@ public actor TaskStore {
             clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
         }
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
         return nil
+    }
+
+    /// Writes a task/template back to the correct store after a possible template FLIP, crossing the
+    /// store boundary when the flip changed which store owns it (a template is global, a task is
+    /// per-session). Shared by `setTemplate` and `updateDefinition`, the two writers that can flip
+    /// `isTemplate`.
+    private func commitTemplateFlip(id: UUID, task: inout AgentTask, isTemplate: Bool, wasInLibrary: Bool) async {
+        // With NO library wired (tests, or a launch where the library failed to load), templates stay
+        // in the per-session store exactly as they did before this feature — crucially, never remove a
+        // task with nowhere to put it (that would lose it). `wasInLibrary` is always false here.
+        guard let templateLibrary else {
+            tasks[id] = task
+            onChange?()
+            return
+        }
+        if isTemplate, !wasInLibrary {
+            // Promote: move it out of this session into the library. Its preserved prior-run child
+            // (inserted by `preservePriorRunAsTemplateChildIfNeeded`) stays per-session.
+            tasks.removeValue(forKey: id)
+            onChange?()
+            await templateLibrary.upsert(task)
+        } else if !isTemplate, wasInLibrary {
+            // Demote: bring it back into THIS session.
+            task.sessionID = sessionID
+            _ = await templateLibrary.removeTemplate(id: id)
+            tasks[id] = task
+            onChange?()
+        } else if wasInLibrary {
+            await templateLibrary.upsert(task)   // still a library template — edit in place
+        } else {
+            tasks[id] = task                     // still a per-session task — write in place
+            onChange?()
+        }
     }
 
     /// Clears the template authoring fields — but ONLY when an actual template is being demoted.
@@ -171,8 +209,10 @@ public actor TaskStore {
         task.templateInputValues = [:]
     }
 
-    public func setTemplateInputDefinitions(id: UUID, definitions: [TemplateInputDefinition]) -> String? {
-        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+    public func setTemplateInputDefinitions(id: UUID, definitions: [TemplateInputDefinition]) async -> String? {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
         guard task.isTemplate else {
             return "Task '\(task.title)' is not a template. Only template tasks can define template inputs."
         }
@@ -200,13 +240,19 @@ public actor TaskStore {
         task.templateInputDefinitions = definitions
         task.templateInputValues = [:]
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
         return nil
     }
 
-    public func setTemplateInstanceTitleTemplate(id: UUID, titleTemplate: String?) -> String? {
-        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+    public func setTemplateInstanceTitleTemplate(id: UUID, titleTemplate: String?) async -> String? {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
         guard task.isTemplate else {
             return "Task '\(task.title)' is not a template. Only template tasks can define an instance title template."
         }
@@ -222,8 +268,12 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         task.lastEditedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
         return nil
     }
 
@@ -235,8 +285,10 @@ public actor TaskStore {
         isTemplate: Bool,
         templateInputDefinitions: [TemplateInputDefinition],
         templateInstanceTitleTemplate: String?
-    ) -> String? {
-        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+    ) async -> String? {
+        let localTask = tasks[id]
+        let inLibrary = localTask == nil
+        guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else { return "Task not found: \(id.uuidString)" }
         guard task.status.isDescriptionEditable else {
             return "Task '\(task.title)' cannot be edited while it is \(task.status.rawValue)."
         }
@@ -290,8 +342,7 @@ public actor TaskStore {
         let now = Date()
         task.updatedAt = now
         task.lastEditedAt = now
-        tasks[id] = task
-        onChange?()
+        await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
         return nil
     }
 
@@ -369,6 +420,28 @@ public actor TaskStore {
     public func allLibraryTemplates() async -> [AgentTask] {
         await templateLibrary?.allTemplates() ?? []
     }
+
+    /// Applies a pure in-place edit to a task that may be a LOCAL per-session task OR a GLOBAL library
+    /// template, writing the result back to whichever store owns it. `body` returns a non-nil error
+    /// string to REFUSE the edit (nothing is written), or nil on success — matching the existing
+    /// guard-then-mutate editing methods. This is the single seam that lets the per-session editing
+    /// surface (Smith's tools + the task editor) reach library-resident templates without every method
+    /// growing its own two-store branch. For a local task this is byte-for-byte the old behavior.
+    private func mutateTaskOrTemplate(id: UUID, _ body: (inout AgentTask) -> String?) async -> String? {
+        if var task = tasks[id] {
+            if let problem = body(&task) { return problem }
+            tasks[id] = task
+            onChange?()
+            return nil
+        }
+        if let templateLibrary, var template = await templateLibrary.template(id: id) {
+            if let problem = body(&template) { return problem }
+            await templateLibrary.upsert(template)   // re-upsert preserves group membership
+            return nil
+        }
+        return "Task not found: \(id.uuidString)"
+    }
+
 
     public func instantiateTemplate(templateID: UUID, inputValues: [String: String]) async -> TemplateInstantiationResult {
         // A template may live in this session's tasks (before the global migration) or in the shared
@@ -807,8 +880,10 @@ public actor TaskStore {
     /// Returns a human-readable refusal, or nil on success — the caller used to invent its own
     /// reason from a bare `false`, which could only ever name one of the ways this can fail.
     @discardableResult
-    public func updateDescription(id: UUID, description: String) -> String? {
-        guard var task = tasks[id] else { return "Task not found." }
+    public func updateDescription(id: UUID, description: String) async -> String? {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
         guard task.status.isDescriptionEditable else {
             return "Task \"\(task.title)\" can't be edited while it is \(task.status.rawValue)."
         }
@@ -827,8 +902,12 @@ public actor TaskStore {
         let now = Date()
         task.updatedAt = now
         task.lastEditedAt = now
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
         return nil
     }
 
@@ -848,8 +927,10 @@ public actor TaskStore {
     /// permanently un-amendable, the deadlock documented in `setTemplateInputDefinitions`.
     ///
     /// Deliberately NOT `@discardableResult` — a silently dropped refusal is the whole defect.
-    public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) -> String? {
-        guard var task = tasks[id] else { return "Task not found: \(id.uuidString)" }
+    public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) async -> String? {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
         // Checked ABOVE the dedup: below it, re-sending an already-applied bad amendment would fall
         // into the no-op branch and report success for text the system rejected the first time.
         if task.isTemplate,
@@ -888,8 +969,12 @@ public actor TaskStore {
             task.descriptionAttachments.append(contentsOf: attachments)
         }
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
         return nil
     }
 
@@ -910,8 +995,10 @@ public actor TaskStore {
     /// Gated on status AND evidence, HERE rather than at the tool layer: a tool reads the task and
     /// mutates later, so its check is TOCTOU. Returns a human-readable refusal, or nil on success.
     @discardableResult
-    public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) -> String? {
-        guard var task = tasks[id] else { return "Task not found." }
+    public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async -> String? {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
         guard task.status.isValidationContractEditable else {
             return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
         }
@@ -935,8 +1022,12 @@ public actor TaskStore {
         }
         writeAcceptanceContract(criteria, to: &task)
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
         return nil
     }
 
@@ -947,8 +1038,10 @@ public actor TaskStore {
     ///
     /// Returns a human-readable error, or nil on success.
     @discardableResult
-    public func applyCriterionActions(taskID: UUID, actions: [CriterionAction]) -> String? {
-        guard var task = tasks[taskID] else { return "Task not found." }
+    public func applyCriterionActions(taskID: UUID, actions: [CriterionAction]) async -> String? {
+        let existingLocalTask = tasks[taskID]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: taskID)) : existingLocalTask else { return "Task not found." }
         guard task.status.isValidationContractEditable else {
             return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
         }
@@ -998,8 +1091,12 @@ public actor TaskStore {
         }
         writeAcceptanceContract(criteria, to: &task)
         task.updatedAt = Date()
-        tasks[taskID] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[taskID] = task
+            onChange?()
+        }
         return nil
     }
 
@@ -1060,8 +1157,10 @@ public actor TaskStore {
     ///
     /// Returns a human-readable refusal, or nil on success.
     @discardableResult
-    public func setSteps(id: UUID, steps: [TaskStep]) -> String? {
-        guard var task = tasks[id] else { return "Task not found." }
+    public func setSteps(id: UUID, steps: [TaskStep]) async -> String? {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
         if task.isTemplate {
             let definedNames = Set(task.templateInputDefinitions.map(\.name))
             for (position, step) in steps.filter(\.isActive).enumerated() {
@@ -1076,8 +1175,12 @@ public actor TaskStore {
         }
         task.steps = steps
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
         return nil
     }
 
@@ -1111,8 +1214,20 @@ public actor TaskStore {
     /// orderings; every write goes through `tasks[taskID]?` directly and touches only its own
     /// field. There is no whole-record write-back left to go stale.
     @discardableResult
-    public func applyStepAction(taskID: UUID, action: TaskStepAction) -> String? {
-        guard let task = tasks[taskID] else { return "Task not found." }
+    public func applyStepAction(taskID: UUID, action: TaskStepAction) async -> String? {
+        // Dual-dispatch to whichever store owns the task (local session task or global library
+        // template) via the shared editing seam. The mutation (`applyStepMutation`) is SYNCHRONOUS,
+        // so `mutateTaskOrTemplate`'s local branch does read → mutate → write with no `await` in
+        // between — preserving the no-lost-update guarantee the old point-mutation design provided
+        // (the actor cannot interleave two calls at a non-suspension point). A library template is
+        // never executed, so its edits have no concurrent writer regardless.
+        await mutateTaskOrTemplate(id: taskID) { applyStepMutation(action, to: &$0) }
+    }
+
+    /// Applies one step mutation to `task` in place, returning a human-readable refusal or nil on
+    /// success. Extracted so the local-task and library-template paths share one implementation. Each
+    /// case validates against the current state and mutates only the step field it is about.
+    private func applyStepMutation(_ action: TaskStepAction, to task: inout AgentTask) -> String? {
         // Only the two actions that author TEXT can introduce a placeholder; the rest move,
         // status, or tombstone steps whose text was checked when it was written.
         let templateInputNames = task.isTemplate ? Set(task.templateInputDefinitions.map(\.name)) : []
@@ -1125,7 +1240,7 @@ public actor TaskStore {
             ) {
                 return problem
             }
-            tasks[taskID]?.steps.append(TaskStep(text: text, origin: origin))
+            task.steps.append(TaskStep(text: text, origin: origin))
         case .update(let stepID, let newText):
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
             guard task.steps[index].status != .removed else { return "Step \(stepID) was removed and cannot be edited." }
@@ -1138,7 +1253,7 @@ public actor TaskStore {
             ) {
                 return problem
             }
-            tasks[taskID]?.steps[index].text = newText
+            task.steps[index].text = newText
         case .setStatus(let stepID, let status, let note):
             // `delete` is the single source of tombstoning. Letting `setStatus` write `.removed`
             // too meant two code paths for one irreversible mutation, and advertised removal as
@@ -1151,14 +1266,14 @@ public actor TaskStore {
             if status == .skipped && (note ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
                 return "Skipping a step requires a note explaining why."
             }
-            tasks[taskID]?.steps[index].status = status
-            if let note { tasks[taskID]?.steps[index].note = note }
+            task.steps[index].status = status
+            if let note { task.steps[index].note = note }
         case .delete(let stepID, let note):
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
             guard task.steps[index].status != .removed else { return "Step \(stepID) was already removed." }
             guard !note.trimmingCharacters(in: .whitespaces).isEmpty else { return "Deleting a step requires a note explaining why." }
-            tasks[taskID]?.steps[index].status = .removed
-            tasks[taskID]?.steps[index].note = note
+            task.steps[index].status = .removed
+            task.steps[index].note = note
         case .purge(let stepID):
             // Enforced here as well as at the tool layer: this is the one step mutation that
             // leaves no trace, so the guard belongs at the point of mutation, not only at the
@@ -1167,7 +1282,7 @@ public actor TaskStore {
                 return "Task \"\(task.title)\" has already been run or validated — its step record can't be hard-deleted. Use `delete` to tombstone the step instead."
             }
             guard let index = task.steps.firstIndex(where: { $0.id == stepID }) else { return "No step with id \(stepID)." }
-            tasks[taskID]?.steps.remove(at: index)
+            task.steps.remove(at: index)
         case .move(let stepID, let destination):
             var active = task.steps.filter(\.isActive)
             guard let from = active.firstIndex(where: { $0.id == stepID }) else {
@@ -1202,7 +1317,7 @@ public actor TaskStore {
                 insertionIndex = oneBased - 1
             }
             active.insert(moved, at: insertionIndex)
-            tasks[taskID]?.steps = active + task.steps.filter { !$0.isActive }
+            task.steps = active + task.steps.filter { !$0.isActive }
         case .reorder(let orderedActiveIDs):
             let active = task.steps.filter(\.isActive)
             let activeIDs = Set(active.map(\.id))
@@ -1214,10 +1329,9 @@ public actor TaskStore {
             // their original relative order — the record of removed steps is preserved.
             let reordered = orderedActiveIDs.compactMap { byID[$0] }
             let removed = task.steps.filter { !$0.isActive }
-            tasks[taskID]?.steps = reordered + removed
+            task.steps = reordered + removed
         }
-        tasks[taskID]?.updatedAt = Date()
-        onChange?()
+        task.updatedAt = Date()
         return nil
     }
 
@@ -1481,8 +1595,10 @@ public actor TaskStore {
     /// Sets (or clears) a per-task user override for a single tool. `enabled == nil` removes the
     /// override (the tool reverts to the global policy / automatic verdict). User overrides survive
     /// re-evaluation — the live registry re-applies them after every scoping pass.
-    public func setUserToolOverride(id: UUID, tool: String, enabled: Bool?) {
-        guard var task = tasks[id] else { return }
+    public func setUserToolOverride(id: UUID, tool: String, enabled: Bool?) async {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
         var overrides = task.userToolOverrides ?? [:]
         if let enabled {
             overrides[tool] = enabled
@@ -1491,16 +1607,23 @@ public actor TaskStore {
         }
         task.userToolOverrides = overrides.isEmpty ? nil : overrides
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
     }
 
     /// Bulk variant of `setUserToolOverride`: applies the same `enabled` value to many tools in a
     /// single mutation (one persist, one `onChange`). `enabled == nil` clears the override for each.
     /// Backs the per-MCP-server Auto/On/Off shortcut so toggling a whole server doesn't fan out into
     /// N separate writes. No-op when `tools` is empty.
-    public func setUserToolOverrides(id: UUID, tools: [String], enabled: Bool?) {
-        guard !tools.isEmpty, var task = tasks[id] else { return }
+    public func setUserToolOverrides(id: UUID, tools: [String], enabled: Bool?) async {
+        guard !tools.isEmpty else { return }
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
         var overrides = task.userToolOverrides ?? [:]
         for tool in tools {
             if let enabled {
@@ -1511,8 +1634,12 @@ public actor TaskStore {
         }
         task.userToolOverrides = overrides.isEmpty ? nil : overrides
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
     }
 
     /// Saves a compressed summary of Brown's last working state for resumability.
