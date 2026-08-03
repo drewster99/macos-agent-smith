@@ -139,6 +139,25 @@ public actor PersistenceManager {
         try await FileIO.writeJSON(tasks, to: url)
     }
 
+    // MARK: - Template library (shared / global)
+
+    /// Loads the global template library (templates + groups). Returns nil when the file is absent —
+    /// the caller uses that to detect that the one-time per-session → global template migration has not
+    /// run yet (distinct from a migrated-but-empty library).
+    public func loadTemplateLibrary() async throws -> TemplateLibrarySnapshot? {
+        let url = baseDirectory.appendingPathComponent("template_library.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try await FileIO.readJSON(TemplateLibrarySnapshot.self, from: url)
+    }
+
+    /// Saves the global template library. Writing this file is what marks the migration complete, so
+    /// callers must persist it before stripping templates from the per-session task files.
+    public func saveTemplateLibrary(_ snapshot: TemplateLibrarySnapshot) async throws {
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let url = baseDirectory.appendingPathComponent("template_library.json")
+        try await FileIO.writeJSON(snapshot, to: url)
+    }
+
     /// Moves an unreadable `inactive_tasks.json` aside to a timestamped `.corrupt-…` name so a fresh
     /// one can be written without destroying the original — the user can attempt manual recovery.
     /// Returns the destination URL, or nil if there was no file to move. Throws on filesystem failure
