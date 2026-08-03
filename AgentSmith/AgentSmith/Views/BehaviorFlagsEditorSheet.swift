@@ -21,6 +21,9 @@ struct BehaviorFlagsEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var states: [String: TriStateOverride] = [:]
+    /// `nil` = inherit (no source has said). A picker rather than flags because the mechanisms are
+    /// mutually exclusive — as booleans, two could be on at once and describe a model that can't exist.
+    @State private var reasoningControlSelection: ReasoningControl?
 
     /// Flags shown in title order — sorted once, not per body pass.
     private static let sortedFlags = BehaviorFlag.allCases.sorted { $0.editorTitle < $1.editorTitle }
@@ -32,7 +35,7 @@ struct BehaviorFlagsEditorSheet: View {
     }
 
     private var hasAnyOverride: Bool {
-        states.values.contains { $0 != .default }
+        states.values.contains { $0 != .default } || reasoningControlSelection != nil
     }
 
     var body: some View {
@@ -47,17 +50,31 @@ struct BehaviorFlagsEditorSheet: View {
                                             description: flag.editorDescription, selection: binding(for: flag.rawValue))
                     }
                 }
+                Section("Reasoning control") {
+                    Picker("Mechanism", selection: $reasoningControlSelection) {
+                        Text("Inherit").tag(ReasoningControl?.none)
+                        ForEach(ReasoningControl.allCases, id: \.self) { control in
+                            Text(control.editorTitle).tag(ReasoningControl?.some(control))
+                        }
+                    }
+                    Text(reasoningControlSelection?.editorDescription
+                         ?? "How reasoning is switched on and off. Inherit leaves it to the catalog.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 BehaviorFlagsExtrasSection(extras: resolved.extras)
             }
             .formStyle(.grouped)
             OverrideSheetFooter(
                 explanation: "Default = use bundled / LiteLLM resolution. Force on/off writes a per-model override.",
                 resetDisabled: !hasAnyOverride,
-                onReset: { for flag in BehaviorFlag.allCases { states[flag.rawValue] = .default } })
+                onReset: {
+                    for flag in BehaviorFlag.allCases { states[flag.rawValue] = .default }
+                    reasoningControlSelection = nil
+                })
         }
         .padding(20)
         .frame(minWidth: 540, idealWidth: 640, minHeight: 420, idealHeight: 620)
-        .onAppear { loadFromShared() }
+        .onAppear { loadFromShared(); reasoningControlSelection = shared.userModelOverrides[key]?.reasoningControl }
     }
 
     private func binding(for rawValue: String) -> Binding<TriStateOverride> {
@@ -81,19 +98,13 @@ struct BehaviorFlagsEditorSheet: View {
         for flag in BehaviorFlag.allCases {
             flagsPatch[flag] = (states[flag.rawValue] ?? .default).asOptional
         }
-        let existing = shared.userModelOverrides[key]
-        var merged = ModelMetadataOverride(
-            displayName: existing?.displayName,
-            maxInputTokens: existing?.maxInputTokens,
-            maxOutputTokens: existing?.maxOutputTokens,
-            sizeLabel: existing?.sizeLabel,
-            capabilities: existing?.capabilities,
-            pricing: existing?.pricing,
-            behaviorFlags: flagsPatch.isEmpty ? nil : flagsPatch
-        )
-        merged.hidden = existing?.hidden
-        merged.isAvailable = existing?.isAvailable
-        merged.isAccessDenied = existing?.isAccessDenied
+        // Start from the EXISTING override and mutate only what this sheet owns. Rebuilding it
+        // field-by-field made every field this sheet doesn't know about vanish on save — so any
+        // field added to ModelMetadataOverride was silently wiped by whichever editor the user
+        // happened to open next. Preserving by default fails safe; enumerating fails lossy.
+        var merged = shared.userModelOverrides[key] ?? ModelMetadataOverride()
+        merged.behaviorFlags = flagsPatch.isEmpty ? nil : flagsPatch
+        merged.reasoningControl = reasoningControlSelection
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }
 }

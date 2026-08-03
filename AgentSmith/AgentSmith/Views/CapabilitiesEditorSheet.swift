@@ -142,18 +142,16 @@ struct CapabilitiesEditorSheet: View {
             patch[capability] = value
             if value != nil { anyForced = true }
         }
-        // This sheet owns capabilities, status flags, display name, AND token limits; only the fields
-        // it does NOT edit (pricing, behavior flags) are carried from the existing override.
-        let existing = shared.userModelOverrides[key]
-        var merged = ModelMetadataOverride(
-            displayName: trimmedDisplayNameOverride,
-            maxInputTokens: maxContextOverride,
-            maxOutputTokens: maxOutputOverride,
-            sizeLabel: existing?.sizeLabel,
-            capabilities: anyForced ? patch : nil,
-            pricing: existing?.pricing,
-            behaviorFlags: existing?.behaviorFlags
-        )
+        // This sheet owns capabilities, status flags, display name, AND token limits.
+        // Start from the EXISTING override and mutate only what this sheet owns. Rebuilding it
+        // field-by-field made every field this sheet doesn't know about vanish on save — so any
+        // field added to ModelMetadataOverride was silently wiped by whichever editor the user
+        // happened to open next. Preserving by default fails safe; enumerating fails lossy.
+        var merged = shared.userModelOverrides[key] ?? ModelMetadataOverride()
+        merged.displayName = trimmedDisplayNameOverride
+        merged.maxInputTokens = maxContextOverride
+        merged.maxOutputTokens = maxOutputOverride
+        merged.capabilities = anyForced ? patch : nil
         for descriptor in CapabilityStatusDescriptor.all {
             merged[keyPath: descriptor.override] = (states[descriptor.id] ?? .default).asOptional
         }

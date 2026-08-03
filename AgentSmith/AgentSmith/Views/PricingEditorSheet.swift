@@ -149,20 +149,12 @@ struct PricingEditorSheet: View {
             guard built != initialBuilt else { return }
             pricingOverride = Self.isEmpty(built) ? nil : built
         }
-        let existing = shared.userModelOverrides[key]
-        let merged = ModelMetadataOverride(
-            displayName: existing?.displayName,
-            maxInputTokens: existing?.maxInputTokens,
-            maxOutputTokens: existing?.maxOutputTokens,
-            sizeLabel: existing?.sizeLabel,
-            capabilities: existing?.capabilities,
-            pricing: pricingOverride,
-            supportsChatCompletions: existing?.supportsChatCompletions,
-            behaviorFlags: existing?.behaviorFlags,
-            hidden: existing?.hidden,
-            isAvailable: existing?.isAvailable,
-            isAccessDenied: existing?.isAccessDenied
-        )
+        // Start from the EXISTING override and mutate only what this sheet owns. Rebuilding it
+        // field-by-field made every field this sheet doesn't know about vanish on save — so any
+        // field added to ModelMetadataOverride was silently wiped by whichever editor the user
+        // happened to open next. Preserving by default fails safe; enumerating fails lossy.
+        var merged = shared.userModelOverrides[key] ?? ModelMetadataOverride()
+        merged.pricing = pricingOverride
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }
 
