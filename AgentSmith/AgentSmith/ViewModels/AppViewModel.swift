@@ -23,6 +23,20 @@ final class AppViewModel {
     /// `hasRestoredHistory` / `persistedHistoryCount` forward to it, so `ChannelLogView` and the
     /// inspector keep reading `viewModel.messages` unchanged while the filtering happens off-main.
     let primaryTranscriptProvider: FilteredTranscriptProvider
+    /// The TOP pane's view onto the SAME store, filtered to the currently `selectedTaskID`'s transcript.
+    /// One store, two providers — this one re-filters (off-main) whenever the selection changes.
+    let topTranscriptProvider: FilteredTranscriptProvider
+
+    /// The task whose transcript the top pane shows. `nil` = nothing selected (top pane shows a
+    /// "Select a task" prompt). Set by clicking a task in the sidebar; auto-set when a task starts.
+    /// Its `didSet` repoints `topTranscriptProvider`'s filter to `.task(id)` (or match-nothing).
+    var selectedTaskID: UUID? {
+        didSet {
+            guard selectedTaskID != oldValue else { return }
+            topTranscriptProvider.filter = TranscriptFilter(
+                taskScope: selectedTaskID.map { TranscriptFilter.TaskScope.task($0) } ?? .matchNone)
+        }
+    }
 
     /// The resident transcript tail shown in the main pane — a forward to the primary provider (the
     /// store owns the array off-main). Still `[ChannelMessage]`, so every existing reader is unchanged.
@@ -34,7 +48,10 @@ final class AppViewModel {
     var renderedToolRequestIDs: Set<String> { primaryTranscriptProvider.toolRequestIDs }
 
     var tasks: [AgentTask] = [] {
-        didSet { rebucketTasks() }
+        didSet {
+            rebucketTasks()
+            autoSelectNewlyStartedTask(previous: oldValue)
+        }
     }
     /// Active tasks for this session's sidebar. Maintained by `rebucketTasks()` so the sidebar's
     /// body never re-filters per render. Archived + deleted are global (below), not per-session.
@@ -116,6 +133,18 @@ final class AppViewModel {
     /// split moves it out.
     private func rebucketTasks() {
         activeTaskList = tasks.filter { $0.disposition == .active }
+    }
+
+    /// Auto-selects a task the instant it enters flight (starting/running), so the top pane follows the
+    /// work — whether the user, Smith's auto-advance, or a scheduled run kicked it off. Fires only on
+    /// the transition INTO flight (a task already running in `previous` is not re-selected), so a live
+    /// task's ordinary updates don't keep stealing the selection.
+    private func autoSelectNewlyStartedTask(previous: [AgentTask]) {
+        let inFlight: Set<AgentTask.Status> = [.starting, .running]
+        let alreadyInFlight = Set(previous.filter { inFlight.contains($0.status) }.map(\.id))
+        if let justStarted = tasks.first(where: { inFlight.contains($0.status) && !alreadyInFlight.contains($0.id) }) {
+            selectedTaskID = justStarted.id
+        }
     }
 
     /// Resolves a task by ID across this session's active tasks and the global archived + deleted
@@ -342,10 +371,13 @@ final class AppViewModel {
         }
         self.transcriptStore = TranscriptStore(residentCap: Self.residentMessageCap)
         self.primaryTranscriptProvider = FilteredTranscriptProvider(filter: .all, cap: Self.residentMessageCap)
+        self.topTranscriptProvider = FilteredTranscriptProvider(
+            filter: TranscriptFilter(taskScope: .matchNone), cap: Self.residentMessageCap)
         // The main pane subscribes now so it paints the moment the initial tail loads (readers are
         // wired and the tail loaded in `loadPersistedState`). The store owns display; appends stay on
         // this view model via the JSONL writer above.
         primaryTranscriptProvider.attach(to: transcriptStore)
+        topTranscriptProvider.attach(to: transcriptStore)
     }
 
     // MARK: - Lifecycle

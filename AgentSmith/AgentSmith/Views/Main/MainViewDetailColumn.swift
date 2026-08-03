@@ -18,6 +18,24 @@ struct MainViewDetailColumn: View {
     /// Updated via .onChange when any of the underlying shared preferences change.
     @State private var cachedDisplayPrefs = TimestampPreferences.default
 
+    /// PDF-export action for a "Task Completed" banner, shared by both transcript panes.
+    private var exportTaskPDFAction: (UUID, String, String?, Date) -> Void {
+        { taskID, title, result, timestamp in
+            Task {
+                await viewModel.exportTaskCompletedBannerPDF(
+                    taskID: taskID, fallbackTitle: title, fallbackResult: result, fallbackTimestamp: timestamp)
+            }
+        }
+    }
+
+    /// Opens Settings → MCP Servers, shared by both transcript panes.
+    private var openMCPSettingsAction: () -> Void {
+        {
+            shared.settingsSelectedTab = .mcp
+            openSettings()
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if shared.taskOverlayVisible {
@@ -35,30 +53,32 @@ struct MainViewDetailColumn: View {
                 ReviewBanner(taskTitle: reviewTask.title, isHelpRequest: reviewTask.status == .awaitingHelp)
             }
 
-            ChannelLogView(
-                messages: viewModel.messages,
-                toolRequestIDs: viewModel.renderedToolRequestIDs,
-                persistedHistoryCount: viewModel.persistedHistoryCount,
-                hasRestoredHistory: viewModel.hasRestoredHistory,
-                onRestoreHistory: { viewModel.restoreHistory() },
-                onExportTaskPDF: { taskID, title, result, timestamp in
-                    Task {
-                        await viewModel.exportTaskCompletedBannerPDF(
-                            taskID: taskID,
-                            fallbackTitle: title,
-                            fallbackResult: result,
-                            fallbackTimestamp: timestamp
-                        )
-                    }
-                },
-                onOpenMCPSettings: {
-                    shared.settingsSelectedTab = .mcp
-                    openSettings()
-                },
-                displayPrefs: cachedDisplayPrefs,
-                selectedImageAttachment: $selectedImageAttachment
-            )
-            .equatable()
+            VSplitView {
+                // Top: the selected task's transcript (or a "Select a task" prompt).
+                TaskTranscriptTopPane(
+                    viewModel: viewModel,
+                    displayPrefs: cachedDisplayPrefs,
+                    onExportTaskPDF: exportTaskPDFAction,
+                    onOpenMCPSettings: openMCPSettingsAction,
+                    selectedImageAttachment: $selectedImageAttachment
+                )
+                .frame(minHeight: 120, idealHeight: 240)
+
+                // Bottom: the full session transcript (unchanged from the single-pane behavior).
+                ChannelLogView(
+                    messages: viewModel.messages,
+                    toolRequestIDs: viewModel.renderedToolRequestIDs,
+                    persistedHistoryCount: viewModel.persistedHistoryCount,
+                    hasRestoredHistory: viewModel.hasRestoredHistory,
+                    onRestoreHistory: { viewModel.restoreHistory() },
+                    onExportTaskPDF: exportTaskPDFAction,
+                    onOpenMCPSettings: openMCPSettingsAction,
+                    displayPrefs: cachedDisplayPrefs,
+                    selectedImageAttachment: $selectedImageAttachment
+                )
+                .equatable()
+                .frame(minHeight: 200)
+            }
             // Update cached display preferences when any of the underlying shared preferences change.
             // This avoids creating a new TimestampPreferences instance on every body pass.
             .onChange(of: shared.showTimestampsOnTaskBanners) { _, newValue in
@@ -163,6 +183,41 @@ struct MainViewDetailColumn: View {
                     return .handled
                 }
             }
+        }
+    }
+}
+
+/// The top transcript pane: the selected task's transcript (from `topTranscriptProvider`, filtered to
+/// `.task(selectedTaskID)` off-main), or a "Select a task" prompt when nothing is selected. Reuses the
+/// same `ChannelLogView`; the task-scoped pane suppresses the full-log "Restore" affordance.
+private struct TaskTranscriptTopPane: View {
+    let viewModel: AppViewModel
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        if viewModel.selectedTaskID == nil {
+            ContentUnavailableView(
+                "Select a task",
+                systemImage: "list.bullet.rectangle",
+                description: Text("Click a task in the sidebar to see its transcript here.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ChannelLogView(
+                messages: viewModel.topTranscriptProvider.messages,
+                toolRequestIDs: viewModel.topTranscriptProvider.toolRequestIDs,
+                persistedHistoryCount: 0,      // task-scoped pane: no full-log "Restore" affordance
+                hasRestoredHistory: true,
+                onRestoreHistory: {},
+                onExportTaskPDF: onExportTaskPDF,
+                onOpenMCPSettings: onOpenMCPSettings,
+                displayPrefs: displayPrefs,
+                selectedImageAttachment: $selectedImageAttachment
+            )
+            .equatable()
         }
     }
 }

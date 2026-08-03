@@ -329,23 +329,23 @@ struct TaskRowButton: View {
     @State private var sendBackTask: AgentTask?
 
     var body: some View {
-        Button {
-            AgentSmithApp.showOrOpenTaskDetail(
-                target: TaskDetailTarget(sessionID: viewModel.session.id, taskID: task.id),
-                openWindow: openWindow
-            )
-        } label: {
-            TaskRow(
-                task: task,
-                style: style,
-                density: density,
-                disclosure: disclosure,
-                indent: indent,
-                viewModel: viewModel,
-                onStartRunnableTask: startRunnableTask
-            )
-        }
-        .buttonStyle(.plain)
+        TaskRow(
+            task: task,
+            style: style,
+            density: density,
+            disclosure: disclosure,
+            indent: indent,
+            viewModel: viewModel,
+            onStartRunnableTask: startRunnableTask
+        )
+        .contentShape(Rectangle())
+        .background(task.id == viewModel.selectedTaskID
+            ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.25)
+            : Color.clear)
+        // Single-click SELECTS (drives the top transcript pane); double-click opens the detail
+        // window. Nested buttons (cost chip, play/pause) still consume their own taps first.
+        .onTapGesture(count: 2) { openTaskDetail() }
+        .onTapGesture { viewModel.selectedTaskID = task.id }
         .contextMenu { contextMenu(task: task, style: style, viewModel: viewModel) }
         .sheet(item: $templateRunInputTask) { task in
             TemplateRunInputSheet(
@@ -374,8 +374,19 @@ struct TaskRowButton: View {
         }
     }
 
+    /// Opens the standalone Task Detail window for this row's task (single-click now selects instead).
+    private func openTaskDetail() {
+        AgentSmithApp.showOrOpenTaskDetail(
+            target: TaskDetailTarget(sessionID: viewModel.session.id, taskID: task.id),
+            openWindow: openWindow
+        )
+    }
+
     @ViewBuilder
     private func contextMenu(task: AgentTask, style: TaskRowStyle, viewModel: AppViewModel) -> some View {
+        Button(action: { openTaskDetail() }, label: {
+            Label("Open Details", systemImage: "info.circle")
+        })
         Button(action: { copyTaskIDToPasteboard(task.id) }, label: {
             Label("Copy Task ID", systemImage: "doc.on.doc")
         })

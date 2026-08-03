@@ -34,6 +34,9 @@ public struct TranscriptFilter: Sendable, Equatable {
         case task(UUID)
         /// Only messages NOT tied to a task (`taskID == nil`) — Smith planning/replying overhead.
         case orchestration
+        /// Nothing matches. The empty-selection state for a pane that shows one task at a time — its
+        /// provider stays subscribed but delivers no rows until a task is picked.
+        case matchNone
     }
 
     /// Public (channel-wide) vs private (addressed to a specific agent) messages.
@@ -90,6 +93,8 @@ public struct TranscriptFilter: Sendable, Equatable {
             if message.taskID != id { return false }
         case .orchestration:
             if message.taskID != nil { return false }
+        case .matchNone:
+            return false
         }
 
         switch visibility {
