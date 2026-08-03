@@ -2129,7 +2129,11 @@ final class AppViewModel {
     /// caller MUST NOT then delete the session directory, or that task would be lost.
     @discardableResult
     func moveAllActiveTasksToInactive(archiving: Bool) async -> Bool {
-        guard let taskStore else { return true }
+        // A nil taskStore is a VM whose `loadPersistedState` hasn't finished — its tasks are still on
+        // disk, unloaded. Reporting `true` ("all moved") here would let the caller delete the session
+        // directory and silently lose them, the exact fail-open `SessionDeletionOutcome` exists to close.
+        // Fail closed: the delete aborts (`.aborted`) and the user retries once the session has loaded.
+        guard let taskStore else { return false }
         var allMoved = true
         for task in await taskStore.allTasks() where task.disposition == .active {
             if task.status.isInProgress {

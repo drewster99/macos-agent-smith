@@ -149,7 +149,12 @@ private struct TaskBucketBrowserSheet: View {
 /// Groups tasks into template families (parent + its cloned instances). File-scoped so both the sidebar
 /// list and the bucket browser build the same grouping.
 private func taskFamilies(for tasks: [AgentTask]) -> [TaskFamily] {
-    let tasksByID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+    // `uniquingKeysWith`, NOT `uniqueKeysWithValues`: the latter TRAPS on a duplicate id. The library
+    // family list feeds this `templates + childTasks(of:)`, and `childTasks` concatenates the active and
+    // archived lists with no dedup — during an archive/soft-delete move a run is briefly in BOTH (the
+    // inactive mirror updates before the source is removed), so a re-render mid-move would hand this a
+    // duplicate id and crash the app. This is display grouping; first-wins is fine.
+    let tasksByID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     var childrenByParentID: [UUID: [AgentTask]] = [:]
     var parents: [AgentTask] = []
 

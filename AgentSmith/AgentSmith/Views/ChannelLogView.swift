@@ -60,7 +60,7 @@ func transcriptTimestampString(for date: Date, now: Date = Date()) -> String {
     let startOfDate = calendar.startOfDay(for: date)
     let startOfNow = calendar.startOfDay(for: now)
     guard let daysApart = calendar.dateComponents([.day], from: startOfDate, to: startOfNow).day else {
-        return datedTranscriptTimestamp(for: date, now: now, time: time, calendar: calendar)
+        return datedTranscriptTimestamp(for: date, now: now, time: time)
     }
 
     switch daysApart {
@@ -71,14 +71,19 @@ func transcriptTimestampString(for date: Date, now: Date = Date()) -> String {
     case 2...6:
         return "\(transcriptWeekdayFormatter.string(from: date)), \(time)"
     default:
-        return datedTranscriptTimestamp(for: date, now: now, time: time, calendar: calendar)
+        return datedTranscriptTimestamp(for: date, now: now, time: time)
     }
 }
 
+/// The Gregorian calendar the year-suffix decision is made in, so it agrees with the pinned-Gregorian
+/// date formatters. Deciding "same year" in `Calendar.current` (e.g. Hebrew/Islamic) while rendering a
+/// Gregorian date can drop the year on a genuinely older message, or print a redundant one.
+private let transcriptGregorianCalendar = Calendar(identifier: .gregorian)
+
 /// The fully-dated form ("Sun Jul 14, 3:19:07pm"), with the year appended only when `date`'s year
 /// differs from `now`'s. Shared by the older-than-a-week branch and the defensive nil-gap branch.
-private func datedTranscriptTimestamp(for date: Date, now: Date, time: String, calendar: Calendar) -> String {
-    let sameYear = calendar.isDate(date, equalTo: now, toGranularity: .year)
+private func datedTranscriptTimestamp(for date: Date, now: Date, time: String) -> String {
+    let sameYear = transcriptGregorianCalendar.isDate(date, equalTo: now, toGranularity: .year)
     let datePart = sameYear
         ? transcriptDateThisYearFormatter.string(from: date)
         : transcriptDateOtherYearFormatter.string(from: date)
