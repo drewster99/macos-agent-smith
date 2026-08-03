@@ -117,8 +117,11 @@ final class SessionManager {
     /// pre-configured like the one they were just using, rather than whichever VM
     /// happened to be first in the dictionary's hash order.
     @discardableResult
-    func createSession(name: String = "New Session", templateSessionID: UUID? = nil) async -> Session {
-        let session = Session(name: name)
+    func createSession(name: String? = nil, templateSessionID: UUID? = nil) async -> Session {
+        // Friendly adjective-noun name (collision-checked) when the caller doesn't specify one, so new
+        // sessions are distinguishable at a glance instead of a stack of identical "New Session"s.
+        let chosenName = name ?? SessionNameGenerator.uniqueName(avoiding: Set(sessions.map(\.name)))
+        let session = Session(name: chosenName)
         sessions.append(session)
         await persistSessions()
 
@@ -157,6 +160,47 @@ final class SessionManager {
         sessions[idx].name = name
         sessions[idx].updatedAt = Date()
         await persistSessions()
+    }
+
+    /// Deletes a session entirely. Stops + evicts its live view model (moving its active tasks to the
+    /// global store — archived or soft-deleted per `archivingTasks` — first so they survive), removes it
+    /// from the list, and deletes its `sessions/<id>/` directory (transcript, evidence, schedules,
+    /// state). Its already-global archived/deleted tasks, global usage, and attachments are untouched.
+    /// If it was the LAST session, a fresh named one is minted and RETURNED so the caller can open a
+    /// window for it (the app is never left sessionless).
+    @discardableResult
+    func deleteSession(id: UUID, archivingTasks: Bool) async -> Session? {
+        if let vm = viewModels[id] {
+            await vm.stopAll()
+            await vm.moveAllActiveTasksToInactive(archiving: archivingTasks)
+            // Durably persist the global inactive store before the session directory is deleted, so a
+            // crash can't lose a just-moved task that only lived in memory. (deleteSessionData removes
+            // sessions/<id>/, not inactive_tasks.json, but this keeps both delete paths symmetric.)
+            _ = await shared.persistInactiveTasksNow()
+            viewModels.removeValue(forKey: id)
+        } else {
+            // Closed session (no live VM): move its active tasks into the global inactive store straight
+            // from disk, so deleting the directory can't lose them.
+            if let store = try? await shared.ensureInactiveTaskStore() {
+                let pm = PersistenceManager(sessionID: id)
+                let disposition: AgentTask.TaskDisposition = archivingTasks ? .archived : .recentlyDeleted
+                for var task in ((try? await pm.loadTasks()) ?? []) where task.disposition == .active {
+                    task.disposition = disposition
+                    await store.insert(task)
+                }
+                _ = await shared.persistInactiveTasksNow()
+            }
+        }
+
+        sessions.removeAll { $0.id == id }
+        await persistSessions()
+        try? await PersistenceManager(sessionID: id).deleteSessionData()
+
+        if sessions.isEmpty {
+            // Never leave the app sessionless — mint a fresh named session for the caller to open.
+            return await createSession()
+        }
+        return nil
     }
 
     // closeSession was removed in 2026-04. Closing a window must NEVER mutate or delete the

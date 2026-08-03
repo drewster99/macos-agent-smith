@@ -109,6 +109,13 @@ struct AgentSmithApp: App {
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(shared.focusedSessionID == nil)
+
+                Button("Delete Session\u{2026}", role: .destructive) {
+                    if let id = shared.focusedSessionID {
+                        shared.deleteSessionRequestID = id
+                    }
+                }
+                .disabled(shared.focusedSessionID == nil)
             }
             CommandMenu("Session") {
                 // Every session shows up here. Clicking switches focus to its open window
@@ -477,6 +484,7 @@ struct SessionScene: View {
     @State private var bootstrapped = false
     @State private var showRenameSheet = false
     @State private var renameDraft = ""
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         Group {
@@ -525,6 +533,14 @@ struct SessionScene: View {
                 showRenameSheet = true
             }
         }
+        .onChange(of: shared.deleteSessionRequestID) { _, newValue in
+            guard let id = newValue, id == resolvedID else { return }
+            // Project rule: defer @State / @Observable mutations out of .onChange.
+            DispatchQueue.main.async {
+                shared.deleteSessionRequestID = nil
+                showDeleteConfirm = true
+            }
+        }
         .sheet(isPresented: $showRenameSheet) {
             RenameSessionSheet(
                 name: $renameDraft,
@@ -539,6 +555,46 @@ struct SessionScene: View {
                 },
                 onCancel: { showRenameSheet = false }
             )
+        }
+        .confirmationDialog(
+            deleteConfirmTitle,
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Archive its tasks & delete") { performSessionDelete(archiving: true) }
+            Button("Delete its tasks & delete", role: .destructive) { performSessionDelete(archiving: false) }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("The session's transcript, evidence, and schedules are removed. Its tasks move to Archived or Recently Deleted (recoverable). This can't be undone.")
+        }
+    }
+
+    /// Title for the delete-session confirmation, naming the session.
+    private var deleteConfirmTitle: String {
+        guard let id = resolvedID, let session = sessionManager.sessions.first(where: { $0.id == id }) else {
+            return "Delete this session?"
+        }
+        return "Delete session \u{201C}\(session.name)\u{201D}?"
+    }
+
+    /// Deletes this window's session, moving its tasks to the global store. If it was the last session,
+    /// a fresh one is minted and adopted in THIS window; otherwise this window closes.
+    private func performSessionDelete(archiving: Bool) {
+        guard let id = resolvedID else { return }
+        Task {
+            let replacement = await sessionManager.deleteSession(id: id, archivingTasks: archiving)
+            if let replacement {
+                sessionIDString = replacement.id.uuidString
+            } else {
+                closeSessionWindow(id)
+            }
+        }
+    }
+
+    private func closeSessionWindow(_ id: UUID) {
+        let target = AgentSmithApp.windowIdentifier(for: id)
+        for window in NSApp.windows where window.identifier?.rawValue == target {
+            window.close()
         }
     }
 

@@ -2021,6 +2021,27 @@ final class AppViewModel {
         await shared.usageStore.flush()
     }
 
+    /// Moves every active task — including templates and scheduled tasks — out to the global inactive
+    /// store (archived or soft-deleted per `archiving`) so they survive deletion of the session
+    /// directory. Call `stopAll()` first: it demotes running tasks to `.interrupted`, but paused /
+    /// validating / awaiting-review / awaiting-help / starting tasks stay in-progress, and
+    /// `archive`/`softDelete` refuse an in-progress task. The runtime is already stopped, so those are
+    /// stale labels — demote them to `.interrupted` here, otherwise the task would be stranded in the
+    /// session file and lost when it is deleted.
+    func moveAllActiveTasksToInactive(archiving: Bool) async {
+        guard let taskStore else { return }
+        for task in await taskStore.allTasks() where task.disposition == .active {
+            if task.status.isInProgress {
+                await taskStore.updateStatus(id: task.id, status: .interrupted)
+            }
+            if archiving {
+                _ = await taskStore.archive(id: task.id)
+            } else {
+                _ = await taskStore.softDelete(id: task.id)
+            }
+        }
+    }
+
     /// Drains every per-file writer so the on-disk state reflects in-memory
     /// state before `stopAll` returns. Each writer enforces FIFO write order
     /// internally; `flush()` waits until every previously-enqueued snapshot

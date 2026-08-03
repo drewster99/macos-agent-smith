@@ -439,6 +439,9 @@ final class SharedAppState {
     /// per-session orchestration overrides sheet for this session ID. Cleared after handling,
     /// so only the frontmost tab (whose id matches) presents it.
     var sessionOverridesRequestID: UUID?
+    /// Signal from the File menu to the focused `MainView` that it should show the delete-session
+    /// confirmation for this session ID. Cleared after handling, so only the frontmost tab acts on it.
+    var deleteSessionRequestID: UUID?
     /// Set to true after `loadPersistedState()` finishes.
     var hasLoadedPersistedState = false
     /// Whether the launch splash should currently render. Starts true at process start and
