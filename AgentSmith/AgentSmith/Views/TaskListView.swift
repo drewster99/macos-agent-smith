@@ -624,9 +624,13 @@ private struct TaskRow: View {
         // per-piece re-derivation cost a standard row a few full scans on every redraw.
         let runs = childRuns
         Group {
-            switch density {
-            case .standard: standardLayout(runs: runs)
-            case .compact: compactLayout()
+            if style == .active && task.status.isInProgress {
+                runningLayout()
+            } else {
+                switch density {
+                case .standard: standardLayout(runs: runs)
+                case .compact: compactLayout()
+                }
             }
         }
         .contentShape(Rectangle())
@@ -639,6 +643,81 @@ private struct TaskRow: View {
     }
 
     // MARK: Layouts
+
+    /// Two-line layout for an IN-FLIGHT task: line 1 is icon + center-truncated title + the full,
+    /// live-ticking elapsed; line 2 is cost + a strip of step-status glyphs (the row's to-do list at a
+    /// glance). Pause/Stop live in the context menu — this row's job is progress, not controls.
+    @ViewBuilder
+    private func runningLayout() -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                leadingStatusOrOutcome()
+                titleText()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                runningElapsed()
+                    .fixedSize()
+            }
+            HStack(spacing: 6) {
+                costChip()
+                Spacer(minLength: 4)
+                stepGlyphStrip()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    /// Live-ticking elapsed since the run started, always shown in full (a running row is a stopwatch).
+    @ViewBuilder
+    private func runningElapsed() -> some View {
+        let start = task.startedAt ?? task.createdAt
+        TimelineView(.periodic(from: start, by: 1)) { context in
+            Text(durationDisplayString(context.date.timeIntervalSince(start)))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    /// A compact strip of the ACTIVE steps' status glyphs; overflow past a cap collapses to "+N".
+    @ViewBuilder
+    private func stepGlyphStrip() -> some View {
+        let activeSteps = task.steps.filter(\.isActive)
+        let cap = 8
+        HStack(spacing: 2) {
+            ForEach(Array(activeSteps.prefix(cap)), id: \.id) { step in
+                Image(systemName: Self.stepSymbol(step.status))
+                    .foregroundStyle(Self.stepColor(step.status))
+                    .imageScale(.small)
+            }
+            if activeSteps.count > cap {
+                Text("+\(activeSteps.count - cap)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize()
+    }
+
+    /// Step-status glyph + color, mirroring `TaskOverlayBar` so the sidebar and overlay read the same.
+    private static func stepSymbol(_ status: TaskStep.Status) -> String {
+        switch status {
+        case .pending: return "circle"
+        case .inProgress: return "circle.lefthalf.filled"
+        case .completed: return "checkmark.circle.fill"
+        case .skipped: return "arrow.uturn.right.circle"
+        case .removed: return "trash.circle"
+        }
+    }
+    private static func stepColor(_ status: TaskStep.Status) -> Color {
+        switch status {
+        case .pending: return .secondary
+        case .inProgress: return AppColors.stepInProgress
+        case .completed: return AppColors.stepCompleted
+        case .skipped: return AppColors.stepSkipped
+        case .removed: return AppColors.stepRemoved
+        }
+    }
 
     @ViewBuilder
     private func standardLayout(runs: [AgentTask]) -> some View {
