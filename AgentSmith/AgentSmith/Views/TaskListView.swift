@@ -17,8 +17,9 @@ private func copyTaskIDToPasteboard(_ id: UUID) {
 struct TaskListView: View {
     @Bindable var viewModel: AppViewModel
 
-    @State private var showArchived = false
-    @State private var showDeleted = false
+    /// Which bucket the browser sheet is showing (all-this-session / archived / deleted), or nil when
+    /// closed. Replaces the old inline-expand toggles — buckets now open their own selection pane.
+    @State private var browserScope: TaskBrowserScope?
 
     var body: some View {
         let activeTasks = viewModel.activeTaskList
@@ -38,25 +39,9 @@ struct TaskListView: View {
                         TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
                     }
 
-                    if !archivedTasks.isEmpty || !deletedTasks.isEmpty {
-                        bucketToggles(archivedCount: archivedTasks.count, deletedCount: deletedTasks.count)
-                    }
-
-                    // Group the archived/deleted buckets only when their section is actually shown —
-                    // no point building families for a collapsed section on every render.
-                    if showArchived && !archivedTasks.isEmpty {
-                        TaskSectionHeader(title: "Archived")
-                        ForEach(taskFamilies(for: archivedTasks)) { family in
-                            TaskFamilyRows(family: family, style: .archived, viewModel: viewModel)
-                        }
-                    }
-
-                    if showDeleted && !deletedTasks.isEmpty {
-                        TaskSectionHeader(title: "Deleted")
-                        ForEach(taskFamilies(for: deletedTasks)) { family in
-                            TaskFamilyRows(family: family, style: .recentlyDeleted, viewModel: viewModel)
-                        }
-                    }
+                    bucketButtons(activeCount: activeTasks.count,
+                                  archivedCount: archivedTasks.count,
+                                  deletedCount: deletedTasks.count)
                 }
             }
         }
@@ -66,55 +51,114 @@ struct TaskListView: View {
             actions: { Button("OK") { viewModel.taskActionError = nil } },
             message: { Text(viewModel.taskActionError ?? "") }
         )
-    }
-
-    private func taskFamilies(for tasks: [AgentTask]) -> [TaskFamily] {
-        let tasksByID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
-        var childrenByParentID: [UUID: [AgentTask]] = [:]
-        var parents: [AgentTask] = []
-
-        for task in tasks {
-            if let parentTaskID = task.parentTaskID, tasksByID[parentTaskID] != nil {
-                childrenByParentID[parentTaskID, default: []].append(task)
-            } else {
-                parents.append(task)
-            }
-        }
-
-        return parents.map { parent in
-            TaskFamily(parent: parent, children: childrenByParentID[parent.id] ?? [])
+        .sheet(item: $browserScope) { scope in
+            TaskBucketBrowserSheet(scope: scope, viewModel: viewModel) { browserScope = nil }
         }
     }
 
+    /// Footer buttons that open a browser pane for a bucket, replacing the old in-place expansion.
+    /// "All" reaches every active task in this session (useful once the sidebar caps its live list).
     @ViewBuilder
-    private func bucketToggles(archivedCount: Int, deletedCount: Int) -> some View {
-        HStack(spacing: 16) {
-            if archivedCount > 0 {
-                Button(action: { showArchived.toggle() }, label: {
-                    Label(
-                        "Archived (\(archivedCount))",
-                        systemImage: showArchived ? "archivebox.fill" : "archivebox"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(showArchived ? .primary : .secondary)
-                })
-                .buttonStyle(.plain)
+    private func bucketButtons(activeCount: Int, archivedCount: Int, deletedCount: Int) -> some View {
+        if activeCount > 0 || archivedCount > 0 || deletedCount > 0 {
+            HStack(spacing: 16) {
+                if activeCount > 0 {
+                    bucketButton("All", systemImage: "square.stack.3d.up") { browserScope = .allSession }
+                }
+                if archivedCount > 0 {
+                    bucketButton("Archived (\(archivedCount))", systemImage: "archivebox") { browserScope = .archived }
+                }
+                if deletedCount > 0 {
+                    bucketButton("Deleted (\(deletedCount))", systemImage: "trash") { browserScope = .deleted }
+                }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+    }
 
-            if deletedCount > 0 {
-                Button(action: { showDeleted.toggle() }, label: {
-                    Label(
-                        "Deleted (\(deletedCount))",
-                        systemImage: showDeleted ? "trash.fill" : "trash"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(showDeleted ? .red : .secondary)
-                })
-                .buttonStyle(.plain)
+    private func bucketButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action, label: {
+            Label(title, systemImage: systemImage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        })
+        .buttonStyle(.plain)
+    }
+}
+
+/// Which task bucket a `TaskBucketBrowserSheet` shows.
+enum TaskBrowserScope: String, Identifiable {
+    case allSession, archived, deleted
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .allSession: return "All Tasks — this session"
+        case .archived: return "Archived"
+        case .deleted: return "Recently Deleted"
+        }
+    }
+    var rowStyle: TaskRowStyle {
+        switch self {
+        case .allSession: return .active
+        case .archived: return .archived
+        case .deleted: return .recentlyDeleted
+        }
+    }
+    func tasks(from viewModel: AppViewModel) -> [AgentTask] {
+        switch self {
+        case .allSession: return viewModel.activeTaskList
+        case .archived: return viewModel.archivedTaskList
+        case .deleted: return viewModel.recentlyDeletedTaskList
+        }
+    }
+}
+
+/// The bucket browser: a sheet listing a scope's tasks (grouped into template families, same as the
+/// sidebar). Replaces the old inline archived/deleted expansion.
+private struct TaskBucketBrowserSheet: View {
+    let scope: TaskBrowserScope
+    let viewModel: AppViewModel
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(scope.title).font(.headline)
+                Spacer()
+                Button("Done", action: onClose).keyboardShortcut(.defaultAction)
+            }
+            .padding()
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(taskFamilies(for: scope.tasks(from: viewModel))) { family in
+                        TaskFamilyRows(family: family, style: scope.rowStyle, viewModel: viewModel)
+                    }
+                }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .frame(minWidth: 460, idealWidth: 560, minHeight: 420, idealHeight: 640)
+    }
+}
+
+/// Groups tasks into template families (parent + its cloned instances). File-scoped so both the sidebar
+/// list and the bucket browser build the same grouping.
+private func taskFamilies(for tasks: [AgentTask]) -> [TaskFamily] {
+    let tasksByID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+    var childrenByParentID: [UUID: [AgentTask]] = [:]
+    var parents: [AgentTask] = []
+
+    for task in tasks {
+        if let parentTaskID = task.parentTaskID, tasksByID[parentTaskID] != nil {
+            childrenByParentID[parentTaskID, default: []].append(task)
+        } else {
+            parents.append(task)
+        }
+    }
+
+    return parents.map { parent in
+        TaskFamily(parent: parent, children: childrenByParentID[parent.id] ?? [])
     }
 }
 
