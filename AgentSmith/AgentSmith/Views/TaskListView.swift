@@ -373,23 +373,28 @@ struct TaskRowButton: View {
     @State private var sendBackTask: AgentTask?
 
     var body: some View {
-        TaskRow(
-            task: task,
-            style: style,
-            density: density,
-            disclosure: disclosure,
-            indent: indent,
-            viewModel: viewModel,
-            onStartRunnableTask: startRunnableTask
-        )
-        .contentShape(Rectangle())
+        Button {
+            viewModel.selectedTaskID = task.id
+        } label: {
+            TaskRow(
+                task: task,
+                style: style,
+                density: density,
+                disclosure: disclosure,
+                indent: indent,
+                viewModel: viewModel,
+                onStartRunnableTask: startRunnableTask
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
         .background(task.id == viewModel.selectedTaskID
             ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.25)
             : Color.clear)
-        // Single-click SELECTS (drives the top transcript pane); double-click opens the detail
-        // window. Nested buttons (cost chip, play/pause) still consume their own taps first.
-        .onTapGesture(count: 2) { openTaskDetail() }
-        .onTapGesture { viewModel.selectedTaskID = task.id }
+        // The row Button SELECTS (drives the top transcript pane); a double-click opens the detail
+        // window. Nested buttons (cost chip, play/pause) consume their own clicks first, and
+        // "Open Details" is also on the context menu.
+        .simultaneousGesture(TapGesture(count: 2).onEnded { openTaskDetail() })
         .contextMenu { contextMenu(task: task, style: style, viewModel: viewModel) }
         .sheet(item: $templateRunInputTask) { task in
             TemplateRunInputSheet(
