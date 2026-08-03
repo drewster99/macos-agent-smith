@@ -903,8 +903,10 @@ final class AppViewModel {
         channelStreamTask = Task { @MainActor [weak self] in
             for await message in channel.stream() {
                 guard let self else { break }
-                await self.transcriptStore.ingest(message)   // display (off-main fan-out + cap)
+                // Disk FIRST, synchronously: a task cancellation at the `ingest` suspension below must
+                // never skip persisting a message the stream already delivered.
                 self.enqueueChannelAppendForPersist(message)  // disk (debounced JSONL)
+                await self.transcriptStore.ingest(message)    // display (off-main fan-out + cap)
                 self.shared.speechController.handle(message)
             }
         }
@@ -2150,8 +2152,8 @@ final class AppViewModel {
     /// also survives in the persisted history.
     private func appendLocalSystemMessage(_ content: String) {
         let message = ChannelMessage(sender: .system, content: content)
-        Task { await transcriptStore.ingest(message) }   // display (off-main fan-out + cap)
-        enqueueChannelAppendForPersist(message)           // disk (debounced JSONL)
+        enqueueChannelAppendForPersist(message)           // disk first (debounced JSONL)
+        Task { await transcriptStore.ingest(message) }    // display (off-main fan-out + cap)
     }
 
     /// Queues a message for the on-disk JSONL log (debounced by `persistMessages`). Display — the

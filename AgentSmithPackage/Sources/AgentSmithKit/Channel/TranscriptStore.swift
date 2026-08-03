@@ -103,11 +103,12 @@ public actor TranscriptStore {
         fanOut(appended: batch)
     }
 
-    /// Wipes the resident tail and every subscriber's view (the `/clear` screen reset). Persistence is
-    /// the caller's concern — the store owns display only.
+    /// Wipes the resident tail and every subscriber's view (the `/clear` screen reset). The on-disk log
+    /// is UNTOUCHED — persistence is the caller's concern — so `persistedHistoryCount` is DELIBERATELY
+    /// kept and only `hasRestoredHistory` is reset: that re-offers "Restore full history (N)" for the
+    /// still-on-disk lines. Zeroing the count would hide the restore affordance and strand them.
     public func clear() {
         resident.removeAll()
-        persistedHistoryCount = 0
         hasRestoredHistory = false
         resetAllSubscribers()
     }
