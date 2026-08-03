@@ -176,6 +176,37 @@ The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch 
   - **Per-emitter tool-call review** — see the Security convention above; approves without a verdict but stays visible (`wasEvaluated == false`).
   - **Retrieval** — one entry point `retrieveContext(source: RetrievalSource, query:)` at all five points; the resolved `RetrievalToggle` maps to pool limits (0 = corpus off, both-off = cheap no-op). Exposed to agents/tools via `ToolContext.retrieveContext` and to `SecurityEvaluator` via an injected closure. `SemanticSearchResults.formattedForInjection()` renders the injected block everywhere.
 
+### Effort, reasoning control, and model capabilities (SwiftLLMKit 0.0.140)
+
+The library separates two things that used to share the name "effort", and Agent Smith's UI has to
+say which:
+
+- **General effort** (`ModelConfiguration.effort`) — Anthropic `output_config.effort`, applies even
+  with reasoning off.
+- **Reasoning effort** (`.reasoningEffort`) — `reasoning_effort`, reasoning models only.
+
+`RoleModelConfigOverrideEditor` therefore has TWO effort rows. They are not interchangeable: a model
+may accept one and reject the other with HTTP 400. The asterisk on an off-ladder level comes from
+`EffortSupport.rejects`, which fails safe — an unknown ladder marks nothing rather than inventing a
+warning.
+
+**Every model-override sheet must start from the existing `ModelMetadataOverride` and mutate only
+what it owns.** They used to rebuild it field-by-field from `existing?.x`, which silently dropped
+every field that sheet didn't know about — so a field added to the library was wiped by whichever
+editor the user opened next. Preserving by default fails safe; enumerating fails lossy. This applies
+to `CapabilitiesEditorSheet`, `BehaviorFlagsEditorSheet` and `PricingEditorSheet` alike.
+
+**Anything added to `ModelMetadataOverride` needs a UI control**, or a wrong value is uncorrectable.
+Capabilities are free — `CapabilitiesEditorSheet` iterates `ModelCapability.allCases`. Typed
+non-boolean fields are not: `ReasoningControl` needed its own picker (in `BehaviorFlagsEditorSheet`,
+since both answer "how do I talk to this model"), with "Inherit" as a real selection distinct from
+every mechanism — it means no source has said, which is not "no reasoning control".
+
+**`CapabilityEvalRunner` reports and probes the two ladders separately.** Its forced-`reasoning_effort`
+probe writes the reasoning ladder by construction; the general ladder is gated by
+`supportsUnconditionalGeneralEffortEmission` (true only for Anthropic), because a flag-gated endpoint
+silently drops the field and would turn "no error" into a recorded false positive.
+
 ### Persistence boundaries
 
 - Per-session: channel log, tasks, attachments, session-local state JSON. Path: `AppSupport/AgentSmith/sessions/<uuid>/`.
