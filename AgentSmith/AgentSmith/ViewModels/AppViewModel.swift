@@ -2643,6 +2643,19 @@ final class AppViewModel {
     func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: UUID) async { await shared.moveLibraryTemplate(templateID, toGroup: groupID) }
     func removeLibraryTemplate(id: UUID) async { await shared.removeLibraryTemplate(id: id) }
 
+    /// Loads a task's transcript from ANOTHER session's channel log — for the top pane when the selected
+    /// task (or drilled template run) originated in a session that isn't this window's (so the live
+    /// `topTranscriptProvider`, bound to THIS session's store, has nothing for it). Read-only and
+    /// one-shot (no streaming updates); the file-backed counterpart to the live provider. The (large)
+    /// scan runs in the package, off this actor. Returns the task's messages plus the tool-request id
+    /// set the row renderer folds tool output against.
+    func loadCrossSessionTaskTranscript(originSessionID: UUID, taskID: UUID) async -> (messages: [ChannelMessage], toolRequestIDs: Set<String>) {
+        let pm = PersistenceManager(sessionID: originSessionID)
+        let messages = (try? await pm.loadTaskTranscript(taskID: taskID)) ?? []
+        let ids = Set(messages.compactMap { FilteredTranscriptProvider.toolRequestID(of: $0) })
+        return (messages, ids)
+    }
+
     /// Estimates the total cost of a set of usage records using current pricing.
     /// Used by the PDF exporter, which computes from its own fresh fetch. Applies the
     /// same formula as `CostBoard.costOf` — the two must not diverge, or an exported

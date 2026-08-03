@@ -363,6 +363,13 @@ public actor PersistenceManager {
         return decodeJSONL(data).messages
     }
 
+    /// Loads only the messages belonging to `taskID` from this session's channel log. Reads and filters
+    /// the (potentially large) full log here in the package — off the caller's actor — so the scan never
+    /// blocks the main thread. Backs the top pane's read-only cross-session transcript.
+    public func loadTaskTranscript(taskID: UUID) async throws -> [ChannelMessage] {
+        try await loadFullChannelLog().filter { $0.taskID == taskID }
+    }
+
     // MARK: - Tasks (per-session)
 
     public func saveTasks(_ tasks: [AgentTask]) async throws {

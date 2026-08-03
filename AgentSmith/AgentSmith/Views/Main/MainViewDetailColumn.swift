@@ -228,6 +228,16 @@ private struct TaskTranscriptTopPane: View {
         viewModel.selectedTaskID.flatMap { viewModel.anyTask(id: $0) }
     }
 
+    /// The task whose transcript the pane shows: the selection itself, or — for a template with a run
+    /// drilled in — that run. Its `sessionID` decides live-vs-cross-session below.
+    private var effectiveTask: AgentTask? {
+        guard let selected else { return nil }
+        if selected.isTemplate {
+            return viewModel.selectedTemplateRunID.flatMap { viewModel.anyTask(id: $0) }
+        }
+        return selected
+    }
+
     var body: some View {
         Group {
             if let selected {
@@ -254,18 +264,73 @@ private struct TaskTranscriptTopPane: View {
                 DrilledRunHeader { viewModel.selectedTemplateRunID = nil }
                 Divider()
             }
-            ChannelLogView(
-                messages: viewModel.topTranscriptProvider.messages,
-                toolRequestIDs: viewModel.topTranscriptProvider.toolRequestIDs,
-                persistedHistoryCount: 0,      // task-scoped pane: no full-log "Restore" affordance
-                hasRestoredHistory: true,
-                onRestoreHistory: {},
-                onExportTaskPDF: onExportTaskPDF,
-                onOpenMCPSettings: onOpenMCPSettings,
-                displayPrefs: displayPrefs,
-                selectedImageAttachment: $selectedImageAttachment
-            )
-            .equatable()
+            if let effective = effectiveTask, let origin = effective.sessionID, origin != viewModel.session.id {
+                // The task/run originated in ANOTHER session, so this session's live top provider has
+                // nothing for it — vend a read-only transcript from that session's channel log.
+                CrossSessionTranscriptView(
+                    originSessionID: origin,
+                    taskID: effective.id,
+                    viewModel: viewModel,
+                    displayPrefs: displayPrefs,
+                    onExportTaskPDF: onExportTaskPDF,
+                    onOpenMCPSettings: onOpenMCPSettings,
+                    selectedImageAttachment: $selectedImageAttachment
+                )
+            } else {
+                ChannelLogView(
+                    messages: viewModel.topTranscriptProvider.messages,
+                    toolRequestIDs: viewModel.topTranscriptProvider.toolRequestIDs,
+                    persistedHistoryCount: 0,      // task-scoped pane: no full-log "Restore" affordance
+                    hasRestoredHistory: true,
+                    onRestoreHistory: {},
+                    onExportTaskPDF: onExportTaskPDF,
+                    onOpenMCPSettings: onOpenMCPSettings,
+                    displayPrefs: displayPrefs,
+                    selectedImageAttachment: $selectedImageAttachment
+                )
+                .equatable()
+            }
+        }
+    }
+}
+
+/// A read-only, file-backed transcript for a task whose ORIGIN session isn't this window's — loaded
+/// once from that session's channel log (no streaming updates). The file-backed counterpart to the
+/// live `topTranscriptProvider`.
+private struct CrossSessionTranscriptView: View {
+    let originSessionID: UUID
+    let taskID: UUID
+    let viewModel: AppViewModel
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    @State private var loaded: (messages: [ChannelMessage], toolRequestIDs: Set<String>)?
+
+    var body: some View {
+        Group {
+            if let loaded {
+                ChannelLogView(
+                    messages: loaded.messages,
+                    toolRequestIDs: loaded.toolRequestIDs,
+                    persistedHistoryCount: 0,
+                    hasRestoredHistory: true,
+                    onRestoreHistory: {},
+                    onExportTaskPDF: onExportTaskPDF,
+                    onOpenMCPSettings: onOpenMCPSettings,
+                    displayPrefs: displayPrefs,
+                    selectedImageAttachment: $selectedImageAttachment
+                )
+                .equatable()
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task(id: taskID) {
+            loaded = nil
+            loaded = await viewModel.loadCrossSessionTaskTranscript(originSessionID: originSessionID, taskID: taskID)
         }
     }
 }

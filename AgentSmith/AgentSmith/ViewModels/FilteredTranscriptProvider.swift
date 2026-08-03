@@ -117,8 +117,9 @@ final class FilteredTranscriptProvider {
         messages = updated
     }
 
-    /// The `requestID` of `message` if it is a `tool_request`, else nil.
-    private static func toolRequestID(of message: ChannelMessage) -> String? {
+    /// The `requestID` of `message` if it is a `tool_request`, else nil. Also used by the file-backed
+    /// cross-session transcript, which computes the fold set from a one-shot read.
+    static func toolRequestID(of message: ChannelMessage) -> String? {
         guard message.kind == .toolRequest,
               case .string(let requestID)? = message.metadata?["requestID"] else { return nil }
         return requestID
