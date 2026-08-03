@@ -599,13 +599,18 @@ final class AppViewModel {
             // the library and a session (which would double it in every union read). Before dropping a
             // straggler, ensure it's actually IN the library (re-migrate one the batch collect skipped,
             // e.g. a transient read error), so a straggler is never dropped into nonexistence.
-            if shared.hasMigratedTemplatesToLibrary, let templateLibrary {
+            // Gated on the library being PERSISTABLE: if it can't save (rare corrupt-file case), keep
+            // templates per-session rather than stripping them into an unsavable library (lost on quit).
+            // Re-migrate any isTemplate straggler the batch collect missed, then drop from this session's
+            // load ANY task the library owns — an isTemplate straggler OR a stale pre-flip copy (a crash
+            // mid-promote can leave the id in the session file as a NON-template while the library holds
+            // the template; the library, the promote's destination, is the intended winner).
+            if shared.hasMigratedTemplatesToLibrary, shared.templateLibraryIsPersistable, let templateLibrary {
+                let libraryIDs = Set(await templateLibrary.allTemplates().map(\.id))
                 for task in savedTasks where task.isTemplate {
-                    if await templateLibrary.template(id: task.id) == nil {
-                        await templateLibrary.upsert(task)
-                    }
+                    if !libraryIDs.contains(task.id) { await templateLibrary.upsert(task) }
                 }
-                savedTasks.removeAll { $0.isTemplate }
+                savedTasks.removeAll { $0.isTemplate || libraryIDs.contains($0.id) }
             }
 
             // Running tasks didn't survive the last quit — mark them interrupted.

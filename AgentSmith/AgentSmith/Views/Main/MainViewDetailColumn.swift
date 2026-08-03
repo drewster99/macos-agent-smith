@@ -259,14 +259,23 @@ private struct TaskTranscriptTopPane: View {
 
     @ViewBuilder
     private func transcript(showBackToRuns: Bool) -> some View {
+        let effective = effectiveTask
+        // Resident in THIS session's live store → its messages are (or are becoming) current here, so
+        // the live streaming provider is right — even for a task restored from another origin session
+        // and re-running in this window. A finished drilled run is the exception: it's resident but its
+        // messages have been trimmed from the bounded resident tail, so it must be read from the log.
+        let residentHere = effective.map { e in viewModel.tasks.contains { $0.id == e.id } } ?? false
+        let finishedDrilledRun = showBackToRuns && (effective?.status.isInProgress == false)
         VStack(spacing: 0) {
             if showBackToRuns {
                 DrilledRunHeader { viewModel.selectedTemplateRunID = nil }
                 Divider()
             }
-            if let effective = effectiveTask, let origin = effective.sessionID, origin != viewModel.session.id {
-                // The task/run originated in ANOTHER session, so this session's live top provider has
-                // nothing for it — vend a read-only transcript from that session's channel log.
+            // Vend a read-only transcript from the origin session's log when the live provider can't be
+            // trusted to have it: a task NOT resident in this session (archived/deleted or cross-session
+            // and not restored), or a finished drilled run (trimmed from the tail). Otherwise the live
+            // streaming provider — a resident, still-running task, including a live drilled run.
+            if let effective, let origin = effective.sessionID, !residentHere || finishedDrilledRun {
                 CrossSessionTranscriptView(
                     originSessionID: origin,
                     taskID: effective.id,
