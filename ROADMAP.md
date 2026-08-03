@@ -4,7 +4,7 @@
 
 ### Task workspace overhaul: filtered transcripts, sidebar redesign, Library, global-ish storage, session deletion (designed 2026-08-02)
 
-**Status:** designed and fully settled 2026-08-02 (long design thread); building in phases. This entry is the authoritative record of WHAT and WHY.
+**Status:** designed and fully settled 2026-08-02 (long design thread); **BUILT 2026-08-03 ✅** — all six phases plus the templates-global migration (library + dual-dispatch editing + Library UI + pop-out) and the Active recent-cap landed and pushed. This entry is the authoritative record of WHAT and WHY. Two decisions were escalated mid-build and settled by the user: (1) full-send the templates-global migration via expand→migrate→contract; (2) template FLIPS cross the store boundary (promote session→library, demote library→current session). Both are reflected below and in `CLAUDE.md` conventions.
 
 Large, interlocking reorganization of the task/transcript surface. The settled architecture and the phase order both live here.
 
@@ -29,12 +29,21 @@ Large, interlocking reorganization of the task/transcript surface. The settled a
 
 #### Phases (each builds, /rechecks, and commits before the next)
 
-1. **Independent engine/settings fixes.** Auto-run → Orchestration settings (+ per-session override, remove sidebar checkboxes, engine reads resolved at auto-advance sites); gate the load-time auto-archive sweep behind the setting (default OFF); cancel wakes on archive + soft-delete.
-2. **Transcript store + provider foundation.** `TranscriptStore` actor, `FilteredTranscriptProvider`, `TranscriptFilter`, `TranscriptUpdate`, AsyncStream transport; rewire `ChannelLogView` to a provider, drop its `Equatable`+`revision`, keep `MessageRow.Equatable`; migrate `viewModel.messages` readers. Single pane, identical behavior.
-3. **Storage: `sessionID` + templates-global.** Add `sessionID` to `AgentTask` (backed-up migration stamping every record); `TemplateLibraryStore` (single-writer, "Default" group); immutable-`sessionID` invariant + clone guard; cross-session transcript resolution (live or file-backed store vended by SessionManager).
-4. **Two-pane transcript + selection.** Vertical split; top = `selectedTaskID` transcript / template run-history; bottom = configurable filter popover; single-click select / double-click open on existing rows; "Select a task" + auto-select on any task start.
-5. **Sidebar redesign.** Active (running + recent) with the 2-line running row + row cosmetics; Library (groups + Default + pop-out); Archived/Deleted own panes; all-session browser; gear (per-session / ⌘ global + modifier tooltip).
-6. **Session deletion.** Menu item, full stop, Archive/Delete prompt, remove dir + list entry, close window, last-session bootstrap; adjective-noun new-session naming.
+1. ✅ **Independent engine/settings fixes.** Auto-run → Orchestration settings (+ per-session override, remove sidebar checkboxes, engine reads resolved at auto-advance sites); gate the load-time auto-archive sweep behind the setting (default OFF); cancel wakes on archive + soft-delete.
+2. ✅ **Transcript store + provider foundation.** `TranscriptStore` actor, `FilteredTranscriptProvider`, `TranscriptFilter`, `TranscriptUpdate`, AsyncStream transport; rewire `ChannelLogView` to a provider, drop its `Equatable`+`revision`, keep `MessageRow.Equatable`; migrate `viewModel.messages` readers. Single pane, identical behavior.
+3. ✅ **Storage: `sessionID` + templates-global.** Add `sessionID` to `AgentTask` (stamped on create, back-filled on load); `TemplateLibraryStore` (single-writer, "Default" group); immutable-`sessionID` invariant + clone guard. (The templates-global MIGRATION itself was deferred to be paired with the Library UI, and landed as the 9a–9d sub-phases below. Cross-session file-backed transcript resolution remains the one deferred sub-item — the top pane binds to the current session's store; a closed origin session's transcript isn't file-vended yet.)
+4. ✅ **Two-pane transcript + selection.** Vertical split; top = `selectedTaskID` transcript; bottom = configurable filter popover (real per-kind/sender/visibility config, persisted); single-click select / double-click open on existing rows; "Select a task" + auto-select on any task start; `selectedTaskID` persisted per session.
+5. ✅ **Sidebar redesign.** Active (running + recent, capped at 20) with the 2-line running row + row cosmetics; Library (groups + Default + pop-out window); Archived/Deleted own panes; all-session browser; gear (per-session / ⌘ global + modifier tooltip).
+6. ✅ **Session deletion.** Menu item, full stop, Archive/Delete prompt, remove dir + list entry, close window (or adopt a fresh session in-place when it was the last), last-session bootstrap; adjective-noun new-session naming.
+
+#### Templates-global migration sub-phases (built 2026-08-03, expand→migrate→contract)
+
+- ✅ **9a — wire the library (inert).** `SharedAppState.templateLibraryStore` + writer + published `libraryTemplates`/`libraryGroups`, `ensureTemplateLibraryStore` (load-only), flush/persist. Nothing reads it yet.
+- ✅ **9b — engine/tools read the union.** `TaskStore` gains an injected `templateLibrary`; `instantiateTemplate`, the start chokepoint (`resolveStartTarget`), `RunTaskTool`, and `ListTasksTool` resolve a template from per-session ∪ library.
+- ✅ **9c — dual-dispatch editing, promote/demote, migration.** Every editing method (steps, criteria, description, inputs, tool overrides) reads-and-writes whichever store owns the task. `setTemplate`/`updateDefinition` FLIP across the boundary. One-time collect+strip migration, marker-gated (UserDefaults, not file-presence), with an `AppViewModel` load-time strip backstop. Creation routes new templates to the library. **Verified live on real data: 6 templates moved into the library, origin session stripped, no loss.**
+- ✅ **9d — Library UI.** Sidebar Library section (grouped templates + run history + group/template management), Active recent-cap (running + newest terminal, ≤20), and a pop-out Library window (⌘⌥L).
+
+**Known residual (deferred, not built):** a closed origin session's transcript is not yet file-vended to the top pane (phase-3 sub-item); template soft-delete/archive dual-dispatch was scoped out (deletion is via the Library UI's "Remove from Library" → `removeTemplate`); the migration marker is written via UserDefaults' normal sync (a hard-kill before sync just re-runs the idempotent migration next launch).
 
 ### OpenRouter routes and variants: one model is many routes, and we record one (found 2026-07-30)
 
