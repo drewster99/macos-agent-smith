@@ -209,7 +209,20 @@ private struct CapabilitiesForm: View {
 
     private static let sortedCapabilities = ModelCapability.allCases.sorted { $0.editorTitle < $1.editorTitle }
 
-    private var effortLevels: [String] { modelInfo?.validEffortLevels ?? [] }
+    /// Both ladders, labelled — they measure different parameters, so a merged list would
+    /// misreport which one a level belongs to.
+    private var generalEffortLevels: [String] { modelInfo?.generalEffort?.knownLevels ?? [] }
+    private var reasoningEffortLevels: [String] { modelInfo?.reasoningEffort?.knownLevels ?? [] }
+
+    /// Both constructs on one line, each labelled. General effort (Anthropic `output_config.effort`)
+    /// applies even with reasoning off; reasoning effort (`reasoning_effort`) does not — so showing
+    /// one merged list would tell the reader the wrong thing about both.
+    private var effortSummary: String {
+        var parts: [String] = []
+        if let general = modelInfo?.generalEffort { parts.append("general: \(general.editorSummary)") }
+        if let reasoning = modelInfo?.reasoningEffort { parts.append("reasoning: \(reasoning.editorSummary)") }
+        return parts.isEmpty ? "none reported" : parts.joined(separator: " · ")
+    }
 
     private var probeTitle: String {
         modelInfo?.lastProbedAt == nil ? "Probe this model now" : "Re-probe this model"
@@ -252,9 +265,9 @@ private struct CapabilitiesForm: View {
             }
             Section("Capabilities") {
                 LabeledContent("Effort levels") {
-                    Text(effortLevels.isEmpty ? "none reported" : effortLevels.joined(separator: ", "))
+                    Text(effortSummary)
                         .font(.caption.monospaced())
-                        .foregroundStyle(effortLevels.isEmpty ? AnyShapeStyle(HierarchicalShapeStyle.tertiary)
+                        .foregroundStyle(effortSummary == "none reported" ? AnyShapeStyle(HierarchicalShapeStyle.tertiary)
                                                               : AnyShapeStyle(HierarchicalShapeStyle.secondary))
                 }
                 ForEach(Self.sortedCapabilities, id: \.self) { capability in

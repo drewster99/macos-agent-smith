@@ -294,8 +294,11 @@ struct AgentModelSettingsSection: View {
                 .foregroundStyle(.secondary)
             Text(resolved.thinkingBudget.map { "thinking \(formatTokenCount($0))" } ?? "thinking off")
                 .foregroundStyle(.secondary)
-            if let effort = resolved.thinkingEffort, !effort.isEmpty {
+            if let effort = resolved.effort, !effort.isEmpty {
                 Text("effort \(effort)").foregroundStyle(.secondary)
+            }
+            if let reasoningEffort = resolved.reasoningEffort, !reasoningEffort.isEmpty {
+                Text("reasoning \(reasoningEffort)").foregroundStyle(.secondary)
             }
             // Show a cap only when the user explicitly overrode it (keyed on the override's presence,
             // not resolved-vs-model — the model may report no max, which the resolved fallback hides).

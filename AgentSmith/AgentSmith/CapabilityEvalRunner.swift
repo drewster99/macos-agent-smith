@@ -219,7 +219,10 @@ enum CapabilityEvalRunner {
             let preferLowImageDetail = provider.endpoint.host?.contains("api.openai.com") == true
             var profile = await ModelProber.probe(
                 llm: llm, seed: seed,
-                effortLevelsToProbe: provider.apiType == .anthropic ? target.effortLevels : [],
+                effortLevelsToProbe: target.effortLevels,
+                // Anthropic emits output_config.effort whatever the model claims; a flag-gated
+                // endpoint would silently drop it and turn "no error" into a false positive.
+                supportsUnconditionalGeneralEffortEmission: provider.apiType == .anthropic,
                 preferLowImageDetail: preferLowImageDetail
             )
 
@@ -255,7 +258,7 @@ enum CapabilityEvalRunner {
             // the field via extraJSONOverrides bypasses the gate, making effort PROVABLE instead
             // of hand-authored: one provider per level, graded on the endpoint's own answer.
             if provider.apiType != .anthropic, !target.effortLevels.isEmpty {
-                for level in target.effortLevels where profile.effortLevels[level] == nil {
+                for level in target.effortLevels where profile.reasoningEffortLevels[level] == nil {
                     let forcedConfig = ModelConfiguration(
                         name: "probe:\(target.modelID):effort", providerID: target.providerID,
                         modelID: target.modelID, temperature: nil, maxOutputTokens: 512,
@@ -263,7 +266,7 @@ enum CapabilityEvalRunner {
                         extraJSONOverrides: ["reasoning_effort": .string(level)]
                     )
                     let forcedLLM = kit.makeProvider(configuration: forcedConfig, provider: provider)
-                    profile.effortLevels[level] = await ModelProber.probeParameterAcceptance(
+                    profile.reasoningEffortLevels[level] = await ModelProber.probeParameterAcceptance(
                         llm: forcedLLM,
                         parameterDescription: "reasoning_effort=\(level)",
                         rejectionKeywords: ["reasoning_effort", "reasoning", "effort"]
@@ -351,8 +354,11 @@ enum CapabilityEvalRunner {
         let c = info.capabilities
         print("  catalog: toolUse=\(c.toolUse) vision=\(c.vision) pdfInput=\(c.pdfInput) reasoning=\(c.reasoning) "
               + "maxOut=\(info.maxOutputTokens.map(String.init) ?? "?") mode=\(info.mode ?? "?")")
-        if !info.validEffortLevels.isEmpty || !info.behaviorFlags.isAllDefault {
-            print("  catalog: effortLevels=\(info.validEffortLevels) flags=[\(info.behaviorFlags.displayLabels.joined(separator: ","))]")
+        if info.generalEffort != nil || info.reasoningEffort != nil || !info.behaviorFlags.isAllDefault {
+            let general = info.generalEffort.map(\.editorSummary) ?? "-"
+            let reasoning = info.reasoningEffort.map(\.editorSummary) ?? "-"
+            print("  catalog: generalEffort=[\(general)] reasoningEffort=[\(reasoning)] "
+                  + "flags=[\(info.behaviorFlags.displayLabels.joined(separator: ","))]")
         }
     }
 
@@ -419,10 +425,14 @@ enum CapabilityEvalRunner {
         if let deprecatedOn = p.deprecatedOn {
             plain("deprecated", Self.dateOnly.string(from: deprecatedOn))
         }
-        if !p.effortLevels.isEmpty {
-            let accepted = p.establishedEffortLevels
-            let rejected = p.effortLevels.filter { $0.value.value == false }.keys.sorted()
-            print("    effort             accepted=[\(accepted.joined(separator: ","))] rejected=[\(rejected.joined(separator: ","))]")
+        // Reported per construct: a general-effort ladder and a reasoning-effort ladder measure
+        // different parameters, so merging them into one line would misreport both.
+        for (label, ladder, accepted) in [
+            ("general  ", p.generalEffortLevels, p.establishedGeneralEffortLevels),
+            ("reasoning", p.reasoningEffortLevels, p.establishedReasoningEffortLevels)
+        ] where !ladder.isEmpty {
+            let rejected = ladder.filter { $0.value.value == false }.keys.sorted()
+            print("    effort \(label)   accepted=[\(accepted.joined(separator: ","))] rejected=[\(rejected.joined(separator: ","))]")
         }
         print("    — \(p.callCount) calls, \(String(format: "%.1fs", p.duration))")
     }
@@ -479,8 +489,10 @@ enum CapabilityEvalRunner {
             // Established effort levels, shallow → deep. Spelled out rather than abbreviated: the
             // whole point is which ladder rungs this model actually accepts, and "med" or "xh"
             // makes that a guess. Absent levels were never attempted, not rejected.
-            ("effort",         { $0.establishedEffortLevels.isEmpty ? "-"
-                                    : $0.establishedEffortLevels.joined(separator: ",") }),
+            ("gen-effort",     { $0.establishedGeneralEffortLevels.isEmpty ? "-"
+                                    : $0.establishedGeneralEffortLevels.joined(separator: ",") }),
+            ("rsn-effort",     { $0.establishedReasoningEffortLevels.isEmpty ? "-"
+                                    : $0.establishedReasoningEffortLevels.joined(separator: ",") }),
             ("max-context",    { intCell($0.maxContextTokens) }),
             // maxOutputBoundedByContext is mutually exclusive with maxOutputTokens — when the
             // endpoint has no independent output cap, that one stays inconclusive and this holds

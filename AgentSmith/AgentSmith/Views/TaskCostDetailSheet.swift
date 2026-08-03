@@ -240,7 +240,7 @@ struct TaskCostDetailSheet: View {
 
     private func configContentKey(_ c: ModelConfiguration) -> String {
         let temperature = c.temperature.map { "\($0)" } ?? "default"
-        let thinking = "\(c.thinkingBudget.map { "\($0)" } ?? "-")/\(c.thinkingEffort ?? "-")"
+        let thinking = "\(c.thinkingBudget.map { "\($0)" } ?? "-")/\(c.effort ?? "-")/\(c.reasoningEffort ?? "-")"
         let overrides = c.extraJSONOverrides.map { dict in
             dict.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
         } ?? "-"

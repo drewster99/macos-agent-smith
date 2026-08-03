@@ -15,8 +15,8 @@ struct RoleModelConfigOverrideEditor: View {
 
     @State private var override = ModelConfigurationOverride()
 
-    /// Standard adaptive-thinking effort levels; the model's own `validEffortLevels` decides which
-    /// draw a warning, not which are offered (overrides are permissive).
+    /// Standard effort levels; the model's own ``EffortSupport`` decides which draw a warning,
+    /// not which are offered (overrides are permissive).
     private static let effortLevels = ["low", "medium", "high", "xhigh", "max"]
 
     private var modelInfo: ModelInfo? {
@@ -38,6 +38,7 @@ struct RoleModelConfigOverrideEditor: View {
             maxContextRow()
             if selectedProviderSupportsThinking {
                 effortRow()
+                reasoningEffortRow()
                 thinkingBudgetRow()
             }
             togglesRow()
@@ -111,18 +112,21 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
+    /// GENERAL effort — Anthropic's `output_config.effort`, which applies even with reasoning off.
+    /// Separate from the reasoning row below because they are different wire parameters with
+    /// different ladders; one control for both was how they got conflated in the first place.
     private func effortRow() -> some View {
         overrideRow(
-            title: "Thinking effort",
-            help: "Adaptive-thinking depth. Off = the model / provider default.",
-            isOn: Binding(get: { override.thinkingEffort != nil },
-                          set: { override.thinkingEffort = $0 ? (modelInfo?.validEffortLevels.first ?? "high") : nil }),
+            title: "Effort (general)",
+            help: "Overall effort. Applies even when reasoning is off. Off = the model / provider default.",
+            isOn: Binding(get: { override.effort != nil },
+                          set: { override.effort = $0 ? (modelInfo?.generalEffort?.knownLevels?.first ?? "high") : nil }),
             defaultText: "provider default",
-            warning: warnings[.thinkingEffort]
+            warning: warnings[.effort]
         ) {
-            Picker("", selection: Binding(get: { override.thinkingEffort ?? "high" }, set: { override.thinkingEffort = $0 })) {
+            Picker("", selection: Binding(get: { override.effort ?? "high" }, set: { override.effort = $0 })) {
                 ForEach(Self.effortLevels, id: \.self) { level in
-                    Text(effortLabel(level)).tag(level)
+                    Text(effortLabel(level, modelInfo?.generalEffort)).tag(level)
                 }
             }
             .pickerStyle(.segmented)
@@ -222,9 +226,34 @@ struct RoleModelConfigOverrideEditor: View {
             .frame(maxWidth: 160, alignment: .leading)
     }
 
-    private func effortLabel(_ level: String) -> String {
-        guard let modelInfo, !modelInfo.validEffortLevels.isEmpty else { return level }
-        return modelInfo.validEffortLevels.contains(level) ? level : "\(level)*"
+    /// REASONING effort — `reasoning_effort` on OpenAI-compatible endpoints. Only meaningful for
+    /// reasoning models, which is why it is gated separately from the general row above: a model
+    /// may accept one and reject the other with HTTP 400.
+    private func reasoningEffortRow() -> some View {
+        overrideRow(
+            title: "Effort (reasoning)",
+            help: "Reasoning depth (`reasoning_effort`). Off = the model / provider default.",
+            isOn: Binding(get: { override.reasoningEffort != nil },
+                          set: { override.reasoningEffort = $0 ? (modelInfo?.reasoningEffort?.knownLevels?.first ?? "high") : nil }),
+            defaultText: "provider default",
+            warning: warnings[.reasoningEffort]
+        ) {
+            Picker("", selection: Binding(get: { override.reasoningEffort ?? "high" },
+                                          set: { override.reasoningEffort = $0 })) {
+                ForEach(Self.effortLevels, id: \.self) { level in
+                    Text(effortLabel(level, modelInfo?.reasoningEffort)).tag(level)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 160, alignment: .leading)
+        }
+    }
+
+    /// Marks a level the model's own record does not list. `rejects` fails safe, so a model with
+    /// an unknown ladder marks nothing — an asterisk there would invent a warning.
+    private func effortLabel(_ level: String, _ support: EffortSupport?) -> String {
+        guard let support else { return level }
+        return support.rejects(level) ? "\(level)*" : level
     }
 
     /// Only Anthropic/Alibaba honor thinking today; hide the thinking rows elsewhere to keep the
