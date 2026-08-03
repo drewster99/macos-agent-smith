@@ -35,6 +35,7 @@ final class AppViewModel {
             guard selectedTaskID != oldValue else { return }
             topTranscriptProvider.filter = TranscriptFilter(
                 taskScope: selectedTaskID.map { TranscriptFilter.TaskScope.task($0) } ?? .matchNone)
+            persistSessionStateAsync()
         }
     }
 
@@ -434,6 +435,9 @@ final class AppViewModel {
                     migratedOverride.autoRunInterruptedTasks = false
                 }
                 orchestrationOverride = migratedOverride.isEmpty ? nil : migratedOverride
+                // Restore the top-pane selection. The didSet repoints the top provider's filter;
+                // its persist is suppressed here by isApplyingPersistedState.
+                selectedTaskID = state.selectedTaskID
             } else {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
                 // No per-session state — fall back to the shared default assignments (from bundled
@@ -2121,7 +2125,8 @@ final class AppViewModel {
             toolsEnabled: toolsEnabled,
             autoRunNextTask: autoRunNextTask,
             autoRunInterruptedTasks: autoRunInterruptedTasks,
-            orchestrationOverride: orchestrationOverride
+            orchestrationOverride: orchestrationOverride,
+            selectedTaskID: selectedTaskID
         )
         logger.notice("flushPersistence: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(finalState.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(finalState.autoRunInterruptedTasks, privacy: .public)")
         await sessionStateWriter.enqueue(finalState)
@@ -2453,7 +2458,8 @@ final class AppViewModel {
             toolsEnabled: toolsEnabled,
             autoRunNextTask: autoRunNextTask,
             autoRunInterruptedTasks: autoRunInterruptedTasks,
-            orchestrationOverride: orchestrationOverride
+            orchestrationOverride: orchestrationOverride,
+            selectedTaskID: selectedTaskID
         )
         logger.notice("persistSessionStateAsync: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(state.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(state.autoRunInterruptedTasks, privacy: .public) caller=\(callerFunction, privacy: .public)@\(callerFile, privacy: .public):\(callerLine, privacy: .public)")
         let writer = sessionStateWriter
