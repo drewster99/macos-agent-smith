@@ -78,6 +78,9 @@ final class AppViewModel {
     var archivedTaskList: [AgentTask] { shared.archivedTasks }
     /// Deleted ("Recently Deleted") tasks — global across all sessions, sourced from `SharedAppState`.
     var recentlyDeletedTaskList: [AgentTask] { shared.deletedTasks }
+    /// Global template tasks (the Library), sourced from `SharedAppState`. Templates are global —
+    /// unlike active instance tasks — so every window shows the same set, live.
+    var libraryTemplates: [AgentTask] { shared.libraryTemplates }
     /// Active scheduled wakes (timers) for this session. Refreshed via runtime callbacks
     /// and on demand from the View → Timers window.
     var activeTimers: [ScheduledWake] = [] {
@@ -550,6 +553,14 @@ final class AppViewModel {
                     logger.error("tasks.json was corrupt and could not be quarantined: \(decodeError.localizedDescription, privacy: .public)")
                 }
                 savedTasks = []
+            }
+
+            // Templates are global now (in the library). Once the migration has durably run, drop any
+            // that remain in this session's file — normally none (the migration strips them), but this
+            // is the backstop for a strip that failed for this session, so a template never lives in
+            // both the library and a session (which would double it in every union read).
+            if shared.hasMigratedTemplatesToLibrary {
+                savedTasks.removeAll { $0.isTemplate }
             }
 
             // Running tasks didn't survive the last quit — mark them interrupted.

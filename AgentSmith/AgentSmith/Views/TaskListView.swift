@@ -25,9 +25,12 @@ struct TaskListView: View {
         let activeTasks = viewModel.activeTaskList
         let archivedTasks = viewModel.archivedTaskList
         let deletedTasks = viewModel.recentlyDeletedTaskList
+        // Templates live in the global library now; union them in so a template still renders as a
+        // family parent over its per-session run instances (a dedicated Library section comes next).
+        let familyTasks = activeTasks + viewModel.libraryTemplates
 
         Group {
-            if activeTasks.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
+            if familyTasks.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
                 ContentUnavailableView(
                     "No Tasks",
                     systemImage: "checklist",
@@ -35,7 +38,7 @@ struct TaskListView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(taskFamilies(for: activeTasks)) { family in
+                    ForEach(taskFamilies(for: familyTasks)) { family in
                         TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
                     }
 

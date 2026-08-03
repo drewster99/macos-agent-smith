@@ -492,6 +492,13 @@ final class SharedAppState {
     /// we refuse to overwrite, or a migration save that failed. While false, mutations aren't written
     /// and per-session files aren't stripped, so no template is lost by clobbering or premature strip.
     private var templateLibraryPersistable = true
+    /// Marks the one-time per-session → global template migration complete. A UserDefaults marker
+    /// (NOT file presence): the library file can be materialized empty by a normal termination flush
+    /// before the migration runs, so file-absence is not a reliable "not yet migrated" signal.
+    static let templatesMigratedKey = "didMigrateTemplatesToGlobalLibrary"
+    /// True once templates have durably moved into the global library. While false, templates still
+    /// live per-session and MUST NOT be filtered out of a session's active load.
+    var hasMigratedTemplatesToLibrary: Bool { UserDefaults.standard.bool(forKey: Self.templatesMigratedKey) }
 
     /// Tracks the in-flight one-time attachment migration so concurrent windows run it once.
     private var attachmentsMigrationTask: Task<Void, Never>?
@@ -1136,6 +1143,27 @@ final class SharedAppState {
             }
         }
 
+        // One-time per-session → global template migration, gated by a UserDefaults marker (see
+        // `templatesMigratedKey`). Collect every session's `isTemplate` tasks, MERGE them into the
+        // library (upsert preserves group membership for any already present), persist durably, and
+        // ONLY THEN strip them from the per-session files — destination-durable-before-source-removal,
+        // so a crash in the gap can never lose a template from both. On a failed save the per-session
+        // copies are kept and the marker stays unset, so it retries next launch.
+        if templateLibraryPersistable, !UserDefaults.standard.bool(forKey: Self.templatesMigratedKey) {
+            let collected = await collectTemplatesFromSessions()
+            for template in collected { await store.upsert(template) }
+            do {
+                try await basePersistence.saveTemplateLibrary(await store.snapshot())
+                await stripTemplatesFromSessionFiles()
+                UserDefaults.standard.set(true, forKey: Self.templatesMigratedKey)
+                if !collected.isEmpty {
+                    logger.notice("Migrated \(collected.count) template(s) from per-session files into the global library")
+                }
+            } catch {
+                logger.error("Failed to persist migrated template_library.json (\(error.localizedDescription, privacy: .public)) — keeping per-session copies; migration retries next launch")
+            }
+        }
+
         // Wire persistence + UI mirror AFTER the initial restore so loading doesn't trigger a redundant
         // write. Enqueue gated on `templateLibraryPersistable` so a corrupt/unwritable file is never
         // clobbered by an in-session mutation.
@@ -1180,6 +1208,54 @@ final class SharedAppState {
         } catch {
             logger.error("persistTemplateLibraryNow failed: \(error.localizedDescription, privacy: .public)")
             return false
+        }
+    }
+
+    /// Reads every session's `tasks.json` and returns the union of their `isTemplate` tasks, keeping the
+    /// newer copy on id collisions. Read-only — modifies no session file. Mirrors `collectInactiveFromSessions`.
+    private func collectTemplatesFromSessions() async -> [AgentTask] {
+        let sessions = (try? await basePersistence.loadSessionList()) ?? []
+        var union: [UUID: AgentTask] = [:]
+        for session in sessions {
+            let pm = PersistenceManager(sessionID: session.id)
+            let tasks: [AgentTask]
+            do {
+                tasks = try await pm.loadTasks()
+            } catch {
+                logger.error("Template migration: could not read session \(session.id.uuidString, privacy: .public)'s tasks (\(error.localizedDescription, privacy: .public)) — skipping it")
+                continue
+            }
+            for task in tasks where task.isTemplate {
+                if let existing = union[task.id], existing.updatedAt >= task.updatedAt { continue }
+                union[task.id] = task
+            }
+        }
+        return Array(union.values)
+    }
+
+    /// Rewrites every session's `tasks.json` to drop `isTemplate` tasks. Run only after the global
+    /// library is durably saved, so a template is never removed from a session file before it is
+    /// preserved globally. A failed rewrite is non-fatal — the marker-gated load-time filter
+    /// (`AppViewModel`) drops any straggler so it never appears in both the library and a session.
+    private func stripTemplatesFromSessionFiles() async {
+        let sessions = (try? await basePersistence.loadSessionList()) ?? []
+        for session in sessions {
+            let pm = PersistenceManager(sessionID: session.id)
+            let tasks: [AgentTask]
+            do {
+                tasks = try await pm.loadTasks()
+            } catch {
+                logger.error("Template strip: could not read session \(session.id.uuidString, privacy: .public)'s tasks (\(error.localizedDescription, privacy: .public)) — skipping it")
+                continue
+            }
+            let nonTemplates = tasks.filter { !$0.isTemplate }
+            if nonTemplates.count != tasks.count {
+                do {
+                    try await pm.saveTasks(nonTemplates)
+                } catch {
+                    logger.error("Template strip: could not rewrite session \(session.id.uuidString, privacy: .public)'s tasks (\(error.localizedDescription, privacy: .public)) — the load-time filter is the backstop")
+                }
+            }
         }
     }
 

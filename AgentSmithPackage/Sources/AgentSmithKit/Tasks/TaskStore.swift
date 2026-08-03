@@ -596,8 +596,15 @@ public actor TaskStore {
             sessionID: sessionID,
             templateInputDefinitions: definitions
         )
-        tasks[task.id] = task
-        onChange?()
+        // A new template belongs in the GLOBAL library (when one is wired); everything else is
+        // per-session. The returned id is the same either way, so the caller's follow-up setters
+        // (criteria, steps, title template) dual-dispatch to wherever the task now lives.
+        if isTemplate, let templateLibrary {
+            await templateLibrary.upsert(task)
+        } else {
+            tasks[task.id] = task
+            onChange?()
+        }
         return task
     }
 
