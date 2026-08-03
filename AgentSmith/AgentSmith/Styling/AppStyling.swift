@@ -220,7 +220,7 @@ enum AppFonts {
     static let channelSender = Font.system(.caption, design: .monospaced, weight: .bold)
     static let channelBody = Font.system(.body, design: .monospaced)
     static let channelTimestamp = Font.system(.caption2, design: .monospaced)
-    static let taskTitle = Font.headline
+    static let taskTitle = Font.system(.headline, weight: .medium)
     /// Title font for compact (child) task rows. Deliberately unbolded — a template's runs
     /// almost always share the parent's title, so the title is context rather than headline.
     static let taskTitleCompact = Font.system(.subheadline, weight: .regular)

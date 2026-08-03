@@ -33,7 +33,15 @@ struct MainView: View {
 
     var body: some View {
         NavigationSplitView {
-            MainViewSidebar(viewModel: viewModel, onCreateTask: { taskCreatorPresentation = .creating() })
+            MainViewSidebar(
+                viewModel: viewModel,
+                onCreateTask: { taskCreatorPresentation = .creating() },
+                onOpenSessionOrchestration: { showingOrchestrationOverrides = true },
+                onOpenGlobalOrchestration: {
+                    shared.settingsSelectedTab = .orchestration
+                    openSettings()
+                }
+            )
         } detail: {
             MainViewDetailColumn(
                 viewModel: viewModel,

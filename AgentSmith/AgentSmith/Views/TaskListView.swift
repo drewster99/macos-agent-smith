@@ -648,18 +648,13 @@ private struct TaskRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 titleRow()
 
+                // Description line dropped — the truncated preview was essentially never useful; the
+                // full description lives in Task Detail. Active/archived rows keep the metadata strip +
+                // family summary (which carries the run-list expand/collapse control); a recently-
+                // deleted row is just its struck-through title.
                 if style != .recentlyDeleted {
-                    descriptionText()
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     metadataLine()
-                    // Last line of the card: it summarizes the block of runs printed directly
-                    // beneath it and carries that block's expand/collapse control, so the
-                    // control sits against the thing it opens.
                     familySummaryLine(runs: runs)
-                } else {
-                    descriptionText()
-                        .lineLimit(1)
                 }
             }
 
@@ -971,7 +966,9 @@ private struct TaskRow: View {
     /// from …"), so tail truncation clips away the only part that ever differs. Middle
     /// truncation keeps both ends and drops the boilerplate in between.
     private var compactTruncation: Text.TruncationMode {
-        density == .compact ? .middle : .tail
+        // Center-truncate task titles everywhere: runs of a template share a long common prefix, and
+        // the distinguishing text is at both ends, so middle truncation preserves what identifies them.
+        .middle
     }
 
     @ViewBuilder
@@ -1078,13 +1075,6 @@ private struct TaskRow: View {
                 .lineLimit(1)
                 .layoutPriority(-1)
         }
-    }
-
-    @ViewBuilder
-    private func descriptionText() -> some View {
-        Text(task.description)
-            .font(AppFonts.taskDescription)
-            .foregroundStyle(style == .active ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
     }
 
 }
