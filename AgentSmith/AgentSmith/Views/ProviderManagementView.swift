@@ -61,22 +61,28 @@ struct ProviderManagementView: View {
 
     private func builtInSection() -> some View {
         let visible = showAllBuiltIns ? allBuiltInsAlphabetical : defaultVisibleBuiltIns
-        let canShowMore = !showAllBuiltIns && visible.count < BuiltInProviders.all.count
+        let hiddenCount = BuiltInProviders.all.count - visible.count
+        let hiddenNote = "\(hiddenCount) more built-in "
+            + (hiddenCount == 1 ? "provider is" : "providers are")
+            + " hidden. Turn on \u{201C}Show all\u{201D} to pick from every provider."
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Providers")
                     .font(AppFonts.sectionHeader)
                 Spacer()
-                if showAllBuiltIns {
-                    Button("Show popular only") { showAllBuiltIns = false }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                } else if canShowMore {
-                    Button("Show all (\(BuiltInProviders.all.count))") { showAllBuiltIns = true }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
+                Toggle(isOn: $showAllBuiltIns) {
+                    Text("Show all (\(BuiltInProviders.all.count))")
                 }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            if hiddenCount > 0 {
+                Text(hiddenNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             ForEach(visible, id: \.id) { preset in
