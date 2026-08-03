@@ -566,7 +566,13 @@ final class AppViewModel {
                 persistTasks()
             }
 
-            let standaloneStore = TaskStore(inactiveStore: inactiveStore)
+            // Back-fill the immutable origin sessionID on legacy per-session tasks that predate the
+            // field (nil). New tasks get stamped by the store on creation; this stamps the already-
+            // persisted ones (idempotent — re-runs each launch until the next save writes it through).
+            for i in savedTasks.indices where savedTasks[i].sessionID == nil {
+                savedTasks[i].sessionID = session.id
+            }
+            let standaloneStore = TaskStore(inactiveStore: inactiveStore, sessionID: session.id)
             taskStore = standaloneStore
             await wireDurablePersistHooks(on: standaloneStore)
             await standaloneStore.restore(savedTasks)
@@ -919,6 +925,9 @@ final class AppViewModel {
             await oldStore.setOnChange { }
         }
         self.taskStore = liveTaskStore
+        // The live store was built inside the runtime before the session id was known; stamp it now so
+        // tasks Smith creates carry this session's immutable origin id.
+        await liveTaskStore.setSessionID(session.id)
         await wireDurablePersistHooks(on: liveTaskStore)
         await liveTaskStore.setOnChange { [weak self] in
             Task { @MainActor [weak self] in

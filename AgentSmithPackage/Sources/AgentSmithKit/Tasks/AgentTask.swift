@@ -97,6 +97,13 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// ordinary tasks and for templates themselves. Lets future UI group instances
     /// under their template; for now it's just a recorded lineage.
     public var parentTaskID: UUID?
+    /// The session this task ORIGINATED in (was created / instantiated in). IMMUTABLE once set — a
+    /// task belongs to exactly one session's transcript for its whole life, which is what makes "a
+    /// task's messages live in one session's log" hold (unarchiving keeps it; re-running in a different
+    /// session clones a fresh task rather than re-homing this one). Stamped on creation by `TaskStore`
+    /// and back-filled on load for legacy per-session tasks. `nil` only for archived/deleted tasks that
+    /// predate this field — their origin session is unrecoverable, so their transcript reads unavailable.
+    public var sessionID: UUID?
     /// Inputs this template requires or accepts before a run can be instantiated. Only
     /// template tasks may define these directly. Template instances retain a snapshot so
     /// their historical context stays stable if the template is edited later.
@@ -415,6 +422,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         validation: TaskValidationState? = nil,
         isTemplate: Bool = false,
         parentTaskID: UUID? = nil,
+        sessionID: UUID? = nil,
         templateInputDefinitions: [TemplateInputDefinition] = [],
         templateInstanceTitleTemplate: String? = nil,
         templateInputValues: [String: String] = [:]
@@ -452,6 +460,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.validation = validation
         self.isTemplate = isTemplate
         self.parentTaskID = parentTaskID
+        self.sessionID = sessionID
         self.templateInputDefinitions = templateInputDefinitions
         self.templateInstanceTitleTemplate = templateInstanceTitleTemplate
         self.templateInputValues = templateInputValues
@@ -460,7 +469,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages
     }
 
     public init(from decoder: Decoder) throws {
@@ -498,6 +507,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
         isTemplate = try c.decodeIfPresent(Bool.self, forKey: .isTemplate) ?? false
         parentTaskID = try c.decodeIfPresent(UUID.self, forKey: .parentTaskID)
+        sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
         templateInputDefinitions = try c.decodeIfPresent([TemplateInputDefinition].self, forKey: .templateInputDefinitions) ?? []
         templateInstanceTitleTemplate = try c.decodeIfPresent(String.self, forKey: .templateInstanceTitleTemplate)
         templateInputValues = try c.decodeIfPresent([String: String].self, forKey: .templateInputValues) ?? [:]
@@ -552,6 +562,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(validation, forKey: .validation)
         if isTemplate { try c.encode(true, forKey: .isTemplate) }
         try c.encodeIfPresent(parentTaskID, forKey: .parentTaskID)
+        try c.encodeIfPresent(sessionID, forKey: .sessionID)
         if !templateInputDefinitions.isEmpty {
             try c.encode(templateInputDefinitions, forKey: .templateInputDefinitions)
         }

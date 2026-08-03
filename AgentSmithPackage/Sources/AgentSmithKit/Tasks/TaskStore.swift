@@ -21,6 +21,12 @@ public actor TaskStore {
     private var onTaskMovedToInactive: (@Sendable (UUID) -> Void)?
     /// The shared global store for archived + recently-deleted tasks. See the type doc.
     private let inactiveStore: InactiveTaskStore?
+    /// The session this store belongs to. Stamped onto every task created here (`addTask`,
+    /// `instantiateTemplate`) as its immutable origin `sessionID`. `nil` in standalone / test stores.
+    /// A set-once `var` (`setSessionID`) because the LIVE store is built inside the runtime before the
+    /// session id is threaded in and adopted by the view model afterward. Note this is the stable
+    /// `Session.id`, NOT the runtime's per-run `currentSessionID`.
+    private var sessionID: UUID?
     /// Durably writes the global inactive store to disk *now*, returning whether it succeeded.
     /// Injected by the app so a cross-store move can guarantee the destination file is on disk
     /// before the source is removed — a crash in the gap must never leave a task absent from both
@@ -39,8 +45,15 @@ public actor TaskStore {
     /// `autoArchiveEnabled`. Defaults to the historical four-hour cutoff.
     private var autoArchiveInterval: TimeInterval = 4 * 3600
 
-    public init(inactiveStore: InactiveTaskStore? = nil) {
+    public init(inactiveStore: InactiveTaskStore? = nil, sessionID: UUID? = nil) {
         self.inactiveStore = inactiveStore
+        self.sessionID = sessionID
+    }
+
+    /// Sets the origin session ONCE (no-op if already set). Used for the live store, which is
+    /// constructed inside the runtime before the session id is known and adopted afterward.
+    public func setSessionID(_ id: UUID) {
+        if sessionID == nil { sessionID = id }
     }
 
     /// Pushes the user's auto-archive Settings into the store — the single source of the effective
@@ -443,6 +456,7 @@ public actor TaskStore {
             steps: clonedSteps,
             isTemplate: false,
             parentTaskID: template.id,
+            sessionID: sessionID,
             templateInputDefinitions: template.templateInputDefinitions,
             templateInputValues: resolvedInputs.values
         )
@@ -475,6 +489,7 @@ public actor TaskStore {
             scheduledRunAt: scheduledRunAt,
             descriptionAttachments: descriptionAttachments,
             isTemplate: isTemplate,
+            sessionID: sessionID,
             templateInputDefinitions: definitions
         )
         tasks[task.id] = task
