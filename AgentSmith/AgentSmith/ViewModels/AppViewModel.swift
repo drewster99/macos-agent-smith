@@ -38,10 +38,33 @@ final class AppViewModel {
     var selectedTaskID: UUID? {
         didSet {
             guard selectedTaskID != oldValue else { return }
-            topTranscriptProvider.filter = TranscriptFilter(
-                taskScope: selectedTaskID.map { TranscriptFilter.TaskScope.task($0) } ?? .matchNone)
+            selectedTemplateRunID = nil   // a new selection clears any drilled-into template run
+            refreshTopTranscriptFilter()
             persistSessionStateAsync()
         }
+    }
+    /// When a TEMPLATE is selected, the top pane shows its run history; drilling into one run sets this
+    /// to that run's id and the pane shows THAT run's transcript. `nil` = the run-history list (for a
+    /// template) or the task's own transcript (for a normal task). In-memory only (a transient drill-in).
+    var selectedTemplateRunID: UUID? {
+        didSet {
+            guard selectedTemplateRunID != oldValue else { return }
+            refreshTopTranscriptFilter()
+        }
+    }
+
+    /// Repoints the top provider's filter. A normal task → its own transcript; a selected template with
+    /// no drilled run → nothing (the pane shows the run-history LIST instead); a template with a run
+    /// drilled in → that run's transcript.
+    private func refreshTopTranscriptFilter() {
+        let transcriptTaskID: UUID?
+        if let selectedTaskID, anyTask(id: selectedTaskID)?.isTemplate == true {
+            transcriptTaskID = selectedTemplateRunID
+        } else {
+            transcriptTaskID = selectedTaskID
+        }
+        topTranscriptProvider.filter = TranscriptFilter(
+            taskScope: transcriptTaskID.map { TranscriptFilter.TaskScope.task($0) } ?? .matchNone)
     }
 
     /// The bottom (full-session) pane's filter configuration — which kind groups, senders, and

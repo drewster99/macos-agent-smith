@@ -222,15 +222,38 @@ private struct TaskTranscriptTopPane: View {
     let onOpenMCPSettings: () -> Void
     @Binding var selectedImageAttachment: Attachment?
 
+    /// The selected row resolved to a task/template (nil = nothing selected). A TEMPLATE with no run
+    /// drilled in shows its run history; everything else shows a transcript.
+    private var selected: AgentTask? {
+        viewModel.selectedTaskID.flatMap { viewModel.anyTask(id: $0) }
+    }
+
     var body: some View {
-        if viewModel.selectedTaskID == nil {
-            ContentUnavailableView(
-                "Select a task",
-                systemImage: "list.bullet.rectangle",
-                description: Text("Click a task in the sidebar to see its transcript here.")
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
+        Group {
+            if let selected {
+                if selected.isTemplate && viewModel.selectedTemplateRunID == nil {
+                    TemplateRunHistoryPane(template: selected, viewModel: viewModel)
+                } else {
+                    transcript(showBackToRuns: selected.isTemplate)
+                }
+            } else {
+                ContentUnavailableView(
+                    "Select a task",
+                    systemImage: "list.bullet.rectangle",
+                    description: Text("Click a task in the sidebar to see its transcript here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func transcript(showBackToRuns: Bool) -> some View {
+        VStack(spacing: 0) {
+            if showBackToRuns {
+                DrilledRunHeader { viewModel.selectedTemplateRunID = nil }
+                Divider()
+            }
             ChannelLogView(
                 messages: viewModel.topTranscriptProvider.messages,
                 toolRequestIDs: viewModel.topTranscriptProvider.toolRequestIDs,
@@ -244,5 +267,136 @@ private struct TaskTranscriptTopPane: View {
             )
             .equatable()
         }
+    }
+}
+
+/// The top pane's run-history mode: a template's runs (its instances, newest first), each drilling into
+/// that run's transcript. Runs come from `childTasks` (this session's active + the global archived),
+/// so a run whose origin session is closed shows in the list; its transcript needs closed-session
+/// vending (a TODO) to render.
+private struct TemplateRunHistoryPane: View {
+    let template: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        let runs = viewModel.childTasks(of: template.id)
+            .sorted { ($0.startedAt ?? $0.createdAt) > ($1.startedAt ?? $1.createdAt) }
+        VStack(alignment: .leading, spacing: 0) {
+            TemplateRunHistoryHeader(title: template.title, runCount: runs.count)
+            Divider()
+            TemplateRunList(runs: runs) { viewModel.selectedTemplateRunID = $0 }
+        }
+    }
+}
+
+private struct TemplateRunList: View {
+    let runs: [AgentTask]
+    let onSelect: (UUID) -> Void
+
+    var body: some View {
+        if runs.isEmpty {
+            ContentUnavailableView(
+                "No runs yet",
+                systemImage: "clock.arrow.circlepath",
+                description: Text("This template hasn't been run. Use its Run action to start one.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(runs, id: \.id) { run in
+                        TemplateRunRow(run: run) { onSelect(run.id) }
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct TemplateRunHistoryHeader: View {
+    let title: String
+    let runCount: Int
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "clock.arrow.circlepath")
+                .foregroundStyle(.secondary)
+            Text("Run History")
+                .font(.headline)
+            Text("· \(title)")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+            Text("\(runCount) run\(runCount == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+}
+
+private struct TemplateRunRow: View {
+    let run: AgentTask
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Image(systemName: statusSymbol)
+                    .foregroundStyle(statusColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(run.title)
+                        .font(.callout)
+                        .lineLimit(1)
+                    Text((run.startedAt ?? run.createdAt).formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var statusSymbol: String {
+        switch run.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        case .running, .starting, .validating: return "play.circle.fill"
+        case .paused, .interrupted, .awaitingReview, .awaitingHelp: return "pause.circle.fill"
+        default: return "circle"
+        }
+    }
+
+    private var statusColor: Color {
+        switch run.status {
+        case .completed: return .green
+        case .failed: return .red
+        case .running, .starting, .validating: return .blue
+        default: return .secondary
+        }
+    }
+}
+
+private struct DrilledRunHeader: View {
+    let onBack: () -> Void
+    var body: some View {
+        HStack {
+            Button(action: onBack) {
+                Label("Run History", systemImage: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
     }
 }
