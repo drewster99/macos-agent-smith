@@ -1418,11 +1418,12 @@ public actor OrchestrationRuntime {
         autoRunInterruptedTasks: Bool = false,
         memoryStore: MemoryStore? = nil,
         inactiveTaskStore: InactiveTaskStore = InactiveTaskStore(),
+        templateLibrary: TemplateLibraryStore? = nil,
         liveActivityTracker: LiveActivityTracker = LiveActivityTracker(),
         validationMetricsLedger: ValidationMetricsLedger? = nil
     ) {
         self.channel = MessageChannel()
-        self.taskStore = TaskStore(inactiveStore: inactiveTaskStore)
+        self.taskStore = TaskStore(inactiveStore: inactiveTaskStore, templateLibrary: templateLibrary)
         self.memoryStore = memoryStore ?? MemoryStore(engine: semanticSearchEngine)
         self.liveActivityTracker = liveActivityTracker
         self.llmProviders = providers
@@ -1804,7 +1805,7 @@ public actor OrchestrationRuntime {
         amendment: String? = nil,
         templateInputValues: [String: String] = [:]
     ) async -> UUID? {
-        guard let task = await taskStore.task(id: taskID), task.isTemplate else { return taskID }
+        guard let task = await taskStore.taskOrLibraryTemplate(id: taskID), task.isTemplate else { return taskID }
         let instance: AgentTask
         switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: templateInputValues) {
         case .success(let created):

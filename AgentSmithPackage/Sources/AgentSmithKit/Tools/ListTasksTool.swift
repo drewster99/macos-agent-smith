@@ -139,6 +139,10 @@ struct ListTasksTool: AgentTool {
         var pool: [AgentTask] = []
         if allowedDispositions.contains(.active) {
             pool += await context.taskStore.allTasks()
+            // Templates are `.active` but live in the GLOBAL library (they moved out of the per-session
+            // active list), so include them here — otherwise is_template / parent-template lookups would
+            // stop finding templates after the migration. Disjoint from `allTasks()` by construction.
+            pool += await context.taskStore.allLibraryTemplates()
         }
         if allowedDispositions.contains(.archived) || allowedDispositions.contains(.recentlyDeleted) {
             pool += await context.taskStore.allInactiveTasks()

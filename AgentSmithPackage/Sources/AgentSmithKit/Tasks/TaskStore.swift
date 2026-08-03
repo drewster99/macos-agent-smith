@@ -21,6 +21,9 @@ public actor TaskStore {
     private var onTaskMovedToInactive: (@Sendable (UUID) -> Void)?
     /// The shared global store for archived + recently-deleted tasks. See the type doc.
     private let inactiveStore: InactiveTaskStore?
+    /// The shared global template library. Templates may live here (after the global migration) rather
+    /// than in this per-session store, so template lookups (`instantiateTemplate`) consult both.
+    private let templateLibrary: TemplateLibraryStore?
     /// The session this store belongs to. Stamped onto every task created here (`addTask`,
     /// `instantiateTemplate`) as its immutable origin `sessionID`. `nil` in standalone / test stores.
     /// A set-once `var` (`setSessionID`) because the LIVE store is built inside the runtime before the
@@ -45,9 +48,14 @@ public actor TaskStore {
     /// `autoArchiveEnabled`. Defaults to the historical four-hour cutoff.
     private var autoArchiveInterval: TimeInterval = 4 * 3600
 
-    public init(inactiveStore: InactiveTaskStore? = nil, sessionID: UUID? = nil) {
+    public init(
+        inactiveStore: InactiveTaskStore? = nil,
+        sessionID: UUID? = nil,
+        templateLibrary: TemplateLibraryStore? = nil
+    ) {
         self.inactiveStore = inactiveStore
         self.sessionID = sessionID
+        self.templateLibrary = templateLibrary
     }
 
     /// Sets the origin session ONCE (no-op if already set). Used for the live store, which is
@@ -335,8 +343,8 @@ public actor TaskStore {
     /// tools, relevant-context, help request) and the template/recurrence-carrying
     /// fields (`isTemplate = false`, `scheduledRunAt = nil`). Sets `parentTaskID` to the
     /// template. Returns the instance, or nil if the template is missing.
-    public func cloneTemplateInstance(templateID: UUID) -> AgentTask? {
-        switch instantiateTemplate(templateID: templateID, inputValues: [:]) {
+    public func cloneTemplateInstance(templateID: UUID) async -> AgentTask? {
+        switch await instantiateTemplate(templateID: templateID, inputValues: [:]) {
         case .success(let instance): return instance
         case .failure: return nil
         }
@@ -347,8 +355,31 @@ public actor TaskStore {
         case failure(String)
     }
 
-    public func instantiateTemplate(templateID: UUID, inputValues: [String: String]) -> TemplateInstantiationResult {
-        guard let template = tasks[templateID] else {
+    /// Looks up a task in this session's active list, falling back to the global template library — a
+    /// template may live there (after the migration) rather than in this per-session store. Used by the
+    /// start path and run tools, which must resolve a template wherever it lives before instantiating it
+    /// into this session. For a normal (non-template) task this is just `task(id:)`.
+    public func taskOrLibraryTemplate(id: UUID) async -> AgentTask? {
+        if let local = tasks[id] { return local }
+        return await templateLibrary?.template(id: id)
+    }
+
+    /// Every template in the global library (empty when no library is wired). Lets `list_tasks` and the
+    /// sidebar surface templates that have moved out of the per-session store into the global library.
+    public func allLibraryTemplates() async -> [AgentTask] {
+        await templateLibrary?.allTemplates() ?? []
+    }
+
+    public func instantiateTemplate(templateID: UUID, inputValues: [String: String]) async -> TemplateInstantiationResult {
+        // A template may live in this session's tasks (before the global migration) or in the shared
+        // library (after it). Prefer a local copy, fall back to the library. The instance is always
+        // minted into THIS per-session store (stamped with `sessionID`), wherever the template lives.
+        let template: AgentTask
+        if let local = tasks[templateID] {
+            template = local
+        } else if let fromLibrary = await templateLibrary?.template(id: templateID) {
+            template = fromLibrary
+        } else {
             return .failure("Template task not found: \(templateID.uuidString)")
         }
         guard template.isTemplate else {

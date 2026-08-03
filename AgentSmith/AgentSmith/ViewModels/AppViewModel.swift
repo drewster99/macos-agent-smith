@@ -532,9 +532,9 @@ final class AppViewModel {
             // global migration; later calls return the shared instance.
             let inactiveStore = try await shared.ensureInactiveTaskStore()
             // The global template library. Loads (or starts empty); the per-session → global template
-            // migration is deferred to a later build. Non-fatal — a failure just means no Library
-            // templates this launch, never a failed session load.
-            _ = try? await shared.ensureTemplateLibraryStore()
+            // migration is deferred to a later build. Non-fatal — a failure just means template lookups
+            // fall back to per-session copies this launch, never a failed session load.
+            let templateLibrary = try? await shared.ensureTemplateLibraryStore()
 
             var savedTasks: [AgentTask]
             do {
@@ -635,7 +635,7 @@ final class AppViewModel {
             for i in savedTasks.indices where savedTasks[i].sessionID == nil {
                 savedTasks[i].sessionID = session.id
             }
-            let standaloneStore = TaskStore(inactiveStore: inactiveStore, sessionID: session.id)
+            let standaloneStore = TaskStore(inactiveStore: inactiveStore, sessionID: session.id, templateLibrary: templateLibrary)
             taskStore = standaloneStore
             await wireDurablePersistHooks(on: standaloneStore)
             await standaloneStore.restore(savedTasks)
@@ -785,6 +785,8 @@ final class AppViewModel {
             shared.startupError = msg
             return
         }
+        // Global template library — non-fatal (template lookups fall back to per-session copies).
+        let sharedTemplateLibrary = try? await shared.ensureTemplateLibraryStore()
 
         let newRuntime = OrchestrationRuntime(
             providers: providers,
@@ -799,6 +801,7 @@ final class AppViewModel {
             autoRunInterruptedTasks: autoRunInterruptedTasks,
             memoryStore: sharedMemoryStore,
             inactiveTaskStore: sharedInactiveStore,
+            templateLibrary: sharedTemplateLibrary,
             liveActivityTracker: shared.liveActivityTracker,
             validationMetricsLedger: .shared
         )

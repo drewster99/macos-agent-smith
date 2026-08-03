@@ -93,7 +93,13 @@ struct RunTaskTool: AgentTool {
         // Resolve across active + global inactive: a completed task older than 4h is auto-archived
         // into the global store, and the agent is still shown it via list_tasks/get_task_details, so
         // "redo that one" must be able to find it here too.
-        guard var task = await context.taskStore.taskAnyDisposition(id: taskID) else {
+        // A template may live in this session (pre-migration) or in the global library (post-migration);
+        // the library fallback resolves it in the latter case. run_task then clones it downstream.
+        var resolvedTask = await context.taskStore.taskAnyDisposition(id: taskID)
+        if resolvedTask == nil {
+            resolvedTask = await context.taskStore.taskOrLibraryTemplate(id: taskID)
+        }
+        guard var task = resolvedTask else {
             return .failure("""
                 No task found with ID \(taskID). \
                 \(await Self.candidateTaskList(context: context))
