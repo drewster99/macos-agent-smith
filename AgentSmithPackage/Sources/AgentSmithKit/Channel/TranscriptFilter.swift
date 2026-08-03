@@ -49,20 +49,32 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// Which senders pass. `nil` = every sender. A non-nil set matches a message iff its `sender` is a
     /// member — `ChannelMessage.Sender` is `Hashable`, so `.agent(.smith)`, `.user`, etc. are set members.
     public var allowedSenders: Set<ChannelMessage.Sender>?
+    /// Which recipients pass. `nil` = every recipient. A non-nil set filters PRIVATE (addressed) messages
+    /// by their `recipient`; a PUBLIC message (no recipient) always passes. This is the axis that lets a
+    /// view hide everything addressed TO a worker, which the sender axis can't (a Security-Agent-to-Brown
+    /// message has an ALLOWED sender).
+    public var allowedRecipients: Set<MessageRecipient>?
     public var kinds: KindRule
     public var taskScope: TaskScope
     public var visibility: Visibility
+    /// When true, messages flagged as errors (`metadata["isError"] == true`) are hidden. Errors are a
+    /// cross-cutting FLAG, not a kind, so they get their own axis. Default false — errors show.
+    public var hideErrors: Bool
 
     public init(
         allowedSenders: Set<ChannelMessage.Sender>? = nil,
+        allowedRecipients: Set<MessageRecipient>? = nil,
         kinds: KindRule = .all,
         taskScope: TaskScope = .any,
-        visibility: Visibility = .all
+        visibility: Visibility = .all,
+        hideErrors: Bool = false
     ) {
         self.allowedSenders = allowedSenders
+        self.allowedRecipients = allowedRecipients
         self.kinds = kinds
         self.taskScope = taskScope
         self.visibility = visibility
+        self.hideErrors = hideErrors
     }
 
     /// The pass-everything filter — the single-pane / firehose default.
@@ -72,6 +84,11 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// call from any isolation domain (it reads only the message's own value).
     public func matches(_ message: ChannelMessage) -> Bool {
         if let allowedSenders, !allowedSenders.contains(message.sender) { return false }
+        // Recipient axis filters PRIVATE messages; a public message (no recipient) always passes.
+        if let allowedRecipients, let recipient = message.recipient, !allowedRecipients.contains(recipient) {
+            return false
+        }
+        if hideErrors, case .bool(true)? = message.metadata?["isError"] { return false }
 
         switch kinds {
         case .all:

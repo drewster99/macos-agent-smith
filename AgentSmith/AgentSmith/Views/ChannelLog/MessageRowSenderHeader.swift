@@ -51,7 +51,7 @@ struct MessageRowSenderHeader: View {
             }
 
             if shouldShowTimestamp {
-                Text(sharedTimestampFormatter.string(from: message.timestamp))
+                Text(transcriptTimestampString(for: message.timestamp))
                     .font(AppFonts.channelTimestamp)
                     .foregroundStyle(.secondary)
             }

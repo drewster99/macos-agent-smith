@@ -79,27 +79,66 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     public var visibleGroups: Set<TranscriptKindGroup>
     /// Which senders are shown. `nil` = every sender (the common case); a non-nil set is an allow-list.
     public var allowedSenders: Set<ChannelMessage.Sender>?
+    /// Which recipients are shown. `nil` = every recipient; a non-nil set filters PRIVATE (addressed)
+    /// messages (a public message always passes). This is what lets the default hide everything addressed
+    /// TO a worker — the sender axis can't (a Security-Agent-to-Brown message has an allowed sender).
+    public var allowedRecipients: Set<MessageRecipient>?
     /// Public / private / all.
     public var visibility: TranscriptFilter.Visibility
+    /// When true, only messages with NO associated task (the Smith↔user orchestration layer) show — the
+    /// per-task chatter of individual workers is hidden. This is the primary knob that makes the default
+    /// the conversation rather than the firehose.
+    public var hideTaskScoped: Bool
+    /// When false, error messages (`metadata["isError"]`) are hidden.
+    public var showErrors: Bool
 
     public init(
         visibleGroups: Set<TranscriptKindGroup> = Set(TranscriptKindGroup.allCases),
         allowedSenders: Set<ChannelMessage.Sender>? = nil,
-        visibility: TranscriptFilter.Visibility = .all
+        allowedRecipients: Set<MessageRecipient>? = nil,
+        visibility: TranscriptFilter.Visibility = .all,
+        hideTaskScoped: Bool = false,
+        showErrors: Bool = true
     ) {
         self.visibleGroups = visibleGroups
         self.allowedSenders = allowedSenders
+        self.allowedRecipients = allowedRecipients
         self.visibility = visibility
+        self.hideTaskScoped = hideTaskScoped
+        self.showErrors = showErrors
     }
 
-    /// The default bottom-pane view — the readable conversation. Chat + task lifecycle + validation +
-    /// system are on; the raw tool-call stream and memory bookkeeping (the noisy groups) are off. Every
-    /// sender, both visibilities. The user narrows or widens from here.
+    private enum CodingKeys: String, CodingKey {
+        case visibleGroups, allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
+    }
+
+    /// Custom decode so a config persisted BEFORE the recipient / task-scope / error axes existed still
+    /// reads back — the synthesized decoder emits a hard `decode` for every non-optional key and would
+    /// throw `keyNotFound` on the missing ones, taking the whole `SessionState` decode down with it. Each
+    /// field falls back to the same default as the memberwise init. (Encode stays synthesized.)
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        visibleGroups = try c.decodeIfPresent(Set<TranscriptKindGroup>.self, forKey: .visibleGroups)
+            ?? Set(TranscriptKindGroup.allCases)
+        allowedSenders = try c.decodeIfPresent(Set<ChannelMessage.Sender>.self, forKey: .allowedSenders)
+        allowedRecipients = try c.decodeIfPresent(Set<MessageRecipient>.self, forKey: .allowedRecipients)
+        visibility = try c.decodeIfPresent(TranscriptFilter.Visibility.self, forKey: .visibility) ?? .all
+        hideTaskScoped = try c.decodeIfPresent(Bool.self, forKey: .hideTaskScoped) ?? false
+        showErrors = try c.decodeIfPresent(Bool.self, forKey: .showErrors) ?? true
+    }
+
+    /// The default bottom-pane view — the Smith↔user ORCHESTRATION conversation: nothing to OR from a
+    /// worker (Brown), and nothing scoped to a specific task (that history lives in the top pane per
+    /// task). Every kind group is on, but the task-scope + no-Brown filters carry the weight, so what
+    /// remains is the user's conversation with Smith plus orchestration-level notices.
     public static let conversation = TranscriptViewConfig(
-        visibleGroups: [.chat, .taskLifecycle, .validation, .system]
+        allowedSenders: Set(selectableSenders.filter { $0 != .agent(.brown) }),
+        allowedRecipients: Set(selectableRecipients.filter { $0 != .agent(.brown) }),
+        hideTaskScoped: true
     )
 
-    /// The unfiltered firehose — every group, every sender, both visibilities. Equals `TranscriptFilter.all`.
+    /// The unfiltered firehose — every group, sender, recipient; task-scoped included; errors shown.
+    /// Equals `TranscriptFilter.all`.
     public static let everything = TranscriptViewConfig()
 
     /// The senders the popover offers as toggles, in display order. Validators post as the display-only
@@ -109,10 +148,16 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         .validator, .system
     ]
 
-    /// The off-main `TranscriptFilter` this config represents, scoped to `taskScope`. When every group
-    /// is visible the kind axis collapses to `.all` (cheapest predicate); otherwise it names exactly the
+    /// The recipients the popover offers as toggles. Messages are addressed to `.user` or an `.agent`.
+    public static let selectableRecipients: [MessageRecipient] = [
+        .user, .agent(.smith), .agent(.brown), .agent(.securityAgent), .agent(.summarizer)
+    ]
+
+    /// The off-main `TranscriptFilter` this config represents. `taskScope`, when given, is an explicit
+    /// override (a task-scoped pane); otherwise the config's `hideTaskScoped` switch decides. When every
+    /// group is visible the kind axis collapses to `.all` (cheapest); otherwise it names exactly the
     /// visible groups' kinds and passes kindless messages iff Chat is on.
-    public func makeFilter(taskScope: TranscriptFilter.TaskScope = .any) -> TranscriptFilter {
+    public func makeFilter(taskScope: TranscriptFilter.TaskScope? = nil) -> TranscriptFilter {
         let kinds: TranscriptFilter.KindRule
         if visibleGroups == Set(TranscriptKindGroup.allCases) {
             kinds = .all
@@ -122,9 +167,11 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         }
         return TranscriptFilter(
             allowedSenders: allowedSenders,
+            allowedRecipients: allowedRecipients,
             kinds: kinds,
-            taskScope: taskScope,
-            visibility: visibility
+            taskScope: taskScope ?? (hideTaskScoped ? .orchestration : .any),
+            visibility: visibility,
+            hideErrors: !showErrors
         )
     }
 }

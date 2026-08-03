@@ -34,26 +34,59 @@ struct TranscriptFilterBar: View {
     }
 }
 
-/// The bottom pane's filter configuration UI: toggle message-kind groups, senders, and public/private,
-/// with two one-click presets. Edits apply live — each toggle mutates the bound `TranscriptViewConfig`,
-/// whose didSet repoints the pane's provider off-main.
+/// The bottom pane's filter configuration UI: toggle message-kind groups, senders, recipients, scope,
+/// errors, and public/private, with two one-click presets. Edits apply live — each toggle mutates the
+/// bound `TranscriptViewConfig`, whose didSet repoints the pane's provider off-main.
 struct TranscriptFilterPopover: View {
     @Binding var config: TranscriptViewConfig
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                TranscriptKindGroupSection(config: $config)
+                TranscriptFilterPresetRow(config: $config)
+                Divider()
+                TranscriptScopeSection(config: $config)
                 Divider()
                 TranscriptSenderSection(config: $config)
                 Divider()
-                TranscriptVisibilitySection(config: $config)
+                TranscriptRecipientSection(config: $config)
                 Divider()
-                TranscriptFilterPresetRow(config: $config)
+                TranscriptKindGroupSection(config: $config)
+                Divider()
+                TranscriptVisibilitySection(config: $config)
             }
             .padding()
         }
-        .frame(width: 320, height: 460)
+        .frame(width: 400, height: 620)
+    }
+}
+
+/// The scope switches that carry most of the default's weight: hide everything tied to a specific task
+/// (the top pane owns per-task history), and show/hide error messages.
+private struct TranscriptScopeSection: View {
+    @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Scope")
+                .font(.headline)
+            Toggle(isOn: $config.hideTaskScoped) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Hide task-specific messages")
+                    Text("Only the Smith ↔ you orchestration layer — per-task work shows in the top pane")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Toggle(isOn: $config.showErrors) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Show errors")
+                    Text("Provider failures, out-of-credits notices, and other flagged errors")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 
@@ -114,6 +147,41 @@ private struct TranscriptSenderSection: View {
                 if isOn { allowed.insert(sender) } else { allowed.remove(sender) }
                 config.allowedSenders =
                     allowed == Set(TranscriptViewConfig.selectableSenders) ? nil : allowed
+            }
+        )
+    }
+}
+
+/// The recipient allow-list. Filters PRIVATE (addressed) messages only — a public message always shows.
+/// `nil` (every recipient) is all-on; turning any off materializes the set; all-on collapses to `nil`.
+/// This is the axis that hides everything addressed TO a worker, which the sender axis can't.
+private struct TranscriptRecipientSection: View {
+    @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recipients")
+                .font(.headline)
+            Text("Filters messages addressed to a specific agent. Public messages always show.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(TranscriptViewConfig.selectableRecipients, id: \.self) { recipient in
+                Toggle(recipient.displayName, isOn: binding(for: recipient))
+            }
+        }
+    }
+
+    private func binding(for recipient: MessageRecipient) -> Binding<Bool> {
+        Binding(
+            get: {
+                guard let allowed = config.allowedRecipients else { return true }
+                return allowed.contains(recipient)
+            },
+            set: { isOn in
+                var allowed = config.allowedRecipients ?? Set(TranscriptViewConfig.selectableRecipients)
+                if isOn { allowed.insert(recipient) } else { allowed.remove(recipient) }
+                config.allowedRecipients =
+                    allowed == Set(TranscriptViewConfig.selectableRecipients) ? nil : allowed
             }
         )
     }

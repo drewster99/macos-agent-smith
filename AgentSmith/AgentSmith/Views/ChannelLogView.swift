@@ -1,12 +1,68 @@
 import SwiftUI
 import AgentSmithKit
 
-/// Shared timestamp formatter used by all banner and message row structs in this file.
+/// The time-of-day portion of a transcript timestamp: 12-hour with seconds and lowercase am/pm,
+/// e.g. "3:19:07pm". Used on its own for today's messages and as the tail of the relative-date form
+/// for older ones (see `transcriptTimestampString`).
 let sharedTimestampFormatter: DateFormatter = {
     let f = DateFormatter()
-    f.dateFormat = "HH:mm:ss.SS"
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.amSymbol = "am"
+    f.pmSymbol = "pm"
+    f.dateFormat = "h:mm:ssa"
     return f
 }()
+
+/// Weekday name for a message 2–6 days old, e.g. "Friday".
+private let transcriptWeekdayFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "EEEE"
+    return f
+}()
+
+/// Month/day for an older message in the current year, e.g. "Sun Jul 14".
+private let transcriptDateThisYearFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "EEE MMM d"
+    return f
+}()
+
+/// Month/day/year for an older message from a previous year, e.g. "Sun Jul 14 2025".
+private let transcriptDateOtherYearFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "EEE MMM d yyyy"
+    return f
+}()
+
+/// A transcript timestamp that only spends characters on a date when it isn't today's. Today shows the
+/// bare time ("3:19:07pm"); yesterday and the last few days get a relative-day prefix ("Yesterday,
+/// 3:19:07pm" / "Friday, 5:15:32am"); anything older gets a dated prefix, with the year appended only
+/// when it differs from now ("Sun Jul 14, 2:06:55pm"). `now` is a parameter so the mapping is pure and
+/// testable — production reads the clock, tests pin it.
+func transcriptTimestampString(for date: Date, now: Date = Date()) -> String {
+    let calendar = Calendar.current
+    let time = sharedTimestampFormatter.string(from: date)
+
+    if calendar.isDate(date, inSameDayAs: now) {
+        return time
+    }
+    if calendar.isDateInYesterday(date) {
+        return "Yesterday, \(time)"
+    }
+
+    let startOfDate = calendar.startOfDay(for: date)
+    let startOfNow = calendar.startOfDay(for: now)
+    if let daysApart = calendar.dateComponents([.day], from: startOfDate, to: startOfNow).day,
+       (2...6).contains(daysApart) {
+        return "\(transcriptWeekdayFormatter.string(from: date)), \(time)"
+    }
+
+    let sameYear = calendar.isDate(date, equalTo: now, toGranularity: .year)
+    let datePart = sameYear
+        ? transcriptDateThisYearFormatter.string(from: date)
+        : transcriptDateOtherYearFormatter.string(from: date)
+    return "\(datePart), \(time)"
+}
 
 /// Display preferences for the channel log — purely cosmetic toggles read from the global
 /// `SharedAppState` and threaded down through the SwiftUI environment so each banner / row
@@ -108,7 +164,7 @@ struct ChannelTimestamp: View {
     
     var body: some View {
         if isVisible {
-            Text(sharedTimestampFormatter.string(from: timestamp))
+            Text(transcriptTimestampString(for: timestamp))
                 .font(AppFonts.channelTimestamp)
                 .foregroundStyle(foregroundStyle)
         }

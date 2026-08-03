@@ -35,16 +35,32 @@ import Foundation
         if case .all = filter.kinds { } else { Issue.record("expected .all kind rule") }
     }
 
-    @Test func conversationHidesToolAndMemoryNoise() {
+    @Test func conversationDefaultIsOrchestrationWithoutBrown() {
         let filter = TranscriptViewConfig.conversation.makeFilter()
-        guard case .only(let kinds, let includingKindless) = filter.kinds else {
-            Issue.record("expected .only kind rule"); return
-        }
-        #expect(includingKindless)                      // Chat is on
-        #expect(kinds.contains(.taskCompleted))         // Task lifecycle on
-        #expect(kinds.contains(.validationReport))      // Validation on
-        #expect(!kinds.contains(.toolRequest))          // Tool calls off
-        #expect(!kinds.contains(.memorySaved))          // Memory off
+        // Every kind group is on — the default's work is done by the scope + recipient axes, not kinds.
+        #expect(filter.kinds == .all)
+        // Nothing scoped to a task: only the Smith↔user orchestration layer.
+        #expect(filter.taskScope == .orchestration)
+        // Nothing FROM Brown.
+        #expect(filter.allowedSenders?.contains(.agent(.brown)) == false)
+        #expect(filter.allowedSenders?.contains(.agent(.smith)) == true)
+        #expect(filter.allowedSenders?.contains(.user) == true)
+        // Nothing TO Brown (a Security-Agent→Brown message is dropped by the recipient axis).
+        #expect(filter.allowedRecipients?.contains(.agent(.brown)) == false)
+        #expect(filter.allowedRecipients?.contains(.agent(.smith)) == true)
+        // Errors still show by default.
+        #expect(filter.hideErrors == false)
+    }
+
+    @Test func conversationDropsSecurityAgentToBrown() {
+        let filter = TranscriptViewConfig.conversation.makeFilter()
+        let securityToBrown = ChannelMessage(
+            sender: .agent(.securityAgent),
+            recipientID: UUID(),
+            recipient: .agent(.brown),
+            content: "SAFE Internal task management metadata update"
+        )
+        #expect(!filter.matches(securityToBrown))
     }
 
     @Test func taskScopeThreadsThrough() {
@@ -64,10 +80,27 @@ import Foundation
         let config = TranscriptViewConfig(
             visibleGroups: [.chat, .validation],
             allowedSenders: [.user, .agent(.brown), .validator],
-            visibility: .publicOnly
+            allowedRecipients: [.user, .agent(.smith)],
+            visibility: .publicOnly,
+            hideTaskScoped: true,
+            showErrors: false
         )
         let back = try JSONDecoder().decode(
             TranscriptViewConfig.self, from: JSONEncoder().encode(config))
         #expect(back == config)
+    }
+
+    /// A config persisted BEFORE the recipient/task-scope/error axes existed must still decode — the new
+    /// fields fall back to their inits (nil recipients, task-scoped shown, errors shown).
+    @Test func legacyConfigWithoutNewAxesDecodes() throws {
+        let legacyJSON = """
+        {"visibleGroups":["chat","system"],"visibility":"all"}
+        """
+        let back = try JSONDecoder().decode(
+            TranscriptViewConfig.self, from: Data(legacyJSON.utf8))
+        #expect(back.allowedRecipients == nil)
+        #expect(back.hideTaskScoped == false)
+        #expect(back.showErrors == true)
+        #expect(back.visibleGroups == [.chat, .system])
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 import SwiftLLMKit
 
 /// Who a private channel message is addressed to.
-public enum MessageRecipient: Sendable, Equatable {
+public enum MessageRecipient: Sendable, Equatable, Hashable {
     case agent(AgentRole)
     case user
 
