@@ -22,15 +22,14 @@ struct TaskListView: View {
     @State private var browserScope: TaskBrowserScope?
 
     var body: some View {
-        let activeTasks = viewModel.activeTaskList
+        // Active shows only running + recent (capped); templates now live in their own Library section.
+        let activeTasks = viewModel.recentActiveTasks
+        let templates = viewModel.libraryTemplates
         let archivedTasks = viewModel.archivedTaskList
         let deletedTasks = viewModel.recentlyDeletedTaskList
-        // Templates live in the global library now; union them in so a template still renders as a
-        // family parent over its per-session run instances (a dedicated Library section comes next).
-        let familyTasks = activeTasks + viewModel.libraryTemplates
 
         Group {
-            if familyTasks.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
+            if activeTasks.isEmpty && templates.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
                 ContentUnavailableView(
                     "No Tasks",
                     systemImage: "checklist",
@@ -38,11 +37,13 @@ struct TaskListView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(taskFamilies(for: familyTasks)) { family in
+                    ForEach(taskFamilies(for: activeTasks)) { family in
                         TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
                     }
 
-                    bucketButtons(activeCount: activeTasks.count,
+                    LibrarySectionView(viewModel: viewModel)
+
+                    bucketButtons(activeCount: viewModel.activeTaskList.count,
                                   archivedCount: archivedTasks.count,
                                   deletedCount: deletedTasks.count)
                 }
@@ -448,26 +449,54 @@ struct TaskRowButton: View {
             })
         }
         Divider()
-        switch style {
-        case .active:
-            activeMenu(task: task, viewModel: viewModel)
-        case .archived:
-            Button(action: { Task { await viewModel.unarchiveTask(id: task.id) } }, label: {
-                Label("Unarchive", systemImage: "arrow.uturn.backward")
-            })
-            Divider()
-            Button(role: .destructive, action: { Task { await viewModel.deleteTask(id: task.id) } }, label: {
-                Label("Delete", systemImage: "trash")
-            })
-        case .recentlyDeleted:
-            Button(action: { Task { await viewModel.undeleteTask(id: task.id) } }, label: {
-                Label("Undelete", systemImage: "arrow.uturn.backward")
-            })
-            Divider()
-            Button(role: .destructive, action: { Task { await viewModel.permanentlyDeleteTask(id: task.id) } }, label: {
-                Label("Delete Permanently", systemImage: "trash.fill")
-            })
+        if task.isTemplate {
+            // Templates live in the Library, not the active/archived/deleted buckets — their menu is
+            // Run / Move-to-Group / Remove-from-Library, not Archive/Delete (which don't apply).
+            templateMenu(task: task, viewModel: viewModel)
+        } else {
+            switch style {
+            case .active:
+                activeMenu(task: task, viewModel: viewModel)
+            case .archived:
+                Button(action: { Task { await viewModel.unarchiveTask(id: task.id) } }, label: {
+                    Label("Unarchive", systemImage: "arrow.uturn.backward")
+                })
+                Divider()
+                Button(role: .destructive, action: { Task { await viewModel.deleteTask(id: task.id) } }, label: {
+                    Label("Delete", systemImage: "trash")
+                })
+            case .recentlyDeleted:
+                Button(action: { Task { await viewModel.undeleteTask(id: task.id) } }, label: {
+                    Label("Undelete", systemImage: "arrow.uturn.backward")
+                })
+                Divider()
+                Button(role: .destructive, action: { Task { await viewModel.permanentlyDeleteTask(id: task.id) } }, label: {
+                    Label("Delete Permanently", systemImage: "trash.fill")
+                })
+            }
         }
+    }
+
+    /// Context-menu items for a Library template: run it (clones an instance), move it between groups,
+    /// or remove it from the Library entirely.
+    @ViewBuilder
+    private func templateMenu(task: AgentTask, viewModel: AppViewModel) -> some View {
+        Button(action: { startRunnableTask(task) }, label: {
+            Label("Run", systemImage: "play")
+        })
+        Menu {
+            ForEach(viewModel.libraryGroups) { group in
+                Button(group.name) {
+                    Task { await viewModel.moveLibraryTemplate(task.id, toGroup: group.id) }
+                }
+            }
+        } label: {
+            Label("Move to Group", systemImage: "folder")
+        }
+        Divider()
+        Button(role: .destructive, action: { Task { await viewModel.removeLibraryTemplate(id: task.id) } }, label: {
+            Label("Remove from Library", systemImage: "trash")
+        })
     }
 
     @ViewBuilder
@@ -1385,5 +1414,138 @@ private struct SendBackToBrownSheet: View {
         }
         .padding(20)
         .frame(minWidth: 420, idealWidth: 480)
+    }
+}
+
+// MARK: - Library section
+
+/// The sidebar's Library section: the GLOBAL templates, grouped by `TemplateGroup` (Default first).
+/// Each template renders as a family row so its run history stays reachable; group management (new /
+/// rename / delete) is on the header and group context menus, and per-template moves live on the row's
+/// own context menu. Hidden entirely when there are no templates.
+struct LibrarySectionView: View {
+    let viewModel: AppViewModel
+    @State private var showNewGroupPrompt = false
+    @State private var newGroupName = ""
+
+    private var orderedGroups: [TemplateGroup] {
+        let groups = viewModel.libraryGroups
+        return groups.filter { $0.name == "Default" }
+            + groups.filter { $0.name != "Default" }.sorted { $0.name < $1.name }
+    }
+
+    var body: some View {
+        Group {
+            if !viewModel.libraryTemplates.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    LibrarySectionHeader(onNewGroup: { showNewGroupPrompt = true })
+                    ForEach(orderedGroups) { group in
+                        LibraryGroupView(group: group, viewModel: viewModel)
+                    }
+                }
+            }
+        }
+        .alert("New Group", isPresented: $showNewGroupPrompt) {
+            TextField("Group name", text: $newGroupName)
+            Button("Create") { commitNewGroup() }
+            Button("Cancel", role: .cancel) { newGroupName = "" }
+        }
+    }
+
+    private func commitNewGroup() {
+        let name = newGroupName.trimmingCharacters(in: .whitespaces)
+        newGroupName = ""
+        guard !name.isEmpty else { return }
+        Task { await viewModel.createLibraryGroup(name: name) }
+    }
+}
+
+private struct LibrarySectionHeader: View {
+    let onNewGroup: () -> Void
+    var body: some View {
+        HStack {
+            Text("Library")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button(action: onNewGroup) {
+                Image(systemName: "folder.badge.plus")
+            }
+            .buttonStyle(.borderless)
+            .help("New group")
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 12)
+        .padding(.bottom, 2)
+    }
+}
+
+/// One Library group: its header (name + count + rename/delete menu) over the family rows of the
+/// templates it holds. Templates keep their stored order within the group.
+private struct LibraryGroupView: View {
+    let group: TemplateGroup
+    let viewModel: AppViewModel
+    @State private var showRenamePrompt = false
+    @State private var renameDraft = ""
+
+    private var families: [TaskFamily] {
+        let templates = group.templateIDs.compactMap { id in
+            viewModel.libraryTemplates.first { $0.id == id }
+        }
+        let children = templates.flatMap { viewModel.childTasks(of: $0.id) }
+        return taskFamilies(for: templates + children)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            LibraryGroupHeader(
+                group: group,
+                canModify: group.name != "Default",
+                onRename: { renameDraft = group.name; showRenamePrompt = true },
+                onDelete: { Task { await viewModel.deleteLibraryGroup(id: group.id) } }
+            )
+            ForEach(families) { family in
+                TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
+            }
+        }
+        .alert("Rename Group", isPresented: $showRenamePrompt) {
+            TextField("Group name", text: $renameDraft)
+            Button("Rename") { commitRename() }
+            Button("Cancel", role: .cancel) { }
+        }
+    }
+
+    private func commitRename() {
+        let name = renameDraft.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        Task { await viewModel.renameLibraryGroup(id: group.id, to: name) }
+    }
+}
+
+private struct LibraryGroupHeader: View {
+    let group: TemplateGroup
+    let canModify: Bool
+    let onRename: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "folder")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(group.name)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text("(\(group.templateIDs.count))")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .contextMenu {
+            Button("Rename Group\u{2026}", action: onRename).disabled(!canModify)
+            Button("Delete Group", role: .destructive, action: onDelete).disabled(!canModify)
+        }
     }
 }

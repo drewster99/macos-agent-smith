@@ -81,6 +81,20 @@ final class AppViewModel {
     /// Global template tasks (the Library), sourced from `SharedAppState`. Templates are global —
     /// unlike active instance tasks — so every window shows the same set, live.
     var libraryTemplates: [AgentTask] { shared.libraryTemplates }
+    /// The Library's groups, sourced from `SharedAppState`.
+    var libraryGroups: [TemplateGroup] { shared.libraryGroups }
+
+    /// The Active sidebar section: every live (non-terminal) task plus the most-recently-updated
+    /// terminal ones, capped so a template with hundreds of runs never floods the sidebar — the full
+    /// run history lives in the Library (per template) and the all-session browser.
+    var recentActiveTasks: [AgentTask] {
+        let cap = 20
+        let live = activeTaskList.filter { !$0.status.isTerminal && $0.status != .interrupted }
+        let finished = activeTaskList
+            .filter { $0.status.isTerminal || $0.status == .interrupted }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        return live + finished.prefix(max(0, cap - live.count))
+    }
     /// Active scheduled wakes (timers) for this session. Refreshed via runtime callbacks
     /// and on demand from the View → Timers window.
     var activeTimers: [ScheduledWake] = [] {
@@ -2581,6 +2595,15 @@ final class AppViewModel {
         activeTaskList.filter { $0.parentTaskID == taskID }
             + shared.archivedTasks.filter { $0.parentTaskID == taskID }
     }
+
+    // MARK: - Library group operations (forward to the shared global library)
+
+    @discardableResult
+    func createLibraryGroup(name: String) async -> TemplateGroup? { await shared.createLibraryGroup(name: name) }
+    func renameLibraryGroup(id: UUID, to name: String) async { await shared.renameLibraryGroup(id: id, to: name) }
+    func deleteLibraryGroup(id: UUID) async { await shared.deleteLibraryGroup(id: id) }
+    func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: UUID) async { await shared.moveLibraryTemplate(templateID, toGroup: groupID) }
+    func removeLibraryTemplate(id: UUID) async { await shared.removeLibraryTemplate(id: id) }
 
     /// Estimates the total cost of a set of usage records using current pricing.
     /// Used by the PDF exporter, which computes from its own fresh fetch. Applies the

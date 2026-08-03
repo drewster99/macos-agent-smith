@@ -1211,6 +1211,25 @@ final class SharedAppState {
         }
     }
 
+    // MARK: Library group operations (delegate to the store; its onChange refreshes the published buckets)
+
+    @discardableResult
+    func createLibraryGroup(name: String) async -> TemplateGroup? {
+        await templateLibraryStore?.createGroup(name: name)
+    }
+    func renameLibraryGroup(id: UUID, to name: String) async {
+        await templateLibraryStore?.renameGroup(id: id, to: name)
+    }
+    func deleteLibraryGroup(id: UUID) async {
+        await templateLibraryStore?.deleteGroup(id: id)
+    }
+    func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: UUID) async {
+        await templateLibraryStore?.moveTemplate(templateID, toGroup: groupID)
+    }
+    func removeLibraryTemplate(id: UUID) async {
+        _ = await templateLibraryStore?.removeTemplate(id: id)
+    }
+
     /// Reads every session's `tasks.json` and returns the union of their `isTemplate` tasks, keeping the
     /// newer copy on id collisions. Read-only — modifies no session file. Mirrors `collectInactiveFromSessions`.
     private func collectTemplatesFromSessions() async -> [AgentTask] {
