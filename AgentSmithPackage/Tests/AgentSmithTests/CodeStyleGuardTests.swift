@@ -96,10 +96,13 @@ struct CodeStyleGuardTests {
     /// SwiftUI rule. Use `VStack` / `HStack` etc. inside a `ScrollView`.
     @Test("No Lazy* containers in app target")
     func noLazyContainers() throws {
-        // Exclude this test file (its body legitimately mentions Lazy* in error messages)
-        // and the AppStyling docs.
+        // `ModelsSettingsTab.swift` is a documented, USER-APPROVED exception (2026-07-31): the model
+        // catalog runs to ~1,700 short, uniform rows, so eager realization froze the tab. The rows are
+        // well under a screen dimension, so the sizing pitfall this rule guards against does not apply.
+        // The approval is recorded at the usage site; this whitelist keeps the guard honoring it.
         let hits = try Self.scan(
-            regex: #"\bLazy(VStack|HStack|VGrid|HGrid)\b"#
+            regex: #"\bLazy(VStack|HStack|VGrid|HGrid)\b"#,
+            excluding: ["ModelsSettingsTab.swift"]
         )
         if !hits.isEmpty {
             let formatted = hits.map { "  \($0.path):\($0.line) — \($0.text)" }.joined(separator: "\n")
