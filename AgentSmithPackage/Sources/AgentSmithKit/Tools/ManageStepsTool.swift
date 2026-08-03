@@ -160,7 +160,7 @@ public struct ManageStepsTool: AgentTool {
             guard case .string(let raw) = arguments["task_id"], let taskID = UUID(uuidString: raw) else {
                 return .failure("`task_id` is required — the UUID of the task whose step list to edit (find it with `list_tasks` or `get_task_details`). The worker omits this and edits its own task; you must name the task.")
             }
-            guard let resolved = await context.taskStore.task(id: taskID) else {
+            guard let resolved = await context.taskStore.taskOrLibraryTemplate(id: taskID) else {
                 return .failure("No active task found with id \(taskID).")
             }
             guard resolved.status.isValidationContractEditable else {
@@ -373,7 +373,7 @@ public struct ManageStepsTool: AgentTool {
     /// A call that changes one step therefore reports one step. Callers wanting the whole picture
     /// have `list`, which is a single call whose answer is about the list by definition.
     private static func renderedStep(taskID: UUID, stepID: UUID, context: ToolContext) async -> String {
-        guard let task = await context.taskStore.task(id: taskID),
+        guard let task = await context.taskStore.taskOrLibraryTemplate(id: taskID),
               let step = task.steps.first(where: { $0.id == stepID }) else {
             return "(step \(stepID) not found)"
         }
@@ -382,7 +382,7 @@ public struct ManageStepsTool: AgentTool {
     }
 
     private static func renderedStepList(taskID: UUID, context: ToolContext) async -> String {
-        guard let task = await context.taskStore.task(id: taskID) else { return "(task not found)" }
+        guard let task = await context.taskStore.taskOrLibraryTemplate(id: taskID) else { return "(task not found)" }
         guard let rendered = task.renderedSteps(includeIDs: true) else { return "Step list is empty." }
         return "Current steps:\n\(rendered)"
     }

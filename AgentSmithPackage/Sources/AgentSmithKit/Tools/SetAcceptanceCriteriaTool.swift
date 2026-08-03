@@ -154,7 +154,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         guard case .string(let taskIDString) = arguments["task_id"], let taskID = UUID(uuidString: taskIDString) else {
             return .failure("Missing or invalid 'task_id' — pass the task's UUID.")
         }
-        guard let task = await context.taskStore.task(id: taskID) else {
+        guard let task = await context.taskStore.taskOrLibraryTemplate(id: taskID) else {
             return .failure("No task with id \(taskID.uuidString). Use list_tasks to find the right id.")
         }
         // A FAILED task is recoverable: fixing its criteria is exactly how you recover from a
@@ -248,7 +248,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         if let problem = await context.taskStore.applyCriterionActions(taskID: task.id, actions: actions) {
             return .failure(problem)
         }
-        guard let updated = await context.taskStore.task(id: task.id) else {
+        guard let updated = await context.taskStore.taskOrLibraryTemplate(id: task.id) else {
             return .failure("Task \(task.id.uuidString) disappeared while its criteria were being edited.")
         }
 

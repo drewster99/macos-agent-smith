@@ -65,6 +65,33 @@ import Foundation
         #expect(await library.template(id: task.id) == nil)  // gone from the library
     }
 
+    @Test func taskAnyDispositionAndUnionLookupsFindLibraryTemplates() async {
+        // Regression: tools that resolve a task_id (get_task_details, run_task, the editing tools)
+        // must find a template surfaced by list_tasks. Both the "find anywhere" and the union lookup do.
+        let (store, _) = makeStore()
+        let task = AgentTask(title: "Nightly", description: "run it")
+        await store.restore([task])
+        _ = await store.setTemplate(id: task.id, isTemplate: true)
+
+        #expect(await store.taskAnyDisposition(id: task.id)?.id == task.id)
+        #expect(await store.taskOrLibraryTemplate(id: task.id)?.id == task.id)
+        // A plain per-session lookup deliberately does NOT (it's the active-only accessor).
+        #expect(await store.task(id: task.id) == nil)
+    }
+
+    @Test func addUpdateLandsOnLibraryTemplate() async {
+        // Regression: the "Started instance … from this template" note run_task records lands on the
+        // template, which is library-resident — addUpdate must dual-dispatch or the note is silently lost.
+        let (store, library) = makeStore()
+        let task = AgentTask(title: "Nightly", description: "run it")
+        await store.restore([task])
+        _ = await store.setTemplate(id: task.id, isTemplate: true)
+
+        await store.addUpdate(id: task.id, message: "Started instance ABC from this template.")
+        let updates = await library.template(id: task.id)?.updates ?? []
+        #expect(updates.contains { $0.message.contains("Started instance ABC") })
+    }
+
     @Test func instantiateFromLibraryMintsInstanceIntoSession() async {
         let (store, library) = makeStore()
         let task = AgentTask(title: "Nightly", description: "run it")

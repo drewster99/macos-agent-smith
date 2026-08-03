@@ -121,7 +121,11 @@ public actor TaskStore {
     /// (archived + deleted). Used by tools that operate on a task regardless of disposition.
     public func taskAnyDisposition(id: UUID) async -> AgentTask? {
         if let active = tasks[id] { return active }
-        return await inactiveStore?.task(id: id)
+        if let inactive = await inactiveStore?.task(id: id) { return inactive }
+        // Templates live in the global library, not the per-session/inactive stores. A "find it
+        // anywhere" lookup must include them, or every tool that surfaces a template id via list_tasks
+        // (get_task_details, run_task, …) reports it missing.
+        return await templateLibrary?.template(id: id)
     }
 
     /// All globally-inactive tasks (archived + recently-deleted), across every session. Empty
@@ -862,13 +866,21 @@ public actor TaskStore {
             .first
     }
 
-    /// Appends a progress update to a task. Update history is unbounded.
-    public func addUpdate(id: UUID, message: String, attachments: [Attachment] = []) {
-        guard var task = tasks[id] else { return }
+    /// Appends a progress update to a task OR a library template (the "Started instance … from this
+    /// template" note run_task/resolveStartTarget records lands on the template, which is now
+    /// library-resident). Update history is unbounded.
+    public func addUpdate(id: UUID, message: String, attachments: [Attachment] = []) async {
+        let existingLocalTask = tasks[id]
+        let editingLibraryTemplate = existingLocalTask == nil
+        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
         task.updates.append(AgentTask.TaskUpdate(message: message, attachments: attachments))
         task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
+        if editingLibraryTemplate {
+            await templateLibrary?.upsert(task)
+        } else {
+            tasks[id] = task
+            onChange?()
+        }
     }
 
     /// Replaces a task's description entirely.

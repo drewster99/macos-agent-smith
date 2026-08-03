@@ -55,7 +55,7 @@ struct AmendTaskTool: AgentTool {
             return .failure("Error: amendment must not be empty.")
         }
 
-        guard await context.taskStore.task(id: taskID) != nil else {
+        guard await context.taskStore.taskOrLibraryTemplate(id: taskID) != nil else {
             return .failure("Task not found: \(taskIDString)")
         }
 
@@ -109,7 +109,7 @@ struct AmendTaskTool: AgentTool {
         // picked up "on the next start" — false, since that worker keeps running on the
         // un-amended description.
         guard let brownID = await context.workerIDForTask(taskID),
-              let task = await context.taskStore.task(id: taskID),
+              let task = await context.taskStore.taskOrLibraryTemplate(id: taskID),
               task.status == .running else {
             return false
         }

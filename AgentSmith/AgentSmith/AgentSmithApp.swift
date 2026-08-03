@@ -603,11 +603,17 @@ struct SessionScene: View {
     private func performSessionDelete(archiving: Bool) {
         guard let id = resolvedID else { return }
         Task {
-            let replacement = await sessionManager.deleteSession(id: id, archivingTasks: archiving)
-            if let replacement {
-                sessionIDString = replacement.id.uuidString
-            } else {
-                closeSessionWindow(id)
+            switch await sessionManager.deleteSession(id: id, archivingTasks: archiving) {
+            case .deleted(let replacement):
+                if let replacement {
+                    // This was the LAST session — adopt the freshly-minted one in THIS window.
+                    sessionIDString = replacement.id.uuidString
+                } else {
+                    closeSessionWindow(id)
+                }
+            case .aborted(let reason):
+                // Nothing was deleted — a task couldn't be preserved. Keep the window; surface why.
+                shared.startupError = reason
             }
         }
     }

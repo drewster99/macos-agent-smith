@@ -181,13 +181,14 @@ final class AppViewModel {
         }
     }
 
-    /// Resolves a task by ID across this session's active tasks and the global archived + deleted
-    /// buckets. Detail/timer views target tasks by ID and a task may now be in the global buckets
-    /// (archived/deleted) rather than this session's active list.
+    /// Resolves a task by ID across this session's active tasks, the global archived + deleted buckets,
+    /// and the global template library. Detail/timer views target tasks by ID and a task may now be in
+    /// a global bucket (archived/deleted) or the library (templates) rather than this session's active list.
     func anyTask(id: UUID) -> AgentTask? {
         tasks.first { $0.id == id }
             ?? shared.archivedTasks.first { $0.id == id }
             ?? shared.deletedTasks.first { $0.id == id }
+            ?? shared.libraryTemplates.first { $0.id == id }
     }
 
     func scheduledWakes(for taskID: UUID) -> [ScheduledWake] {
@@ -570,10 +571,17 @@ final class AppViewModel {
             }
 
             // Templates are global now (in the library). Once the migration has durably run, drop any
-            // that remain in this session's file — normally none (the migration strips them), but this
-            // is the backstop for a strip that failed for this session, so a template never lives in
-            // both the library and a session (which would double it in every union read).
-            if shared.hasMigratedTemplatesToLibrary {
+            // that remain in this session's file — normally none (the migration strips them). This is
+            // the backstop for a strip that failed for this session, so a template never lives in both
+            // the library and a session (which would double it in every union read). Before dropping a
+            // straggler, ensure it's actually IN the library (re-migrate one the batch collect skipped,
+            // e.g. a transient read error), so a straggler is never dropped into nonexistence.
+            if shared.hasMigratedTemplatesToLibrary, let templateLibrary {
+                for task in savedTasks where task.isTemplate {
+                    if await templateLibrary.template(id: task.id) == nil {
+                        await templateLibrary.upsert(task)
+                    }
+                }
                 savedTasks.removeAll { $0.isTemplate }
             }
 
@@ -1645,7 +1653,7 @@ final class AppViewModel {
     @discardableResult
     func setTaskAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async -> Bool {
         guard let taskStore else { return false }
-        guard let task = await taskStore.task(id: id), task.status.isValidationContractEditable else {
+        guard let task = await taskStore.taskOrLibraryTemplate(id: id), task.status.isValidationContractEditable else {
             taskActionError = "Acceptance criteria can't be edited while the task is running, validating, or completed."
             return false
         }
@@ -1699,7 +1707,7 @@ final class AppViewModel {
     @discardableResult
     func setTaskSteps(id: UUID, steps: [TaskStep]) async -> Bool {
         guard let taskStore else { return false }
-        guard let task = await taskStore.task(id: id), task.status.isValidationContractEditable else {
+        guard let task = await taskStore.taskOrLibraryTemplate(id: id), task.status.isValidationContractEditable else {
             taskActionError = "Steps can't be edited while the task is running, validating, or completed."
             return false
         }
@@ -2087,18 +2095,23 @@ final class AppViewModel {
     /// `archive`/`softDelete` refuse an in-progress task. The runtime is already stopped, so those are
     /// stale labels — demote them to `.interrupted` here, otherwise the task would be stranded in the
     /// session file and lost when it is deleted.
-    func moveAllActiveTasksToInactive(archiving: Bool) async {
-        guard let taskStore else { return }
+    /// Returns whether EVERY active task was moved. A `false` means at least one archive/soft-delete
+    /// was refused (e.g. a durable global write failed and rolled back, leaving the task active) — the
+    /// caller MUST NOT then delete the session directory, or that task would be lost.
+    @discardableResult
+    func moveAllActiveTasksToInactive(archiving: Bool) async -> Bool {
+        guard let taskStore else { return true }
+        var allMoved = true
         for task in await taskStore.allTasks() where task.disposition == .active {
             if task.status.isInProgress {
                 await taskStore.updateStatus(id: task.id, status: .interrupted)
             }
-            if archiving {
-                _ = await taskStore.archive(id: task.id)
-            } else {
-                _ = await taskStore.softDelete(id: task.id)
-            }
+            let moved = archiving
+                ? await taskStore.archive(id: task.id)
+                : await taskStore.softDelete(id: task.id)
+            if !moved { allMoved = false }
         }
+        return allMoved
     }
 
     /// Drains every per-file writer so the on-disk state reflects in-memory

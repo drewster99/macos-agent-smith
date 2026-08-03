@@ -44,7 +44,7 @@ struct UpdateTaskTool: AgentTool {
         guard let taskID = UUID(uuidString: taskIDString) else {
             return .failure("Invalid `task_id` format: \(taskIDString)")
         }
-        guard await context.taskStore.task(id: taskID) != nil else {
+        guard await context.taskStore.taskOrLibraryTemplate(id: taskID) != nil else {
             return .failure("Task not found: \(taskIDString)")
         }
 

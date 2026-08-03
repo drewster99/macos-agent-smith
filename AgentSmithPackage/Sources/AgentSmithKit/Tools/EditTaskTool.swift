@@ -57,7 +57,7 @@ public struct EditTaskTool: AgentTool {
         guard case .string(let taskIDString) = arguments["task_id"], let taskID = UUID(uuidString: taskIDString) else {
             return .failure("Missing or invalid 'task_id'.")
         }
-        guard let task = await context.taskStore.task(id: taskID) else {
+        guard let task = await context.taskStore.taskOrLibraryTemplate(id: taskID) else {
             return .failure("No task with id \(taskID.uuidString).")
         }
 
