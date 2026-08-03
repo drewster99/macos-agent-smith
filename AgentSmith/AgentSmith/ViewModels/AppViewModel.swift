@@ -691,7 +691,7 @@ final class AppViewModel {
             for i in savedTasks.indices where savedTasks[i].sessionID == nil {
                 savedTasks[i].sessionID = session.id
             }
-            let standaloneStore = TaskStore(inactiveStore: inactiveStore, sessionID: session.id, templateLibrary: templateLibrary)
+            let standaloneStore = TaskStore(inactiveStore: inactiveStore, sessionID: session.id, templateLibrary: templateLibrary, templateLibraryPersistable: shared.templateLibraryIsPersistable)
             taskStore = standaloneStore
             await wireDurablePersistHooks(on: standaloneStore)
             await standaloneStore.restore(savedTasks)
@@ -858,6 +858,7 @@ final class AppViewModel {
             memoryStore: sharedMemoryStore,
             inactiveTaskStore: sharedInactiveStore,
             templateLibrary: sharedTemplateLibrary,
+            templateLibraryPersistable: shared.templateLibraryIsPersistable,
             liveActivityTracker: shared.liveActivityTracker,
             validationMetricsLedger: .shared
         )
@@ -2527,7 +2528,8 @@ final class AppViewModel {
     private func wireDurablePersistHooks(on store: TaskStore) async {
         await store.setDurablePersistHooks(
             inactive: { [weak self] in await self?.shared.persistInactiveTasksNow() ?? false },
-            active: { [weak self] snapshot in await self?.persistActiveTasksNow(snapshot) ?? false }
+            active: { [weak self] snapshot in await self?.persistActiveTasksNow(snapshot) ?? false },
+            library: { [weak self] in await self?.shared.persistTemplateLibraryNow() ?? false }
         )
     }
 

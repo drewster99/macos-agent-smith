@@ -1436,7 +1436,9 @@ struct LibrarySectionView: View {
 
     var body: some View {
         Group {
-            if !viewModel.libraryTemplates.isEmpty {
+            // Shown when there are templates OR the user has created a group beyond the seeded Default,
+            // so a freshly-made empty group is still visible (and can receive a moved template).
+            if !viewModel.libraryTemplates.isEmpty || viewModel.libraryGroups.count > 1 {
                 VStack(alignment: .leading, spacing: 0) {
                     LibrarySectionHeader(onNewGroup: { showNewGroupPrompt = true })
                     ForEach(orderedGroups) { group in

@@ -38,6 +38,15 @@ public actor TaskStore {
     /// Durably writes this session's active-task snapshot to disk *now*, returning success. Same
     /// purpose as `durablyPersistInactiveNow`, for the restore direction (global → active).
     private var durablyPersistActiveNow: (@Sendable ([AgentTask]) async -> Bool)?
+    /// Durably writes the global template library to disk *now*, returning success. For the cross-store
+    /// moves that touch the library — promote/demote (`commitTemplateFlip`) and a template's
+    /// archive/soft-delete/restore — so the destination file is durable before the source is removed.
+    private var durablyPersistLibraryNow: (@Sendable () async -> Bool)?
+    /// Whether the template library can be persisted this launch. False only for a corrupt library file
+    /// that couldn't even be quarantined (very rare): a NEW template is then kept per-session rather than
+    /// upserted into an unsavable library, so it isn't lost on quit — the load-time straggler backstop
+    /// re-migrates it once the library is healthy.
+    private var templateLibraryPersistable = true
 
     /// Whether the automatic stale-completed sweep is enabled. Off until the app layer pushes the
     /// user's Settings value via `setAutoArchivePolicy`. This gate is consulted ONLY by the
@@ -51,11 +60,13 @@ public actor TaskStore {
     public init(
         inactiveStore: InactiveTaskStore? = nil,
         sessionID: UUID? = nil,
-        templateLibrary: TemplateLibraryStore? = nil
+        templateLibrary: TemplateLibraryStore? = nil,
+        templateLibraryPersistable: Bool = true
     ) {
         self.inactiveStore = inactiveStore
         self.sessionID = sessionID
         self.templateLibrary = templateLibrary
+        self.templateLibraryPersistable = templateLibraryPersistable
     }
 
     /// Sets the origin session ONCE (no-op if already set). Used for the live store, which is
@@ -85,15 +96,18 @@ public actor TaskStore {
         onChange = handler
     }
 
-    /// Injects the durable-write hooks that make cross-store disposition moves crash-safe. The
-    /// `inactive` hook durably persists the global inactive store; `active` durably persists the
-    /// given snapshot of this session's active tasks. Both return whether the write succeeded.
+    /// Injects the durable-write hooks that make cross-store moves crash-safe. `inactive` durably
+    /// persists the global inactive store; `active` durably persists the given snapshot of this
+    /// session's active tasks; `library` durably persists the global template library. Each returns
+    /// whether the write succeeded.
     public func setDurablePersistHooks(
         inactive: @escaping @Sendable () async -> Bool,
-        active: @escaping @Sendable ([AgentTask]) async -> Bool
+        active: @escaping @Sendable ([AgentTask]) async -> Bool,
+        library: (@Sendable () async -> Bool)? = nil
     ) {
         durablyPersistInactiveNow = inactive
         durablyPersistActiveNow = active
+        durablyPersistLibraryNow = library
     }
 
     /// Registers a callback fired when a task transitions to a terminal status for the first time.
@@ -180,16 +194,29 @@ public actor TaskStore {
             return
         }
         if isTemplate, !wasInLibrary {
-            // Promote: move it out of this session into the library. Its preserved prior-run child
-            // (inserted by `preservePriorRunAsTemplateChildIfNeeded`) stays per-session.
+            // Promote (session → library): land it durably in the library BEFORE removing the session
+            // copy, so a crash in the gap can't lose it from both files (the ordering the inactive-store
+            // `move` uses). On a failed library write, keep it per-session — nothing is lost, and the
+            // load-time straggler backstop re-migrates it. Its preserved prior-run child stays per-session.
+            await templateLibrary.upsert(task)
+            if let durablyPersistLibraryNow, await durablyPersistLibraryNow() == false {
+                await templateLibrary.removeTemplate(id: id)
+                tasks[id] = task
+                onChange?()
+                return
+            }
             tasks.removeValue(forKey: id)
             onChange?()
-            await templateLibrary.upsert(task)
         } else if !isTemplate, wasInLibrary {
-            // Demote: bring it back into THIS session.
+            // Demote (library → session): land it durably in THIS session BEFORE removing the library
+            // copy. On a failed active write, roll back and leave it in the library.
             task.sessionID = sessionID
-            _ = await templateLibrary.removeTemplate(id: id)
             tasks[id] = task
+            if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
+                tasks.removeValue(forKey: id)
+                return
+            }
+            _ = await templateLibrary.removeTemplate(id: id)
             onChange?()
         } else if wasInLibrary {
             await templateLibrary.upsert(task)   // still a library template — edit in place
@@ -600,10 +627,12 @@ public actor TaskStore {
             sessionID: sessionID,
             templateInputDefinitions: definitions
         )
-        // A new template belongs in the GLOBAL library (when one is wired); everything else is
-        // per-session. The returned id is the same either way, so the caller's follow-up setters
-        // (criteria, steps, title template) dual-dispatch to wherever the task now lives.
-        if isTemplate, let templateLibrary {
+        // A new template belongs in the GLOBAL library (when one is wired AND persistable); everything
+        // else is per-session. The returned id is the same either way, so the caller's follow-up setters
+        // (criteria, steps, title template) dual-dispatch to wherever the task now lives. When the
+        // library can't persist (rare corrupt-file case), a template is kept per-session so it isn't
+        // lost on quit — the load-time straggler backstop re-migrates it once the library is healthy.
+        if isTemplate, let templateLibrary, templateLibraryPersistable {
             await templateLibrary.upsert(task)
         } else {
             tasks[task.id] = task
@@ -1741,6 +1770,10 @@ public actor TaskStore {
             }
             return await move(task, to: .archived, in: inactiveStore)
         }
+        // A library-resident template → the archive bucket (kept as a template, restorable to the library).
+        if await templateLibrary?.template(id: id) != nil {
+            return await moveTemplateFromLibrary(id: id, to: .archived)
+        }
         // Already out in the global store (e.g. re-archiving, or archiving a deleted task).
         if let inactiveStore { return await inactiveStore.setDisposition(id: id, to: .archived) }
         return false
@@ -1770,6 +1803,26 @@ public actor TaskStore {
         return true
     }
 
+    /// Moves a library-resident TEMPLATE out to the global inactive store (archived or recently-deleted,
+    /// `isTemplate` preserved so it restores back into the library), with the same destination-durable-
+    /// before-source-removal ordering as `move`. Returns false (changing nothing) if it can't be found
+    /// or the durable write fails.
+    private func moveTemplateFromLibrary(id: UUID, to disposition: AgentTask.TaskDisposition) async -> Bool {
+        guard let templateLibrary, let inactiveStore,
+              let template = await templateLibrary.template(id: id) else { return false }
+        var moved = template
+        moved.disposition = disposition
+        moved.updatedAt = Date()
+        await inactiveStore.insert(moved)
+        if let durablyPersistInactiveNow, await durablyPersistInactiveNow() == false {
+            await inactiveStore.remove(id: moved.id)   // roll back; leave it in the library
+            return false
+        }
+        _ = await templateLibrary.removeTemplate(id: id)
+        onTaskMovedToInactive?(id)
+        return true
+    }
+
     /// Soft-deletes a task by moving it to the (global) Deleted bucket.
     /// Returns false without making changes if the task is currently in progress, or if the
     /// task can't be found in either this session's active list or the global inactive store.
@@ -1782,6 +1835,10 @@ public actor TaskStore {
                 return true
             }
             return await move(task, to: .recentlyDeleted, in: inactiveStore)
+        }
+        // A library-resident template → the Recently Deleted bucket (restorable to the library).
+        if await templateLibrary?.template(id: id) != nil {
+            return await moveTemplateFromLibrary(id: id, to: .recentlyDeleted)
         }
         // Already out in the global store (e.g. deleting an archived task).
         if let inactiveStore { return await inactiveStore.setDisposition(id: id, to: .recentlyDeleted) }
@@ -1813,6 +1870,20 @@ public actor TaskStore {
             return
         }
         guard let existing = await inactiveStore.task(id: id) else { return }
+        // A template restores to the GLOBAL library (where templates live), not this session's active
+        // list. Destination-durable-before-source-removal, same as the task path below.
+        if existing.isTemplate, let templateLibrary {
+            var restored = existing
+            restored.disposition = .active
+            restored.updatedAt = Date()
+            await templateLibrary.upsert(restored)
+            if let durablyPersistLibraryNow, await durablyPersistLibraryNow() == false {
+                await templateLibrary.removeTemplate(id: id)   // roll back; leave it in the inactive store
+                return
+            }
+            await inactiveStore.remove(id: id)
+            return
+        }
         var task = existing
         task.disposition = .active
         task.updatedAt = Date()
@@ -1841,6 +1912,10 @@ public actor TaskStore {
             tasks.removeValue(forKey: id)
             onChange?()
             return true
+        }
+        // A library-resident template → gone from the library.
+        if let templateLibrary, await templateLibrary.template(id: id) != nil {
+            return await templateLibrary.removeTemplate(id: id) != nil
         }
         if let inactiveStore { return await inactiveStore.permanentlyDelete(id: id) }
         return false

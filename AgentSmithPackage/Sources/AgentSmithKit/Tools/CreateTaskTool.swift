@@ -415,23 +415,28 @@ public struct CreateTaskTool: AgentTool {
         }
 
         // Search semantic memory + prior tasks for relevant context to attach to this task (the
-        // `.newTask` retrieval settings decide which corpora, if any, are searched).
-        let retrieved = await context.retrieveContext(.newTask, title + " " + description)
-        let attached = await TaskContextRetrieval.attachRelevantContext(
-            taskID: task.id,
-            results: retrieved,
-            taskStore: context.taskStore
-        )
+        // `.newTask` retrieval settings decide which corpora, if any, are searched). SKIPPED for a
+        // template: templates don't run themselves — each INSTANCE gets its own relevant context at
+        // start time (resolveStartTarget) — so retrieving here is a wasted embedding + corpus scan,
+        // and `setRelevantContext` is per-session so it couldn't attach to a library-resident template.
         var contextNote = ""
-        var noteParts: [String] = []
-        if !attached.memories.isEmpty {
-            noteParts.append("\(attached.memories.count) relevant memor\(attached.memories.count == 1 ? "y" : "ies")")
-        }
-        if !attached.priorTasks.isEmpty {
-            noteParts.append("\(attached.priorTasks.count) relevant prior task\(attached.priorTasks.count == 1 ? "" : "s")")
-        }
-        if !noteParts.isEmpty {
-            contextNote = " Attached: \(noteParts.joined(separator: ", "))."
+        if !isTemplate {
+            let retrieved = await context.retrieveContext(.newTask, title + " " + description)
+            let attached = await TaskContextRetrieval.attachRelevantContext(
+                taskID: task.id,
+                results: retrieved,
+                taskStore: context.taskStore
+            )
+            var noteParts: [String] = []
+            if !attached.memories.isEmpty {
+                noteParts.append("\(attached.memories.count) relevant memor\(attached.memories.count == 1 ? "y" : "ies")")
+            }
+            if !attached.priorTasks.isEmpty {
+                noteParts.append("\(attached.priorTasks.count) relevant prior task\(attached.priorTasks.count == 1 ? "" : "s")")
+            }
+            if !noteParts.isEmpty {
+                contextNote = " Attached: \(noteParts.joined(separator: ", "))."
+            }
         }
 
         // Build metadata for the task_created channel message, including any retrieved context.
@@ -446,7 +451,7 @@ public struct CreateTaskTool: AgentTool {
         if let scheduledRunAt {
             meta["scheduledRunAt"] = .double(scheduledRunAt.timeIntervalSince1970)
         }
-        if let task = await context.taskStore.task(id: task.id) {
+        if let task = await context.taskStore.taskOrLibraryTemplate(id: task.id) {
             if let memories = task.relevantMemories, !memories.isEmpty {
                 meta["contextMemoryCount"] = .int(memories.count)
                 // Each entry: "85% — content [tags]". Entries separated by ASCII Record

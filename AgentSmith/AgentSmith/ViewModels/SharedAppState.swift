@@ -499,6 +499,10 @@ final class SharedAppState {
     /// True once templates have durably moved into the global library. While false, templates still
     /// live per-session and MUST NOT be filtered out of a session's active load.
     var hasMigratedTemplatesToLibrary: Bool { UserDefaults.standard.bool(forKey: Self.templatesMigratedKey) }
+    /// Whether the template library can be persisted this launch (false only for a corrupt library file
+    /// that couldn't be quarantined). Injected into each `TaskStore` so a new template isn't upserted
+    /// into an unsavable library and lost on quit.
+    var templateLibraryIsPersistable: Bool { templateLibraryPersistable }
 
     /// Tracks the in-flight one-time attachment migration so concurrent windows run it once.
     private var attachmentsMigrationTask: Task<Void, Never>?

@@ -14,6 +14,13 @@ import Foundation
         return (store, library)
     }
 
+    private func makeStoreWithInactive() -> (TaskStore, TemplateLibraryStore, InactiveTaskStore) {
+        let library = TemplateLibraryStore()
+        let inactive = InactiveTaskStore()
+        let store = TaskStore(inactiveStore: inactive, sessionID: UUID(), templateLibrary: library)
+        return (store, library, inactive)
+    }
+
     @Test func promoteMovesTaskOutToLibrary() async {
         let (store, library) = makeStore()
         let task = AgentTask(title: "Nightly", description: "run it")
@@ -49,7 +56,7 @@ import Foundation
     }
 
     @Test func demoteBringsTemplateBackIntoThisSession() async {
-        let (store, library) = makeStore()
+        let (_, library) = makeStore()
         let sessionID = UUID()
         let scopedStore = TaskStore(sessionID: sessionID, templateLibrary: library)
         let task = AgentTask(title: "Nightly", description: "run it")
@@ -90,6 +97,35 @@ import Foundation
         await store.addUpdate(id: task.id, message: "Started instance ABC from this template.")
         let updates = await library.template(id: task.id)?.updates ?? []
         #expect(updates.contains { $0.message.contains("Started instance ABC") })
+    }
+
+    @Test func softDeleteMovesLibraryTemplateToRecentlyDeletedThenRestoresToLibrary() async {
+        let (store, library, inactive) = makeStoreWithInactive()
+        let task = AgentTask(title: "Nightly", description: "run it")
+        await store.restore([task])
+        _ = await store.setTemplate(id: task.id, isTemplate: true)
+
+        // Soft-delete → to the inactive store (recentlyDeleted, STILL a template), out of the library.
+        #expect(await store.softDelete(id: task.id) == true)
+        #expect(await library.template(id: task.id) == nil)
+        let deleted = await inactive.task(id: task.id)
+        #expect(deleted?.disposition == .recentlyDeleted)
+        #expect(deleted?.isTemplate == true)
+
+        // Undelete → back to the LIBRARY (not this session's active list).
+        await store.undelete(id: task.id)
+        #expect(await library.template(id: task.id)?.isTemplate == true)
+        #expect(await store.task(id: task.id) == nil)
+        #expect(await inactive.task(id: task.id) == nil)
+    }
+
+    @Test func permanentlyDeleteRemovesLibraryTemplate() async {
+        let (store, library, _) = makeStoreWithInactive()
+        let task = AgentTask(title: "Nightly", description: "run it")
+        await store.restore([task])
+        _ = await store.setTemplate(id: task.id, isTemplate: true)
+        #expect(await store.permanentlyDelete(id: task.id) == true)
+        #expect(await library.template(id: task.id) == nil)
     }
 
     @Test func instantiateFromLibraryMintsInstanceIntoSession() async {

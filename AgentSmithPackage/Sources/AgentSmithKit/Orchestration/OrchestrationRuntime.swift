@@ -1419,11 +1419,12 @@ public actor OrchestrationRuntime {
         memoryStore: MemoryStore? = nil,
         inactiveTaskStore: InactiveTaskStore = InactiveTaskStore(),
         templateLibrary: TemplateLibraryStore? = nil,
+        templateLibraryPersistable: Bool = true,
         liveActivityTracker: LiveActivityTracker = LiveActivityTracker(),
         validationMetricsLedger: ValidationMetricsLedger? = nil
     ) {
         self.channel = MessageChannel()
-        self.taskStore = TaskStore(inactiveStore: inactiveTaskStore, templateLibrary: templateLibrary)
+        self.taskStore = TaskStore(inactiveStore: inactiveTaskStore, templateLibrary: templateLibrary, templateLibraryPersistable: templateLibraryPersistable)
         self.memoryStore = memoryStore ?? MemoryStore(engine: semanticSearchEngine)
         self.liveActivityTracker = liveActivityTracker
         self.llmProviders = providers
