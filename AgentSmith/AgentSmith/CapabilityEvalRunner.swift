@@ -317,26 +317,33 @@ enum CapabilityEvalRunner {
 
                 // tool_choice options, each independently — "accepts the parameter" does not mean
                 // "accepts every value of it".
-                // The capability comes from the choice itself — a hand-paired list here was an
-                // ARRAY literal, so a new LLMToolChoice case would break every switch loudly and
-                // leave this silently one probe short.
-                let toolChoices: [LLMToolChoice] = [
-                    .required, .textOnly, .specific(name: CapabilityProbe.probeToolName)
-                ]
-                for choice in toolChoices where profile[choice.requiredCapability] == nil {
-                    // The probe derives this provider's own shape; nil = no such field here.
-                    guard let finding = await ModelProber.probeToolChoice(
-                        choice, apiType: provider.apiType, makeProviderForcing: forcing) else { continue }
-                    profile[choice.requiredCapability] = finding
-                    profile.callCount += 1
-                }
-
                 // Reasoning on/off — separate probes because neither direction implies the other.
                 for (enabled, capability) in [(true, ModelCapability.reasoningEnableable),
                                               (false, ModelCapability.reasoningDisableable)]
                 where profile[capability] == nil {
                     profile[capability] = await ModelProber.probeReasoningToggle(
                         enabled: enabled, makeProviderForcing: forcing)
+                    profile.callCount += 1
+                }
+
+                // The capability comes from the choice itself — a hand-paired list here was an
+                // ARRAY literal, so a new LLMToolChoice case would break every switch loudly and
+                // leave this silently one probe short.
+                let toolChoices: [LLMToolChoice] = [
+                    .required, .textOnly, .specific(name: CapabilityProbe.probeToolName)
+                ]
+                // Thinking is turned off first where the model allows it: Moonshot and DeepSeek
+                // both reject `required` and named-function choices as "incompatible with thinking
+                // enabled", so probing with it on measures that incompatibility rather than the
+                // option. Requires the reasoning probes above to have run.
+                let canDisableThinking = profile[.reasoningDisableable]?.value == true
+                for choice in toolChoices where profile[choice.requiredCapability] == nil {
+                    // The probe derives this provider's own shape; nil = no such field here.
+                    guard let finding = await ModelProber.probeToolChoice(
+                        choice, apiType: provider.apiType,
+                        disableThinkingFirst: canDisableThinking,
+                        makeProviderForcing: forcing) else { continue }
+                    profile[choice.requiredCapability] = finding
                     profile.callCount += 1
                 }
                 // nil unless the model's mechanism actually has a `keep` key — acceptance-grading
