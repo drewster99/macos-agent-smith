@@ -91,8 +91,10 @@ struct TaskDescriptionEditingTests {
     @Test("Updating a non-existent task ID is refused")
     func unknownIDIsRefused() async {
         let store = TaskStore()
-        let problem = await store.updateDescription(id: UUID(), description: "x")
-        #expect(problem == "Task not found.")
+        let id = UUID()
+        let problem = await store.updateDescription(id: id, description: "x")
+        // The dual-dispatch seam (`mutateTaskOrTemplate`) returns the id-qualified refusal.
+        #expect(problem == "Task not found: \(id.uuidString)")
     }
 
     @Test("AgentTask round-trips lastEditedAt through Codable")

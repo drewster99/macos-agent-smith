@@ -332,13 +332,7 @@ public actor TaskStore {
     }
 
     public func setTemplateInputDefinitions(id: UUID, definitions: [TemplateInputDefinition]) async -> String? {
-        // F6: hold the per-task lock across this dual-dispatch editor's read → mutate → await-upsert, so
-        // a concurrent same-task edit can't land on the read base and be clobbered by the upsert.
-        await acquireTaskLock(id)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
+        await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
         guard task.isTemplate else {
             return "Task '\(task.title)' is not a template. Only template tasks can define template inputs."
         }
@@ -366,21 +360,12 @@ public actor TaskStore {
         task.templateInputDefinitions = definitions
         task.templateInputValues = [:]
         task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
-        }
         return nil
+        }
     }
 
     public func setTemplateInstanceTitleTemplate(id: UUID, titleTemplate: String?) async -> String? {
-        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
+        await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
         guard task.isTemplate else {
             return "Task '\(task.title)' is not a template. Only template tasks can define an instance title template."
         }
@@ -396,13 +381,8 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         task.lastEditedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
-        }
         return nil
+        }
     }
 
     @discardableResult
@@ -571,12 +551,26 @@ public actor TaskStore {
                 onChange?()
                 return nil
             }
-            if let templateLibrary, var template = await templateLibrary.template(id: id) {
-                if let problem = body(&template) { return problem }
-                await templateLibrary.upsert(template)   // re-upsert preserves group membership
-                return nil
+            guard let templateLibrary else { return "Task not found: \(id.uuidString)" }
+            // Hold the library's per-id edit lock across read→mutate→upsert so a CROSS-session editor of
+            // the same template can't interleave between the read and the upsert and clobber it (the
+            // per-task lock above is per-session only). The body still runs HERE on the TaskStore actor,
+            // so it may call TaskStore helpers (e.g. applyStepMutation); only the library read/write hops
+            // across the actor boundary. No early return between acquire and release, so the lock can't leak.
+            await templateLibrary.acquireEditLock(id)
+            let outcome: String?
+            if var template = await templateLibrary.template(id: id) {
+                if let problem = body(&template) {
+                    outcome = problem
+                } else {
+                    await templateLibrary.upsert(template)   // re-upsert preserves group membership
+                    outcome = nil
+                }
+            } else {
+                outcome = "Task not found: \(id.uuidString)"
             }
-            return "Task not found: \(id.uuidString)"
+            await templateLibrary.releaseEditLock(id)
+            return outcome
         }
     }
 
@@ -1006,18 +1000,10 @@ public actor TaskStore {
     /// template" note run_task/resolveStartTarget records lands on the template, which is now
     /// library-resident). Update history is unbounded.
     public func addUpdate(id: UUID, message: String, attachments: [Attachment] = []) async {
-        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
-        task.updates.append(AgentTask.TaskUpdate(message: message, attachments: attachments))
-        task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
+        _ = await mutateTaskOrTemplate(id: id) { task in    // see setSteps for the locking rationale
+            task.updates.append(AgentTask.TaskUpdate(message: message, attachments: attachments))
+            task.updatedAt = Date()
+            return nil
         }
     }
 
@@ -1038,36 +1024,27 @@ public actor TaskStore {
     /// reason from a bare `false`, which could only ever name one of the ways this can fail.
     @discardableResult
     public func updateDescription(id: UUID, description: String) async -> String? {
-        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
-        guard task.status.isDescriptionEditable else {
-            return "Task \"\(task.title)\" can't be edited while it is \(task.status.rawValue)."
+        await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
+            guard task.status.isDescriptionEditable else {
+                return "Task \"\(task.title)\" can't be edited while it is \(task.status.rawValue)."
+            }
+            // No-op edit: return without touching `lastEditedAt`, so no "edited" badge appears. (Under
+            // the shared dispatch this still rewrites the unchanged task; harmless — it's byte-identical.)
+            guard task.description != description else { return nil }
+            if task.isTemplate,
+               let problem = TemplateInputValidation.placeholderProblem(
+                   in: description,
+                   field: "description",
+                   definedNames: Set(task.templateInputDefinitions.map(\.name))
+               ) {
+                return problem
+            }
+            task.description = description
+            let now = Date()
+            task.updatedAt = now
+            task.lastEditedAt = now
+            return nil
         }
-        // Skip the no-op edit so an "edited" badge doesn't appear from a Save click that
-        // didn't actually change anything.
-        guard task.description != description else { return nil }
-        if task.isTemplate,
-           let problem = TemplateInputValidation.placeholderProblem(
-               in: description,
-               field: "description",
-               definedNames: Set(task.templateInputDefinitions.map(\.name))
-           ) {
-            return problem
-        }
-        task.description = description
-        let now = Date()
-        task.updatedAt = now
-        task.lastEditedAt = now
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
-        }
-        return nil
     }
 
     /// Appends a clearly-labeled amendment to a task's description, optionally adding
@@ -1087,56 +1064,47 @@ public actor TaskStore {
     ///
     /// Deliberately NOT `@discardableResult` — a silently dropped refusal is the whole defect.
     public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) async -> String? {
-        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
-        // Checked ABOVE the dedup: below it, re-sending an already-applied bad amendment would fall
-        // into the no-op branch and report success for text the system rejected the first time.
-        if task.isTemplate,
-           let problem = TemplateInputValidation.placeholderProblem(
-               in: amendment,
-               field: "description amendment",
-               definedNames: Set(task.templateInputDefinitions.map(\.name))
-           ) {
-            return problem
+        await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
+            // Checked ABOVE the dedup: below it, re-sending an already-applied bad amendment would fall
+            // into the no-op branch and report success for text the system rejected the first time.
+            if task.isTemplate,
+               let problem = TemplateInputValidation.placeholderProblem(
+                   in: amendment,
+                   field: "description amendment",
+                   definedNames: Set(task.templateInputDefinitions.map(\.name))
+               ) {
+                return problem
+            }
+            // An amendment to an INSTANCE substitutes the run's supplied input values, so
+            // "also sign {{app_name}}" reads like the rest of the rendered instance instead of
+            // reaching the worker as a literal placeholder (2026-07-28, user decision; before this,
+            // instance amendments were the one authored-text path substitution never touched).
+            // `definedNames` is the VALUE key set because instances don't carry input definitions —
+            // a name with no supplied value (an omitted optional, or a typo) stays literal, which
+            // for an after-the-fact amendment is the visible outcome, not a silent empty gap.
+            var amendment = amendment
+            if !task.isTemplate, !task.templateInputValues.isEmpty {
+                amendment = TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
+                    amendment,
+                    values: task.templateInputValues,
+                    definedNames: Set(task.templateInputValues.keys),
+                    layout: .preserved
+                )
+            }
+            // Dedup: don't stack an [Amendment] identical to the one already at the end of the
+            // description. `run_task` amends BEFORE it tries to spawn/scope, so a failed start
+            // (e.g. a tool-scoping failure) leaves the amendment applied; retrying with the same
+            // instructions would otherwise append the same block over and over. Compared AFTER
+            // substitution, because the substituted text is what the previous send appended.
+            if !task.description.hasSuffix("[Amendment]: \(amendment)") {
+                task.description += "\n\n[Amendment]: \(amendment)"
+            }
+            if !attachments.isEmpty {
+                task.descriptionAttachments.append(contentsOf: attachments)
+            }
+            task.updatedAt = Date()
+            return nil
         }
-        // An amendment to an INSTANCE substitutes the run's supplied input values, so
-        // "also sign {{app_name}}" reads like the rest of the rendered instance instead of
-        // reaching the worker as a literal placeholder (2026-07-28, user decision; before this,
-        // instance amendments were the one authored-text path substitution never touched).
-        // `definedNames` is the VALUE key set because instances don't carry input definitions —
-        // a name with no supplied value (an omitted optional, or a typo) stays literal, which
-        // for an after-the-fact amendment is the visible outcome, not a silent empty gap.
-        var amendment = amendment
-        if !task.isTemplate, !task.templateInputValues.isEmpty {
-            amendment = TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
-                amendment,
-                values: task.templateInputValues,
-                definedNames: Set(task.templateInputValues.keys),
-                layout: .preserved
-            )
-        }
-        // Dedup: don't stack an [Amendment] identical to the one already at the end of the
-        // description. `run_task` amends BEFORE it tries to spawn/scope, so a failed start
-        // (e.g. a tool-scoping failure) leaves the amendment applied; retrying with the same
-        // instructions would otherwise append the same block over and over. Compared AFTER
-        // substitution, because the substituted text is what the previous send appended.
-        if !task.description.hasSuffix("[Amendment]: \(amendment)") {
-            task.description += "\n\n[Amendment]: \(amendment)"
-        }
-        if !attachments.isEmpty {
-            task.descriptionAttachments.append(contentsOf: attachments)
-        }
-        task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
-        }
-        return nil
     }
 
     /// Records a help-request escalation from Brown and parks the task in `.awaitingHelp`, its own
@@ -1157,41 +1125,32 @@ public actor TaskStore {
     /// mutates later, so its check is TOCTOU. Returns a human-readable refusal, or nil on success.
     @discardableResult
     public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async -> String? {
-        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
-        guard task.status.isValidationContractEditable else {
-            return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
-        }
-        guard task.canReplaceAcceptanceContract(with: criteria) else {
-            let dropped = task.acceptanceCriteria.filter { existing in !criteria.contains { $0.id == existing.id } }
-            return """
-                Task "\(task.title)" has already been validated, so its contract can't be replaced wholesale — \
-                this list drops \(dropped.count) criterion(s) that carry a verdict or rejection history \
-                (\(dropped.map { "\"\($0.name)\"" }.joined(separator: ", "))). \
-                Use `actions` with `update` (which keeps a criterion's id, and its verdict when the contract text \
-                is unchanged) and `delete` (which says so plainly) instead.
-                """
-        }
-        if task.isTemplate {
-            let definedNames = Set(task.templateInputDefinitions.map(\.name))
-            for criterion in criteria {
-                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: definedNames) {
-                    return problem
+        await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
+            guard task.status.isValidationContractEditable else {
+                return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
+            }
+            guard task.canReplaceAcceptanceContract(with: criteria) else {
+                let dropped = task.acceptanceCriteria.filter { existing in !criteria.contains { $0.id == existing.id } }
+                return """
+                    Task "\(task.title)" has already been validated, so its contract can't be replaced wholesale — \
+                    this list drops \(dropped.count) criterion(s) that carry a verdict or rejection history \
+                    (\(dropped.map { "\"\($0.name)\"" }.joined(separator: ", "))). \
+                    Use `actions` with `update` (which keeps a criterion's id, and its verdict when the contract text \
+                    is unchanged) and `delete` (which says so plainly) instead.
+                    """
+            }
+            if task.isTemplate {
+                let definedNames = Set(task.templateInputDefinitions.map(\.name))
+                for criterion in criteria {
+                    if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: definedNames) {
+                        return problem
+                    }
                 }
             }
+            writeAcceptanceContract(criteria, to: &task)
+            task.updatedAt = Date()
+            return nil
         }
-        writeAcceptanceContract(criteria, to: &task)
-        task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
-        }
-        return nil
     }
 
     /// Applies a batch of per-criterion edits ATOMICALLY: every action is validated and applied to a
@@ -1202,67 +1161,58 @@ public actor TaskStore {
     /// Returns a human-readable error, or nil on success.
     @discardableResult
     public func applyCriterionActions(taskID: UUID, actions: [CriterionAction]) async -> String? {
-        await acquireTaskLock(taskID)                    // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(taskID) }
-        let existingLocalTask = tasks[taskID]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: taskID)) : existingLocalTask else { return "Task not found." }
-        guard task.status.isValidationContractEditable else {
-            return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
-        }
-        guard !actions.isEmpty else { return "No criterion actions were given." }
-        var criteria = task.acceptanceCriteria
-        let templateInputNames = task.isTemplate ? Set(task.templateInputDefinitions.map(\.name)) : []
-        for action in actions {
-            switch action {
-            case .add(let name, let validationPrompt, let inputEnumeratorPrompt, let waivable, let origin):
-                let criterion = AcceptanceCriterion(
-                    name: name,
-                    validationPrompt: validationPrompt,
-                    inputEnumeratorPrompt: inputEnumeratorPrompt,
-                    waivable: waivable,
-                    origin: origin
-                )
-                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: templateInputNames) {
-                    return problem
-                }
-                criteria.append(criterion)
-            case .update(let criterionID, let name, let validationPrompt, let inputEnumeratorPrompt, let waivable):
-                guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
-                    return "No acceptance criterion with id \(criterionID.uuidString)."
-                }
-                // id and origin are deliberately untouched: preserving identity across an edit is
-                // the whole reason this verb exists.
-                var edited = criteria[index]
-                edited.name = name
-                edited.validationPrompt = validationPrompt
-                edited.inputEnumeratorPrompt = inputEnumeratorPrompt
-                edited.waivable = waivable
-                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: edited, definedNames: templateInputNames) {
-                    return problem
-                }
-                criteria[index] = edited
-            case .delete(let criterionID):
-                guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
-                    return "No acceptance criterion with id \(criterionID.uuidString)."
-                }
-                criteria.remove(at: index)
+        await mutateTaskOrTemplate(id: taskID) { task in     // see setSteps for the locking rationale
+            guard task.status.isValidationContractEditable else {
+                return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
             }
+            guard !actions.isEmpty else { return "No criterion actions were given." }
+            var criteria = task.acceptanceCriteria
+            let templateInputNames = task.isTemplate ? Set(task.templateInputDefinitions.map(\.name)) : []
+            for action in actions {
+                switch action {
+                case .add(let name, let validationPrompt, let inputEnumeratorPrompt, let waivable, let origin):
+                    let criterion = AcceptanceCriterion(
+                        name: name,
+                        validationPrompt: validationPrompt,
+                        inputEnumeratorPrompt: inputEnumeratorPrompt,
+                        waivable: waivable,
+                        origin: origin
+                    )
+                    if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: templateInputNames) {
+                        return problem
+                    }
+                    criteria.append(criterion)
+                case .update(let criterionID, let name, let validationPrompt, let inputEnumeratorPrompt, let waivable):
+                    guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
+                        return "No acceptance criterion with id \(criterionID.uuidString)."
+                    }
+                    // id and origin are deliberately untouched: preserving identity across an edit is
+                    // the whole reason this verb exists.
+                    var edited = criteria[index]
+                    edited.name = name
+                    edited.validationPrompt = validationPrompt
+                    edited.inputEnumeratorPrompt = inputEnumeratorPrompt
+                    edited.waivable = waivable
+                    if let problem = TemplateInputValidation.placeholderProblem(inCriterion: edited, definedNames: templateInputNames) {
+                        return problem
+                    }
+                    criteria[index] = edited
+                case .delete(let criterionID):
+                    guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
+                        return "No acceptance criterion with id \(criterionID.uuidString)."
+                    }
+                    criteria.remove(at: index)
+                }
+            }
+            // Names must stay distinct: the replace-all path matches criteria BY NAME to preserve
+            // identity, so a duplicate would silently collapse two criteria into one there.
+            guard Set(criteria.map(\.name)).count == criteria.count else {
+                return "Duplicate criterion names — each display name must be distinct."
+            }
+            writeAcceptanceContract(criteria, to: &task)
+            task.updatedAt = Date()
+            return nil
         }
-        // Names must stay distinct: the replace-all path matches criteria BY NAME to preserve
-        // identity, so a duplicate would silently collapse two criteria into one there.
-        guard Set(criteria.map(\.name)).count == criteria.count else {
-            return "Duplicate criterion names — each display name must be distinct."
-        }
-        writeAcceptanceContract(criteria, to: &task)
-        task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[taskID] = task
-            onChange?()
-        }
-        return nil
     }
 
     /// The SINGLE writer of a task's acceptance contract. Both authoring paths — a wholesale replace
@@ -1323,34 +1273,26 @@ public actor TaskStore {
     /// Returns a human-readable refusal, or nil on success.
     @discardableResult
     public func setSteps(id: UUID, steps: [TaskStep]) async -> String? {
-        // F6: hold the per-task lock across this dual-dispatch editor's read → mutate → await-upsert, so
-        // a concurrent same-task edit can't land on the read base and be clobbered by the upsert.
-        await acquireTaskLock(id)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
-        if task.isTemplate {
-            let definedNames = Set(task.templateInputDefinitions.map(\.name))
-            for (position, step) in steps.filter(\.isActive).enumerated() {
-                if let problem = TemplateInputValidation.placeholderProblem(
-                    inStep: step.text,
-                    atPosition: position + 1,
-                    definedNames: definedNames
-                ) {
-                    return problem
+        // Dual-dispatch via mutateTaskOrTemplate: it holds the per-task lock (within-session) AND the
+        // library edit lock (cross-session) across the read→mutate→write, closing the lost-update hole
+        // this editor's old inline flag-pattern had. The body runs on this actor.
+        await mutateTaskOrTemplate(id: id) { task in
+            if task.isTemplate {
+                let definedNames = Set(task.templateInputDefinitions.map(\.name))
+                for (position, step) in steps.filter(\.isActive).enumerated() {
+                    if let problem = TemplateInputValidation.placeholderProblem(
+                        inStep: step.text,
+                        atPosition: position + 1,
+                        definedNames: definedNames
+                    ) {
+                        return problem
+                    }
                 }
             }
+            task.steps = steps
+            task.updatedAt = Date()
+            return nil
         }
-        task.steps = steps
-        task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
-        }
-        return nil
     }
 
     /// Returns the active steps to unstarted for a fresh attempt: status back to `.pending`,
@@ -1765,24 +1707,16 @@ public actor TaskStore {
     /// override (the tool reverts to the global policy / automatic verdict). User overrides survive
     /// re-evaluation — the live registry re-applies them after every scoping pass.
     public func setUserToolOverride(id: UUID, tool: String, enabled: Bool?) async {
-        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
-        var overrides = task.userToolOverrides ?? [:]
-        if let enabled {
-            overrides[tool] = enabled
-        } else {
-            overrides.removeValue(forKey: tool)
-        }
-        task.userToolOverrides = overrides.isEmpty ? nil : overrides
-        task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
+        _ = await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
+            var overrides = task.userToolOverrides ?? [:]
+            if let enabled {
+                overrides[tool] = enabled
+            } else {
+                overrides.removeValue(forKey: tool)
+            }
+            task.userToolOverrides = overrides.isEmpty ? nil : overrides
+            task.updatedAt = Date()
+            return nil
         }
     }
 
@@ -1792,26 +1726,18 @@ public actor TaskStore {
     /// N separate writes. No-op when `tools` is empty.
     public func setUserToolOverrides(id: UUID, tools: [String], enabled: Bool?) async {
         guard !tools.isEmpty else { return }
-        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
-        defer { releaseTaskLock(id) }
-        let existingLocalTask = tasks[id]
-        let editingLibraryTemplate = existingLocalTask == nil
-        guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
-        var overrides = task.userToolOverrides ?? [:]
-        for tool in tools {
-            if let enabled {
-                overrides[tool] = enabled
-            } else {
-                overrides.removeValue(forKey: tool)
+        _ = await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
+            var overrides = task.userToolOverrides ?? [:]
+            for tool in tools {
+                if let enabled {
+                    overrides[tool] = enabled
+                } else {
+                    overrides.removeValue(forKey: tool)
+                }
             }
-        }
-        task.userToolOverrides = overrides.isEmpty ? nil : overrides
-        task.updatedAt = Date()
-        if editingLibraryTemplate {
-            await templateLibrary?.upsert(task)
-        } else {
-            tasks[id] = task
-            onChange?()
+            task.userToolOverrides = overrides.isEmpty ? nil : overrides
+            task.updatedAt = Date()
+            return nil
         }
     }
 

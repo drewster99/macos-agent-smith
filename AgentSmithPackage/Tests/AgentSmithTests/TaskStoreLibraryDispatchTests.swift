@@ -96,6 +96,28 @@ import Foundation
         #expect(await library.template(id: task.id)?.updates.count == baseline + n)
     }
 
+    /// F6 CROSS-SESSION: two SEPARATE TaskStores share the one global library and edit the SAME template
+    /// concurrently. The per-session TaskStore lock can't serialize this (each store has its own); the
+    /// library EDIT lock does. This is precisely the case the per-session lock's headline claim missed —
+    /// proven to fail (updates lost) without the library lock.
+    @Test func concurrentEditsFromTwoSessionsToOneLibraryTemplateDoNotLoseUpdates() async {
+        let library = TemplateLibraryStore()
+        let storeA = TaskStore(sessionID: UUID(), templateLibrary: library)
+        let storeB = TaskStore(sessionID: UUID(), templateLibrary: library)
+        let task = AgentTask(title: "Shared", description: "d", isTemplate: true)
+        await library.upsert(task)
+        let baseline = await library.template(id: task.id)?.updates.count ?? 0
+
+        let n = 20
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<n {
+                group.addTask { await storeA.addUpdate(id: task.id, message: "A\(i)") }
+                group.addTask { await storeB.addUpdate(id: task.id, message: "B\(i)") }
+            }
+        }
+        #expect(await library.template(id: task.id)?.updates.count == baseline + 2 * n)
+    }
+
     /// The lock is per-TASK, not global: edits to DIFFERENT templates run concurrently and all land.
     @Test func concurrentEditsToDifferentTemplatesAllLand() async {
         let (store, library) = makeStore()

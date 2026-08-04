@@ -81,6 +81,41 @@ public actor TemplateLibraryStore {
     private var groups: [TemplateGroup] = []
     private var onChange: (@Sendable () -> Void)?
 
+    // MARK: - Per-template edit lock (F6, cross-session)
+    //
+    // A dual-dispatch editor edits a library template as read (`template(id:)`) → mutate → write
+    // (`upsert`) — three separate hops on this global actor, so this actor's own per-call serialization
+    // does NOT keep two sessions' editors from interleaving between the read and the upsert and clobbering
+    // each other (a lost update). A caller holds this per-id lock ACROSS its whole read→mutate→upsert; a
+    // second caller for the SAME id waits (fair FIFO). The TaskStore per-task lock only covers one session.
+    private var lockedTemplateIDs: Set<UUID> = []
+    private var templateLockWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+
+    /// Acquires the exclusive edit lock for template `id`, awaiting any in-flight holder (fair FIFO). The
+    /// `contains` check and the `insert`/`append` run in one synchronous actor step (no `await` between),
+    /// so two acquirers can't both see it unlocked. Pair with `releaseEditLock`.
+    public func acquireEditLock(_ id: UUID) async {
+        if lockedTemplateIDs.contains(id) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                templateLockWaiters[id, default: []].append(continuation)
+            }
+        } else {
+            lockedTemplateIDs.insert(id)
+        }
+    }
+
+    /// Releases the edit lock for `id`, handing it to the next FIFO waiter if any (id stays locked), else
+    /// clearing it.
+    public func releaseEditLock(_ id: UUID) {
+        if var waiters = templateLockWaiters[id], !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            templateLockWaiters[id] = waiters.isEmpty ? nil : waiters
+            next.resume()
+        } else {
+            lockedTemplateIDs.remove(id)
+        }
+    }
+
     public init() {}
 
     public func setOnChange(_ handler: @escaping @Sendable () -> Void) {
