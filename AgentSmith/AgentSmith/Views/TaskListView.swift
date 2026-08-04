@@ -170,8 +170,13 @@ private func taskFamilies(for tasks: [AgentTask]) -> [TaskFamily] {
     let tasksByID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     var childrenByParentID: [UUID: [AgentTask]] = [:]
     var parents: [AgentTask] = []
+    // Dedup the EMITTED lists too, not just the lookup dict: `tasks` itself can hold the same id twice
+    // (childTasks concatenates active + archived, briefly overlapping during a move), so appending
+    // straight from the raw array would hand a `ForEach` two rows with the same Identifiable id —
+    // SwiftUI "undefined results". First-wins, preserving display order.
+    var seen = Set<UUID>()
 
-    for task in tasks {
+    for task in tasks where seen.insert(task.id).inserted {
         if let parentTaskID = task.parentTaskID, tasksByID[parentTaskID] != nil {
             childrenByParentID[parentTaskID, default: []].append(task)
         } else {

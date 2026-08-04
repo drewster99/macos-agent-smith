@@ -608,11 +608,14 @@ final class AppViewModel {
             if shared.hasMigratedTemplatesToLibrary, shared.templateLibraryIsPersistable, let templateLibrary {
                 let libraryByID = Dictionary(
                     await templateLibrary.allTemplates().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-                // Snapshot so a failed durable write can be rolled back in memory — the reconciliation
-                // must be all-or-nothing, never a half-applied library.
-                let preReconcileSnapshot = await templateLibrary.snapshot()
 
-                var libraryMutated = false
+                // Record THIS session's own ops so a failed durable write can be rolled back SURGICALLY —
+                // inverting only what this session did. A whole-library `restore(snapshot)` was wrong here:
+                // sessions load concurrently (one VM per window), each mutating the shared global library,
+                // so restoring the snapshot this session captured would discard a template ANOTHER session
+                // committed in the meantime — silent permanent loss.
+                var upsertedStragglers: [UUID] = []
+                var evictedDemoteLosers: [AgentTask] = []
                 var kept: [AgentTask] = []
                 for task in savedTasks {
                     if task.isTemplate {
@@ -621,7 +624,7 @@ final class AppViewModel {
                         // library is durable.
                         if libraryByID[task.id] == nil {
                             await templateLibrary.upsert(task)
-                            libraryMutated = true
+                            upsertedStragglers.append(task.id)
                         }
                         continue
                     }
@@ -637,18 +640,21 @@ final class AppViewModel {
                     // backstop can't resurrect it (which silently reversed a committed demote before).
                     if task.updatedAt > libraryCopy.updatedAt {
                         await templateLibrary.removeTemplate(id: task.id)
-                        libraryMutated = true
+                        evictedDemoteLosers.append(libraryCopy)
                         kept.append(task)
                     }
                     // else: library (the promote destination) wins — drop the stale session copy.
                 }
 
                 // Destination-durable-BEFORE-source-drop (mirrors the migration proper): only strip the
-                // session copies once the library change is on disk. If it can't be persisted, roll the
-                // library back to its pre-reconciliation state and keep this session's file untouched —
-                // nothing is lost, and the backstop retries next launch.
+                // session copies once the library change is on disk. If it can't be persisted, SURGICALLY
+                // invert only this session's ops (re-adding evicted losers, removing straggler upserts) and
+                // keep this session's file untouched — nothing is lost, other sessions' concurrent changes
+                // are preserved, and the backstop retries next launch.
+                let libraryMutated = !upsertedStragglers.isEmpty || !evictedDemoteLosers.isEmpty
                 if libraryMutated, await shared.persistTemplateLibraryNow() == false {
-                    await templateLibrary.restore(preReconcileSnapshot)
+                    for id in upsertedStragglers { await templateLibrary.removeTemplate(id: id) }
+                    for loser in evictedDemoteLosers { await templateLibrary.upsert(loser) }
                     logger.error("template library reconciliation could not be persisted; keeping session tasks intact")
                 } else {
                     savedTasks = kept
@@ -1575,8 +1581,12 @@ final class AppViewModel {
         let succeeded = await taskStore.softDelete(id: id)
         if succeeded {
             await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user deleted this task. It is no longer active — do not work on it, wait for it, or treat it as in progress.")
-        } else {
+        } else if task?.status.isInProgress == true {
             taskActionError = "This task is in progress and cannot be deleted."
+        } else {
+            // A non-in-progress failure is a durable-write failure (e.g. a library template whose delete
+            // couldn't be persisted) — not "in progress", which would be a flatly wrong explanation.
+            taskActionError = "Couldn't delete \"\(title)\" — the change couldn't be saved. Please try again."
         }
     }
 
