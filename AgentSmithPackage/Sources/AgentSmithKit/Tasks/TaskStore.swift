@@ -114,6 +114,22 @@ public actor TaskStore {
         return await body()
     }
 
+    /// Runs `body` holding the LIBRARY's per-id edit lock IFF the task is library-resident. The flip
+    /// entry points (`setTemplate`/`updateDefinition`) read a library template in their own guard and
+    /// write it via `commitTemplateFlip` — a read→mutate→write that, unlike the editors routed through
+    /// `mutateTaskOrTemplate`, was NOT serialized against cross-session editors of the same template
+    /// (which hold this lock). Wrapping the whole read-decide-commit here closes that (the demote's
+    /// removeTemplate racing a re-insert, and two windows editing one template's definition). Lock order
+    /// matches `mutateTaskOrTemplate`: per-task lock (already held by the caller) THEN library edit lock,
+    /// so no cycle. Single acquire/release around `body`, so no leak on an early return inside it.
+    private func withLibraryEditLockIfNeeded(_ id: UUID, _ inLibrary: Bool, _ body: () async -> String?) async -> String? {
+        guard inLibrary, let templateLibrary else { return await body() }
+        await templateLibrary.acquireEditLock(id)
+        let result = await body()
+        await templateLibrary.releaseEditLock(id)
+        return result
+    }
+
     public init(
         inactiveStore: InactiveTaskStore? = nil,
         sessionID: UUID? = nil,
@@ -224,10 +240,14 @@ public actor TaskStore {
         // Whole read-decide-commit under the per-task lock, so a concurrent edit of the same task can't
         // land between the base read and the flip's durable writes and be discarded by the flip.
         await withTaskLock(id) { () async -> String? in
-            // A task being promoted is a local session task; a template being demoted may live locally
-            // (pre-migration) or in the global library.
+            // A task being promoted is a local session task; a template being demoted lives in the global
+            // library. When it's a library template, hold the library edit lock across the whole read-
+            // decide-commit so a cross-session editor can't clobber the definition edit or re-insert a
+            // template this demote removes (the flip reads/writes the library directly, NOT via the
+            // mutateTaskOrTemplate seam, so it needs the lock explicitly).
+            let inLibrary = tasks[id] == nil
+            return await withLibraryEditLockIfNeeded(id, inLibrary) {
             let localTask = tasks[id]
-            let inLibrary = localTask == nil
             guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else {
                 return "Task not found: \(id.uuidString)"
             }
@@ -245,6 +265,7 @@ public actor TaskStore {
             }
             task.updatedAt = Date()
             return await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
+            }
         }
     }
 
@@ -409,11 +430,13 @@ public actor TaskStore {
         templateInstanceTitleTemplate: String?
     ) async -> String? {
         // Whole read-decide-commit under the per-task lock (see `setTemplate`); `defer` form to avoid
-        // re-indenting this method's long body.
+        // re-indenting this method's long body. When it's a library template, also hold the library edit
+        // lock so a concurrent cross-session definition edit can't clobber it (same as setTemplate).
         await acquireTaskLock(id)
         defer { releaseTaskLock(id) }
+        let inLibrary = tasks[id] == nil
+        return await withLibraryEditLockIfNeeded(id, inLibrary) {
         let localTask = tasks[id]
-        let inLibrary = localTask == nil
         guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else { return "Task not found: \(id.uuidString)" }
         guard task.status.isDescriptionEditable else {
             return "Task '\(task.title)' cannot be edited while it is \(task.status.rawValue)."
@@ -469,6 +492,7 @@ public actor TaskStore {
         task.updatedAt = now
         task.lastEditedAt = now
         return await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
+        }
     }
 
     private func hasPriorRunState(_ task: AgentTask) -> Bool {

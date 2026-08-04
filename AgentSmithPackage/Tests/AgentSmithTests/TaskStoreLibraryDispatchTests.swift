@@ -118,6 +118,32 @@ import Foundation
         #expect(await library.template(id: task.id)?.updates.count == baseline + 2 * n)
     }
 
+    /// F6 recheck: the FLIP paths (setTemplate/updateDefinition) edit a library template via
+    /// commitTemplateFlip directly, NOT via mutateTaskOrTemplate, so they need the library edit lock too.
+    /// A cross-session setSteps (an editor) racing an updateDefinition (a flip) on the SAME template must
+    /// not lose either edit: with the lock, whichever runs second reads the other's committed state.
+    @Test func flipPathSerializesAgainstConcurrentEditor() async {
+        let library = TemplateLibraryStore()
+        let storeA = TaskStore(sessionID: UUID(), templateLibrary: library)
+        let storeB = TaskStore(sessionID: UUID(), templateLibrary: library)
+        let task = AgentTask(title: "Orig", description: "d", isTemplate: true)
+        await library.upsert(task)
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                _ = await storeA.setSteps(id: task.id, steps: [TaskStep(text: "s1", origin: .smith)])
+            }
+            group.addTask {
+                _ = await storeB.updateDefinition(
+                    id: task.id, title: "Renamed", description: "d2", isTemplate: true,
+                    templateInputDefinitions: [], templateInstanceTitleTemplate: nil)
+            }
+        }
+        let final = await library.template(id: task.id)
+        #expect(final?.title == "Renamed")                     // the flip's rename survived
+        #expect(final?.steps.filter(\.isActive).count == 1)    // the editor's step survived
+    }
+
     /// The lock is per-TASK, not global: edits to DIFFERENT templates run concurrently and all land.
     @Test func concurrentEditsToDifferentTemplatesAllLand() async {
         let (store, library) = makeStore()
