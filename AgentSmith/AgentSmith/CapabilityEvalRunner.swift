@@ -318,8 +318,8 @@ enum CapabilityEvalRunner {
                 // tool_choice options, each independently — "accepts the parameter" does not mean
                 // "accepts every value of it".
                 // Reasoning on/off — separate probes because neither direction implies the other.
-                for (enabled, capability) in [(true, ModelCapability.reasoningEnableable),
-                                              (false, ModelCapability.reasoningDisableable)]
+                for (enabled, capability) in [(true, ModelCapability.reasoningCanBeEnabled),
+                                              (false, ModelCapability.reasoningCanBeDisabled)]
                 where profile[capability] == nil {
                     profile[capability] = await ModelProber.probeReasoningToggle(
                         enabled: enabled, makeProviderForcing: forcing)
@@ -336,7 +336,7 @@ enum CapabilityEvalRunner {
                 // both reject `required` and named-function choices as "incompatible with thinking
                 // enabled", so probing with it on measures that incompatibility rather than the
                 // option. Requires the reasoning probes above to have run.
-                let canDisableThinking = profile[.reasoningDisableable]?.value == true
+                let canDisableThinking = profile[.reasoningCanBeDisabled]?.value == true
                 for choice in toolChoices where profile[choice.requiredCapability] == nil {
                     // The probe derives this provider's own shape; nil = no such field here.
                     guard let finding = await ModelProber.probeToolChoice(
@@ -348,21 +348,21 @@ enum CapabilityEvalRunner {
                 }
                 // nil unless the model's mechanism actually has a `keep` key — acceptance-grading
                 // it everywhere recorded `true` on any endpoint that ignores unknown body keys.
-                if profile[.thinkingKeepAll] == nil,
+                if profile[.thinkingSupportsKeepAll] == nil,
                    let finding = await ModelProber.probeThinkingKeep(
                        reasoningControl: catalogEntry?.reasoningControl, makeProviderForcing: forcing) {
-                    profile[.thinkingKeepAll] = finding
+                    profile[.thinkingSupportsKeepAll] = finding
                     profile.callCount += 1
                 }
-                if profile[.strictToolDefinitions] == nil {
-                    profile[.strictToolDefinitions] = await ModelProber.probeStrictToolDefinitions(
+                if profile[.toolDefinitionsSupportStrict] == nil {
+                    profile[.toolDefinitionsSupportStrict] = await ModelProber.probeStrictToolDefinitions(
                         makeProviderForcing: forcing)
                     profile.callCount += 1
                 }
 
                 // Budget range LAST: it is the only multi-call probe here, and running it after the
                 // single-call facts means an interrupted sweep still banks those.
-                if profile.maxThinkingBudgetTokens == nil, profile[.thinkingBudgetTokens]?.value != false {
+                if profile.maxThinkingBudgetTokens == nil, profile[.thinkingSupportsTokenBudget]?.value != false {
                     let calls = ProbeCallCounter()
                     profile.maxThinkingBudgetTokens = await ModelProber.probeThinkingBudgetRange(
                         llm: await forcing([:]), modelID: target.modelID,
