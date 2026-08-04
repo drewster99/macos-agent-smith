@@ -1221,13 +1221,13 @@ final class SharedAppState {
     func createLibraryGroup(name: String) async -> TemplateGroup? {
         await templateLibraryStore?.createGroup(name: name)
     }
-    func renameLibraryGroup(id: UUID, to name: String) async {
+    func renameLibraryGroup(id: TemplateGroup.ID, to name: String) async {
         await templateLibraryStore?.renameGroup(id: id, to: name)
     }
-    func deleteLibraryGroup(id: UUID) async {
+    func deleteLibraryGroup(id: TemplateGroup.ID) async {
         await templateLibraryStore?.deleteGroup(id: id)
     }
-    func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: UUID) async {
+    func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: TemplateGroup.ID) async {
         await templateLibraryStore?.moveTemplate(templateID, toGroup: groupID)
     }
     func removeLibraryTemplate(id: UUID) async {

@@ -606,11 +606,53 @@ final class AppViewModel {
             // mid-promote can leave the id in the session file as a NON-template while the library holds
             // the template; the library, the promote's destination, is the intended winner).
             if shared.hasMigratedTemplatesToLibrary, shared.templateLibraryIsPersistable, let templateLibrary {
-                let libraryIDs = Set(await templateLibrary.allTemplates().map(\.id))
-                for task in savedTasks where task.isTemplate {
-                    if !libraryIDs.contains(task.id) { await templateLibrary.upsert(task) }
+                let libraryByID = Dictionary(
+                    await templateLibrary.allTemplates().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                // Snapshot so a failed durable write can be rolled back in memory — the reconciliation
+                // must be all-or-nothing, never a half-applied library.
+                let preReconcileSnapshot = await templateLibrary.snapshot()
+
+                var libraryMutated = false
+                var kept: [AgentTask] = []
+                for task in savedTasks {
+                    if task.isTemplate {
+                        // A template still in this session's file. Re-migrate one the batch collect
+                        // missed (transient read error); the session copy is dropped below once the
+                        // library is durable.
+                        if libraryByID[task.id] == nil {
+                            await templateLibrary.upsert(task)
+                            libraryMutated = true
+                        }
+                        continue
+                    }
+                    guard let libraryCopy = libraryByID[task.id] else {
+                        kept.append(task)
+                        continue
+                    }
+                    // The id lives in BOTH the session file and the library — a crash mid-flip. Newest
+                    // `updatedAt` wins, matching the active↔inactive reconciler: a committed DEMOTE wrote
+                    // the session file (its destination) first, so the session copy is newer and is the
+                    // winner; a committed PROMOTE's destination is the library, so the library copy is
+                    // newer. When the session copy wins, evict the stale library template so the load-time
+                    // backstop can't resurrect it (which silently reversed a committed demote before).
+                    if task.updatedAt > libraryCopy.updatedAt {
+                        await templateLibrary.removeTemplate(id: task.id)
+                        libraryMutated = true
+                        kept.append(task)
+                    }
+                    // else: library (the promote destination) wins — drop the stale session copy.
                 }
-                savedTasks.removeAll { $0.isTemplate || libraryIDs.contains($0.id) }
+
+                // Destination-durable-BEFORE-source-drop (mirrors the migration proper): only strip the
+                // session copies once the library change is on disk. If it can't be persisted, roll the
+                // library back to its pre-reconciliation state and keep this session's file untouched —
+                // nothing is lost, and the backstop retries next launch.
+                if libraryMutated, await shared.persistTemplateLibraryNow() == false {
+                    await templateLibrary.restore(preReconcileSnapshot)
+                    logger.error("template library reconciliation could not be persisted; keeping session tasks intact")
+                } else {
+                    savedTasks = kept
+                }
             }
 
             // Running tasks didn't survive the last quit — mark them interrupted.
@@ -2647,9 +2689,9 @@ final class AppViewModel {
 
     @discardableResult
     func createLibraryGroup(name: String) async -> TemplateGroup? { await shared.createLibraryGroup(name: name) }
-    func renameLibraryGroup(id: UUID, to name: String) async { await shared.renameLibraryGroup(id: id, to: name) }
-    func deleteLibraryGroup(id: UUID) async { await shared.deleteLibraryGroup(id: id) }
-    func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: UUID) async { await shared.moveLibraryTemplate(templateID, toGroup: groupID) }
+    func renameLibraryGroup(id: TemplateGroup.ID, to name: String) async { await shared.renameLibraryGroup(id: id, to: name) }
+    func deleteLibraryGroup(id: TemplateGroup.ID) async { await shared.deleteLibraryGroup(id: id) }
+    func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: TemplateGroup.ID) async { await shared.moveLibraryTemplate(templateID, toGroup: groupID) }
     func removeLibraryTemplate(id: UUID) async { await shared.removeLibraryTemplate(id: id) }
 
     /// Loads a task's transcript from ANOTHER session's channel log — for the top pane when the selected

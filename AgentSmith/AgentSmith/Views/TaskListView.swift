@@ -1435,8 +1435,8 @@ struct LibrarySectionView: View {
 
     private var orderedGroups: [TemplateGroup] {
         let groups = viewModel.libraryGroups
-        return groups.filter { $0.name == "Default" }
-            + groups.filter { $0.name != "Default" }.sorted { $0.name < $1.name }
+        return groups.filter { $0.id == .default }
+            + groups.filter { $0.id != .default }.sorted { $0.name < $1.name }
     }
 
     var body: some View {
@@ -1507,7 +1507,7 @@ private struct LibraryGroupView: View {
         VStack(alignment: .leading, spacing: 0) {
             LibraryGroupHeader(
                 group: group,
-                canModify: group.name != "Default",
+                canModify: group.id != .default,
                 onRename: { renameDraft = group.name; showRenamePrompt = true },
                 onDelete: { Task { await viewModel.deleteLibraryGroup(id: group.id) } }
             )
