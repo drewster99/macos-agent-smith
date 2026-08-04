@@ -335,12 +335,25 @@ enum CapabilityEvalRunner {
                 // tool_choice options, each independently — "accepts the parameter" does not mean
                 // "accepts every value of it".
                 // Reasoning on/off — separate probes because neither direction implies the other.
-                for (enabled, capability) in [(true, ModelCapability.reasoningCanBeEnabled),
-                                              (false, ModelCapability.reasoningCanBeDisabled)]
-                where profile[capability] == nil {
-                    profile[capability] = await ModelProber.probeReasoningToggle(
-                        enabled: enabled, makeProviderForcing: forcing)
-                    profile.callCount += 1
+                // Both are RUN even when one is already answered: they are read together below, and
+                // a conclusion drawn from one observation and one blank would be drawn from a
+                // baseline that was never measured. Only an already-answered PAIR skips.
+                if profile[.reasoningCanBeEnabled] == nil || profile[.reasoningCanBeDisabled] == nil {
+                    let on = await ModelProber.observeReasoningToggle(enabled: true, makeProviderForcing: forcing)
+                    let off = await ModelProber.observeReasoningToggle(enabled: false, makeProviderForcing: forcing)
+                    profile.callCount += 2
+                    // Acceptance says the endpoint took the switch; the reply says whether it DID
+                    // anything. `thinking` is an unknown key to most OpenAI-compatible endpoints and
+                    // unknown keys are ignored rather than refused, so a model that carried on
+                    // thinking was being recorded as one whose reasoning can be turned off.
+                    let conclusions = ModelProber.concludeReasoning(on: on, off: off)
+                    profile[.reasoningCanBeEnabled] = on.finding
+                    profile[.reasoningCanBeDisabled] = conclusions.canBeDisabled
+                    // Observed reasoning is the only thing that establishes the model reasons at
+                    // all; a decoded vendor claim already present is left alone.
+                    if profile[.reasoning] == nil, conclusions.reasons.status == .established {
+                        profile[.reasoning] = conclusions.reasons
+                    }
                 }
 
                 // The capability comes from the choice itself — a hand-paired list here was an
@@ -740,6 +753,10 @@ enum CapabilityEvalRunner {
                                                   (.toolChoiceSupportsNamedFunction, "fn")]) }),
             ("structured-out", { acceptedSet($0, [(.structuredOutputSupportsJSONObject, "obj"),
                                                   (.structuredOutputSupportsJSONSchema, "schema")]) }),
+            // Does it reason at all — established only by OBSERVING reasoning, so a blank means
+            // undemonstrated. Distinct from the switches beside it: a thinking-only model reasons
+            // and cannot be turned off, and rejecting both switches does not mean it never reasons.
+            ("reasons",        { $0[.reasoning].map(cell) ?? "-" }),
             ("reasoning-ctl",  { acceptedSet($0, [(.reasoningCanBeEnabled, "on"),
                                                   (.reasoningCanBeDisabled, "off")]) }),
             ("strict-tools",   { $0[.toolDefinitionsSupportStrict].map(cell) ?? "-" }),
