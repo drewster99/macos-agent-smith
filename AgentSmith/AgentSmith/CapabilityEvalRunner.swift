@@ -304,13 +304,8 @@ enum CapabilityEvalRunner {
                     .jsonSchema(name: "probe", schema: ["type": .string("object")])
                 ]
                 for mode in structuredModes where profile[mode.requiredCapability] == nil {
-                    let llm = kit.makeProvider(
-                        configuration: ModelConfiguration(
-                            name: "probe:\(target.modelID)", providerID: target.providerID,
-                            modelID: target.modelID, temperature: nil, maxOutputTokens: 512, streaming: false),
-                        provider: provider)
                     profile[mode.requiredCapability] = await ModelProber.probeStructuredOutput(
-                        mode, llm: llm, modelID: target.modelID)
+                        mode, makeProviderForcing: forcing)
                     profile.callCount += 1
                 }
 
@@ -359,11 +354,12 @@ enum CapabilityEvalRunner {
                         accounting: catalogEntry?.thinkingBudgetAccounting,
                         maxOutputTokens: profile.maxOutputTokens.value ?? catalogEntry?.maxOutputTokens,
                         maxContextTokens: profile.maxContextTokens.value ?? catalogEntry?.maxInputTokens,
-                        makeProviderWithBudget: { @MainActor budget in
+                        makeProviderWithBudget: { @MainActor budget, pairedMax in
                             kit.makeProvider(
                                 configuration: ModelConfiguration(
                                     name: "probe:\(target.modelID)", providerID: target.providerID,
-                                    modelID: target.modelID, temperature: nil, maxOutputTokens: 512,
+                                    modelID: target.modelID, temperature: nil,
+                                    maxOutputTokens: pairedMax,
                                     thinkingBudget: budget, streaming: false),
                                 provider: provider)
                         },
