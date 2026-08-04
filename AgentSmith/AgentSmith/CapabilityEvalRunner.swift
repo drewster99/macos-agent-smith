@@ -366,7 +366,17 @@ enum CapabilityEvalRunner {
                 // both reject `required` and named-function choices as "incompatible with thinking
                 // enabled", so probing with it on measures that incompatibility rather than the
                 // option. Requires the reasoning probes above to have run.
-                let canDisableThinking = profile[.reasoningCanBeDisabled]?.value == true
+                //
+                // `!= false`, NOT `== true`, and the asymmetry is load-bearing. The two outcomes are
+                // not equally bad: sending the disable when it does not work costs nothing (the
+                // field is ignored, which is precisely how it earned a `false`), while NOT sending
+                // it when it would have worked produces a confounded tool-choice finding — the same
+                // confound that cost nine findings a re-probe on 2026-08-03. So it attempts the
+                // disable unless the switch is KNOWN useless. This became load-bearing when the OFF
+                // verdict stopped being acceptance-graded: `inconclusive` is now a real outcome (a
+                // model whose thinking only partly reduced), and under `== true` those models would
+                // silently have been probed with thinking left on.
+                let canDisableThinking = profile[.reasoningCanBeDisabled]?.value != false
                 for choice in toolChoices where profile[choice.requiredCapability] == nil {
                     // The probe derives this provider's own shape; nil = no such field here.
                     guard let finding = await ModelProber.probeToolChoice(
