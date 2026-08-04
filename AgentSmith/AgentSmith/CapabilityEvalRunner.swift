@@ -317,13 +317,11 @@ enum CapabilityEvalRunner {
                     (.specific(name: CapabilityProbe.probeToolName), .toolChoiceSpecificFunction)
                 ]
                 for (choice, capability) in toolChoiceProbes where profile[capability] == nil {
-                    let llm = kit.makeProvider(
-                        configuration: ModelConfiguration(
-                            name: "probe:\(target.modelID)", providerID: target.providerID,
-                            modelID: target.modelID, temperature: nil, maxOutputTokens: 512, streaming: false),
-                        provider: provider)
+                    // Forced, because production emission is gated per option: re-probing one
+                    // already recorded false would send nothing and grade the success as support.
                     profile[capability] = await ModelProber.probeToolChoice(
-                        choice, llm: llm, modelID: target.modelID)
+                        choice, forcedWireValue: Self.forcedToolChoice(choice),
+                        makeProviderForcing: forcing)
                     profile.callCount += 1
                 }
 
@@ -642,6 +640,21 @@ enum CapabilityEvalRunner {
     /// Prints every `providerID/modelID` that `--targets` will accept — the exact strings, one
     /// per line, grouped by provider — then exits. A cloud provider without a key is flagged (its
     /// models can't be probed); a keyless LOCAL provider is not — it just needs to be running.
+    /// The OpenAI `tool_choice` wire shape, as an `AnyCodable` tree the probe can force past the
+    /// production gate. Mirrors `OpenAICompatibleProvider.encodeOpenAIToolChoice`.
+    private static func forcedToolChoice(_ choice: LLMToolChoice) -> AnyCodable {
+        switch choice {
+        case .auto: return .string("auto")
+        case .required: return .string("required")
+        case .textOnly: return .string("none")
+        case .specific(let name):
+            return .dictionary([
+                "type": .string("function"),
+                "function": .dictionary(["name": .string(name)])
+            ])
+        }
+    }
+
     private static func listModelsAndExit(kit: LLMKitManager) -> Never {
         print(String(repeating: "═", count: 72))
         print("AVAILABLE MODELS  (copy a providerID/modelID into --targets)")
