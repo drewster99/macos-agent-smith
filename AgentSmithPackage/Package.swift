@@ -15,7 +15,7 @@ let package = Package(
         // ship as patch releases on this 0.0.x line, so a floor (not an open range) is what
         // keeps an out-of-date checkout from satisfying the build. Package.resolved locks the
         // exact commit for reproducible clones.
-        .package(url: "https://github.com/drewster99/swift-llm-kit.git", from: "0.0.156"),
+        .package(url: "https://github.com/drewster99/swift-llm-kit.git", from: "0.0.157"),
         // On-device semantic memory (MLX embeddings). 0.0.6 keeps Agent Smith on the
         // MLX Swift LM 2.x-compatible line while picking up the patched MLX Metal fix.
         // See the package CHANGELOG and ROADMAP. Package.resolved locks the commit.
