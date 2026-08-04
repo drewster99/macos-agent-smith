@@ -15,7 +15,7 @@ import SwiftLLMKit
 ///   AgentSmith --list-models                       print every providerID/modelID, then exit
 ///   AgentSmith --eval-capabilities [flags]
 ///     --targets <provID/model,...>  probe these instead of every catalogued model (the default)
-///     --effort                      with --targets, probe every known effort level per model
+///     --no-effort                   skip the effort-ladder probes (they are ON by default)
 ///     --no-seed                     probe everything even if the payload already answered it
 ///     --discard-non-chat            drop models the probe establishes can't chat (post-probe)
 ///     --discard-deprecated          skip models the provider marked deprecated (before probing)
@@ -51,12 +51,24 @@ enum CapabilityEvalRunner {
         let note: String
     }
 
+    /// The effort levels every target is probed against — the FULL ladder unless explicitly
+    /// disabled, because a probe run is meant to measure everything the vendor did not already
+    /// answer. It costs nothing on a level the payload settled: the decoded ladder seeds
+    /// `generalEffortLevels` / `reasoningEffortLevels` with `.decoded` findings (a KNOWN ladder
+    /// states "no" for every level it omits), and both probe loops skip any level already present.
+    /// So this list is the set of levels to probe only where the vendor stayed silent.
+    ///
+    /// `--no-effort` exists for the case where that silence covers a large sweep and the calls are
+    /// not wanted right now — an opt-OUT, since the default has to be the complete measurement.
+    private static var effortLevelsToProbe: [String] {
+        CommandLine.arguments.contains("--no-effort") ? [] : EffortRank.allKnown
+    }
+
     /// Every catalogued model, across all providers — the default target set when no `--targets` is
     /// given. Unconfigured / keyless providers are skipped in the probe loop (not filtered here), so
-    /// this is "probe everything the catalog knows about." `--effort` applies the full effort ladder
-    /// per model, same as an explicit `--targets` sweep.
+    /// this is "probe everything the catalog knows about."
     private static func allCatalogTargets(kit: LLMKitManager) -> [Target] {
-        let levels = CommandLine.arguments.contains("--effort") ? EffortRank.allKnown : []
+        let levels = effortLevelsToProbe
         return kit.models
             .sorted { ($0.providerID, $0.modelID) < ($1.providerID, $1.modelID) }
             .map { Target(providerID: $0.providerID, modelID: $0.modelID, effortLevels: levels, note: "all catalogued models") }
@@ -84,6 +96,11 @@ enum CapabilityEvalRunner {
 
         print("=== Capability evaluation ===")
         print("verbose: \(verbose)  discard-non-chat: \(discardNonChat)  discard-deprecated: \(discardDeprecated)")
+        // Said out loud because it is now ON by default and is the largest single cost in a sweep:
+        // up to one call per unstated level per model. What the payload already answered is free.
+        print("effort ladders: " + (effortLevelsToProbe.isEmpty
+            ? "DISABLED (--no-effort)"
+            : "probing \(effortLevelsToProbe.joined(separator: "/")) where the payload is silent"))
         print("logs: \(NSTemporaryDirectory())AgentSmith-CapabilityEval/\n")
 
         let kit = LLMKitManager(appIdentifier: "com.nuclearcyborg.AgentSmith",
@@ -680,11 +697,12 @@ enum CapabilityEvalRunner {
             // whole point is which ladder rungs this model actually accepts, and "med" or "xh"
             // makes that a guess. Absent levels were never attempted, not rejected.
             //
-            // Falls back to the ladder the VENDOR declares, parenthesized. Effort levels are probed
-            // only under `--effort`, so without the fallback these two columns read `-` on every row
-            // of an ordinary run even for a model that publishes its ladder in `/models` — which is
-            // where every ladder actually comes from today. Parens keep declared and measured
-            // distinguishable rather than passing one off as the other.
+            // Falls back to the ladder the VENDOR declares, parenthesized. A freshly probed profile
+            // is seeded from the decoded payload, so a published ladder normally arrives in the
+            // measured list already; the fallback covers the profile that has one and the seed did
+            // not — a `--reuse-store` record written before the vendor published it, most of all.
+            // Parens keep declared and measured distinguishable rather than passing one off as the
+            // other.
             ("gen-effort",     { declaredOrMeasuredEffort($0.establishedGeneralEffortLevels,
                                                           declared(for: $0)?.generalEffort) }),
             ("rsn-effort",     { declaredOrMeasuredEffort($0.establishedReasoningEffortLevels,
@@ -916,8 +934,7 @@ enum CapabilityEvalRunner {
     private static func parseTargets(kit: LLMKitManager) -> [Target]? {
         guard let index = CommandLine.arguments.firstIndex(of: "--targets"),
               index + 1 < CommandLine.arguments.count else { return nil }
-        let effort = CommandLine.arguments.contains("--effort")
-        let levels = effort ? EffortRank.allKnown : []
+        let levels = effortLevelsToProbe
         return CommandLine.arguments[index + 1].split(separator: ",").flatMap { spec -> [Target] in
             let parts = spec.split(separator: "/", maxSplits: 1)
             if parts.count == 2 {
