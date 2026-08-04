@@ -275,6 +275,103 @@ enum CapabilityEvalRunner {
                 }
             }
 
+            // Capability probes that need the raw field forced past a production gate. Each is
+            // gated on `chat` (a model that can't answer can't answer these either) and skipped
+            // when the store already settled it, so a re-run costs nothing for known facts.
+            if profile.chat.value == true {
+                // The catalog entry supplies the limits that BOUND the budget search; the probed
+                // values win where they exist, since they were measured on this very endpoint.
+                let catalogEntry = kit.modelInfo(providerID: target.providerID, modelID: target.modelID)
+                /// One throwaway provider per forced payload — the same pattern the effort probe
+                /// uses, and the reason none of this needs probe-only code in the request builders.
+                ///
+                /// Explicitly `@MainActor`: the factory it calls is main-actor isolated, and the
+                /// probes are not. Annotating the closure keeps the hop at this boundary instead of
+                /// pushing the caller's isolation into the library's signature.
+                let forcing: @MainActor @Sendable ([String: AnyCodable]) async -> any LLMProvider = { overrides in
+                    kit.makeProvider(
+                        configuration: ModelConfiguration(
+                            name: "probe:\(target.modelID)", providerID: target.providerID,
+                            modelID: target.modelID, temperature: nil, maxOutputTokens: 512,
+                            streaming: false, extraJSONOverrides: overrides),
+                        provider: provider)
+                }
+
+                // Structured output — graded on the RESPONSE, not on acceptance: an endpoint that
+                // ignores response_format returns 200 and would otherwise record as supporting it.
+                let structuredModes: [LLMResponseFormat] = [
+                    .jsonObject,
+                    .jsonSchema(name: "probe", schema: ["type": .string("object")])
+                ]
+                for mode in structuredModes where profile[mode.requiredCapability] == nil {
+                    let llm = kit.makeProvider(
+                        configuration: ModelConfiguration(
+                            name: "probe:\(target.modelID)", providerID: target.providerID,
+                            modelID: target.modelID, temperature: nil, maxOutputTokens: 512, streaming: false),
+                        provider: provider)
+                    profile[mode.requiredCapability] = await ModelProber.probeStructuredOutput(
+                        mode, llm: llm, modelID: target.modelID)
+                    profile.callCount += 1
+                }
+
+                // tool_choice options, each independently — "accepts the parameter" does not mean
+                // "accepts every value of it".
+                let toolChoiceProbes: [(LLMToolChoice, ModelCapability)] = [
+                    (.required, .toolChoiceRequired),
+                    (.textOnly, .toolChoiceNone),
+                    (.specific(name: CapabilityProbe.probeToolName), .toolChoiceSpecificFunction)
+                ]
+                for (choice, capability) in toolChoiceProbes where profile[capability] == nil {
+                    let llm = kit.makeProvider(
+                        configuration: ModelConfiguration(
+                            name: "probe:\(target.modelID)", providerID: target.providerID,
+                            modelID: target.modelID, temperature: nil, maxOutputTokens: 512, streaming: false),
+                        provider: provider)
+                    profile[capability] = await ModelProber.probeToolChoice(
+                        choice, llm: llm, modelID: target.modelID)
+                    profile.callCount += 1
+                }
+
+                // Reasoning on/off — separate probes because neither direction implies the other.
+                for (enabled, capability) in [(true, ModelCapability.reasoningEnableable),
+                                              (false, ModelCapability.reasoningDisableable)]
+                where profile[capability] == nil {
+                    profile[capability] = await ModelProber.probeReasoningToggle(
+                        enabled: enabled, makeProviderForcing: forcing)
+                    profile.callCount += 1
+                }
+                if profile[.thinkingKeepAll] == nil {
+                    profile[.thinkingKeepAll] = await ModelProber.probeThinkingKeep(makeProviderForcing: forcing)
+                    profile.callCount += 1
+                }
+                if profile[.strictToolDefinitions] == nil {
+                    profile[.strictToolDefinitions] = await ModelProber.probeStrictToolDefinitions(
+                        makeProviderForcing: forcing)
+                    profile.callCount += 1
+                }
+
+                // Budget range LAST: it is the only multi-call probe here, and running it after the
+                // single-call facts means an interrupted sweep still banks those.
+                if profile.maxThinkingBudgetTokens == nil, profile[.thinkingBudgetTokens]?.value != false {
+                    let calls = ProbeCallCounter()
+                    profile.maxThinkingBudgetTokens = await ModelProber.probeThinkingBudgetRange(
+                        llm: await forcing([:]), modelID: target.modelID,
+                        accounting: catalogEntry?.thinkingBudgetAccounting,
+                        maxOutputTokens: profile.maxOutputTokens.value ?? catalogEntry?.maxOutputTokens,
+                        maxContextTokens: profile.maxContextTokens.value ?? catalogEntry?.maxInputTokens,
+                        makeProviderWithBudget: { @MainActor budget in
+                            kit.makeProvider(
+                                configuration: ModelConfiguration(
+                                    name: "probe:\(target.modelID)", providerID: target.providerID,
+                                    modelID: target.modelID, temperature: nil, maxOutputTokens: 512,
+                                    thinkingBudget: budget, streaming: false),
+                                provider: provider)
+                        },
+                        calls: calls)
+                    profile.callCount += calls.value
+                }
+            }
+
             // Trailing {"role":"system"} steering-turn support — shared with the GUI probe via
             // TrailingSystemTurnProbe so the flag is measured identically. It runs AFTER probe()
             // returns (gated on an established chat), excludes Gemini, forces the flag on for the one
