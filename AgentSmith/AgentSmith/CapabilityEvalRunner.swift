@@ -304,24 +304,26 @@ enum CapabilityEvalRunner {
                     .jsonSchema(name: "probe", schema: ["type": .string("object")])
                 ]
                 for mode in structuredModes where profile[mode.requiredCapability] == nil {
-                    profile[mode.requiredCapability] = await ModelProber.probeStructuredOutput(
-                        mode, makeProviderForcing: forcing)
+                    // nil = this provider family has no `response_format`; no call is spent.
+                    guard let finding = await ModelProber.probeStructuredOutput(
+                        mode, apiType: provider.apiType, makeProviderForcing: forcing) else { continue }
+                    profile[mode.requiredCapability] = finding
                     profile.callCount += 1
                 }
 
                 // tool_choice options, each independently — "accepts the parameter" does not mean
                 // "accepts every value of it".
-                let toolChoiceProbes: [(LLMToolChoice, ModelCapability)] = [
-                    (.required, .toolChoiceRequired),
-                    (.textOnly, .toolChoiceNone),
-                    (.specific(name: CapabilityProbe.probeToolName), .toolChoiceSpecificFunction)
+                // The capability comes from the choice itself — a hand-paired list here was an
+                // ARRAY literal, so a new LLMToolChoice case would break every switch loudly and
+                // leave this silently one probe short.
+                let toolChoices: [LLMToolChoice] = [
+                    .required, .textOnly, .specific(name: CapabilityProbe.probeToolName)
                 ]
-                for (choice, capability) in toolChoiceProbes where profile[capability] == nil {
-                    // Forced, because production emission is gated per option: re-probing one
-                    // already recorded false would send nothing and grade the success as support.
-                    profile[capability] = await ModelProber.probeToolChoice(
-                        choice, forcedWireValue: Self.forcedToolChoice(choice),
-                        makeProviderForcing: forcing)
+                for choice in toolChoices where profile[choice.requiredCapability] == nil {
+                    // The probe derives this provider's own shape; nil = no such field here.
+                    guard let finding = await ModelProber.probeToolChoice(
+                        choice, apiType: provider.apiType, makeProviderForcing: forcing) else { continue }
+                    profile[choice.requiredCapability] = finding
                     profile.callCount += 1
                 }
 
@@ -333,8 +335,12 @@ enum CapabilityEvalRunner {
                         enabled: enabled, makeProviderForcing: forcing)
                     profile.callCount += 1
                 }
-                if profile[.thinkingKeepAll] == nil {
-                    profile[.thinkingKeepAll] = await ModelProber.probeThinkingKeep(makeProviderForcing: forcing)
+                // nil unless the model's mechanism actually has a `keep` key — acceptance-grading
+                // it everywhere recorded `true` on any endpoint that ignores unknown body keys.
+                if profile[.thinkingKeepAll] == nil,
+                   let finding = await ModelProber.probeThinkingKeep(
+                       reasoningControl: catalogEntry?.reasoningControl, makeProviderForcing: forcing) {
+                    profile[.thinkingKeepAll] = finding
                     profile.callCount += 1
                 }
                 if profile[.strictToolDefinitions] == nil {
@@ -640,20 +646,6 @@ enum CapabilityEvalRunner {
     /// Prints every `providerID/modelID` that `--targets` will accept — the exact strings, one
     /// per line, grouped by provider — then exits. A cloud provider without a key is flagged (its
     /// models can't be probed); a keyless LOCAL provider is not — it just needs to be running.
-    /// The OpenAI `tool_choice` wire shape, as an `AnyCodable` tree the probe can force past the
-    /// production gate. Mirrors `OpenAICompatibleProvider.encodeOpenAIToolChoice`.
-    private static func forcedToolChoice(_ choice: LLMToolChoice) -> AnyCodable {
-        switch choice {
-        case .auto: return .string("auto")
-        case .required: return .string("required")
-        case .textOnly: return .string("none")
-        case .specific(let name):
-            return .dictionary([
-                "type": .string("function"),
-                "function": .dictionary(["name": .string(name)])
-            ])
-        }
-    }
 
     private static func listModelsAndExit(kit: LLMKitManager) -> Never {
         print(String(repeating: "═", count: 72))
