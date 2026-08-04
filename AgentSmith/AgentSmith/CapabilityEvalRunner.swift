@@ -384,6 +384,28 @@ enum CapabilityEvalRunner {
                         },
                         calls: calls)
                     profile.callCount += calls.value
+
+                    // The floor, searched for separately. It needs a known-accepted budget to bound
+                    // the search from above, which is exactly what the range probe just established
+                    // — so it runs here rather than standing alone, and is skipped when that probe
+                    // found no usable range (there is nothing below zero to look for).
+                    if profile.minThinkingBudgetTokens == nil,
+                       let accepted = profile.maxThinkingBudgetTokens?.value, accepted > 0 {
+                        let minCalls = ProbeCallCounter()
+                        profile.minThinkingBudgetTokens = await ModelProber.probeThinkingBudgetMinimum(
+                            knownAcceptedBudget: accepted,
+                            makeProviderWithBudget: { @MainActor budget, pairedMax in
+                                kit.makeProvider(
+                                    configuration: ModelConfiguration(
+                                        name: "probe:\(target.modelID)", providerID: target.providerID,
+                                        modelID: target.modelID, temperature: nil,
+                                        maxOutputTokens: pairedMax,
+                                        thinkingBudget: budget, streaming: false),
+                                    provider: provider)
+                            },
+                            calls: minCalls)
+                        profile.callCount += minCalls.value
+                    }
                 }
             }
 
@@ -521,6 +543,9 @@ enum CapabilityEvalRunner {
         }
         if let budget = p.maxThinkingBudgetTokens {
             line("maxThinkBudget", budget)
+        }
+        if let budget = p.minThinkingBudgetTokens {
+            line("minThinkBudget", budget)
         }
         if let maxTemperature = p.maxTemperature {
             plain("maxTemperature", "\(maxTemperature)")
@@ -677,7 +702,8 @@ enum CapabilityEvalRunner {
                                                   (.reasoningCanBeDisabled, "off")]) }),
             ("strict-tools",   { $0[.toolDefinitionsSupportStrict].map(cell) ?? "-" }),
             ("keep-thinking",  { $0[.thinkingSupportsKeepAll].map(cell) ?? "-" }),
-            ("think-budget",   { $0.maxThinkingBudgetTokens.map(intCell) ?? "-" }),
+            ("think-budget-min", { $0.minThinkingBudgetTokens.map(intCell) ?? "-" }),
+            ("think-budget-max", { $0.maxThinkingBudgetTokens.map(intCell) ?? "-" }),
             ("max-context",    { intCell($0.maxContextTokens) }),
             // maxOutputBoundedByContext is mutually exclusive with maxOutputTokens — when the
             // endpoint has no independent output cap, that one stays inconclusive and this holds

@@ -26,6 +26,11 @@ struct BehaviorFlagsEditorSheet: View {
     @State private var reasoningControlSelection: ReasoningControl?
     /// `nil` = inherit. See ``ThinkingBudgetAccounting`` for why a wrong value is silent.
     @State private var budgetAccountingSelection: ThinkingBudgetAccounting?
+    /// Measured budget bounds, held as text so an empty field is distinguishable from a typed 0 —
+    /// which is a real value for the minimum ("this endpoint imposes no floor") and would otherwise
+    /// be indistinguishable from inherit.
+    @State private var minBudgetText: String = ""
+    @State private var maxBudgetText: String = ""
 
     /// Flags shown in title order — sorted once, not per body pass.
     private static let sortedFlags = BehaviorFlag.allCases.sorted { $0.editorTitle < $1.editorTitle }
@@ -38,7 +43,13 @@ struct BehaviorFlagsEditorSheet: View {
 
     private var hasAnyOverride: Bool {
         states.values.contains { $0 != .default } || reasoningControlSelection != nil
-            || budgetAccountingSelection != nil
+            || budgetAccountingSelection != nil || !minBudgetText.isEmpty || !maxBudgetText.isEmpty
+    }
+
+    /// What the catalog says today, shown as each field's placeholder so "inherit" is never blank
+    /// with no indication of what is being inherited.
+    private var catalogEntry: ModelInfo? {
+        shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)
     }
 
     var body: some View {
@@ -78,6 +89,21 @@ struct BehaviorFlagsEditorSheet: View {
                          ?? "Whether a thinking budget is spent from `max_tokens` or is its own allowance.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                // The measured range from `probeThinkingBudgetMinimum` / `probeThinkingBudgetRange`.
+                // Editable for the same reason the accounting picker is: most models are never
+                // probed, and a wrong bound here is silent — too low a floor is rejected by the
+                // endpoint, too high a ceiling truncates the reply.
+                Section("Thinking budget range (tokens)") {
+                    TextField("Minimum", text: $minBudgetText,
+                              prompt: Text(catalogEntry?.minThinkingBudgetTokens.map(String.init)
+                                           ?? "Inherit (\(ThinkingBudget.minimumTokens) documented)"))
+                    TextField("Maximum", text: $maxBudgetText,
+                              prompt: Text(catalogEntry?.maxThinkingBudgetTokens.map(String.init)
+                                           ?? "Inherit (unbounded)"))
+                    Text("Leave blank to inherit. A minimum of 0 means the endpoint imposes no floor "
+                         + "— which is not the same as leaving this blank.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 BehaviorFlagsExtrasSection(extras: resolved.extras)
             }
             .formStyle(.grouped)
@@ -88,12 +114,15 @@ struct BehaviorFlagsEditorSheet: View {
                     for flag in BehaviorFlag.allCases { states[flag.rawValue] = .default }
                     reasoningControlSelection = nil
                     budgetAccountingSelection = nil
+                    minBudgetText = ""; maxBudgetText = ""
                 })
         }
         .padding(20)
         .frame(minWidth: 540, idealWidth: 640, minHeight: 420, idealHeight: 620)
         .onAppear { loadFromShared(); reasoningControlSelection = shared.userModelOverrides[key]?.reasoningControl
-                     budgetAccountingSelection = shared.userModelOverrides[key]?.thinkingBudgetAccounting }
+                     budgetAccountingSelection = shared.userModelOverrides[key]?.thinkingBudgetAccounting
+                     minBudgetText = shared.userModelOverrides[key]?.minThinkingBudgetTokens.map(String.init) ?? ""
+                     maxBudgetText = shared.userModelOverrides[key]?.maxThinkingBudgetTokens.map(String.init) ?? "" }
     }
 
     private func binding(for rawValue: String) -> Binding<TriStateOverride> {
@@ -125,6 +154,10 @@ struct BehaviorFlagsEditorSheet: View {
         merged.behaviorFlags = flagsPatch.isEmpty ? nil : flagsPatch
         merged.reasoningControl = reasoningControlSelection
         merged.thinkingBudgetAccounting = budgetAccountingSelection
+        // Unparseable text stores nil rather than 0: a typo must not silently become "this model
+        // accepts no budget", which is a value with real emission consequences.
+        merged.minThinkingBudgetTokens = Int(minBudgetText.trimmingCharacters(in: .whitespaces))
+        merged.maxThinkingBudgetTokens = Int(maxBudgetText.trimmingCharacters(in: .whitespaces))
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }
 }
