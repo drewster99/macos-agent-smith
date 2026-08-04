@@ -350,7 +350,11 @@ enum CapabilityEvalRunner {
                 // it everywhere recorded `true` on any endpoint that ignores unknown body keys.
                 if profile[.thinkingSupportsKeepAll] == nil,
                    let finding = await ModelProber.probeThinkingKeep(
-                       reasoningControl: catalogEntry?.reasoningControl, makeProviderForcing: forcing) {
+                       reasoningControl: catalogEntry?.reasoningControl,
+                       // Measured stand-in for an undeclared mechanism: nothing decodes
+                       // `reasoningControl`, so without this the probe never runs at all.
+                       acceptedThinkingBlock: profile[.reasoningCanBeEnabled]?.value == true,
+                       makeProviderForcing: forcing) {
                     profile[.thinkingSupportsKeepAll] = finding
                     profile.callCount += 1
                 }
@@ -423,7 +427,7 @@ enum CapabilityEvalRunner {
 
         writeProfiles(profiles)
         exportProbeRecords(kit: kit)
-        printSummary(profiles)
+        printSummary(profiles, kit: kit)
         exit(profiles.contains { $0.chat.status == .inconclusive } ? 2 : 0)
     }
 
@@ -459,9 +463,18 @@ enum CapabilityEvalRunner {
             print("  catalog: (model not in catalog)")
             return
         }
-        let c = info.capabilities
-        print("  catalog: toolUse=\(c.toolUse) vision=\(c.vision) pdfInput=\(c.pdfInput) reasoning=\(c.reasoning) "
-              + "maxOut=\(info.maxOutputTokens.map(String.init) ?? "?") mode=\(info.mode ?? "?")")
+        print("  catalog: maxOut=\(info.maxOutputTokens.map(String.init) ?? "?") mode=\(info.mode ?? "?")")
+        // EVERY capability the catalog states an opinion on, not a hand-picked four. Twelve of them
+        // (batch, promptCaching, audioInput, videoInput, webSearch, parallelToolCalls, …) have no
+        // probe and appear on no other surface, so a fixed list left them invisible everywhere —
+        // there was no way to tell a vendor claiming `audioInput: false` from one that never said.
+        // Tri-state, so an unstated capability is OMITTED rather than printed as false.
+        let stated = ModelCapability.allCases.compactMap { capability -> String? in
+            info.capabilities.state(of: capability).map { "\(capability.rawValue)=\($0)" }
+        }
+        for chunk in stride(from: 0, to: stated.count, by: 6).map({ Array(stated[$0..<min($0 + 6, stated.count)]) }) {
+            print("  catalog: " + chunk.joined(separator: " "))
+        }
         if info.generalEffort != nil || info.reasoningEffort != nil || !info.behaviorFlags.isAllDefault {
             let general = info.generalEffort.map(\.editorSummary) ?? "-"
             let reasoning = info.reasoningEffort.map(\.editorSummary) ?? "-"
@@ -499,6 +512,16 @@ enum CapabilityEvalRunner {
         }
         line("maxContextTokens", p.maxContextTokens)
         line("maxOutputTokens", p.maxOutputTokens)
+        // Iterated rather than listed one by one: a capability added later appears here with no
+        // change to this function, which is the whole reason the findings live in one dictionary.
+        // Sorted so two runs of the same model are diffable.
+        for raw in p.capabilityFindings.keys.sorted() {
+            guard let finding = p.capabilityFindings[raw] else { continue }
+            line(ModelCapability(rawValue: raw)?.label ?? raw, finding)
+        }
+        if let budget = p.maxThinkingBudgetTokens {
+            line("maxThinkBudget", budget)
+        }
         if let maxTemperature = p.maxTemperature {
             plain("maxTemperature", "\(maxTemperature)")
         }
@@ -569,9 +592,9 @@ enum CapabilityEvalRunner {
         return "\(inStr)/\(outStr)"
     }
 
-    private static func printSummary(_ profiles: [ModelProfile]) {
+    private static func printSummary(_ profiles: [ModelProfile], kit: LLMKitManager) {
         print("\n" + String(repeating: "═", count: 100))
-        print("SUMMARY   (yes / no = established · ? = inconclusive · - = not attempted)")
+        print("SUMMARY   (yes / no = established · ? = inconclusive · - = not attempted · (parens) = vendor-declared, not measured)")
         print("")
         func cell(_ f: ProbeFinding<Bool>) -> String {
             switch f.status {
@@ -582,6 +605,40 @@ enum CapabilityEvalRunner {
         }
         func intCell(_ f: ProbeFinding<Int>) -> String {
             f.value.map(formatTokens) ?? (f.status == .inconclusive ? "?" : "-")
+        }
+        /// Names the accepted members of a related set instead of one yes/no per member.
+        ///
+        /// Keeps the three-way distinction the single-value cells make, which a bare join would
+        /// lose: "measured, none of them work" and "never asked" are different answers and must
+        /// not both render as an empty cell.
+        func acceptedSet(_ profile: ModelProfile,
+                         _ members: [(ModelCapability, String)]) -> String {
+            let findings = members.compactMap { capability, label in
+                profile[capability].map { (label: label, finding: $0) }
+            }
+            guard !findings.isEmpty else { return "-" }
+            let accepted = findings
+                .filter { $0.finding.status == .established && $0.finding.value == true }
+                .map(\.label)
+            if !accepted.isEmpty { return accepted.joined(separator: ",") }
+            return findings.contains { $0.finding.status == .established } ? "no" : "?"
+        }
+        func declared(for profile: ModelProfile) -> ModelInfo? {
+            kit.modelInfo(providerID: profile.providerID, modelID: profile.modelID)
+        }
+        /// Measured ladder if we have one, else the vendor's in parens, else `-`.
+        ///
+        /// `.unsupported` renders "none" rather than an empty cell: a vendor saying the knob does
+        /// not exist is an answer, and collapsing it into the same blank as "never asked" throws
+        /// away the one state that lets a caller stop sending the field.
+        func declaredOrMeasuredEffort(_ measured: [String], _ vendor: EffortSupport?) -> String {
+            if !measured.isEmpty { return measured.joined(separator: ",") }
+            switch vendor {
+            case .levels(let ladder):        return "(\(ladder.values.joined(separator: ",")))"
+            case .supportedLevelsUnknown:    return "(yes,levels?)"
+            case .unsupported:               return "(none)"
+            case nil:                        return "-"
+            }
         }
         // Full-length column titles, each wide enough for its header and its cells.
         let columns: [(title: String, cell: (ModelProfile) -> String)] = [
@@ -597,10 +654,30 @@ enum CapabilityEvalRunner {
             // Established effort levels, shallow → deep. Spelled out rather than abbreviated: the
             // whole point is which ladder rungs this model actually accepts, and "med" or "xh"
             // makes that a guess. Absent levels were never attempted, not rejected.
-            ("gen-effort",     { $0.establishedGeneralEffortLevels.isEmpty ? "-"
-                                    : $0.establishedGeneralEffortLevels.joined(separator: ",") }),
-            ("rsn-effort",     { $0.establishedReasoningEffortLevels.isEmpty ? "-"
-                                    : $0.establishedReasoningEffortLevels.joined(separator: ",") }),
+            //
+            // Falls back to the ladder the VENDOR declares, parenthesized. Effort levels are probed
+            // only under `--effort`, so without the fallback these two columns read `-` on every row
+            // of an ordinary run even for a model that publishes its ladder in `/models` — which is
+            // where every ladder actually comes from today. Parens keep declared and measured
+            // distinguishable rather than passing one off as the other.
+            ("gen-effort",     { declaredOrMeasuredEffort($0.establishedGeneralEffortLevels,
+                                                          declared(for: $0)?.generalEffort) }),
+            ("rsn-effort",     { declaredOrMeasuredEffort($0.establishedReasoningEffortLevels,
+                                                          declared(for: $0)?.reasoningEffort) }),
+            // Set-valued, like the effort ladders above: the useful fact is WHICH members of the
+            // set the model accepts, and one yes/no column each would add nine columns to a grid
+            // that is already wide. "no" means measured-and-none-work; "?" only inconclusive;
+            // "-" never attempted — the same three-way distinction the single cells make.
+            ("tool-choice",    { acceptedSet($0, [(.toolChoiceSupportsValueRequired, "req"),
+                                                  (.toolChoiceSupportsValueNone, "none"),
+                                                  (.toolChoiceSupportsNamedFunction, "fn")]) }),
+            ("structured-out", { acceptedSet($0, [(.structuredOutputSupportsJSONObject, "obj"),
+                                                  (.structuredOutputSupportsJSONSchema, "schema")]) }),
+            ("reasoning-ctl",  { acceptedSet($0, [(.reasoningCanBeEnabled, "on"),
+                                                  (.reasoningCanBeDisabled, "off")]) }),
+            ("strict-tools",   { $0[.toolDefinitionsSupportStrict].map(cell) ?? "-" }),
+            ("keep-thinking",  { $0[.thinkingSupportsKeepAll].map(cell) ?? "-" }),
+            ("think-budget",   { $0.maxThinkingBudgetTokens.map(intCell) ?? "-" }),
             ("max-context",    { intCell($0.maxContextTokens) }),
             // maxOutputBoundedByContext is mutually exclusive with maxOutputTokens — when the
             // endpoint has no independent output cap, that one stays inconclusive and this holds
