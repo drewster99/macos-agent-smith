@@ -1565,7 +1565,9 @@ final class AppViewModel {
 
     func deleteTask(id: UUID) async {
         guard let taskStore else { return }
-        let task = tasks.first { $0.id == id }
+        // `anyTask`, not `tasks`: a library template deleted via "Remove from Library" isn't in the
+        // active list, and looking only there logged its deletion as "(unknown)".
+        let task = anyTask(id: id)
         let title = task?.title ?? "(unknown)"
         if let task, !task.status.isInProgress {
             await runtime?.terminateTaskAgents(taskID: id)
@@ -2692,7 +2694,6 @@ final class AppViewModel {
     func renameLibraryGroup(id: TemplateGroup.ID, to name: String) async { await shared.renameLibraryGroup(id: id, to: name) }
     func deleteLibraryGroup(id: TemplateGroup.ID) async { await shared.deleteLibraryGroup(id: id) }
     func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: TemplateGroup.ID) async { await shared.moveLibraryTemplate(templateID, toGroup: groupID) }
-    func removeLibraryTemplate(id: UUID) async { await shared.removeLibraryTemplate(id: id) }
 
     /// Loads a task's transcript from ANOTHER session's channel log — for the top pane when the selected
     /// task (or drilled template run) originated in a session that isn't this window's (so the live

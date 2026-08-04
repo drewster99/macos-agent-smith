@@ -1230,9 +1230,6 @@ final class SharedAppState {
     func moveLibraryTemplate(_ templateID: UUID, toGroup groupID: TemplateGroup.ID) async {
         await templateLibraryStore?.moveTemplate(templateID, toGroup: groupID)
     }
-    func removeLibraryTemplate(id: UUID) async {
-        _ = await templateLibraryStore?.removeTemplate(id: id)
-    }
 
     /// Reads every session's `tasks.json` and returns the union of their `isTemplate` tasks, keeping the
     /// newer copy on id collisions. Read-only — modifies no session file. Mirrors `collectInactiveFromSessions`.

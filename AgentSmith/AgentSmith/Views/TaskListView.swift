@@ -27,6 +27,11 @@ struct TaskListView: View {
         let templates = viewModel.libraryTemplates
         let archivedTasks = viewModel.archivedTaskList
         let deletedTasks = viewModel.recentlyDeletedTaskList
+        // Deleted TEMPLATES get their own bucket ("like archived and deleted") so they aren't lost among
+        // deleted tasks and can be undeleted back to the Library. Both are recentlyDeleted in the global
+        // inactive store; `isTemplate` separates them.
+        let deletedTaskCount = deletedTasks.filter { !$0.isTemplate }.count
+        let deletedTemplateCount = deletedTasks.filter { $0.isTemplate }.count
 
         Group {
             if activeTasks.isEmpty && templates.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
@@ -45,7 +50,8 @@ struct TaskListView: View {
 
                     bucketButtons(activeCount: viewModel.activeTaskList.count,
                                   archivedCount: archivedTasks.count,
-                                  deletedCount: deletedTasks.count)
+                                  deletedTaskCount: deletedTaskCount,
+                                  deletedTemplateCount: deletedTemplateCount)
                 }
             }
         }
@@ -63,8 +69,8 @@ struct TaskListView: View {
     /// Footer buttons that open a browser pane for a bucket, replacing the old in-place expansion.
     /// "All" reaches every active task in this session (useful once the sidebar caps its live list).
     @ViewBuilder
-    private func bucketButtons(activeCount: Int, archivedCount: Int, deletedCount: Int) -> some View {
-        if activeCount > 0 || archivedCount > 0 || deletedCount > 0 {
+    private func bucketButtons(activeCount: Int, archivedCount: Int, deletedTaskCount: Int, deletedTemplateCount: Int) -> some View {
+        if activeCount > 0 || archivedCount > 0 || deletedTaskCount > 0 || deletedTemplateCount > 0 {
             HStack(spacing: 16) {
                 if activeCount > 0 {
                     bucketButton("All", systemImage: "square.stack.3d.up") { browserScope = .allSession }
@@ -72,8 +78,11 @@ struct TaskListView: View {
                 if archivedCount > 0 {
                     bucketButton("Archived (\(archivedCount))", systemImage: "archivebox") { browserScope = .archived }
                 }
-                if deletedCount > 0 {
-                    bucketButton("Deleted (\(deletedCount))", systemImage: "trash") { browserScope = .deleted }
+                if deletedTaskCount > 0 {
+                    bucketButton("Deleted (\(deletedTaskCount))", systemImage: "trash") { browserScope = .deleted }
+                }
+                if deletedTemplateCount > 0 {
+                    bucketButton("Deleted Templates (\(deletedTemplateCount))", systemImage: "trash.square") { browserScope = .deletedTemplates }
                 }
             }
             .padding(.horizontal, 12)
@@ -93,27 +102,31 @@ struct TaskListView: View {
 
 /// Which task bucket a `TaskBucketBrowserSheet` shows.
 enum TaskBrowserScope: String, Identifiable {
-    case allSession, archived, deleted
+    case allSession, archived, deleted, deletedTemplates
     var id: String { rawValue }
     var title: String {
         switch self {
         case .allSession: return "All Tasks — this session"
         case .archived: return "Archived"
         case .deleted: return "Recently Deleted"
+        case .deletedTemplates: return "Deleted Templates"
         }
     }
     var rowStyle: TaskRowStyle {
         switch self {
         case .allSession: return .active
         case .archived: return .archived
-        case .deleted: return .recentlyDeleted
+        case .deleted, .deletedTemplates: return .recentlyDeleted
         }
     }
     func tasks(from viewModel: AppViewModel) -> [AgentTask] {
         switch self {
         case .allSession: return viewModel.activeTaskList
         case .archived: return viewModel.archivedTaskList
-        case .deleted: return viewModel.recentlyDeletedTaskList
+        // Deleted TASKS and deleted TEMPLATES are both `.recentlyDeleted` in the global store; split by
+        // `isTemplate` so each bucket shows only its kind. A deleted template undeletes to the Library.
+        case .deleted: return viewModel.recentlyDeletedTaskList.filter { !$0.isTemplate }
+        case .deletedTemplates: return viewModel.recentlyDeletedTaskList.filter { $0.isTemplate }
         }
     }
 }
@@ -454,9 +467,11 @@ struct TaskRowButton: View {
             })
         }
         Divider()
-        if task.isTemplate {
-            // Templates live in the Library, not the active/archived/deleted buckets — their menu is
-            // Run / Move-to-Group / Remove-from-Library, not Archive/Delete (which don't apply).
+        if task.isTemplate && style == .active {
+            // The Library menu (Run / Move-to-Group / Remove) applies ONLY to a LIVE library template.
+            // A template that has been archived or soft-deleted still carries `isTemplate`, but it lives
+            // in the inactive store — it must get the Unarchive/Undelete/Delete menu below, or its restore
+            // is unreachable and the Library actions silently no-op against a template that isn't there.
             templateMenu(task: task, viewModel: viewModel)
         } else {
             switch style {
@@ -499,7 +514,10 @@ struct TaskRowButton: View {
             Label("Move to Group", systemImage: "folder")
         }
         Divider()
-        Button(role: .destructive, action: { Task { await viewModel.removeLibraryTemplate(id: task.id) } }, label: {
+        // Recoverable: soft-delete routes the template to the global inactive store (Deleted Templates),
+        // where it can be undeleted back to the Library — NOT a bare permanent removal, so a mis-click is
+        // survivable like every other delete in the app. `deleteTask` dual-dispatches to the library copy.
+        Button(role: .destructive, action: { Task { await viewModel.deleteTask(id: task.id) } }, label: {
             Label("Remove from Library", systemImage: "trash")
         })
     }
