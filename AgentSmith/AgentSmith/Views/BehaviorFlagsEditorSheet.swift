@@ -24,6 +24,8 @@ struct BehaviorFlagsEditorSheet: View {
     /// `nil` = inherit (no source has said). A picker rather than flags because the mechanisms are
     /// mutually exclusive — as booleans, two could be on at once and describe a model that can't exist.
     @State private var reasoningControlSelection: ReasoningControl?
+    /// `nil` = inherit. See ``ThinkingBudgetAccounting`` for why a wrong value is silent.
+    @State private var budgetAccountingSelection: ThinkingBudgetAccounting?
 
     /// Flags shown in title order — sorted once, not per body pass.
     private static let sortedFlags = BehaviorFlag.allCases.sorted { $0.editorTitle < $1.editorTitle }
@@ -36,6 +38,7 @@ struct BehaviorFlagsEditorSheet: View {
 
     private var hasAnyOverride: Bool {
         states.values.contains { $0 != .default } || reasoningControlSelection != nil
+            || budgetAccountingSelection != nil
     }
 
     var body: some View {
@@ -60,6 +63,20 @@ struct BehaviorFlagsEditorSheet: View {
                     Text(reasoningControlSelection?.editorDescription
                          ?? "How reasoning is switched on and off. Inherit leaves it to the catalog.")
                         .font(.caption).foregroundStyle(.secondary)
+
+                    // Whose allowance the thinking tokens come out of. Editable because it is
+                    // unverified for most providers and a wrong value does not error — it silently
+                    // truncates the reply, since a budget equal to the output cap leaves nothing
+                    // for the answer.
+                    Picker("Budget accounting", selection: $budgetAccountingSelection) {
+                        Text("Inherit").tag(ThinkingBudgetAccounting?.none)
+                        ForEach(ThinkingBudgetAccounting.allCases, id: \.self) { accounting in
+                            Text(accounting.editorTitle).tag(ThinkingBudgetAccounting?.some(accounting))
+                        }
+                    }
+                    Text(budgetAccountingSelection?.editorDescription
+                         ?? "Whether a thinking budget is spent from `max_tokens` or is its own allowance.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 BehaviorFlagsExtrasSection(extras: resolved.extras)
             }
@@ -70,11 +87,13 @@ struct BehaviorFlagsEditorSheet: View {
                 onReset: {
                     for flag in BehaviorFlag.allCases { states[flag.rawValue] = .default }
                     reasoningControlSelection = nil
+                    budgetAccountingSelection = nil
                 })
         }
         .padding(20)
         .frame(minWidth: 540, idealWidth: 640, minHeight: 420, idealHeight: 620)
-        .onAppear { loadFromShared(); reasoningControlSelection = shared.userModelOverrides[key]?.reasoningControl }
+        .onAppear { loadFromShared(); reasoningControlSelection = shared.userModelOverrides[key]?.reasoningControl
+                     budgetAccountingSelection = shared.userModelOverrides[key]?.thinkingBudgetAccounting }
     }
 
     private func binding(for rawValue: String) -> Binding<TriStateOverride> {
@@ -105,6 +124,7 @@ struct BehaviorFlagsEditorSheet: View {
         var merged = shared.userModelOverrides[key] ?? ModelMetadataOverride()
         merged.behaviorFlags = flagsPatch.isEmpty ? nil : flagsPatch
         merged.reasoningControl = reasoningControlSelection
+        merged.thinkingBudgetAccounting = budgetAccountingSelection
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }
 }
