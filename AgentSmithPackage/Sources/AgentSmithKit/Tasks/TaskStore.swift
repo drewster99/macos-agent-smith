@@ -332,6 +332,10 @@ public actor TaskStore {
     }
 
     public func setTemplateInputDefinitions(id: UUID, definitions: [TemplateInputDefinition]) async -> String? {
+        // F6: hold the per-task lock across this dual-dispatch editor's read → mutate → await-upsert, so
+        // a concurrent same-task edit can't land on the read base and be clobbered by the upsert.
+        await acquireTaskLock(id)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
@@ -372,6 +376,8 @@ public actor TaskStore {
     }
 
     public func setTemplateInstanceTitleTemplate(id: UUID, titleTemplate: String?) async -> String? {
+        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
@@ -1000,6 +1006,8 @@ public actor TaskStore {
     /// template" note run_task/resolveStartTarget records lands on the template, which is now
     /// library-resident). Update history is unbounded.
     public func addUpdate(id: UUID, message: String, attachments: [Attachment] = []) async {
+        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
@@ -1030,6 +1038,8 @@ public actor TaskStore {
     /// reason from a bare `false`, which could only ever name one of the ways this can fail.
     @discardableResult
     public func updateDescription(id: UUID, description: String) async -> String? {
+        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
@@ -1077,6 +1087,8 @@ public actor TaskStore {
     ///
     /// Deliberately NOT `@discardableResult` — a silently dropped refusal is the whole defect.
     public func amendDescription(id: UUID, amendment: String, attachments: [Attachment] = []) async -> String? {
+        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found: \(id.uuidString)" }
@@ -1145,6 +1157,8 @@ public actor TaskStore {
     /// mutates later, so its check is TOCTOU. Returns a human-readable refusal, or nil on success.
     @discardableResult
     public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async -> String? {
+        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
@@ -1188,6 +1202,8 @@ public actor TaskStore {
     /// Returns a human-readable error, or nil on success.
     @discardableResult
     public func applyCriterionActions(taskID: UUID, actions: [CriterionAction]) async -> String? {
+        await acquireTaskLock(taskID)                    // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(taskID) }
         let existingLocalTask = tasks[taskID]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: taskID)) : existingLocalTask else { return "Task not found." }
@@ -1307,6 +1323,10 @@ public actor TaskStore {
     /// Returns a human-readable refusal, or nil on success.
     @discardableResult
     public func setSteps(id: UUID, steps: [TaskStep]) async -> String? {
+        // F6: hold the per-task lock across this dual-dispatch editor's read → mutate → await-upsert, so
+        // a concurrent same-task edit can't land on the read base and be clobbered by the upsert.
+        await acquireTaskLock(id)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return "Task not found." }
@@ -1745,6 +1765,8 @@ public actor TaskStore {
     /// override (the tool reverts to the global policy / automatic verdict). User overrides survive
     /// re-evaluation — the live registry re-applies them after every scoping pass.
     public func setUserToolOverride(id: UUID, tool: String, enabled: Bool?) async {
+        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }
@@ -1770,6 +1792,8 @@ public actor TaskStore {
     /// N separate writes. No-op when `tools` is empty.
     public func setUserToolOverrides(id: UUID, tools: [String], enabled: Bool?) async {
         guard !tools.isEmpty else { return }
+        await acquireTaskLock(id)                        // F6: serialize same-task edits (see setSteps)
+        defer { releaseTaskLock(id) }
         let existingLocalTask = tasks[id]
         let editingLibraryTemplate = existingLocalTask == nil
         guard var task = editingLibraryTemplate ? (await templateLibrary?.template(id: id)) : existingLocalTask else { return }

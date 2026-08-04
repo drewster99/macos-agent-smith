@@ -76,6 +76,26 @@ import Foundation
         #expect(await library.template(id: task.id)?.steps.filter(\.isActive).count == n)
     }
 
+    /// F6 regression for the FLAG-PATTERN editors: addUpdate/updateDescription/setSteps/etc. do their
+    /// library edit via the inline `editingLibraryTemplate` read → mutate → await-upsert, NOT through
+    /// `mutateTaskOrTemplate` — so they need the lock too (the applyStepAction test above wouldn't catch
+    /// a gap here). Concurrent appends to one library template must all survive.
+    @Test func concurrentFlagPatternEditsToOneLibraryTemplateDoNotLoseUpdates() async {
+        let (store, library) = makeStore()
+        let task = AgentTask(title: "Nightly", description: "run it")
+        await store.restore([task])
+        _ = await store.setTemplate(id: task.id, isTemplate: true)
+        let baseline = await library.template(id: task.id)?.updates.count ?? 0
+
+        let n = 25
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<n {
+                group.addTask { await store.addUpdate(id: task.id, message: "update \(i)") }
+            }
+        }
+        #expect(await library.template(id: task.id)?.updates.count == baseline + n)
+    }
+
     /// The lock is per-TASK, not global: edits to DIFFERENT templates run concurrently and all land.
     @Test func concurrentEditsToDifferentTemplatesAllLand() async {
         let (store, library) = makeStore()
