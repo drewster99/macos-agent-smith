@@ -1,5 +1,32 @@
 # Agent Smith — Roadmap
 
+## Model capability contract (SwiftLLMKit 0.0.139 – 0.0.143) ✅ Completed 2026-08-03
+
+Built to answer one question end to end: **how do we talk to this model?** Not just "can it", but
+which parameter, in which shape, with which legal values.
+
+**Built-in providers** gained DeepSeek, Moonshot AI, z.ai (Coding) and the Singapore/Beijing
+DashScope regions (0.0.138). Those last three had been endpoint presets with no built-in for as long
+as built-ins existed, which left anyone using them permanently on a user-created provider —
+never adopted by seeding, never reachable by providerID-keyed metadata.
+
+**"Effort" split into two constructs.** General effort (Anthropic `output_config.effort`, applies
+even with reasoning off) vs reasoning effort (`reasoning_effort`, reasoning models only). The
+override editor has two rows because they are not interchangeable — a model may accept one and
+reject the other with HTTP 400.
+
+**Reasoning control, structured output, `strict` tools and thinking budgets** are all per-model facts
+now, each with a UI control (capabilities come free from `ModelCapability.allCases`; the two typed
+enums needed pickers). `CapabilityEvalRunner` probes all of them in a normal sweep, skipping
+whatever the store already settled.
+
+**Two defects fixed that were not on the plan**: every model-override sheet silently dropped fields
+it did not know about (so a field added to the library was wiped by the next editor opened), and the
+shared OpenAI-compatible decoder — used by five apiTypes — died entirely on one mistyped field,
+taking the provider's whole model list with it.
+
+Full rationale lives in `CLAUDE.md` (both repos) and swift-llm-kit's `ROADMAP.md`.
+
 ## Planned
 
 ### Task workspace overhaul: filtered transcripts, sidebar redesign, Library, global-ish storage, session deletion (designed 2026-08-02)
