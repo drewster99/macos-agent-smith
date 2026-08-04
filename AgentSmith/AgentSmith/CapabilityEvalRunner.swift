@@ -223,7 +223,11 @@ enum CapabilityEvalRunner {
                 // Anthropic emits output_config.effort whatever the model claims; a flag-gated
                 // endpoint would silently drop it and turn "no error" into a false positive.
                 supportsUnconditionalGeneralEffortEmission: provider.apiType == .anthropic,
-                preferLowImageDetail: preferLowImageDetail
+                preferLowImageDetail: preferLowImageDetail,
+                // The record the provider itself gates on, so the tool-calling probe can tell a
+                // forced call from a free one instead of assuming tool_choice went out.
+                modelCapabilities: kit.modelInfo(providerID: target.providerID,
+                                                 modelID: target.modelID)?.capabilities ?? ModelCapabilities()
             )
 
             // An empty wallet is ACCOUNT-wide, not a fact about this model: every remaining call
