@@ -55,6 +55,45 @@ import Foundation
         #expect(await library.template(id: task.id)?.steps.filter(\.isActive).count == 2)
     }
 
+    /// F6: the library-branch edit is read → mutate → `await upsert`, so concurrent edits of the SAME
+    /// template would share a stale base and lose each other's writes. The per-task lock serializes
+    /// them; every concurrent add must survive. WITHOUT the lock this count comes back < n.
+    @Test func concurrentEditsToOneLibraryTemplateDoNotLoseUpdates() async {
+        let (store, library) = makeStore()
+        let task = AgentTask(title: "Nightly", description: "run it")
+        await store.restore([task])
+        _ = await store.setTemplate(id: task.id, isTemplate: true)
+
+        let n = 25
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<n {
+                group.addTask {
+                    _ = await store.applyStepAction(
+                        taskID: task.id, action: .add(text: "step \(i)", origin: .smith))
+                }
+            }
+        }
+        #expect(await library.template(id: task.id)?.steps.filter(\.isActive).count == n)
+    }
+
+    /// The lock is per-TASK, not global: edits to DIFFERENT templates run concurrently and all land.
+    @Test func concurrentEditsToDifferentTemplatesAllLand() async {
+        let (store, library) = makeStore()
+        let tasks = (0..<10).map { AgentTask(title: "T\($0)", description: "d") }
+        await store.restore(tasks)
+        for t in tasks { _ = await store.setTemplate(id: t.id, isTemplate: true) }
+        await withTaskGroup(of: Void.self) { group in
+            for t in tasks {
+                group.addTask {
+                    _ = await store.applyStepAction(taskID: t.id, action: .add(text: "s", origin: .smith))
+                }
+            }
+        }
+        for t in tasks {
+            #expect(await library.template(id: t.id)?.steps.filter(\.isActive).count == 1)
+        }
+    }
+
     @Test func demoteBringsTemplateBackIntoThisSession() async {
         let (_, library) = makeStore()
         let sessionID = UUID()

@@ -57,6 +57,63 @@ public actor TaskStore {
     /// `autoArchiveEnabled`. Defaults to the historical four-hour cutoff.
     private var autoArchiveInterval: TimeInterval = 4 * 3600
 
+    // MARK: - Per-task mutation lock (F6)
+    //
+    // Mutations that SPAN suspension points — the promote/demote flip and the library-resident
+    // dual-dispatch edits — must not interleave on the same task, or one's `await` window lets another
+    // writer's committed change be discarded (a lost update; this codebase's cardinal data-safety sin).
+    // A per-task exclusive async lock serializes them: a second writer of the SAME id QUEUES (fair FIFO)
+    // until the first completes; distinct ids never contend. Synchronous point-writers (e.g. updateStatus)
+    // don't take the lock — they can't lose their own update mid-op — but the flip holds its task in the
+    // in-flight slot below so a sync write landing during the flip's `await` can't corrupt a half-moved
+    // task (it no-ops on the absent id rather than mutating a torn one).
+
+    /// Ids with a mutation in flight. Mutated only inside the synchronous acquire/release critical steps.
+    private var lockedTaskIDs: Set<UUID> = []
+    /// FIFO waiters per locked id. Resuming the head hands it the lock (the id stays locked).
+    private var taskLockWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+
+    /// A task lifted out of `tasks` while its promote/demote flip is mid-flight, so a reader never sees it
+    /// duplicated (in both `tasks` and the library) or vanished. Consulted by `task(id:)` /
+    /// `taskOrLibraryTemplate`. Empty except during a flip.
+    private var flippingTasks: [UUID: AgentTask] = [:]
+
+    /// Acquires the exclusive lock for `id`, awaiting any in-flight holder of the SAME id (fair FIFO).
+    /// The `contains` check and the `insert`/`append` run in ONE synchronous actor step with no `await`
+    /// between, so two acquirers cannot both observe the id unlocked. Pair with `releaseTaskLock` via
+    /// `defer`, or use the `withTaskLock` wrapper. NOT re-entrant: a locked method must not acquire the
+    /// same id again — none do (the flip entry points and `mutateTaskOrTemplate` never nest).
+    private func acquireTaskLock(_ id: UUID) async {
+        if lockedTaskIDs.contains(id) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                taskLockWaiters[id, default: []].append(continuation)
+            }
+        } else {
+            lockedTaskIDs.insert(id)
+        }
+    }
+
+    /// Releases the lock for `id`, handing it to the next FIFO waiter if any (the id stays locked), else
+    /// clearing it. Synchronous — no suspension between reading the waiters and resuming one.
+    private func releaseTaskLock(_ id: UUID) {
+        if var waiters = taskLockWaiters[id], !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            taskLockWaiters[id] = waiters.isEmpty ? nil : waiters
+            next.resume()                           // hand the lock on; id stays locked
+        } else {
+            lockedTaskIDs.remove(id)
+        }
+    }
+
+    /// Runs `body` holding the exclusive lock for `id`. Concurrent calls for the SAME id serialize; a
+    /// large method whose body would re-indent awkwardly can use `acquireTaskLock`/`releaseTaskLock` with
+    /// `defer` directly instead.
+    private func withTaskLock<T>(_ id: UUID, _ body: () async -> T) async -> T {
+        await acquireTaskLock(id)
+        defer { releaseTaskLock(id) }
+        return await body()
+    }
+
     public init(
         inactiveStore: InactiveTaskStore? = nil,
         sessionID: UUID? = nil,
@@ -127,8 +184,12 @@ public actor TaskStore {
 
     /// Retrieves a single active task by ID (this session only). Archived/deleted tasks live in
     /// the global store — use `taskAnyDisposition(id:)` to look across both.
+    ///
+    /// Falls back to the in-flight slot: a task mid-promote/demote is lifted out of `tasks` while its
+    /// flip's durable writes are in flight, and a reader must still see that ONE consistent copy rather
+    /// than a momentary gap (or, worse, a duplicate once it also appears in the library).
     public func task(id: UUID) -> AgentTask? {
-        tasks[id]
+        tasks[id] ?? flippingTasks[id]
     }
 
     /// Looks up a task by ID across this session's active list and the global inactive store
@@ -156,27 +217,31 @@ public actor TaskStore {
     /// run-state — a template never runs itself.
     @discardableResult
     public func setTemplate(id: UUID, isTemplate: Bool) async -> String? {
-        // A task being promoted is a local session task; a template being demoted may live locally
-        // (pre-migration) or in the global library.
-        let localTask = tasks[id]
-        let inLibrary = localTask == nil
-        guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else {
-            return "Task not found: \(id.uuidString)"
+        // Whole read-decide-commit under the per-task lock, so a concurrent edit of the same task can't
+        // land between the base read and the flip's durable writes and be discarded by the flip.
+        await withTaskLock(id) { () async -> String? in
+            // A task being promoted is a local session task; a template being demoted may live locally
+            // (pre-migration) or in the global library.
+            let localTask = tasks[id]
+            let inLibrary = localTask == nil
+            guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else {
+                return "Task not found: \(id.uuidString)"
+            }
+            guard !task.status.isInProgress else {
+                return "Task '\(task.title)' cannot be converted while it is \(task.status.rawValue). Stop or finish it first."
+            }
+            let wasTemplate = task.isTemplate
+            task.isTemplate = isTemplate
+            if isTemplate {
+                preservePriorRunAsTemplateChildIfNeeded(&task, wasTemplate: wasTemplate)
+                task.templateInputValues = [:]
+                normalizeTemplateLauncher(&task)
+            } else {
+                clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
+            }
+            task.updatedAt = Date()
+            return await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
         }
-        guard !task.status.isInProgress else {
-            return "Task '\(task.title)' cannot be converted while it is \(task.status.rawValue). Stop or finish it first."
-        }
-        let wasTemplate = task.isTemplate
-        task.isTemplate = isTemplate
-        if isTemplate {
-            preservePriorRunAsTemplateChildIfNeeded(&task, wasTemplate: wasTemplate)
-            task.templateInputValues = [:]
-            normalizeTemplateLauncher(&task)
-        } else {
-            clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
-        }
-        task.updatedAt = Date()
-        return await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
     }
 
     /// Writes a task/template back to the correct store after a possible template FLIP, crossing the
@@ -201,18 +266,29 @@ public actor TaskStore {
             // `move` uses). On a failed library write, keep it per-session — nothing is lost, it is still
             // a template, and the load-time straggler backstop re-migrates it (so this is not a refusal).
             // Its preserved prior-run child stays per-session.
+            //
+            // Lift the source into the in-flight slot BEFORE the durable writes: while they run, a reader
+            // via `task(id:)` sees this one consistent copy instead of the task appearing in BOTH `tasks`
+            // and the library (the duplicate that could crash the sidebar's family grouping), and a sync
+            // point-writer that lands now finds no `tasks[id]` and no-ops rather than mutating a half-
+            // moved task the flip is about to discard.
+            tasks.removeValue(forKey: id)
+            flippingTasks[id] = task
+            onChange?()
             await templateLibrary.upsert(task)
             if let durablyPersistLibraryNow, await durablyPersistLibraryNow() == false {
                 await templateLibrary.removeTemplate(id: id)
+                flippingTasks.removeValue(forKey: id)
                 tasks[id] = task
                 onChange?()
                 return nil
             }
-            tasks.removeValue(forKey: id)
+            // Destination durable; the task lives in the library now. Retire the slot and make the SOURCE
+            // removal durable too, closing the crash window (the session file otherwise keeps the template
+            // until a coalesced write; the straggler backstop would recover it, but this avoids relying on
+            // that). Promote is complete: destination durable, source durable.
+            flippingTasks.removeValue(forKey: id)
             onChange?()
-            // Make the SOURCE removal durable too, closing the crash window (the session file otherwise
-            // keeps the template until a coalesced write; the straggler backstop would recover it, but
-            // this avoids relying on that). Promote is complete: destination durable, source durable.
             _ = await durablyPersistActiveNow?(Array(tasks.values))
             return nil
         } else if !isTemplate, wasInLibrary {
@@ -332,6 +408,10 @@ public actor TaskStore {
         templateInputDefinitions: [TemplateInputDefinition],
         templateInstanceTitleTemplate: String?
     ) async -> String? {
+        // Whole read-decide-commit under the per-task lock (see `setTemplate`); `defer` form to avoid
+        // re-indenting this method's long body.
+        await acquireTaskLock(id)
+        defer { releaseTaskLock(id) }
         let localTask = tasks[id]
         let inLibrary = localTask == nil
         guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else { return "Task not found: \(id.uuidString)" }
@@ -457,6 +537,7 @@ public actor TaskStore {
     /// into this session. For a normal (non-template) task this is just `task(id:)`.
     public func taskOrLibraryTemplate(id: UUID) async -> AgentTask? {
         if let local = tasks[id] { return local }
+        if let flipping = flippingTasks[id] { return flipping }
         return await templateLibrary?.template(id: id)
     }
 
@@ -473,18 +554,24 @@ public actor TaskStore {
     /// surface (Smith's tools + the task editor) reach library-resident templates without every method
     /// growing its own two-store branch. For a local task this is byte-for-byte the old behavior.
     private func mutateTaskOrTemplate(id: UUID, _ body: (inout AgentTask) -> String?) async -> String? {
-        if var task = tasks[id] {
-            if let problem = body(&task) { return problem }
-            tasks[id] = task
-            onChange?()
-            return nil
+        // Held under the per-task lock: the library branch is read → mutate → `await upsert`, and without
+        // serialization a second edit of the same task interleaving between the read and the upsert would
+        // be clobbered by the first's stale base. The local (session-task) branch has no `await` between
+        // read and write, so it was already atomic; the lock just makes both branches uniform.
+        await withTaskLock(id) { () async -> String? in
+            if var task = tasks[id] {
+                if let problem = body(&task) { return problem }
+                tasks[id] = task
+                onChange?()
+                return nil
+            }
+            if let templateLibrary, var template = await templateLibrary.template(id: id) {
+                if let problem = body(&template) { return problem }
+                await templateLibrary.upsert(template)   // re-upsert preserves group membership
+                return nil
+            }
+            return "Task not found: \(id.uuidString)"
         }
-        if let templateLibrary, var template = await templateLibrary.template(id: id) {
-            if let problem = body(&template) { return problem }
-            await templateLibrary.upsert(template)   // re-upsert preserves group membership
-            return nil
-        }
-        return "Task not found: \(id.uuidString)"
     }
 
 
