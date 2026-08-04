@@ -315,23 +315,21 @@ private struct CrossSessionTranscriptView: View {
     let onOpenMCPSettings: () -> Void
     @Binding var selectedImageAttachment: Attachment?
 
-    @State private var loaded: (messages: [ChannelMessage], toolRequestIDs: Set<String>)?
+    /// The loaded transcript, TAGGED with the task it belongs to. Gating both the assignment (below) and
+    /// the render (here) on `taskID` makes a superseded load structurally unable to display under the
+    /// current selection — a slow load for task A can't paint over task B once B is selected.
+    @State private var loaded: LoadedCrossSessionTranscript?
 
     var body: some View {
         Group {
-            if let loaded {
-                ChannelLogView(
-                    messages: loaded.messages,
-                    toolRequestIDs: loaded.toolRequestIDs,
-                    persistedHistoryCount: 0,
-                    hasRestoredHistory: true,
-                    onRestoreHistory: {},
+            if let loaded, loaded.taskID == taskID {
+                CrossSessionTranscriptOutcomeView(
+                    outcome: loaded.outcome,
+                    displayPrefs: displayPrefs,
                     onExportTaskPDF: onExportTaskPDF,
                     onOpenMCPSettings: onOpenMCPSettings,
-                    displayPrefs: displayPrefs,
                     selectedImageAttachment: $selectedImageAttachment
                 )
-                .equatable()
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -339,7 +337,60 @@ private struct CrossSessionTranscriptView: View {
         }
         .task(id: taskID) {
             loaded = nil
-            loaded = await viewModel.loadCrossSessionTaskTranscript(originSessionID: originSessionID, taskID: taskID)
+            let result = await viewModel.loadCrossSessionTaskTranscript(
+                originSessionID: originSessionID, taskID: taskID)
+            // Don't let a superseded (cancelled) load assign at all — the render guard above also rejects
+            // a mismatched taskID, but not assigning keeps a slow, stale load from clobbering a newer one.
+            guard !Task.isCancelled else { return }
+            loaded = LoadedCrossSessionTranscript(
+                taskID: taskID,
+                outcome: result.map { .loaded(messages: $0.messages, toolRequestIDs: $0.toolRequestIDs) } ?? .failed)
+        }
+    }
+}
+
+/// A file-backed cross-session transcript load, tagged with the task it is for so a stale load can't
+/// render, and carrying a `.failed` case so a read error isn't shown as an empty transcript.
+private struct LoadedCrossSessionTranscript {
+    let taskID: UUID
+    let outcome: Outcome
+
+    enum Outcome {
+        case loaded(messages: [ChannelMessage], toolRequestIDs: Set<String>)
+        case failed
+    }
+}
+
+/// Renders a completed cross-session load: the transcript, or a "couldn't read" state. A `View` struct
+/// (not a `-> some View` helper) per the project's SwiftUI rules.
+private struct CrossSessionTranscriptOutcomeView: View {
+    let outcome: LoadedCrossSessionTranscript.Outcome
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        switch outcome {
+        case .loaded(let messages, let toolRequestIDs):
+            ChannelLogView(
+                messages: messages,
+                toolRequestIDs: toolRequestIDs,
+                persistedHistoryCount: 0,
+                hasRestoredHistory: true,
+                onRestoreHistory: {},
+                onExportTaskPDF: onExportTaskPDF,
+                onOpenMCPSettings: onOpenMCPSettings,
+                displayPrefs: displayPrefs,
+                selectedImageAttachment: $selectedImageAttachment
+            )
+            .equatable()
+        case .failed:
+            ContentUnavailableView(
+                "Transcript unavailable",
+                systemImage: "exclamationmark.triangle",
+                description: Text("This task's transcript could not be read from its session log."))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

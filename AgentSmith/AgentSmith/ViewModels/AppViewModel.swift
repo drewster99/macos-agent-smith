@@ -2700,11 +2700,19 @@ final class AppViewModel {
     /// one-shot (no streaming updates); the file-backed counterpart to the live provider. The (large)
     /// scan runs in the package, off this actor. Returns the task's messages plus the tool-request id
     /// set the row renderer folds tool output against.
-    func loadCrossSessionTaskTranscript(originSessionID: UUID, taskID: UUID) async -> (messages: [ChannelMessage], toolRequestIDs: Set<String>) {
+    /// Loads a task's transcript from its origin session's log. Returns `nil` on a READ failure so the
+    /// caller can distinguish "couldn't load" from "loaded, no messages" — the old `try?`→`[]` rendered
+    /// an unreadable/corrupt log as a clean empty transcript.
+    func loadCrossSessionTaskTranscript(originSessionID: UUID, taskID: UUID) async -> (messages: [ChannelMessage], toolRequestIDs: Set<String>)? {
         let pm = PersistenceManager(sessionID: originSessionID)
-        let messages = (try? await pm.loadTaskTranscript(taskID: taskID)) ?? []
-        let ids = Set(messages.compactMap { FilteredTranscriptProvider.toolRequestID(of: $0) })
-        return (messages, ids)
+        do {
+            let messages = try await pm.loadTaskTranscript(taskID: taskID)
+            let ids = Set(messages.compactMap { FilteredTranscriptProvider.toolRequestID(of: $0) })
+            return (messages, ids)
+        } catch {
+            logger.error("cross-session transcript load failed for task \(taskID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// Estimates the total cost of a set of usage records using current pricing.
