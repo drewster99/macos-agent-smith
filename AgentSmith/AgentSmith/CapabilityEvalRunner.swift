@@ -380,6 +380,23 @@ enum CapabilityEvalRunner {
                         makeProviderForcing: forcing)
                     profile.callCount += 1
                 }
+                // Behaviour-graded, so each takes the ORDINARY provider rather than a forcing one:
+                // what is being measured is how the endpoint treats a normal request shape, and a
+                // forced body would be measuring something the production path never sends.
+                if profile[.systemMessages] == nil {
+                    profile[.systemMessages] = await ModelProber.probeSystemMessages(llm: llm)
+                    profile.callCount += 1
+                }
+                if profile[.assistantPrefill] == nil {
+                    profile[.assistantPrefill] = await ModelProber.probeAssistantPrefill(llm: llm)
+                    profile.callCount += 1
+                }
+                // Needs tool calling to work at all, or it measures that instead. An established
+                // non-tool-caller is skipped; an unmeasured one still gets asked.
+                if profile[.parallelToolCalls] == nil, profile.toolCalling.value != false {
+                    profile[.parallelToolCalls] = await ModelProber.probeParallelToolCalls(llm: llm)
+                    profile.callCount += 1
+                }
 
                 // Budget range LAST: it is the only multi-call probe here, and running it after the
                 // single-call facts means an interrupted sweep still banks those.
@@ -509,7 +526,14 @@ enum CapabilityEvalRunner {
         // there was no way to tell a vendor claiming `audioInput: false` from one that never said.
         // Tri-state, so an unstated capability is OMITTED rather than printed as false.
         let stated = ModelCapability.allCases.compactMap { capability -> String? in
-            info.capabilities.state(of: capability).map { "\(capability.rawValue)=\($0)" }
+            // Unprobed capabilities are flagged inline: the vendor is the ONLY source for these,
+            // so a reader must not weigh them the same as a claim a probe could have overturned.
+            info.capabilities.state(of: capability).map {
+                "\(capability.rawValue)=\($0)" + (capability.isEmpiricallyProbed ? "" : "*")
+            }
+        }
+        if stated.contains(where: { $0.hasSuffix("*") }) {
+            print("  catalog: (* = vendor-declared only; no probe can confirm or refute it)")
         }
         for chunk in stride(from: 0, to: stated.count, by: 6).map({ Array(stated[$0..<min($0 + 6, stated.count)]) }) {
             print("  catalog: " + chunk.joined(separator: " "))
@@ -719,6 +743,11 @@ enum CapabilityEvalRunner {
             ("reasoning-ctl",  { acceptedSet($0, [(.reasoningCanBeEnabled, "on"),
                                                   (.reasoningCanBeDisabled, "off")]) }),
             ("strict-tools",   { $0[.toolDefinitionsSupportStrict].map(cell) ?? "-" }),
+            ("system-msgs",    { $0[.systemMessages].map(cell) ?? "-" }),
+            ("prefill",        { $0[.assistantPrefill].map(cell) ?? "-" }),
+            // Establishes yes only — a single tool call is a model's choice, so "no" is not a
+            // reachable answer here and an absent cell means undemonstrated, not incapable.
+            ("parallel-tools", { $0[.parallelToolCalls].map(cell) ?? "-" }),
             ("keep-thinking",  { $0[.thinkingSupportsKeepAll].map(cell) ?? "-" }),
             ("think-budget-min", { $0.minThinkingBudgetTokens.map(intCell) ?? "-" }),
             ("think-budget-max", { $0.maxThinkingBudgetTokens.map(intCell) ?? "-" }),

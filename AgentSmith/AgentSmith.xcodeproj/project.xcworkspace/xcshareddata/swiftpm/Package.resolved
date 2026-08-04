@@ -96,8 +96,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/drewster99/swift-llm-kit.git",
       "state" : {
-        "revision" : "9e611149d5558c3e8b30b51bd940237a9181edb2",
-        "version" : "0.0.162"
+        "revision" : "ebb6df66cc5304de4217cdde24176ed7f10ec62c",
+        "version" : "0.0.163"
       }
     },
     {
