@@ -147,7 +147,14 @@ struct ListTasksTool: AgentTool {
         if allowedDispositions.contains(.archived) || allowedDispositions.contains(.recentlyDeleted) {
             pool += await context.taskStore.allInactiveTasks()
         }
+        // Dedup by id (first-wins) BEFORE filtering: a promote/demote flip is a two-store move that, for
+        // the brief window of its durable write, leaves the template in BOTH `allTasks()` and the library
+        // (destination-durable-before-source-removal — the safe ordering). Reading the two stores across
+        // two awaits can catch that overlap, and the pool is a bare concatenation, so without this the LLM
+        // could momentarily see one task listed twice.
+        var seenIDs = Set<UUID>()
         var tasks = pool
+            .filter { seenIDs.insert($0.id).inserted }
             .filter { allowedDispositions.contains($0.disposition) }
 
         // Optional status filter applied after disposition.

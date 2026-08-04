@@ -73,11 +73,6 @@ public actor TaskStore {
     /// FIFO waiters per locked id. Resuming the head hands it the lock (the id stays locked).
     private var taskLockWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
 
-    /// A task lifted out of `tasks` while its promote/demote flip is mid-flight, so a reader never sees it
-    /// duplicated (in both `tasks` and the library) or vanished. Consulted by `task(id:)` /
-    /// `taskOrLibraryTemplate`. Empty except during a flip.
-    private var flippingTasks: [UUID: AgentTask] = [:]
-
     /// Acquires the exclusive lock for `id`, awaiting any in-flight holder of the SAME id (fair FIFO).
     /// The `contains` check and the `insert`/`append` run in ONE synchronous actor step with no `await`
     /// between, so two acquirers cannot both observe the id unlocked. Pair with `releaseTaskLock` via
@@ -200,22 +195,14 @@ public actor TaskStore {
 
     /// Retrieves a single active task by ID (this session only). Archived/deleted tasks live in
     /// the global store — use `taskAnyDisposition(id:)` to look across both.
-    ///
-    /// Falls back to the in-flight slot: a task mid-promote/demote is lifted out of `tasks` while its
-    /// flip's durable writes are in flight, and a reader must still see that ONE consistent copy rather
-    /// than a momentary gap (or, worse, a duplicate once it also appears in the library).
     public func task(id: UUID) -> AgentTask? {
-        tasks[id] ?? flippingTasks[id]
+        tasks[id]
     }
 
     /// Looks up a task by ID across this session's active list and the global inactive store
     /// (archived + deleted). Used by tools that operate on a task regardless of disposition.
     public func taskAnyDisposition(id: UUID) async -> AgentTask? {
         if let active = tasks[id] { return active }
-        // Same in-flight-slot fallback as `task(id:)`: a task mid-flip is momentarily out of `tasks`, and
-        // a "find it anywhere" lookup must still find it or a tool (get_task_details, …) reports it
-        // missing for that window.
-        if let flipping = flippingTasks[id] { return flipping }
         if let inactive = await inactiveStore?.task(id: id) { return inactive }
         // Templates live in the global library, not the per-session/inactive stores. A "find it
         // anywhere" lookup must include them, or every tool that surfaces a template id via list_tasks
@@ -286,59 +273,42 @@ public actor TaskStore {
             return nil
         }
         if isTemplate, !wasInLibrary {
-            // Promote (session → library): land it durably in the library BEFORE removing the session
-            // copy, so a crash in the gap can't lose it from both files (the ordering the inactive-store
-            // `move` uses). On a failed library write, keep it per-session — nothing is lost, it is still
-            // a template, and the load-time straggler backstop re-migrates it (so this is not a refusal).
-            // Its preserved prior-run child stays per-session.
+            // Promote (session → library): land it DURABLY in the library (destination) BEFORE removing
+            // the session copy (source), so a crash in the gap can't lose it from both files (the ordering
+            // the inactive-store `move` uses). On a failed library write, keep it per-session — nothing is
+            // lost, it is still a template, and the load-time straggler backstop re-migrates it (so this is
+            // not a refusal). Its preserved prior-run child stays per-session.
             //
-            // Lift the source into the in-flight slot BEFORE the durable writes: while they run, a reader
-            // via `task(id:)` sees this one consistent copy instead of the task appearing in BOTH `tasks`
-            // and the library (the duplicate that could crash the sidebar's family grouping), and a sync
-            // point-writer that lands now finds no `tasks[id]` and no-ops rather than mutating a half-
-            // moved task the flip is about to discard.
-            tasks.removeValue(forKey: id)
-            flippingTasks[id] = task
-            onChange?()
+            // Do NOT remove the source before the destination is durable to hide a transient reader dup:
+            // `removeValue` fires `onChange`, whose coalesced session write drains EAGERLY and can durably
+            // strip the source before the library write lands — reopening the both-files-lose-it window.
+            // The transient duplicate (the task in BOTH `tasks` and the library while the library write
+            // runs) is COSMETIC and is handled by deduping the combined readers (list_tasks, taskFamilies).
             await templateLibrary.upsert(task)
             if let durablyPersistLibraryNow, await durablyPersistLibraryNow() == false {
                 await templateLibrary.removeTemplate(id: id)
-                flippingTasks.removeValue(forKey: id)
                 tasks[id] = task
                 onChange?()
                 return nil
             }
-            // Destination durable; the task lives in the library now. Retire the slot and make the SOURCE
-            // removal durable too, closing the crash window (the session file otherwise keeps the template
-            // until a coalesced write; the straggler backstop would recover it, but this avoids relying on
-            // that). Promote is complete: destination durable, source durable.
-            flippingTasks.removeValue(forKey: id)
+            // Destination durable. Now remove the source and make that durable too.
+            tasks.removeValue(forKey: id)
             onChange?()
             _ = await durablyPersistActiveNow?(Array(tasks.values))
             return nil
         } else if !isTemplate, wasInLibrary {
-            // Demote (library → session). Like promote, use the in-flight slot so the task is NEVER live
-            // in both `tasks` and the library at once (a combined reader such as list_tasks would else see
-            // it twice — once as a task, once as a template) and never vanishes mid-move. Order:
-            //   1. hold it in the slot and remove the in-memory library copy (its FILE still has it, so
-            //      durability is unchanged — crash here rolls the demote back);
-            //   2. move slot → `tasks` (synchronous, no gap) and durably persist the session (DESTINATION
-            //      durable — a crash after this leaves the id in both files, which the newest-updatedAt
-            //      backstop resolves for the session copy);
-            //   3. durably persist the library WITHOUT it (SOURCE durable). Destination-before-source holds.
+            // Demote (library → session): land it DURABLY in this session (destination) BEFORE removing the
+            // library copy (source) — same reasoning as promote (removing the source early lets its
+            // coalesced `onChange` write durably strip it before the destination lands). On a failed active
+            // write, roll back (leave it in the library) and REFUSE. The transient both-stores duplicate is
+            // cosmetic (deduped by the combined readers).
             task.sessionID = sessionID
-            let libraryCopy = await templateLibrary.template(id: id)
-            flippingTasks[id] = task
-            _ = await templateLibrary.removeTemplate(id: id)
             tasks[id] = task
-            flippingTasks.removeValue(forKey: id)
             if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
-                // Roll back: drop the session copy and restore the library template, then REFUSE — the task
-                // did not demote, and reporting success would be a lie.
                 tasks.removeValue(forKey: id)
-                if let libraryCopy { await templateLibrary.upsert(libraryCopy) }
                 return "Couldn't save the change durably, so the task was NOT converted from a template. Please try again."
             }
+            _ = await templateLibrary.removeTemplate(id: id)
             onChange?()
             _ = await durablyPersistLibraryNow?()
             return nil
@@ -561,7 +531,6 @@ public actor TaskStore {
     /// into this session. For a normal (non-template) task this is just `task(id:)`.
     public func taskOrLibraryTemplate(id: UUID) async -> AgentTask? {
         if let local = tasks[id] { return local }
-        if let flipping = flippingTasks[id] { return flipping }
         return await templateLibrary?.template(id: id)
     }
 
