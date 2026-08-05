@@ -445,9 +445,12 @@ struct ChannelLogView: View, Equatable {
                 // so count is pinned and an `.onChange(of: messages.count)` would stop firing —
                 // silently killing auto-scroll. last.id changes on every appended message.
                 .onChange(of: messages.last?.id) {
-                    guard autoScrollEnabled, let lastID = messages.last?.id else { return }
+                    // Watches the raw last id — that is the append signal, and it changes even when
+                    // the new message is folded into an existing row (which still grows that row).
+                    // But it SCROLLS to the last rendered id, the only one with a view to reach.
+                    guard autoScrollEnabled, let target = lastRenderedMessageID else { return }
                     withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(lastID, anchor: .bottom)
+                        proxy.scrollTo(target, anchor: .bottom)
                     }
                 }
                 // Cache expensive computations: window start, visible messages array, and grouping
@@ -474,9 +477,11 @@ struct ChannelLogView: View, Equatable {
 
                 if !isAtBottom {
                     ChannelLogScrollToBottomButton(onTap: {
-                        guard let lastID = messages.last?.id else { return }
+                        // Same target as auto-scroll: a suppressed last message has no view, so the
+                        // button was a no-op in exactly the cases the user reaches for it.
+                        guard let target = lastRenderedMessageID else { return }
                         withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(lastID, anchor: .bottom)
+                            proxy.scrollTo(target, anchor: .bottom)
                         }
                     })
                 }
@@ -543,6 +548,22 @@ struct ChannelLogView: View, Equatable {
         guard message.stringMetadata("requestID") != nil else { return false }
         return message.metadata?["securityDisposition"] != nil
             || message.kind == .toolOutput
+    }
+
+    /// The id of the last message that actually HAS a view — the only thing `proxy.scrollTo` can
+    /// reach.
+    ///
+    /// The `ForEach` renders only non-suppressed messages, so a security review or tool output has
+    /// no `.id(...)` of its own; it is folded into its parent `tool_request` row. Scrolling to
+    /// `messages.last?.id` therefore targeted a view that does not exist whenever the newest
+    /// message was one of those — which in this app is most appends, since every tool call produces
+    /// a tool output. `scrollTo` fails silently in that case, so the transcript simply stopped
+    /// following the tail with nothing in the logs to say why.
+    ///
+    /// `windowStartIndex` already walks back past suppressible rows so the window never STARTS on
+    /// one. This is the same hazard at the other end of the array.
+    private var lastRenderedMessageID: ChannelMessage.ID? {
+        messages.last { !shouldSuppress($0, toolRequestIDs: toolRequestIDs) }?.id
     }
 
     /// Suppresses security reviews and tool outputs that are grouped into a parent tool_request row.
