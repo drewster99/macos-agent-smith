@@ -449,10 +449,18 @@ enum CapabilityEvalRunner {
                 // it everywhere recorded `true` on any endpoint that ignores unknown body keys.
                 if profile[.thinkingSupportsKeepAll] == nil,
                    let finding = await ModelProber.probeThinkingKeep(
-                       reasoningControl: catalogEntry?.reasoningControl,
-                       // Measured stand-in for an undeclared mechanism: nothing decodes
-                       // `reasoningControl`, so without this the probe never runs at all.
-                       acceptedThinkingBlock: profile[.reasoningCanBeEnabled]?.value == true,
+                       // The DISCOVERED mechanism first — the same resolution the budget gate uses.
+                       // Passing only the catalog's (which nothing decodes) plus the old
+                       // `reasoningCanBeEnabled` stand-in went stale the day discovery landed:
+                       // "can be enabled" now means the model accepted ITS OWN mechanism, which is
+                       // `reasoning_effort` at OpenAI and adaptive at the newest Claude — so this
+                       // would have fired a `thinking` block at endpoints that have none.
+                       reasoningControl: profile.reasoningControl?.value ?? catalogEntry?.reasoningControl,
+                       // No stand-in: `keep` is a key OF the thinking block, so with no
+                       // block-mechanism established there is nothing coherent to probe. The
+                       // models this matters for (DeepSeek, Kimi) now demonstrate `.thinkingBlock`
+                       // and arrive through the parameter above.
+                       acceptedThinkingBlock: false,
                        makeProviderForcing: forcing) {
                     profile[.thinkingSupportsKeepAll] = finding
                     profile.callCount += 1
