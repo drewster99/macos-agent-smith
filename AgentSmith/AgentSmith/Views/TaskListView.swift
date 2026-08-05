@@ -665,7 +665,9 @@ struct TaskRowButton: View {
 
 /// Roll-up of every run a parent task has spawned, for the parent's summary line.
 /// `nil` when the task has no runs — an ordinary task shows no summary.
-private struct TaskFamilySummary {
+/// Shared with the Run History pane so the header's totals and the sidebar's roll-up are the SAME
+/// arithmetic. Two implementations of "how did this template's runs go" is two answers.
+struct TaskFamilySummary {
     let runCount: Int
     let buckets: [Bucket]
     let totalCost: Double

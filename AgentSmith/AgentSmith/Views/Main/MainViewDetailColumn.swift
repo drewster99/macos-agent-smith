@@ -68,7 +68,17 @@ struct MainViewDetailColumn: View {
                 // ChannelLogView: a vertical ScrollView otherwise reports its CONTENT's width
                 // (measured: an 11pt ribbon at a 300pt proposal).
                 .frame(maxWidth: .infinity)
-                .frame(minHeight: 120, idealHeight: 240)
+                // maxHeight on the SPLIT AXIS too. Without it the child sizes to its content and
+                // the split has no reason to stretch it: measured at 172pt of content sitting in a
+                // 225pt allocation, with the remaining 53pt showing the bare VSplitView through —
+                // an `element_at` probe there hit the split group itself, so neither child was
+                // drawn in it. That strip is the blank band, and it is why the pane's own header
+                // ended up above the visible area.
+                //
+                // Same rule as ModelMetadataInspectorWindow's split, which gives its flexible child
+                // `maxWidth: .infinity` on ITS split axis for the same reason. `idealHeight` still
+                // sets where the divider rests before the user drags it.
+                .frame(minHeight: 120, idealHeight: 240, maxHeight: .infinity)
 
                 // Bottom: the full session transcript, filtered by the user's per-session config
                 // (its own provider — the inspector still reads the unfiltered firehose).
@@ -80,7 +90,7 @@ struct MainViewDetailColumn: View {
                     selectedImageAttachment: $selectedImageAttachment
                 )
                 .frame(maxWidth: .infinity)
-                .frame(minHeight: 200)
+                .frame(minHeight: 200, maxHeight: .infinity)
             }
             // Update cached display preferences when any of the underlying shared preferences change.
             // This avoids creating a new TimestampPreferences instance on every body pass.
@@ -425,108 +435,112 @@ private struct TemplateRunHistoryPane: View {
     var body: some View {
         let runs = viewModel.childTasks(of: template.id)
             .sorted { ($0.startedAt ?? $0.createdAt) > ($1.startedAt ?? $1.createdAt) }
-        VStack(alignment: .leading, spacing: 0) {
-            TemplateRunHistoryHeader(title: template.title, runCount: runs.count)
-            Divider()
-            TemplateRunList(runs: runs) { viewModel.selectedTemplateRunID = $0 }
+        TemplateRunList(template: template, runs: runs, viewModel: viewModel) {
+            viewModel.selectedTemplateRunID = $0
         }
     }
 }
 
 private struct TemplateRunList: View {
+    let template: AgentTask
     let runs: [AgentTask]
+    let viewModel: AppViewModel
     let onSelect: (UUID) -> Void
 
     var body: some View {
-        if runs.isEmpty {
-            ContentUnavailableView(
-                "No runs yet",
-                systemImage: "clock.arrow.circlepath",
-                description: Text("This template hasn't been run. Use its Run action to start one.")
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                VStack(spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                TemplateOverviewHeader(template: template, runs: runs, viewModel: viewModel)
+                Divider()
+                RunHistoryLabel(runCount: runs.count)
+                if runs.isEmpty {
+                    Text("This template hasn't been run. Use its Run action to start one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 10)
+                } else {
                     ForEach(runs, id: \.id) { run in
-                        TemplateRunRow(run: run) { onSelect(run.id) }
-                        Divider()
+                        TemplateRunRow(run: run, viewModel: viewModel) { onSelect(run.id) }
+                            // Indented under the Run History label, so the header reads as being
+                            // ABOUT the list rather than the first item of it.
+                            .padding(.leading, 12)
+                        Divider().padding(.leading, 12)
                     }
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-private struct TemplateRunHistoryHeader: View {
-    let title: String
+/// What the template IS, above the list of what it did: name, when it was created, and the totals
+/// across every run.
+///
+/// The created date used to sit in the sidebar's template row with no label, where it read as "last
+/// run" and wasn't. Stated here, next to the totals it belongs with, it answers the question it was
+/// always trying to answer.
+private struct TemplateOverviewHeader: View {
+    let template: AgentTask
+    let runs: [AgentTask]
+    let viewModel: AppViewModel
+
+    var body: some View {
+        let summary = TaskFamilySummary(runs: runs, viewModel: viewModel)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.on.doc")
+                    .foregroundStyle(.secondary)
+                Text(template.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                Spacer()
+            }
+            Text("Created \(template.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let summary {
+                HStack(spacing: 10) {
+                    Text("\(summary.runCount) run\(summary.runCount == 1 ? "" : "s")")
+                        .foregroundStyle(.secondary)
+                    // Same buckets the sidebar shows — one arithmetic, so the two can't disagree.
+                    ForEach(summary.buckets) { bucket in
+                        Text("\(bucket.count) \(bucket.label)")
+                            .foregroundStyle(bucket.color)
+                    }
+                    Spacer()
+                    Text(String(format: "$%.2f", summary.totalCost))
+                        .foregroundStyle(.orange)
+                        .monospacedDigit()
+                    Text(formattedElapsed(summary.totalElapsed))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct RunHistoryLabel: View {
     let runCount: Int
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "clock.arrow.circlepath")
                 .foregroundStyle(.secondary)
             Text("Run History")
-                .font(.headline)
-            Text("· \(title)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .font(.subheadline.weight(.semibold))
             Spacer()
             Text("\(runCount) run\(runCount == 1 ? "" : "s")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-}
-
-private struct TemplateRunRow: View {
-    let run: AgentTask
-    let onSelect: () -> Void
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 8) {
-                Image(systemName: statusSymbol)
-                    .foregroundStyle(statusColor)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(run.title)
-                        .font(.callout)
-                        .lineLimit(1)
-                    Text((run.startedAt ?? run.createdAt).formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var statusSymbol: String {
-        switch run.status {
-        case .completed: return "checkmark.circle.fill"
-        case .failed: return "xmark.circle.fill"
-        case .running, .starting, .validating: return "play.circle.fill"
-        case .paused, .interrupted, .awaitingReview, .awaitingHelp: return "pause.circle.fill"
-        default: return "circle"
-        }
-    }
-
-    private var statusColor: Color {
-        switch run.status {
-        case .completed: return .green
-        case .failed: return .red
-        case .running, .starting, .validating: return .blue
-        default: return .secondary
-        }
+        .padding(.vertical, 6)
     }
 }
 
@@ -543,4 +557,172 @@ private struct DrilledRunHeader: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
     }
+}
+
+
+/// One run: the same facts the sidebar's run row shows, plus the two things you can only get here —
+/// what it produced, and the files it produced them into.
+private struct TemplateRunRow: View {
+    let run: AgentTask
+    let viewModel: AppViewModel
+    let onSelect: () -> Void
+
+    @State private var showsResult = false
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Button around the SUMMARY LINE only, not the whole row: the result disclosure and the
+            // attachment chips are buttons themselves, and nesting them inside a row-wide button
+            // makes the inner controls unreachable.
+            Button(action: onSelect) {
+                HStack(spacing: 8) {
+                    if let outcome = run.outcome {
+                    TaskOutcomeChip(outcome: outcome)
+                } else {
+                    TaskStatusChip(status: run.status)
+                }
+                Text(run.title)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                if !run.resultAttachments.isEmpty {
+                    Label("\(run.resultAttachments.count)", systemImage: "paperclip")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .labelStyle(.titleAndIcon)
+                }
+                if let cost = viewModel.cachedTaskCost(run.id), cost > 0 {
+                    Text(String(format: "$%.2f", cost))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.orange)
+                }
+                Text(formattedElapsed(elapsed))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text((run.startedAt ?? run.createdAt).formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if resultText != nil || !run.resultAttachments.isEmpty {
+                RunResultDisclosure(run: run, isExpanded: $showsResult,
+                                    resultText: resultText, isFailure: isFailure,
+                                    viewModel: viewModel)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .contextMenu {
+            Button("Open Details") {
+                AgentSmithApp.showOrOpenTaskDetail(
+                    target: TaskDetailTarget(sessionID: viewModel.session.id, taskID: run.id),
+                    openWindow: openWindow)
+            }
+            Button("Open Transcript", action: onSelect)
+        }
+    }
+
+    private var elapsed: TimeInterval {
+        guard let started = run.startedAt else { return 0 }
+        return (run.completedAt ?? Date()).timeIntervalSince(started)
+    }
+
+    /// Outcome-aware. A clean run has a result worth reading; a run that did NOT finish happily has
+    /// reasons, and those are what you came to the row for — showing an empty result field there
+    /// would answer the wrong question.
+    private var resultText: String? {
+        if isFailure {
+            let rejections = (run.validation?.criterionRejections ?? []).map(\.rejectionText)
+            if !rejections.isEmpty { return rejections.joined(separator: "\n\n") }
+        }
+        if let result = run.result, !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return result
+        }
+        return nil
+    }
+
+    private var isFailure: Bool {
+        run.status == .failed || run.outcome.map { TaskOutcomeBadge.color(for: $0) == .red } == true
+    }
+}
+
+/// The expandable result block and its attachments.
+private struct RunResultDisclosure: View {
+    let run: AgentTask
+    @Binding var isExpanded: Bool
+    let resultText: String?
+    let isFailure: Bool
+    let viewModel: AppViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let resultText {
+                Text(isExpanded ? resultText : String(resultText.prefix(140)))
+                    .font(.caption)
+                    .foregroundStyle(isFailure ? AppColors.verdictRejected : .secondary)
+                    .lineLimit(isExpanded ? nil : 2)
+                    .textSelection(.enabled)
+                if resultText.count > 140 {
+                    Button(isExpanded ? "less" : "more") { isExpanded.toggle() }
+                        .buttonStyle(.plain)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tint)
+                }
+            }
+            if !run.resultAttachments.isEmpty {
+                // QuickLook on click is the cheap look; ⌘-click reveals, for when you want the file
+                // itself rather than a peek at it.
+                FlowingAttachmentChips(attachments: run.resultAttachments, viewModel: viewModel)
+            }
+        }
+        .padding(.leading, 2)
+    }
+}
+
+private struct FlowingAttachmentChips: View {
+    let attachments: [Attachment]
+    let viewModel: AppViewModel
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(attachments) { attachment in
+                Button {
+                    open(attachment, reveal: NSEvent.modifierFlags.contains(.command))
+                } label: {
+                    Label(attachment.filename, systemImage: "paperclip")
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(AppColors.secondaryBackground))
+                }
+                .buttonStyle(.plain)
+                .help("Click to preview · ⌘-click to reveal in Finder")
+            }
+        }
+    }
+
+    private func open(_ attachment: Attachment, reveal: Bool) {
+        let url = viewModel.persistenceManager.attachmentURL(id: attachment.id,
+                                                             filename: attachment.filename)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        if reveal {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+/// Compact duration, shared by the header totals and the rows.
+private func formattedElapsed(_ interval: TimeInterval) -> String {
+    let total = Int(interval.rounded())
+    let hours = total / 3600, minutes = (total % 3600) / 60, seconds = total % 60
+    if hours > 0 { return "\(hours)h \(minutes)m" }
+    if minutes > 0 { return "\(minutes)m \(seconds)s" }
+    return "\(seconds)s"
 }

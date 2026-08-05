@@ -116,7 +116,21 @@ final class AppViewModel {
         let finished = activeTaskList
             .filter { $0.status.isTerminal || $0.status == .interrupted }
             .sorted { $0.updatedAt > $1.updatedAt }
-        return live + finished.prefix(max(0, cap - live.count))
+        // Per-template ceiling on FINISHED runs, so one busy template cannot evict every standalone
+        // task from a 20-row list — "Monitor iMessages" alone has 177 runs. Live runs are never
+        // capped: a run you can no longer see is exactly the one you needed to notice. The full
+        // history is one click away in the Run History pane, which is why a ceiling here is safe now
+        // and would not have been before.
+        let perTemplateCap = 5
+        var seenPerParent: [UUID: Int] = [:]
+        let throttled = finished.filter { run in
+            guard let parent = run.parentTaskID else { return true }
+            let count = seenPerParent[parent, default: 0]
+            guard count < perTemplateCap else { return false }
+            seenPerParent[parent] = count + 1
+            return true
+        }
+        return live + throttled.prefix(max(0, cap - live.count))
     }
     /// Active scheduled wakes (timers) for this session. Refreshed via runtime callbacks
     /// and on demand from the View → Timers window.
