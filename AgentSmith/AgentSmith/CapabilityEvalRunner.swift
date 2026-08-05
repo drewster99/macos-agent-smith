@@ -343,7 +343,10 @@ enum CapabilityEvalRunner {
                 // ignores response_format returns 200 and would otherwise record as supporting it.
                 let structuredModes: [LLMResponseFormat] = [
                     .jsonObject,
-                    .jsonSchema(name: "probe", schema: ["type": .string("object")])
+                    // The shared strict-valid schema — a bare {"type":"object"} fails OpenAI's
+                    // validator before the model sees it, and 47 models were recorded as lacking
+                    // json_schema off the back of that refusal.
+                    .jsonSchema(name: "probe", schema: CapabilityProbe.probeResponseSchema)
                 ]
                 for mode in structuredModes where profile[mode.requiredCapability] == nil {
                     // nil = this provider family has no `response_format`; no call is spent.
