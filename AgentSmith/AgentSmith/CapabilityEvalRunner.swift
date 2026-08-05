@@ -339,9 +339,22 @@ enum CapabilityEvalRunner {
                 // a conclusion drawn from one observation and one blank would be drawn from a
                 // baseline that was never measured. Only an already-answered PAIR skips.
                 if profile[.reasoningCanBeEnabled] == nil || profile[.reasoningCanBeDisabled] == nil {
-                    let on = await ModelProber.observeReasoningToggle(enabled: true, makeProviderForcing: forcing)
-                    let off = await ModelProber.observeReasoningToggle(enabled: false, makeProviderForcing: forcing)
-                    profile.callCount += 2
+                    // Discovers the mechanism rather than assuming one. OpenAI, Moonshot and
+                    // DeepSeek are all `.openAICompatible` and do not share a way to switch
+                    // reasoning, so asking every endpoint for a `thinking` block earned OpenAI's
+                    // "Unknown parameter: 'thinking'" and recorded 60+ reasoning models as unable
+                    // to reason — literally what the endpoint said, and completely wrong.
+                    let mechanismCalls = ProbeCallCounter()
+                    let found = await ModelProber.probeReasoningMechanism(
+                        apiType: provider.apiType, makeProviderForcing: forcing, calls: mechanismCalls)
+                    let (on, off) = (found.on, found.off)
+                    profile.callCount += mechanismCalls.value
+                    // The mechanism itself is a fact worth keeping: nothing else establishes
+                    // `reasoningControl`, which is why the thinking.keep probe could never fire.
+                    if let control = found.control {
+                        profile.reasoningControl = .established(
+                            control, "the endpoint accepted \(control.editorTitle)")
+                    }
                     // Acceptance says the endpoint took the switch; the reply says whether it DID
                     // anything. `thinking` is an unknown key to most OpenAI-compatible endpoints and
                     // unknown keys are ignored rather than refused, so a model that carried on
@@ -435,7 +448,13 @@ enum CapabilityEvalRunner {
                 // a reasoning-token budget. A vendor claim counts too, for the models the toggle
                 // probe cannot reach (OpenAI's reasoning models take `reasoning_effort`, not a
                 // `thinking` block, so nothing observes their reasoning here).
+                // "It reasons" is NOT sufficient on its own: OpenAI's reasoning models reason
+                // demonstrably and have no token budget at all — depth there is a named effort
+                // level. Gating on reasoning alone would rebuild the same 72-model bug one layer up
+                // now that the mechanism probe makes those models demonstrate reasoning.
+                let mechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
                 let reasonsDemonstrably = profile[.reasoning]?.value == true
+                    && (mechanism?.carriesTokenBudget ?? true)
                 let vendorClaimsBudget = catalogEntry?.capabilities.state(of: .thinkingSupportsTokenBudget) == true
                 if profile.maxThinkingBudgetTokens == nil,
                    profile[.thinkingSupportsTokenBudget]?.value != false,
@@ -783,6 +802,9 @@ enum CapabilityEvalRunner {
             // undemonstrated. Distinct from the switches beside it: a thinking-only model reasons
             // and cannot be turned off, and rejecting both switches does not mean it never reasons.
             ("reasons",        { $0[.reasoning].map(cell) ?? "-" }),
+            // Which mechanism the endpoint actually speaks. Discovered, not assumed — and the only
+            // thing that establishes it, so a blank here means no candidate was accepted.
+            ("reasoning-via",  { $0.reasoningControl?.value?.rawValue ?? "-" }),
             ("reasoning-ctl",  { acceptedSet($0, [(.reasoningCanBeEnabled, "on"),
                                                   (.reasoningCanBeDisabled, "off")]) }),
             ("strict-tools",   { $0[.toolDefinitionsSupportStrict].map(cell) ?? "-" }),
