@@ -16,6 +16,8 @@ struct TaskOverlayBar: View {
 
     /// Height mid-drag; committed to `shared.taskOverlayHeight` on gesture end.
     @State private var dragHeight: Double?
+    /// Whether this view pushed the resize cursor, so `onDisappear` can pop exactly what it pushed.
+    @State private var isHoveringHandle = false
 
     private static let minHeight: Double = 90
     private static let maxHeight: Double = 440
@@ -138,7 +140,14 @@ struct TaskOverlayBar: View {
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
-                        dragHeight = min(max(shared.taskOverlayHeight + value.translation.height, Self.minHeight), Self.maxHeight)
+                        // Base is the clamped COMMITTED height. Not `currentHeight` — that returns
+                        // `dragHeight` once a drag is under way, so it would compound every frame
+                        // and run away from the cursor. Not the raw stored value either: the two
+                        // agree today, but if the bounds are ever tightened a persisted
+                        // out-of-range height would make the drag appear dead until the cursor
+                        // travelled past the clamp.
+                        let base = min(max(shared.taskOverlayHeight, Self.minHeight), Self.maxHeight)
+                        dragHeight = min(max(base + value.translation.height, Self.minHeight), Self.maxHeight)
                     }
                     .onEnded { _ in
                         if let dragHeight {
@@ -148,7 +157,19 @@ struct TaskOverlayBar: View {
                     }
             )
             .onHover { hovering in
+                guard hovering != isHoveringHandle else { return }
+                isHoveringHandle = hovering
                 if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            // `push` has no guaranteed counterpart: the bar is gated on HAVING ENTRIES, so dismissing
+            // the last one — or collapsing the bar — removes this view with the pointer still over
+            // it, no `onHover(false)` ever fires, and the resize cursor is stranded on the app-wide
+            // stack. A stray `pop` is a documented no-op, so the flag makes the pairing exact.
+            .onDisappear {
+                if isHoveringHandle {
+                    isHoveringHandle = false
+                    NSCursor.pop()
+                }
             }
     }
 

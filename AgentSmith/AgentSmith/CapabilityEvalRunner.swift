@@ -41,9 +41,12 @@ enum CapabilityEvalRunner {
         return args.contains(flag) || args.contains("--list-models") || args.contains("--fetch-ollama-library")
     }
 
-    /// A model to probe, and which effort levels (if any) to attempt for it. Effort is only worth
-    /// probing where the provider emits the field unconditionally (Anthropic); elsewhere the field
-    /// is flag-gated and a "no error" proves nothing, so the list is empty.
+    /// A model to probe, and which effort levels to attempt for it.
+    ///
+    /// The list is the FULL ladder by default for every provider — Anthropic's general effort rides
+    /// on `output_config.effort` and is emitted unconditionally, while elsewhere the field is
+    /// flag-gated, which is why the non-Anthropic loop forces `reasoning_effort` through
+    /// `extraJSONOverrides` rather than trusting a silent success.
     struct Target {
         let providerID: String
         let modelID: String
@@ -202,21 +205,25 @@ enum CapabilityEvalRunner {
                 let (localRecord, _) = kit.probeRecords(provider: provider, modelID: target.modelID)
                 if let record = localRecord {
                     let age = Date().timeIntervalSince(record.recordedAt)
-                    // v3→v4 changed ONLY the trailing-system methodology (isolated → realistic shape),
-                    // so a v3 record's other findings are still valid: reuse them and re-probe just
-                    // trailing-system, rather than a full re-sweep of every capability.
-                    let migratableV3 = record.proberVersion == 3
-                    if record.proberVersion != ModelProber.proberVersion && !migratableV3 {
+                    // ONLY the current version is reusable. There was a partial-migration branch for
+                    // v3 — written when 4 was current, on the basis that v3→v4 changed only the
+                    // trailing-system methodology — and it survived two version bumps that
+                    // explicitly invalidated everything else. v5 declared every v4 record suspect
+                    // and v6 declared every v5 budget finding fabricated, so a v3 record is at
+                    // least as stale as the versions those bumps rejected, yet it was the one
+                    // vintage still getting a pass.
+                    //
+                    // It also laundered: `storeProbeResult` stamps the CURRENT prober version, so
+                    // carried v3 findings were re-persisted as v6, and the evidence combiner
+                    // prefers a higher prober version over a newer timestamp — letting the
+                    // laundered data outrank a correct measurement.
+                    if record.proberVersion != ModelProber.proberVersion {
                         reusedFindingSummary = "  reuse: SKIP — record is prober v\(record.proberVersion), current is v\(ModelProber.proberVersion); full re-probe"
                     } else if age > reuseMaxAge {
                         reusedFindingSummary = "  reuse: SKIP — record is \(Int(age / 86_400))d old (> \(Int(reuseMaxAgeDays))d); full re-probe"
                     } else {
-                        var carried = record.profile
-                        if migratableV3 { carried.trailingSystemMessage = nil }  // re-measure in the v4 shape
-                        seed.seedProbedFindings(from: carried)
-                        reusedFindingSummary = migratableV3
-                            ? "  reuse: seeded v3 findings from a \(Int(age / 86_400))d-old record; re-probing trailing-system (v4 shape)"
-                            : "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
+                        seed.seedProbedFindings(from: record.profile)
+                        reusedFindingSummary = "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
                     }
                 } else {
                     reusedFindingSummary = "  reuse: no prior record — full probe"
@@ -377,7 +384,8 @@ enum CapabilityEvalRunner {
                     // anything. `thinking` is an unknown key to most OpenAI-compatible endpoints and
                     // unknown keys are ignored rather than refused, so a model that carried on
                     // thinking was being recorded as one whose reasoning can be turned off.
-                    let conclusions = ModelProber.concludeReasoning(on: on, off: off)
+                    let conclusions = ModelProber.concludeReasoning(on: on, off: off,
+                                                                    mechanism: found.control)
                     // Never downgrade: the pair RUNS when either side is missing, so a re-run whose
                     // calls all failed (a 429 storm) would otherwise overwrite a stored established
                     // measurement with an inconclusive and re-persist the loss.
@@ -446,9 +454,11 @@ enum CapabilityEvalRunner {
                     profile[.thinkingSupportsKeepAll] = finding
                     profile.callCount += 1
                 }
-                if profile[.toolDefinitionsSupportStrict] == nil {
-                    profile[.toolDefinitionsSupportStrict] = await ModelProber.probeStrictToolDefinitions(
-                        makeProviderForcing: forcing)
+                // nil where the family has no `strict` concept — no call is spent there.
+                if profile[.toolDefinitionsSupportStrict] == nil,
+                   let strict = await ModelProber.probeStrictToolDefinitions(
+                       apiType: provider.apiType, makeProviderForcing: forcing) {
+                    profile[.toolDefinitionsSupportStrict] = strict
                     profile.callCount += 1
                 }
                 // Behaviour-graded, so each takes the ORDINARY provider rather than a forcing one:
@@ -504,7 +514,6 @@ enum CapabilityEvalRunner {
                    let mechanism, mechanism.carriesTokenBudget {
                     let calls = ProbeCallCounter()
                     profile.maxThinkingBudgetTokens = await ModelProber.probeThinkingBudgetRange(
-                        llm: await forcing([:]), modelID: target.modelID,
                         accounting: catalogEntry?.thinkingBudgetAccounting,
                         maxOutputTokens: profile.maxOutputTokens.value ?? catalogEntry?.maxOutputTokens,
                         maxContextTokens: profile.maxContextTokens.value ?? catalogEntry?.maxInputTokens,
