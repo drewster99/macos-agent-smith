@@ -42,6 +42,17 @@ struct TaskListView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 0) {
+                    // Named, like Library below it. It is a capped, recency-ordered slice — not
+                    // "all tasks" — and an unlabelled list above a labelled one read as the whole
+                    // set with a Library appended.
+                    if !activeTasks.isEmpty {
+                        Text("Recent")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
+                    }
                     ForEach(taskFamilies(for: activeTasks)) { family in
                         TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
                     }
@@ -231,9 +242,12 @@ private struct TaskFamilyRows: View {
         // would render children with no way to collapse them. A childless template run stays compact
         // unless it's a true top-level task — keying on `parentTaskID`, not nesting, keeps a run's
         // presentation stable no matter which bucket it lands in.
-        let density: TaskRowDensity = hasChildren
-            ? .standard
-            : (family.parent.parentTaskID == nil ? .standard : .compact)
+        // STANDARD for everything in the sidebar now. A template run used to render compact, which
+        // made a completed run look like a footnote of the template that spawned it — and once the
+        // Library stopped expanding, Recent became the only place runs appear, so a run there IS the
+        // task you care about. Lineage is carried by the template glyph on the row instead of by
+        // making the row smaller.
+        let density: TaskRowDensity = .standard
 
         VStack(alignment: .leading, spacing: 0) {
             TaskListRow(
@@ -763,6 +777,15 @@ private struct TaskRow: View {
                 leadingStatusOrOutcome()
                 titleText()
                     .frame(maxWidth: .infinity, alignment: .leading)
+                // A run now renders exactly like a standalone task, so this is the only thing left
+                // saying it came from a template. Glyph rather than text: it must not compete with
+                // the title for the width the row just stopped hoarding.
+                if task.parentTaskID != nil {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .help("A run of a template")
+                }
                 runningElapsed()
                     .fixedSize()
             }
@@ -1017,7 +1040,12 @@ private struct TaskRow: View {
     /// window uses for its Result line, so the two surfaces read identically.
     @ViewBuilder
     private func leadingStatusOrOutcome() -> some View {
-        if let outcome = task.outcome {
+        // A template never runs, so its status is permanently `.pending` and the icon was a hollow
+        // circle on every row — a lifecycle glyph for something with no lifecycle. The "Template"
+        // chip on the trailing edge already says what the row is.
+        if task.isTemplate {
+            EmptyView()
+        } else if let outcome = task.outcome {
             TaskOutcomeChip(outcome: outcome)
                 .opacity(style == .active ? 1 : 0.55)
                 .layoutPriority(1)
@@ -1318,11 +1346,15 @@ private struct ScheduledRunsIndicator: View {
             .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
                 ScheduledRunsPopover(task: task, wakes: pendingWakes, viewModel: viewModel)
             }
+        } else if task.isTemplate {
+            // Nothing. A template never ran, so this fell back to its CREATION date — a number that
+            // looked like "last run" and wasn't. It is stated properly, and labelled, in the Run
+            // History header.
+            EmptyView()
         } else {
             Text(density == .compact ? compactTaskTimestamp(task.startedAt ?? task.createdAt) : taskTimestamp(task.startedAt ?? task.createdAt))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-                .fixedSize()
         }
     }
 }
@@ -1534,8 +1566,10 @@ private struct LibraryGroupView: View {
         let templates = group.templateIDs.compactMap { id in
             viewModel.libraryTemplates.first { $0.id == id }
         }
-        let children = templates.flatMap { viewModel.childTasks(of: $0.id) }
-        return taskFamilies(for: templates + children)
+        // Templates ONLY. Their runs live in the Run History pane now, so expanding them here showed
+        // the same list twice and made the Library scroll for a template with 177 runs. It also cost
+        // a `childTasks` scan of the whole archived store per template on every render.
+        return taskFamilies(for: templates)
     }
 
     var body: some View {
