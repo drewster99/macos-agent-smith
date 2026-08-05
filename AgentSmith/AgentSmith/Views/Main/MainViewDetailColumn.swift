@@ -263,9 +263,14 @@ private struct TaskTranscriptTopPane: View {
                     systemImage: "list.bullet.rectangle",
                     description: Text("Click a task in the sidebar to see its transcript here.")
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        // On the GROUP, so all three branches fill the pane identically. Only the
+        // ContentUnavailableView branch was greedy, so selecting a task swapped a filling view for
+        // one sized to its content — the transcript's viewport ended above the pane's bottom edge
+        // and the leftover strip rendered as a blank band that content clipped against, at a height
+        // that did not move when scrolled.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
