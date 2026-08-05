@@ -41,17 +41,27 @@ struct TranscriptPaneHeader<Trailing: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Divider()
             HStack(spacing: 6) {
                 Text(title)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
+                    // Titles carry a task name, which can be a sentence. Without this the header
+                    // wraps to several lines in a narrow pane and eats the transcript's height —
+                    // and a header that grows is exactly the kind of content-driven sizing the
+                    // rest of this change is removing.
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(title)
                 Spacer()
                 trailing
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(AppColors.secondaryBackground)
+            // Bottom rule only. Every placement already has a rule ABOVE it — the split divider for
+            // the lower pane, the overlay bar's or the drilled-run header's divider for the upper —
+            // so a leading Divider here just doubles the line. The tint is what delimits the header;
+            // this separates it from the messages.
             Divider()
         }
     }
