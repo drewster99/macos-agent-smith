@@ -254,14 +254,22 @@ enum CapabilityEvalRunner {
             // on an 11-model Anthropic sweep, where the operator could not tell from the summary
             // that the account simply needed topping up. Stop, say so in full, and leave the
             // stored records alone (nothing was established, so nothing is written).
-            if CapabilityProbe.textIndicatesBillingProblem(profile.chat.evidence ?? "") {
+            // Scans every step-1 finding, not just `chat`. Gemini and Mistral DECODE `capabilities.chat`
+            // from their /models payload, so the seed makes it `.decoded(true, "provider /models
+            // payload")` and `probe()` skips the chat call entirely — the billing failure then lands
+            // in `acceptsTemperature` and the breaker never fired, which is exactly the sweep-wide
+            // burn its comment above says must not happen. Gemini's quota body even contains one of
+            // the phrases this matches.
+            let firstStepEvidence = [profile.chat, profile.acceptsTemperature, profile.isAvailable]
+                .compactMap(\.evidence)
+            if let billingEvidence = firstStepEvidence.first(where: CapabilityProbe.textIndicatesBillingProblem) {
                 let remaining = targets.count - index - 1
                 print("")
                 print(String(repeating: "!", count: 100))
                 print("  BILLING PROBLEM — \(target.providerID) refused the call for payment reasons.")
                 print("  This says NOTHING about any model; every call fails the same way until it is resolved.")
                 print("")
-                print("  \(profile.chat.evidence ?? "")")
+                print("  \(billingEvidence)")
                 print("")
                 if remaining > 0 {
                     print("  Stopping the sweep: \(remaining) further model(s) skipped rather than re-learning this.")
@@ -278,7 +286,13 @@ enum CapabilityEvalRunner {
             // so an unflagged model silently drops it and a "no error" proves nothing. Forcing
             // the field via extraJSONOverrides bypasses the gate, making effort PROVABLE instead
             // of hand-authored: one provider per level, graded on the endpoint's own answer.
-            if provider.apiType != .anthropic, !target.effortLevels.isEmpty {
+            //
+            // Gated on `chat` like the battery below it. It used to sit outside that gate, which was
+            // inert while effort probing was opt-in and an empty list — but once the full ladder
+            // became the default it meant up to 7 paid calls each on every model `probe()` had
+            // already abandoned: unavailable, access-denied, inconclusive-chat, or established
+            // non-chat (embeddings, tts, whisper, babbage-002) across a ~1,700-model catalog.
+            if profile.chat.value == true, provider.apiType != .anthropic, !target.effortLevels.isEmpty {
                 for level in target.effortLevels where profile.reasoningEffortLevels[level] == nil {
                     let forcedConfig = ModelConfiguration(
                         name: "probe:\(target.modelID):effort", providerID: target.providerID,
@@ -351,17 +365,29 @@ enum CapabilityEvalRunner {
                     profile.callCount += mechanismCalls.value
                     // The mechanism itself is a fact worth keeping: nothing else establishes
                     // `reasoningControl`, which is why the thinking.keep probe could never fire.
-                    if let control = found.control {
+                    // Only when DEMONSTRATED. A model that reasons unconditionally emits reasoning
+                    // whatever it is sent, so every candidate "demonstrates" acceptance and the
+                    // winner would be decided by the order of the candidate list — pinning a
+                    // request-builder branch on list order and calling it established.
+                    if let control = found.control, found.mechanismWasDemonstrated {
                         profile.reasoningControl = .established(
-                            control, "the endpoint accepted \(control.editorTitle)")
+                            control, "the endpoint reasoned when asked via \(control.editorTitle)")
                     }
                     // Acceptance says the endpoint took the switch; the reply says whether it DID
                     // anything. `thinking` is an unknown key to most OpenAI-compatible endpoints and
                     // unknown keys are ignored rather than refused, so a model that carried on
                     // thinking was being recorded as one whose reasoning can be turned off.
                     let conclusions = ModelProber.concludeReasoning(on: on, off: off)
-                    profile[.reasoningCanBeEnabled] = on.finding
-                    profile[.reasoningCanBeDisabled] = conclusions.canBeDisabled
+                    // Never downgrade: the pair RUNS when either side is missing, so a re-run whose
+                    // calls all failed (a 429 storm) would otherwise overwrite a stored established
+                    // measurement with an inconclusive and re-persist the loss.
+                    func keepBetter(_ capability: ModelCapability, _ candidate: ProbeFinding<Bool>) {
+                        guard profile[capability]?.status != .established
+                                || candidate.status == .established else { return }
+                        profile[capability] = candidate
+                    }
+                    keepBetter(.reasoningCanBeEnabled, on.finding)
+                    keepBetter(.reasoningCanBeDisabled, conclusions.canBeDisabled)
                     // Observed reasoning is the only thing that establishes the model reasons at
                     // all; a decoded vendor claim already present is left alone.
                     if profile[.reasoning] == nil, conclusions.reasons.status == .established {
@@ -389,12 +415,21 @@ enum CapabilityEvalRunner {
                 // verdict stopped being acceptance-graded: `inconclusive` is now a real outcome (a
                 // model whose thinking only partly reduced), and under `== true` those models would
                 // silently have been probed with thinking left on.
-                let canDisableThinking = profile[.reasoningCanBeDisabled]?.value != false
+                //
+                // The payload is the DISCOVERED mechanism's own, never a shape assumed for every
+                // endpoint. Passing a bare Bool made the probe force `thinking: {type: disabled}`
+                // at OpenAI, which has no such field: it answered "Unrecognized request argument
+                // supplied: thinking", and since that names neither tool_choice nor any of its
+                // values, all three findings fell through to inconclusive — 45 records locally.
+                let discoveredMechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
+                let disablePayload = profile[.reasoningCanBeDisabled]?.value == false
+                    ? nil
+                    : discoveredMechanism.flatMap { $0.reasoningDisableOverrides }
                 for choice in toolChoices where profile[choice.requiredCapability] == nil {
                     // The probe derives this provider's own shape; nil = no such field here.
                     guard let finding = await ModelProber.probeToolChoice(
                         choice, apiType: provider.apiType,
-                        disableThinkingFirst: canDisableThinking,
+                        disableReasoningWith: disablePayload,
                         makeProviderForcing: forcing) else { continue }
                     profile[choice.requiredCapability] = finding
                     profile.callCount += 1
@@ -452,13 +487,21 @@ enum CapabilityEvalRunner {
                 // demonstrably and have no token budget at all — depth there is a named effort
                 // level. Gating on reasoning alone would rebuild the same 72-model bug one layer up
                 // now that the mechanism probe makes those models demonstrate reasoning.
+                // The mechanism gate is now MANDATORY rather than one operand of an `||`, and it
+                // fails CLOSED (`?? false`). As an operand a single hand-authored
+                // `thinkingSupportsTokenBudget` override on a `.reasoningEffortOnly` model bypassed
+                // it entirely and re-opened the bug it names; and `?? true` let a `--reuse-store`
+                // record with no stored mechanism through the same hole.
                 let mechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
                 let reasonsDemonstrably = profile[.reasoning]?.value == true
-                    && (mechanism?.carriesTokenBudget ?? true)
                 let vendorClaimsBudget = catalogEntry?.capabilities.state(of: .thinkingSupportsTokenBudget) == true
+                // Nothing to force the budget into means nothing worth spending calls on: the
+                // request would carry no budget at all and every value would "succeed", which is
+                // exactly how the fabricated ceilings got written.
                 if profile.maxThinkingBudgetTokens == nil,
                    profile[.thinkingSupportsTokenBudget]?.value != false,
-                   reasonsDemonstrably || vendorClaimsBudget {
+                   reasonsDemonstrably || vendorClaimsBudget,
+                   let mechanism, mechanism.carriesTokenBudget {
                     let calls = ProbeCallCounter()
                     profile.maxThinkingBudgetTokens = await ModelProber.probeThinkingBudgetRange(
                         llm: await forcing([:]), modelID: target.modelID,
@@ -466,13 +509,12 @@ enum CapabilityEvalRunner {
                         maxOutputTokens: profile.maxOutputTokens.value ?? catalogEntry?.maxOutputTokens,
                         maxContextTokens: profile.maxContextTokens.value ?? catalogEntry?.maxInputTokens,
                         makeProviderWithBudget: { @MainActor budget, pairedMax in
-                            kit.makeProvider(
-                                configuration: ModelConfiguration(
-                                    name: "probe:\(target.modelID)", providerID: target.providerID,
-                                    modelID: target.modelID, temperature: nil,
-                                    maxOutputTokens: pairedMax,
-                                    thinkingBudget: budget, streaming: false),
-                                provider: provider)
+                            // FORCED, like every other probe here. Through a ModelConfiguration the
+                            // value is gated (no budget on the wire at all for thinking-block
+                            // models) and floored (1023 became 1024), so the probe measured its own
+                            // clamp rather than the model.
+                            await forcing(mechanism.budgetForcingOverrides(
+                                budget: budget, pairedMaxTokens: pairedMax) ?? [:])
                         },
                         calls: calls)
                     profile.callCount += calls.value
@@ -487,13 +529,8 @@ enum CapabilityEvalRunner {
                         profile.minThinkingBudgetTokens = await ModelProber.probeThinkingBudgetMinimum(
                             knownAcceptedBudget: accepted,
                             makeProviderWithBudget: { @MainActor budget, pairedMax in
-                                kit.makeProvider(
-                                    configuration: ModelConfiguration(
-                                        name: "probe:\(target.modelID)", providerID: target.providerID,
-                                        modelID: target.modelID, temperature: nil,
-                                        maxOutputTokens: pairedMax,
-                                        thinkingBudget: budget, streaming: false),
-                                    provider: provider)
+                                await forcing(mechanism.budgetForcingOverrides(
+                                    budget: budget, pairedMaxTokens: pairedMax) ?? [:])
                             },
                             calls: minCalls)
                         profile.callCount += minCalls.value
@@ -1031,6 +1068,11 @@ enum CapabilityEvalRunner {
         let levels = effortLevelsToProbe
         return CommandLine.arguments[index + 1].split(separator: ",").flatMap { spec -> [Target] in
             let parts = spec.split(separator: "/", maxSplits: 1)
+            // `split` omits empty subsequences, so a spec of "/" yields NOTHING and indexing traps.
+            guard !parts.isEmpty else {
+                print("  (ignoring empty --targets entry)")
+                return []
+            }
             if parts.count == 2 {
                 return [Target(providerID: String(parts[0]), modelID: String(parts[1]),
                                effortLevels: levels, note: "cli target")]
