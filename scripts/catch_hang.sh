@@ -19,6 +19,10 @@
 set -uo pipefail
 
 threshold="${1:-3}"
+#: Seconds between checks. Each check samples the target for a second, which is not free — polling
+#: hard would add load to the very app being watched for sluggishness. Six seconds keeps the duty
+#: cycle low; the cost is detection latency, spelled out below rather than left to be worked out.
+interval=6
 outdir="${TMPDIR:-/tmp}AgentSmith-hangs"
 mkdir -p "$outdir"
 
@@ -32,18 +36,22 @@ find_gui() {
   done
 }
 
-echo "watching for hangs — ${threshold} consecutive busy checks trips it; samples land in ${outdir}"
+# Each cycle is one 1s sample plus the interval, so the trip point is roughly this.
+trips_after=$(( threshold * (interval + 1) ))
+echo "watching for hangs — checking every ${interval}s; ${threshold} consecutive busy checks trips it"
+echo "  so a stall is caught after roughly ${trips_after}s (pass a smaller threshold to catch sooner)"
+echo "  samples land in ${outdir}"
 echo "(ctrl-c to stop)"
 
 busy=0
 while true; do
   pid="$(find_gui)"
-  if [[ -z "${pid}" ]]; then busy=0; sleep 2; continue; fi
+  if [[ -z "${pid}" ]]; then busy=0; sleep "${interval}"; continue; fi
 
   snapshot="$(sample "${pid}" 1 -mayDie -file /dev/stdout 2>/dev/null)"
   # The main thread's own line, and whether it bottoms out in the event-wait trap.
   if grep -q "mach_msg2_trap" <<<"$(awk '/com.apple.main-thread/,/^$/' <<<"${snapshot}")"; then
-    if (( busy > 0 )); then echo "  recovered after ${busy}s"; fi
+    if (( busy > 0 )); then echo "  recovered (was busy for ${busy} check(s))"; fi
     busy=0
   else
     busy=$(( busy + 1 ))
@@ -60,5 +68,5 @@ while true; do
       busy=0
     fi
   fi
-  sleep 1
+  sleep "${interval}"
 done
