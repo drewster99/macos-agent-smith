@@ -27,6 +27,30 @@ struct TaskOutcomeChip: View {
     }
 }
 
+/// The lifecycle-status twin of ``TaskOutcomeChip``, for a task that has not reached an outcome yet.
+///
+/// Same capsule, same metrics, so a header reads identically whether the task finished or is still
+/// running — only the colour and wording change. The sidebar shows a bare icon in this state because
+/// its rows are tight; a pane header has room for the word.
+struct TaskStatusChip: View {
+    let status: AgentTask.Status
+
+    var body: some View {
+        let color = TaskStatusBadge.color(for: status)
+        HStack(spacing: 3) {
+            Image(systemName: TaskStatusBadge.icon(for: status))
+                .imageScale(.small)
+            Text(status.displayName)
+        }
+        .font(.caption)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(color.opacity(0.2)))
+        .foregroundStyle(color)
+    }
+}
+
 #Preview("Outcomes") {
     VStack(alignment: .leading, spacing: 8) {
         TaskOutcomeChip(outcome: .success(total: 8))

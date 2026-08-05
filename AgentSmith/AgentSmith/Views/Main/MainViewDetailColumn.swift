@@ -287,11 +287,9 @@ private struct TaskTranscriptTopPane: View {
                 DrilledRunHeader { viewModel.selectedTemplateRunID = nil }
                 Divider()
             }
-            // Names the pane, and names the TASK — the two transcripts are visually identical
-            // otherwise, so the only thing distinguishing this one is which task it belongs to.
-            TranscriptPaneHeader(title: effective.map { "Task transcript · \($0.title)" }
-                                        ?? "Task transcript",
-                                 topRule: true)
+            // Names the TASK, in the sidebar's chip and the transcript's own orange — the two
+            // transcripts are visually identical otherwise, so this is what distinguishes them.
+            TaskTranscriptHeader(task: effective)
             // Vend a read-only transcript from the origin session's log when the live provider can't be
             // trusted to have it: a task NOT resident in this session (archived/deleted or cross-session
             // and not restored), or a finished drilled run (trimmed from the tail). Otherwise the live

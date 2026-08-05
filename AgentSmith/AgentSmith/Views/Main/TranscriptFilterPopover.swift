@@ -48,27 +48,81 @@ struct TranscriptPaneHeader<Trailing: View>: View {
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
+        TranscriptPaneChrome(topRule: topRule) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                // Titles carry a task name, which can be a sentence. Without this the header
+                // wraps to several lines in a narrow pane and eats the transcript's height —
+                // and a header that grows is exactly the kind of content-driven sizing the
+                // rest of this change is removing.
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(title)
+            Spacer()
+            trailing
+        }
+    }
+}
+
+/// The bar itself — tint, padding, and the rules — with no opinion about what sits in it.
+///
+/// Extracted so the plain session header and the task header below are the SAME bar rather than two
+/// that resemble each other: the seam between the panes only reads if both sides match, and a
+/// second hand-built copy is where that quietly stops being true.
+struct TranscriptPaneChrome<Content: View>: View {
+    var topRule: Bool = false
+    @ViewBuilder var content: Content
+
+    var body: some View {
         VStack(spacing: 0) {
             if topRule { Divider() }
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    // Titles carry a task name, which can be a sentence. Without this the header
-                    // wraps to several lines in a narrow pane and eats the transcript's height —
-                    // and a header that grows is exactly the kind of content-driven sizing the
-                    // rest of this change is removing.
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(title)
-                Spacer()
-                trailing
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(AppColors.secondaryBackground)
+            HStack(spacing: 6) { content }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppColors.secondaryBackground)
             // Always: this is what separates the header from the messages under it.
             Divider()
+        }
+    }
+}
+
+/// The upper pane's header: the task's own status chip and its title, styled as the transcript
+/// styles that same title.
+///
+/// The sidebar and the transcript already agree on how a task is presented — the chip from the task
+/// row, the bold monospaced orange the transcript uses for the task name in its sender slot. The
+/// header said the same thing in plain secondary grey, so the eye had to re-learn it in a third
+/// dialect. This is the same task, said the same way.
+struct TaskTranscriptHeader: View {
+    /// nil when the pane has no resolved task — the run-history and empty states.
+    let task: AgentTask?
+
+    var body: some View {
+        TranscriptPaneChrome(topRule: true) {
+            if let task {
+                // The chip the sidebar row shows: the outcome once there is one, the lifecycle
+                // status until then.
+                if let outcome = task.outcome {
+                    TaskOutcomeChip(outcome: outcome)
+                } else {
+                    TaskStatusChip(status: task.status)
+                }
+                Text(task.title)
+                    // AppFonts.channelSender + the Brown/task orange: verbatim what the transcript
+                    // below uses for this exact string in its sender slot.
+                    .font(AppFonts.channelSender)
+                    .foregroundStyle(AppColors.brownAgent)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(task.title)
+            } else {
+                Text("Task transcript")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
         }
     }
 }
