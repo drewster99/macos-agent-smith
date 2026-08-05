@@ -32,15 +32,24 @@ struct TranscriptFilterBar: View {
 ///
 /// Shared by both panes so the seam between them is legible. Previously only the lower pane carried
 /// a title, and it sat on the same background as the messages — so the two transcripts ran together
-/// and the boundary was a guess. The tinted bar plus rules above and below make each pane's start
-/// explicit, and giving both panes the same chrome is what identifies them as two of a kind rather
-/// than one list with a caption in the middle of it.
+/// and the boundary was a guess. The tint plus a rule makes each pane's start explicit, and giving
+/// both panes the same chrome is what identifies them as two of a kind rather than one list with a
+/// caption in the middle of it.
 struct TranscriptPaneHeader<Trailing: View>: View {
     let title: String
+    /// Draw a rule ABOVE the header too.
+    ///
+    /// Off by default because the lower pane sits directly under the split divider, where a second
+    /// hairline only doubles the line. The UPPER pane needs it: with no task in flight the overlay
+    /// bar is not rendered at all — it is gated on HAVING ENTRIES, not on the visibility preference
+    /// — so in the app's resting state this header is the topmost thing in the column, with nothing
+    /// above it to delimit it.
+    var topRule: Bool = false
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
         VStack(spacing: 0) {
+            if topRule { Divider() }
             HStack(spacing: 6) {
                 Text(title)
                     .font(.caption.weight(.medium))
@@ -58,18 +67,15 @@ struct TranscriptPaneHeader<Trailing: View>: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(AppColors.secondaryBackground)
-            // Bottom rule only. Every placement already has a rule ABOVE it — the split divider for
-            // the lower pane, the overlay bar's or the drilled-run header's divider for the upper —
-            // so a leading Divider here just doubles the line. The tint is what delimits the header;
-            // this separates it from the messages.
+            // Always: this is what separates the header from the messages under it.
             Divider()
         }
     }
 }
 
 extension TranscriptPaneHeader where Trailing == EmptyView {
-    init(title: String) {
-        self.init(title: title) { EmptyView() }
+    init(title: String, topRule: Bool = false) {
+        self.init(title: title, topRule: topRule) { EmptyView() }
     }
 }
 

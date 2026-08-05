@@ -89,6 +89,18 @@ public actor TranscriptStore {
     /// Folds every buffered message into the resident tail in one pass and fans it out. Public so a
     /// shutdown path can force a final flush and guarantee no buffered message is lost.
     public func flush() async {
+        foldPendingIntoResident()
+    }
+
+    /// The synchronous half of ``flush()``. Separate so ``clearView(_:)`` can drain the coalescer
+    /// without being `async`: a message sits in `pendingIngest` for up to one flush interval, and a
+    /// watermark taken while the buffer is full points at the last FLUSHED message — so everything
+    /// buffered at that instant lands on the freshly-cleared pane a few milliseconds later.
+    ///
+    /// The watermark cannot simply be a pending message's id instead: `visibleResident` looks the id
+    /// up in `resident`, wouldn't find it, and would fall through to showing everything — a clear
+    /// that appears not to have happened at all.
+    private func foldPendingIntoResident() {
         flushScheduled = false
         guard !pendingIngest.isEmpty else { return }
         let batch = pendingIngest
@@ -114,6 +126,8 @@ public actor TranscriptStore {
     ///
     /// The on-disk log is untouched — persistence is the caller's concern.
     public func clearView(_ id: UUID) {
+        // Drain the coalescer FIRST, or messages buffered at this instant survive the clear.
+        foldPendingIntoResident()
         guard var subscriber = subscribers[id] else { return }
         // nil when nothing is resident: there is nothing to clear past, and a nil watermark keeps
         // the pane in its ordinary un-cleared state rather than inventing a boundary.
@@ -165,8 +179,9 @@ public actor TranscriptStore {
     public func subscribe(filter: TranscriptFilter) -> (id: UUID, stream: AsyncStream<TranscriptUpdate>) {
         let id = UUID()
         let (stream, continuation) = AsyncStream<TranscriptUpdate>.makeStream(bufferingPolicy: .unbounded)
-        subscribers[id] = Subscriber(filter: filter, clearedThroughID: nil, continuation: continuation)
-        continuation.yield(makeReset(for: subscribers[id]!))
+        let subscriber = Subscriber(filter: filter, clearedThroughID: nil, continuation: continuation)
+        subscribers[id] = subscriber
+        continuation.yield(makeReset(for: subscriber))
         continuation.onTermination = { [weak self] _ in
             Task { await self?.removeSubscriber(id) }
         }
@@ -261,8 +276,12 @@ public actor TranscriptStore {
     public func restoreFullHistory() async throws {
         // Also runs when history is already restored but some pane has cleared past it — that pane's
         // only route back is this call, and the idempotence guard alone would refuse it.
-        let anyCleared = subscribers.values.contains { $0.clearedThroughID != nil }
-        guard !hasRestoredHistory || anyCleared, let loadFullLog else { return }
+        // The ids cleared as of NOW. Captured before the load because this actor accepts other
+        // messages across the `await` below: a `clearView` that lands mid-load would otherwise be
+        // silently undone by the blanket un-clear that used to run afterwards, repainting the whole
+        // history over a pane the user had just cleared, with no indication.
+        let clearedBeforeLoad = subscribers.filter { $0.value.clearedThroughID != nil }.map(\.key)
+        guard !hasRestoredHistory || !clearedBeforeLoad.isEmpty, let loadFullLog else { return }
         let full = try await loadFullLog()
         // Any resident message not yet on disk (a not-yet-persisted append) is kept after the
         // authoritative history, deduped by id.
@@ -271,9 +290,11 @@ public actor TranscriptStore {
         resident = full + liveTail
         persistedHistoryCount = resident.count
         hasRestoredHistory = true
-        // Explicitly asking for the full history un-clears every pane: the watermark exists to hide
-        // history, and this is the user overriding that.
-        for id in subscribers.keys { subscribers[id]?.clearedThroughID = nil }
+        // Explicitly asking for the full history un-clears the panes that were cleared WHEN THE
+        // REQUEST WAS MADE — the watermark exists to hide history and this is the user overriding
+        // that. A pane cleared during the load keeps its watermark: that clear is newer than this
+        // request and outranks it.
+        for id in clearedBeforeLoad { subscribers[id]?.clearedThroughID = nil }
         resetAllSubscribers()
     }
 }

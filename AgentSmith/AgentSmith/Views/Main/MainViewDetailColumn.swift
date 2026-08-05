@@ -62,9 +62,11 @@ struct MainViewDetailColumn: View {
                     onOpenMCPSettings: openMCPSettingsAction,
                     selectedImageAttachment: $selectedImageAttachment
                 )
-                // Greedy on the CROSS axis (width) — a VSplitView child that isn't takes its width
-                // from its content and floats centered. Only width: height is the split axis and
-                // belongs to the divider and the min/ideal below.
+                // An explicit contract that this pane fills its column, NOT the fix — measured, the
+                // pane is already full width because its header carries a Spacer, and VSplitView is
+                // already greedy on both axes. The actual fix is the greedy frame inside
+                // ChannelLogView: a vertical ScrollView otherwise reports its CONTENT's width
+                // (measured: an 11pt ribbon at a 300pt proposal).
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 120, idealHeight: 240)
 
@@ -80,9 +82,6 @@ struct MainViewDetailColumn: View {
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 200)
             }
-            // The split itself must fill too, or it collapses to the taller of two already-collapsed
-            // children and the whole stack floats in the middle of the window.
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
             // Update cached display preferences when any of the underlying shared preferences change.
             // This avoids creating a new TimestampPreferences instance on every body pass.
             .onChange(of: shared.showTimestampsOnTaskBanners) { _, newValue in
@@ -207,8 +206,12 @@ private struct BottomTranscriptPane: View {
             ChannelLogView(
                 messages: viewModel.bottomTranscriptProvider.messages,
                 toolRequestIDs: viewModel.bottomTranscriptProvider.toolRequestIDs,
-                persistedHistoryCount: viewModel.persistedHistoryCount,
-                hasRestoredHistory: viewModel.hasRestoredHistory,
+                // This pane's OWN provider, not the view model's forwards — those read the
+                // primary (inspector) provider, and `hasRestoredHistory` is now per-subscriber.
+                // Clearing the primary made it report "not restored", which put a "Restore full
+                // history" button above a bottom pane whose content had not changed at all.
+                persistedHistoryCount: viewModel.bottomTranscriptProvider.persistedHistoryCount,
+                hasRestoredHistory: viewModel.bottomTranscriptProvider.hasRestoredHistory,
                 onRestoreHistory: { viewModel.restoreHistory() },
                 onExportTaskPDF: onExportTaskPDF,
                 onOpenMCPSettings: onOpenMCPSettings,
@@ -282,7 +285,8 @@ private struct TaskTranscriptTopPane: View {
             // Names the pane, and names the TASK — the two transcripts are visually identical
             // otherwise, so the only thing distinguishing this one is which task it belongs to.
             TranscriptPaneHeader(title: effective.map { "Task transcript · \($0.title)" }
-                                        ?? "Task transcript")
+                                        ?? "Task transcript",
+                                 topRule: true)
             // Vend a read-only transcript from the origin session's log when the live provider can't be
             // trusted to have it: a task NOT resident in this session (archived/deleted or cross-session
             // and not restored), or a finished drilled run (trimmed from the tail). Otherwise the live

@@ -129,12 +129,11 @@ final class AppViewModel {
     private(set) var pendingWakesByTaskID: [UUID: [ScheduledWake]] = [:]
     /// Append-only timer history rows displayed in the Timers history pane. Newest first.
     var timerHistory: [TimerEvent] = []
-    /// Whether the full persisted history has been pulled into the transcript. Forwarded from the
-    /// primary provider (the store tracks it).
-    var hasRestoredHistory: Bool { primaryTranscriptProvider.hasRestoredHistory }
-    /// Total messages on disk (drives the "Restore full history" affordance). Forwarded from the
-    /// primary provider.
-    var persistedHistoryCount: Int { primaryTranscriptProvider.persistedHistoryCount }
+    // `hasRestoredHistory` / `persistedHistoryCount` are deliberately NOT forwarded here. They were,
+    // from the PRIMARY provider — which is the inspector's firehose, not a rendered transcript — so
+    // the bottom pane's "Restore full history" affordance was driven by a subscriber the user never
+    // sees. Now that both values are per-subscriber, a pane must read them from its own provider,
+    // and a convenience forward on the view model can only ever name the wrong one.
     /// The first task currently parked for attention — a validator-error escalation the USER resolves
     /// (`.awaitingReview`) or a Brown blocker Smith answers (`.awaitingHelp`). Drives the banner.
     var taskAwaitingReview: AgentTask? {
@@ -2308,22 +2307,23 @@ final class AppViewModel {
     /// here tore down live state the user never asked to discard and left every agent card
     /// reading "Not active" while its agent was still running.
     func clearLog() {
-        // Clears the CONVERSATION pane only. Wiping the store's resident tail also blanked the
-        // per-task and bottom panes, which read the same array — and the restore affordance is
-        // rendered only here, so a task pane had no way back short of relaunching the app.
-        // The full transcript is on disk and untouched either way.
-        primaryTranscriptProvider.clearView()
+        // The BOTTOM provider, because that is the conversation the user is looking at — the two
+        // rendered transcripts read `bottomTranscriptProvider` and `topTranscriptProvider`, and
+        // `primaryTranscriptProvider` is the unfiltered firehose the INSPECTOR reads and is not
+        // rendered as a transcript anywhere. Clearing the primary cleared nothing on screen.
+        //
+        // Deliberately not the top pane: a screen clear must not wipe the task transcript the user
+        // is following, which is the whole reason this stopped being a whole-store wipe.
+        bottomTranscriptProvider.clearView()
     }
 
     /// `/clear` and the toolbar trashcan: resets SMITH'S LLM CONTEXT (with a fresh
     /// task-state re-briefing) and starts a fresh screen. Distinct from Ctrl-L, which is
     /// display-only. Brown is untouched — clearing a worker mid-task would break the task.
     func clearConversation() async {
-        // Awaits the clear directly rather than going through `clearLog`, whose fire-and-forget Task
-        // could land AFTER the system-message append below and wipe it off a just-cleared screen.
-        if let id = primaryTranscriptProvider.subscriberID {
-            await transcriptStore.clearView(id)
-        }
+        // Awaits the clear rather than going through `clearLog`, whose fire-and-forget Task could
+        // land AFTER the system-message append below and wipe it off a just-cleared screen.
+        await bottomTranscriptProvider.clearViewAwaitingCompletion()
         guard let runtime else {
             appendLocalSystemMessage("Screen cleared. System is not running, so there was no agent context to clear.")
             return

@@ -208,6 +208,75 @@ struct TranscriptStoreClearViewTests {
         #expect(cleared?.persistedHistoryCount == 1)
     }
 
+    /// Messages sit in the ingest coalescer for up to one flush interval. A watermark taken while
+    /// that buffer is full points at the last FLUSHED message, so everything buffered at that
+    /// instant would land on the freshly-cleared pane milliseconds later — the clear silently leaks.
+    ///
+    /// The fold DOES fan the buffered batch out first (other panes are entitled to it), so the
+    /// clearing subscriber sees that append immediately superseded by its own reset. What matters is
+    /// the state it settles in, so this drains to the reset rather than counting updates.
+    @Test("A clear also drains the ingest buffer, so buffered messages don't survive it")
+    func clearDrainsTheIngestBuffer() async {
+        let store = TranscriptStore()
+        let (id, stream) = await store.subscribe(filter: .all)
+        var it = stream.makeAsyncIterator()
+        _ = await next(&it)
+
+        // Ingested but NOT flushed — exactly the window a real clear can land in.
+        await store.ingest(msg("buffered"))
+        await store.clearView(id)
+
+        var settled: TranscriptUpdate?
+        while let update = await next(&it) {
+            if update.replaces { settled = update; break }
+        }
+        #expect(settled?.messages.isEmpty == true, "the buffered message must be cleared past")
+
+        await store.ingest(msg("after")); await store.flush()
+        #expect(await next(&it)?.messages.map(\.content) == ["after"],
+                "and the pane keeps receiving after the clear")
+    }
+
+    /// Actor reentrancy: `restoreFullHistory` suspends on the log read, and a clear that lands
+    /// during it used to be silently undone by the blanket un-clear afterwards — repainting the
+    /// whole history over a pane the user had just cleared.
+    ///
+    /// The loader returns the SAME message the store already holds, as a real one would: ids come
+    /// from disk and match. A loader minting fresh ids would strand the watermark and pass this
+    /// test for the wrong reason.
+    @Test("A clear during a restore is not undone by that restore")
+    func clearDuringRestoreSurvives() async throws {
+        let store = TranscriptStore()
+        let (id, stream) = await store.subscribe(filter: .all)
+        var it = stream.makeAsyncIterator()
+        _ = await next(&it)
+        let existing = msg("a")
+        await store.ingest(existing); await store.flush()
+        _ = await next(&it)
+
+        // Parks inside the load and tells the test it got there, so the clear provably lands
+        // mid-suspension rather than racing the child task's start.
+        let gate = AsyncGate()
+        await store.setLogReaders(
+            loadFull: { await gate.enterAndWait(); return [existing] },
+            loadTail: { _ in ([], 0) })
+
+        async let restore: Void = try store.restoreFullHistory()
+        await gate.waitUntilEntered()
+        await store.clearView(id)
+        var cleared: TranscriptUpdate?
+        while let update = await next(&it) {
+            if update.replaces { cleared = update; break }
+        }
+        #expect(cleared?.messages.isEmpty == true)
+
+        await gate.open()
+        try await restore
+
+        #expect(await next(&it)?.messages.isEmpty == true,
+                "the clear is newer than the restore request and outranks it")
+    }
+
     /// Re-filtering a cleared pane must not repaint what it cleared.
     @Test("Changing a cleared pane's filter does not un-clear it")
     func filterChangeKeepsTheClear() async {
@@ -220,5 +289,38 @@ struct TranscriptStoreClearViewTests {
         _ = await next(&it)
         await store.updateFilter(id, to: .all)
         #expect(await next(&it)?.messages.isEmpty == true)
+    }
+}
+
+
+/// A one-shot gate so a test can hold an actor's `await` open and land another call inside it.
+///
+/// Reports ENTRY as well as releasing, because `async let` only starts a child task — without
+/// waiting for entry, the "concurrent" call can land before the suspension it is meant to race.
+private actor AsyncGate {
+    private var opened = false
+    private var entered = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func enterAndWait() async {
+        entered = true
+        let signalling = entryWaiters
+        entryWaiters.removeAll()
+        for waiter in signalling { waiter.resume() }
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { entryWaiters.append($0) }
+    }
+
+    func open() {
+        opened = true
+        let resuming = waiters
+        waiters.removeAll()
+        for waiter in resuming { waiter.resume() }
     }
 }

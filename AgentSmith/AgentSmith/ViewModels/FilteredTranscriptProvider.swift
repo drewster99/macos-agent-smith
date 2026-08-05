@@ -41,9 +41,7 @@ final class FilteredTranscriptProvider {
     /// resident array; a filtered pane trims its (smaller) view to this independently.
     private let cap: Int
     private weak var store: TranscriptStore?
-    /// Exposed so a caller that must AWAIT the clear can reach the store directly; the
-    /// fire-and-forget `clearView()` cannot be ordered against a following append.
-    private(set) var subscriberID: UUID?
+    private var subscriberID: UUID?
     private var consumeTask: Task<Void, Never>?
 
     init(filter: TranscriptFilter = .all, cap: Int = 5_000) {
@@ -84,6 +82,18 @@ final class FilteredTranscriptProvider {
     func clearView() {
         guard let subscriberID, let store else { return }
         Task { await store.clearView(subscriberID) }
+    }
+
+    /// `clearView()` for a caller that must know the clear has LANDED — one that appends a message
+    /// straight afterwards and would otherwise race its own fire-and-forget Task.
+    ///
+    /// Exists so the subscriber id can stay private. Handing the id out instead let a caller keep a
+    /// stale one: `attach` reassigns it from inside a Task, so a re-attach can resolve out of order
+    /// and leave the previous id pointing at a subscriber that has since been removed — after which
+    /// every clear is a silent no-op.
+    func clearViewAwaitingCompletion() async {
+        guard let subscriberID, let store else { return }
+        await store.clearView(subscriberID)
     }
 
     /// Unsubscribes and stops consuming. Safe to call repeatedly.
