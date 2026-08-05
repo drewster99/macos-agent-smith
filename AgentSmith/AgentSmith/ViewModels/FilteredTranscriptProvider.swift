@@ -41,7 +41,9 @@ final class FilteredTranscriptProvider {
     /// resident array; a filtered pane trims its (smaller) view to this independently.
     private let cap: Int
     private weak var store: TranscriptStore?
-    private var subscriberID: UUID?
+    /// Exposed so a caller that must AWAIT the clear can reach the store directly; the
+    /// fire-and-forget `clearView()` cannot be ordered against a following append.
+    private(set) var subscriberID: UUID?
     private var consumeTask: Task<Void, Never>?
 
     init(filter: TranscriptFilter = .all, cap: Int = 5_000) {
@@ -73,6 +75,15 @@ final class FilteredTranscriptProvider {
             }
             await store.unsubscribe(id)
         }
+    }
+
+    /// Clears THIS pane's view, leaving every other pane and the shared resident tail alone.
+    ///
+    /// A no-op before the subscription lands (`attach` sets the id inside its task): there is nothing
+    /// on screen yet to clear, and the pane's first update is a snapshot anyway.
+    func clearView() {
+        guard let subscriberID, let store else { return }
+        Task { await store.clearView(subscriberID) }
     }
 
     /// Unsubscribes and stops consuming. Safe to call repeatedly.

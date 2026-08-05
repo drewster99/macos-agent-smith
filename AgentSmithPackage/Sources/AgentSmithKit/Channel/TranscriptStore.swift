@@ -103,13 +103,36 @@ public actor TranscriptStore {
         fanOut(appended: batch)
     }
 
-    /// Wipes the resident tail and every subscriber's view (the `/clear` screen reset). The on-disk log
-    /// is UNTOUCHED — persistence is the caller's concern — so `persistedHistoryCount` is DELIBERATELY
-    /// kept and only `hasRestoredHistory` is reset: that re-offers "Restore full history (N)" for the
-    /// still-on-disk lines. Zeroing the count would hide the restore affordance and strand them.
+    /// Clears ONE subscriber's view. Every other pane is untouched, and the resident tail is not
+    /// disturbed at all — the clear is recorded as a watermark for this subscriber alone.
+    ///
+    /// This is what "clear the screen" has to mean. The conversation, the per-task pane and the
+    /// bottom pane all read the same `resident` array, so the old whole-store ``clear()`` blanked
+    /// all three: hitting the toolbar trashcan left every task showing no history, with no way back
+    /// short of relaunching the app, because the "Restore full history" affordance is rendered only
+    /// on the main conversation pane. Reported 2026-08-04.
+    ///
+    /// The on-disk log is untouched — persistence is the caller's concern.
+    public func clearView(_ id: UUID) {
+        guard var subscriber = subscribers[id] else { return }
+        // nil when nothing is resident: there is nothing to clear past, and a nil watermark keeps
+        // the pane in its ordinary un-cleared state rather than inventing a boundary.
+        subscriber.clearedThroughID = resident.last?.id
+        subscribers[id] = subscriber
+        subscriber.continuation.yield(makeReset(for: subscriber))
+    }
+
+    /// Wipes the resident tail and every subscriber's view. The on-disk log is UNTOUCHED — so
+    /// `persistedHistoryCount` is DELIBERATELY kept and only `hasRestoredHistory` is reset: that
+    /// re-offers "Restore full history (N)" for the still-on-disk lines. Zeroing the count would
+    /// hide the restore affordance and strand them.
+    ///
+    /// No UI calls this: clearing a screen is ``clearView(_:)``. It remains for a caller that really
+    /// does mean "drop the whole in-memory tail".
     public func clear() {
         resident.removeAll()
         hasRestoredHistory = false
+        for id in subscribers.keys { subscribers[id]?.clearedThroughID = nil }
         resetAllSubscribers()
     }
 
@@ -117,7 +140,7 @@ public actor TranscriptStore {
         for subscriber in subscribers.values {
             let matched = batch.filter(subscriber.filter.matches)
             guard !matched.isEmpty else { continue }
-            subscriber.continuation.yield(makeAppend(matched))
+            subscriber.continuation.yield(makeAppend(matched, for: subscriber))
         }
     }
 
@@ -125,6 +148,12 @@ public actor TranscriptStore {
 
     private struct Subscriber {
         var filter: TranscriptFilter
+        /// The last resident message this subscriber has CLEARED past, if it has cleared.
+        ///
+        /// Per-subscriber because clearing is a property of one pane's view, not of the shared
+        /// tail: the conversation, the per-task pane and the bottom pane all read the same
+        /// `resident` array, so wiping it to clear one of them blanked all three.
+        var clearedThroughID: UUID?
         let continuation: AsyncStream<TranscriptUpdate>.Continuation
     }
     private var subscribers: [UUID: Subscriber] = [:]
@@ -136,8 +165,8 @@ public actor TranscriptStore {
     public func subscribe(filter: TranscriptFilter) -> (id: UUID, stream: AsyncStream<TranscriptUpdate>) {
         let id = UUID()
         let (stream, continuation) = AsyncStream<TranscriptUpdate>.makeStream(bufferingPolicy: .unbounded)
-        subscribers[id] = Subscriber(filter: filter, continuation: continuation)
-        continuation.yield(makeReset(under: filter))
+        subscribers[id] = Subscriber(filter: filter, clearedThroughID: nil, continuation: continuation)
+        continuation.yield(makeReset(for: subscribers[id]!))
         continuation.onTermination = { [weak self] _ in
             Task { await self?.removeSubscriber(id) }
         }
@@ -151,7 +180,8 @@ public actor TranscriptStore {
         guard var subscriber = subscribers[id] else { return }
         subscriber.filter = filter
         subscribers[id] = subscriber
-        subscriber.continuation.yield(makeReset(under: filter))
+        // The watermark rides along: changing what a pane shows is not un-clearing it.
+        subscriber.continuation.yield(makeReset(for: subscriber))
     }
 
     public func unsubscribe(_ id: UUID) {
@@ -163,18 +193,38 @@ public actor TranscriptStore {
         subscribers.removeValue(forKey: id)
     }
 
-    private func makeAppend(_ messages: [ChannelMessage]) -> TranscriptUpdate {
+    private func makeAppend(_ messages: [ChannelMessage], for subscriber: Subscriber) -> TranscriptUpdate {
         TranscriptUpdate(messages: messages, replaces: false,
-                         persistedHistoryCount: persistedHistoryCount, hasRestoredHistory: hasRestoredHistory)
+                         persistedHistoryCount: persistedHistoryCount,
+                         hasRestoredHistory: restoredHistory(for: subscriber))
     }
-    private func makeReset(under filter: TranscriptFilter) -> TranscriptUpdate {
-        TranscriptUpdate(messages: resident.filter(filter.matches), replaces: true,
-                         persistedHistoryCount: persistedHistoryCount, hasRestoredHistory: hasRestoredHistory)
+
+    private func makeReset(for subscriber: Subscriber) -> TranscriptUpdate {
+        TranscriptUpdate(messages: visibleResident(for: subscriber).filter(subscriber.filter.matches),
+                         replaces: true, persistedHistoryCount: persistedHistoryCount,
+                         hasRestoredHistory: restoredHistory(for: subscriber))
+    }
+
+    /// The resident tail as one subscriber sees it — everything after whatever it last cleared past.
+    ///
+    /// A watermark id that is no longer resident has been trimmed away, which means every remaining
+    /// message is NEWER than the clear; showing all of them is the correct answer, not an error.
+    private func visibleResident(for subscriber: Subscriber) -> [ChannelMessage] {
+        guard let cleared = subscriber.clearedThroughID,
+              let index = resident.firstIndex(where: { $0.id == cleared }) else { return resident }
+        return Array(resident[resident.index(after: index)...])
+    }
+
+    /// A cleared pane reports history as un-restored whatever the store thinks, so the "Restore full
+    /// history" affordance comes back for it — that button is the ONLY way back from a clear, and
+    /// hiding it is what stranded a pane with nothing to show until the app was relaunched.
+    private func restoredHistory(for subscriber: Subscriber) -> Bool {
+        subscriber.clearedThroughID == nil && hasRestoredHistory
     }
 
     private func resetAllSubscribers() {
         for subscriber in subscribers.values {
-            subscriber.continuation.yield(makeReset(under: subscriber.filter))
+            subscriber.continuation.yield(makeReset(for: subscriber))
         }
     }
 
@@ -209,7 +259,10 @@ public actor TranscriptStore {
     /// Pulls the ENTIRE on-disk history into the resident tail (user-initiated "Restore full history"),
     /// suspending trimming from here on, then resets every subscriber. Idempotent.
     public func restoreFullHistory() async throws {
-        guard !hasRestoredHistory, let loadFullLog else { return }
+        // Also runs when history is already restored but some pane has cleared past it — that pane's
+        // only route back is this call, and the idempotence guard alone would refuse it.
+        let anyCleared = subscribers.values.contains { $0.clearedThroughID != nil }
+        guard !hasRestoredHistory || anyCleared, let loadFullLog else { return }
         let full = try await loadFullLog()
         // Any resident message not yet on disk (a not-yet-persisted append) is kept after the
         // authoritative history, deduped by id.
@@ -218,6 +271,9 @@ public actor TranscriptStore {
         resident = full + liveTail
         persistedHistoryCount = resident.count
         hasRestoredHistory = true
+        // Explicitly asking for the full history un-clears every pane: the watermark exists to hide
+        // history, and this is the user overriding that.
+        for id in subscribers.keys { subscribers[id]?.clearedThroughID = nil }
         resetAllSubscribers()
     }
 }

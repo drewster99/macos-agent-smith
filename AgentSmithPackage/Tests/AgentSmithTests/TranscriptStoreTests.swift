@@ -133,3 +133,92 @@ import Foundation
         #expect(filtered?.messages.first?.sender == .user)
     }
 }
+
+
+/// Clearing a screen is a property of ONE pane. The conversation, the per-task pane and the bottom
+/// pane all read the same resident tail, so wiping it to clear one blanked all three — and the
+/// "Restore full history" affordance is rendered only on the conversation pane, so a task pane was
+/// left showing nothing with no way back short of relaunching the app. Reported 2026-08-04.
+@Suite("Clearing one pane leaves the others alone")
+struct TranscriptStoreClearViewTests {
+
+    private func msg(_ content: String) -> ChannelMessage {
+        ChannelMessage(sender: .user, content: content, taskID: nil)
+    }
+
+    private func next(_ it: inout AsyncStream<TranscriptUpdate>.Iterator) async -> TranscriptUpdate? {
+        await it.next()
+    }
+
+    @Test("The pane that cleared goes empty; the shared tail and other panes keep their history")
+    func clearingOnePaneSparesTheOther() async {
+        let store = TranscriptStore()
+        let (conversationID, conversationStream) = await store.subscribe(filter: .all)
+        let (_, taskStream) = await store.subscribe(filter: .all)
+        var conversation = conversationStream.makeAsyncIterator()
+        var taskPane = taskStream.makeAsyncIterator()
+        _ = await next(&conversation)
+        _ = await next(&taskPane)
+
+        await store.ingest(msg("a"))
+        await store.ingest(msg("b"))
+        await store.flush()
+        _ = await next(&conversation)
+        #expect(await next(&taskPane)?.messages.count == 2)
+
+        await store.clearView(conversationID)
+        let cleared = await next(&conversation)
+        #expect(cleared?.replaces == true)
+        #expect(cleared?.messages.isEmpty == true, "the pane that asked to be cleared")
+
+        // THE BUG: a pane that never asked for anything must still have its history.
+        let (_, freshStream) = await store.subscribe(filter: .all)
+        var fresh = freshStream.makeAsyncIterator()
+        #expect(await next(&fresh)?.messages.count == 2,
+                "a pane opening after the clear still sees history — this is the per-task pane")
+    }
+
+    @Test("A cleared pane still receives new messages")
+    func clearedPaneKeepsReceiving() async {
+        let store = TranscriptStore()
+        let (id, stream) = await store.subscribe(filter: .all)
+        var it = stream.makeAsyncIterator()
+        _ = await next(&it)
+        await store.ingest(msg("old")); await store.flush()
+        _ = await next(&it)
+        await store.clearView(id)
+        _ = await next(&it)
+
+        await store.ingest(msg("new")); await store.flush()
+        #expect(await next(&it)?.messages.map(\.content) == ["new"])
+    }
+
+    /// That button is the only route back from a clear, so a cleared pane has to be offered it even
+    /// when the store as a whole considers history restored.
+    @Test("A cleared pane is re-offered Restore")
+    func clearedPaneIsReofferedRestore() async {
+        let store = TranscriptStore()
+        await store.ingest(msg("a")); await store.flush()
+        let (id, stream) = await store.subscribe(filter: .all)
+        var it = stream.makeAsyncIterator()
+        _ = await next(&it)
+        await store.clearView(id)
+        let cleared = await next(&it)
+        #expect(cleared?.hasRestoredHistory == false, "otherwise the pane is stranded empty")
+        #expect(cleared?.persistedHistoryCount == 1)
+    }
+
+    /// Re-filtering a cleared pane must not repaint what it cleared.
+    @Test("Changing a cleared pane's filter does not un-clear it")
+    func filterChangeKeepsTheClear() async {
+        let store = TranscriptStore()
+        await store.ingest(msg("a")); await store.flush()
+        let (id, stream) = await store.subscribe(filter: .all)
+        var it = stream.makeAsyncIterator()
+        _ = await next(&it)
+        await store.clearView(id)
+        _ = await next(&it)
+        await store.updateFilter(id, to: .all)
+        #expect(await next(&it)?.messages.isEmpty == true)
+    }
+}

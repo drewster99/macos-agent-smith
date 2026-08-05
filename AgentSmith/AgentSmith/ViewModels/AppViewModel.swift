@@ -2308,18 +2308,22 @@ final class AppViewModel {
     /// here tore down live state the user never asked to discard and left every agent card
     /// reading "Not active" while its agent was still running.
     func clearLog() {
-        // The store owns the resident tail off-main; wiping it resets the primary provider and
-        // re-offers the restore affordance (the full transcript is still on disk, untouched).
-        Task { await transcriptStore.clear() }
+        // Clears the CONVERSATION pane only. Wiping the store's resident tail also blanked the
+        // per-task and bottom panes, which read the same array — and the restore affordance is
+        // rendered only here, so a task pane had no way back short of relaunching the app.
+        // The full transcript is on disk and untouched either way.
+        primaryTranscriptProvider.clearView()
     }
 
     /// `/clear` and the toolbar trashcan: resets SMITH'S LLM CONTEXT (with a fresh
     /// task-state re-briefing) and starts a fresh screen. Distinct from Ctrl-L, which is
     /// display-only. Brown is untouched — clearing a worker mid-task would break the task.
     func clearConversation() async {
-        // Await the wipe directly (not the fire-and-forget `clearLog`) so it lands before the
-        // system-message append below, which would otherwise race back onto a just-cleared screen.
-        await transcriptStore.clear()
+        // Awaits the clear directly rather than going through `clearLog`, whose fire-and-forget Task
+        // could land AFTER the system-message append below and wipe it off a just-cleared screen.
+        if let id = primaryTranscriptProvider.subscriberID {
+            await transcriptStore.clearView(id)
+        }
         guard let runtime else {
             appendLocalSystemMessage("Screen cleared. System is not running, so there was no agent context to clear.")
             return
