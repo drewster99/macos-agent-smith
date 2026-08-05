@@ -867,7 +867,16 @@ private struct TaskRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             compactMetadata()
-                .fixedSize()
+                // layoutPriority WITHOUT fixedSize: the metadata still claims its space before the
+                // title (so the title truncates first, which is what you want), but it can now give
+                // way under real pressure instead of refusing outright.
+                //
+                // `.fixedSize()` here was the horizontal-overflow bug. The chips' own minimums —
+                // cost 40 + elapsed 54 + time 88 + 18 of spacing = 200pt — plus the status icon,
+                // the title's ellipsis and the row spacing put this row's floor at ~250pt, which is
+                // the sidebar column's ENTIRE minimum. fixedSize made that floor absolute, so the
+                // row drew outside its column and was clipped at the window edge: the task list
+                // chopped down its left side, with no window width that fixed it.
                 .layoutPriority(1)
         }
         .padding(.leading, 10 + indent)
@@ -904,6 +913,9 @@ private struct TaskRow: View {
                 runInlineControl()
             }
 
+            // minWidth is kept: it is what lines these three up as columns across rows. Without
+            // `.fixedSize()` above them their 182pt total is the row's floor rather than an
+            // absolute, which lands the row just inside the 250pt column instead of outside it.
             costChip()
                 .frame(minWidth: 40, alignment: .trailing)
             compactElapsedText()
