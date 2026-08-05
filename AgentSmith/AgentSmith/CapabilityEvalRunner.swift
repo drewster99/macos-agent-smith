@@ -423,7 +423,23 @@ enum CapabilityEvalRunner {
 
                 // Budget range LAST: it is the only multi-call probe here, and running it after the
                 // single-call facts means an interrupted sweep still banks those.
-                if profile.maxThinkingBudgetTokens == nil, profile[.thinkingSupportsTokenBudget]?.value != false {
+                //
+                // Requires POSITIVE evidence that there is a reasoning budget to measure. The old
+                // gate was `thinkingSupportsTokenBudget != false`, and nothing ever establishes that
+                // capability — so it passed for every model alive. An endpoint with no budget
+                // parameter ignores one silently and accepts every value, so the searches converge
+                // on nonsense: on 2026-08-04 that wrote a 1-token floor and a fabricated ceiling for
+                // 72 models including gpt-4-turbo and babbage-002, which have no thinking at all.
+                //
+                // Observed reasoning is the evidence, since a model that does not reason cannot have
+                // a reasoning-token budget. A vendor claim counts too, for the models the toggle
+                // probe cannot reach (OpenAI's reasoning models take `reasoning_effort`, not a
+                // `thinking` block, so nothing observes their reasoning here).
+                let reasonsDemonstrably = profile[.reasoning]?.value == true
+                let vendorClaimsBudget = catalogEntry?.capabilities.state(of: .thinkingSupportsTokenBudget) == true
+                if profile.maxThinkingBudgetTokens == nil,
+                   profile[.thinkingSupportsTokenBudget]?.value != false,
+                   reasonsDemonstrably || vendorClaimsBudget {
                     let calls = ProbeCallCounter()
                     profile.maxThinkingBudgetTokens = await ModelProber.probeThinkingBudgetRange(
                         llm: await forcing([:]), modelID: target.modelID,
