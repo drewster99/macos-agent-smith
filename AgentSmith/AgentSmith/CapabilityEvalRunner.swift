@@ -601,8 +601,36 @@ enum CapabilityEvalRunner {
 
         writeProfiles(profiles)
         exportProbeRecords(kit: kit)
+        await recomposeCatalog(kit: kit, probedProviderIDs: Set(targets.map(\.providerID)))
         printSummary(profiles, kit: kit)
         exit(profiles.contains { $0.chat.status == .inconclusive } ? 2 : 0)
+    }
+
+    /// Folds this run's probe evidence into the model catalog that PRODUCTION reads.
+    ///
+    /// Without this a sweep measured correctly and changed nothing. `LLMKitManager.load()` reads the
+    /// cached `model_catalog.json`, and the merge that folds probe records into models
+    /// (`composeModel` → `ProbeEvidenceCombiner`) runs only during a refresh — so a probe run
+    /// written to disk sat unused until the next daily fetch happened to recompose. Observed
+    /// 2026-08-05: the five adaptive Claude models were measured as `anthropicAdaptiveThinking` and
+    /// the catalog still said nothing, so production kept sending the budgeted `thinking` block
+    /// those models refuse by name. A guaranteed 400, from a fact the probe already knew.
+    ///
+    /// A REFRESH rather than re-applying the empirical layer by hand: only the composed catalog is
+    /// persisted, not the authoritative layer, so there is nothing to recompose from offline. And
+    /// hand-applying would invert the merge order — empirical sits BEFORE downloaded overrides,
+    /// LiteLLM enrichment and user overrides, so layering it on top of an already-composed model
+    /// would let a probe beat the user's own override. Refreshing replays the real order.
+    ///
+    /// Scoped to the providers this run actually probed, so a `--targets builtin.anthropic` sweep
+    /// costs one provider's model listing rather than all fourteen.
+    private static func recomposeCatalog(kit: LLMKitManager, probedProviderIDs: Set<String>) async {
+        guard !probedProviderIDs.isEmpty else { return }
+        print("\n--- folding probe evidence into the catalog (\(probedProviderIDs.count) provider(s)) ---")
+        for providerID in probedProviderIDs.sorted() {
+            await kit.refreshModels(forProviderID: providerID)
+            print("  recomposed \(providerID)")
+        }
     }
 
     /// Writes the accumulated local probe store — every run ever, not just this one — in the
