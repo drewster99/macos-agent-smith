@@ -481,6 +481,18 @@ struct ChannelLogView: View, Equatable {
                     })
                 }
             }
+            // GREEDY, and load-bearing in both directions. A vertical `ScrollView` takes its WIDTH
+            // from its content, so without this the pane is sized by whatever it happens to be
+            // showing: a short transcript rendered as a ~100pt ribbon floating in the middle of the
+            // pane, and one containing a long URL or file path demanded that width from the whole
+            // window — which is what stopped the middle column from shrinking and squeezed the
+            // sidebar and inspector instead. Filling the offered width lets the text wrap to the
+            // pane rather than the pane size itself to the text.
+            //
+            // Same defect, same fix as `ModelMetadataInspectorWindow`'s split (see its comment):
+            // a split view's child that is not greedy on the cross axis collapses to its intrinsic
+            // size and floats centered.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
     

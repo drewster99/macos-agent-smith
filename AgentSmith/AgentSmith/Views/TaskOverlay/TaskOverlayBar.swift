@@ -129,8 +129,14 @@ struct TaskOverlayBar: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 3)
             .contentShape(Rectangle())
+            // GLOBAL coordinate space, and that is the whole point. This handle sits INSIDE the
+            // view it resizes, so in the default (local) space its own frame moves as the bar
+            // grows — every frame the bar got taller, the handle slid down under the cursor and
+            // the next `translation` was measured from a moved origin. That feedback loop is what
+            // made the drag jump around instead of tracking the pointer. Global coordinates don't
+            // move with the bar, so `translation` is pure cursor movement.
             .gesture(
-                DragGesture(minimumDistance: 1)
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
                         dragHeight = min(max(shared.taskOverlayHeight + value.translation.height, Self.minHeight), Self.maxHeight)
                     }

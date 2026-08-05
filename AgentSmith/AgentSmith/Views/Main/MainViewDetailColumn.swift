@@ -62,6 +62,10 @@ struct MainViewDetailColumn: View {
                     onOpenMCPSettings: openMCPSettingsAction,
                     selectedImageAttachment: $selectedImageAttachment
                 )
+                // Greedy on the CROSS axis (width) — a VSplitView child that isn't takes its width
+                // from its content and floats centered. Only width: height is the split axis and
+                // belongs to the divider and the min/ideal below.
+                .frame(maxWidth: .infinity)
                 .frame(minHeight: 120, idealHeight: 240)
 
                 // Bottom: the full session transcript, filtered by the user's per-session config
@@ -73,8 +77,12 @@ struct MainViewDetailColumn: View {
                     onOpenMCPSettings: openMCPSettingsAction,
                     selectedImageAttachment: $selectedImageAttachment
                 )
+                .frame(maxWidth: .infinity)
                 .frame(minHeight: 200)
             }
+            // The split itself must fill too, or it collapses to the taller of two already-collapsed
+            // children and the whole stack floats in the middle of the window.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             // Update cached display preferences when any of the underlying shared preferences change.
             // This avoids creating a new TimestampPreferences instance on every body pass.
             .onChange(of: shared.showTimestampsOnTaskBanners) { _, newValue in
@@ -271,6 +279,10 @@ private struct TaskTranscriptTopPane: View {
                 DrilledRunHeader { viewModel.selectedTemplateRunID = nil }
                 Divider()
             }
+            // Names the pane, and names the TASK — the two transcripts are visually identical
+            // otherwise, so the only thing distinguishing this one is which task it belongs to.
+            TranscriptPaneHeader(title: effective.map { "Task transcript · \($0.title)" }
+                                        ?? "Task transcript")
             // Vend a read-only transcript from the origin session's log when the live provider can't be
             // trusted to have it: a task NOT resident in this session (archived/deleted or cross-session
             // and not restored), or a finished drilled run (trimmed from the tail). Otherwise the live

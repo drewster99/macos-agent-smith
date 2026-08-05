@@ -11,11 +11,7 @@ struct TranscriptFilterBar: View {
     private var isFiltering: Bool { config != .everything }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text("Session transcript")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
+        TranscriptPaneHeader(title: "Session transcript") {
             Button {
                 showPopover = true
             } label: {
@@ -29,8 +25,41 @@ struct TranscriptFilterBar: View {
                 TranscriptFilterPopover(config: $config)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+    }
+}
+
+/// The title strip above a transcript pane, with an optional trailing control.
+///
+/// Shared by both panes so the seam between them is legible. Previously only the lower pane carried
+/// a title, and it sat on the same background as the messages — so the two transcripts ran together
+/// and the boundary was a guess. The tinted bar plus rules above and below make each pane's start
+/// explicit, and giving both panes the same chrome is what identifies them as two of a kind rather
+/// than one list with a caption in the middle of it.
+struct TranscriptPaneHeader<Trailing: View>: View {
+    let title: String
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                trailing
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(AppColors.secondaryBackground)
+            Divider()
+        }
+    }
+}
+
+extension TranscriptPaneHeader where Trailing == EmptyView {
+    init(title: String) {
+        self.init(title: title) { EmptyView() }
     }
 }
 
