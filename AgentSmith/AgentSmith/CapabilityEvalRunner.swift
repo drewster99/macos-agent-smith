@@ -379,9 +379,12 @@ enum CapabilityEvalRunner {
                     // whatever it is sent, so every candidate "demonstrates" acceptance and the
                     // winner would be decided by the order of the candidate list — pinning a
                     // request-builder branch on list order and calling it established.
-                    if let control = found.control, found.mechanismWasDemonstrated {
+                    if let control = found.control, found.mechanismWasEstablished {
                         profile.reasoningControl = .established(
-                            control, "the endpoint reasoned when asked via \(control.editorTitle)")
+                            control, found.mechanismWasDemonstrated
+                                ? "the endpoint reasoned when asked via \(control.editorTitle)"
+                                : "the endpoint refused the other mechanism(s) by name and accepted "
+                                + "\(control.editorTitle) — it discriminates between the shapes")
                     }
                     // Acceptance says the endpoint took the switch; the reply says whether it DID
                     // anything. `thinking` is an unknown key to most OpenAI-compatible endpoints and
