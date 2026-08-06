@@ -151,10 +151,12 @@ actor ProbeSweepScheduler {
         return (firstTrip, billingSkippedByProvider[providerID, default: 0])
     }
 
-    /// Providers whose queued targets were dropped by the breaker, with counts, for the
-    /// end-of-run summary.
+    /// Every TRIPPED provider with its skipped-count, for the end-of-run summary — keyed on the
+    /// tripped set, not the skip counts, so a trip that landed with nothing left queued (the
+    /// wallet dying under the provider's last in-flight targets) still reports, instead of
+    /// existing only as a transcript banner that scrolled away.
     func billingSkipSummary() -> [(providerID: String, skippedCount: Int)] {
-        billingSkippedByProvider.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+        billingTrippedProviders.sorted().map { ($0, billingSkippedByProvider[$0, default: 0]) }
     }
 
     func progressSnapshot() -> ProgressSnapshot {

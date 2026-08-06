@@ -2,8 +2,9 @@ import SwiftUI
 import AgentSmithKit
 
 /// A thin header strip above the bottom transcript pane carrying the filter-config button. The funnel
-/// fills when the pane is showing anything less than the full firehose, so it's obvious at a glance that
-/// messages are being hidden.
+/// fills when the config differs from the show-everything default — in practice "messages are being
+/// hidden", though a customization that happens to show everything (e.g. a sender override still equal
+/// to the default it was copied from) fills it too: the icon tracks configuration, not message counts.
 struct TranscriptFilterBar: View {
     @Binding var config: TranscriptViewConfig
     @State private var showPopover = false
@@ -259,6 +260,10 @@ private struct TranscriptKindGroupSection: View {
 private struct TranscriptKindChecklist: View {
     @Binding var selection: TranscriptKindSelection
 
+    /// Every group except Chat, which renders as its own toggle above. Static so the ForEach
+    /// iterates a stored constant instead of re-filtering `allCases` on every body evaluation.
+    private static let kindGroups = TranscriptKindGroup.allCases.filter { !$0.governsKindless }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle(isOn: $selection.showsChat) {
@@ -269,7 +274,7 @@ private struct TranscriptKindChecklist: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            ForEach(TranscriptKindGroup.allCases.filter { !$0.governsKindless }) { group in
+            ForEach(Self.kindGroups) { group in
                 TranscriptKindGroupRow(group: group, selection: $selection)
             }
         }
@@ -283,9 +288,14 @@ private struct TranscriptKindGroupRow: View {
     @State private var isExpanded = false
 
     /// Wire order is stable and clusters families (`task_*`, `validation_*`) — good enough
-    /// ordering, and it never shuffles when display labels get reworded.
-    private var orderedKinds: [ChannelMessageKind] {
-        group.kinds.sorted { $0.rawValue < $1.rawValue }
+    /// ordering, and it never shuffles when display labels get reworded. Stored at init rather
+    /// than computed: a computed collection fed to ForEach re-sorts on every body evaluation.
+    private let orderedKinds: [ChannelMessageKind]
+
+    init(group: TranscriptKindGroup, selection: Binding<TranscriptKindSelection>) {
+        self.group = group
+        self._selection = selection
+        self.orderedKinds = group.kinds.sorted { $0.rawValue < $1.rawValue }
     }
 
     var body: some View {

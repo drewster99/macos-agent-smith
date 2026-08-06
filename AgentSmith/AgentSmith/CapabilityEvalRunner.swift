@@ -96,14 +96,28 @@ enum CapabilityEvalRunner {
         // gaps (inconclusive last time), new models, or prober-version-invalidated findings cost
         // calls. Off by default — a bare sweep is a full, honest re-measurement.
         let reuseStore = CommandLine.arguments.contains("--reuse-store")
-        let reuseMaxAgeDays = argumentValue("--reuse-max-age-days").flatMap(Double.init) ?? 30
+        // Same loud-exit contract as every other numeric flag: a typo'd age silently becoming 30
+        // changes which records re-probe, and that costs real calls.
+        let reuseMaxAgeDays: Double
+        if let raw = argumentValue("--reuse-max-age-days") {
+            guard let days = Double(raw), days.isFinite, days > 0 else {
+                print("--reuse-max-age-days requires a positive, finite number of days"); exit(1)
+            }
+            reuseMaxAgeDays = days
+        } else {
+            reuseMaxAgeDays = 30
+        }
         let reuseMaxAge = reuseMaxAgeDays * 86_400
-        // A hung battery must stall one slot, briefly — not the sweep. Malformed is a loud
-        // exit, not a silent default: a mis-sized deadline abandons real measurements.
+        // A hung battery must stall one slot, briefly — not the sweep. Malformed is a loud exit,
+        // not a silent default: a mis-sized deadline abandons real measurements. Capped at 24h as
+        // policy — Int(timeout) renders in two messages and traps on a non-finite or astronomically
+        // large value, and a per-model deadline longer than a day is a disabled deadline wearing a
+        // number.
         let targetTimeout: TimeInterval
         if let raw = argumentValue("--target-timeout") {
-            guard let seconds = Double(raw), seconds > 0 else {
-                print("--target-timeout requires a positive number of seconds"); exit(1)
+            guard let seconds = Double(raw), seconds > 0, seconds <= 86_400 else {
+                print("--target-timeout requires a positive number of seconds, at most 86400 (24-hour policy cap)")
+                exit(1)
             }
             targetTimeout = seconds
         } else {
@@ -184,8 +198,14 @@ enum CapabilityEvalRunner {
         }
         heartbeat.cancel()
 
-        for (providerID, skippedCount) in await scheduler.billingSkipSummary() {
+        let billingTrips = await scheduler.billingSkipSummary()
+        for (providerID, skippedCount) in billingTrips {
             print("billing breaker: \(providerID) — \(skippedCount) queued model(s) were skipped")
+        }
+        let abandoned = results.abandonedInCatalogOrder()
+        for admission in abandoned {
+            print("deadline: \(admission.target.providerID)/\(admission.target.modelID)"
+                  + " — battery abandoned after \(Int(targetTimeout))s; nothing recorded")
         }
 
         let profiles = results.profilesInCatalogOrder()
@@ -193,7 +213,12 @@ enum CapabilityEvalRunner {
         exportProbeRecords(kit: kit)
         await recomposeCatalog(kit: kit, probedProviderIDs: Set(targets.map(\.providerID)))
         printSummary(profiles, kit: kit)
-        exit(profiles.contains { $0.chat.status == .inconclusive } ? 2 : 0)
+        // 2 = the sweep ran but did not measure everything (abandoned, billing-tripped, or a model
+        // whose chat probe never got an answer). One code: the causes co-occur, the summary text
+        // distinguishes them, and nothing scripted parses these yet.
+        let sweepIncomplete = !abandoned.isEmpty || !billingTrips.isEmpty
+            || profiles.contains { $0.chat.status == .inconclusive }
+        exit(sweepIncomplete ? 2 : 0)
     }
 
     /// The sweep flags that shape every target identically, bundled so the worker signatures
@@ -243,10 +268,51 @@ enum CapabilityEvalRunner {
     /// read in catalog order whatever order the workers finish in.
     final class SweepResults {
         private var indexed: [(index: Int, profile: ModelProfile)] = []
+        /// Deadline-abandoned targets. Durable on purpose: the transcript DEADLINE line scrolls
+        /// away, and an abandonment with no trace in the summary or the exit code is
+        /// indistinguishable from a measured model.
+        private(set) var abandoned: [ProbeSweepScheduler.Admission] = []
         func append(index: Int, profile: ModelProfile) { indexed.append((index, profile)) }
+        func recordAbandoned(_ admission: ProbeSweepScheduler.Admission) { abandoned.append(admission) }
         func profilesInCatalogOrder() -> [ModelProfile] {
             indexed.sorted { $0.index < $1.index }.map(\.profile)
         }
+        func abandonedInCatalogOrder() -> [ProbeSweepScheduler.Admission] {
+            abandoned.sorted { $0.index < $1.index }
+        }
+    }
+
+    /// Billing evidence anywhere in the profile's UNANSWERED findings. Established findings are
+    /// excluded on purpose: a billing refusal never establishes anything (`.paymentRequired`
+    /// grades as no-answer), and an established finding's evidence can quote endpoint- or
+    /// model-authored text, which must not trip an account-wide breaker.
+    ///
+    /// Enumerates every ProbeFinding-carrying field on ModelProfile — the same hand-walked
+    /// inventory the kit's own `seedProbedFindings` maintains. A probe dimension added to the
+    /// kit must be added here too; the drift is benign in practice (a mid-battery billing death
+    /// lands the same body in EVERY subsequent finding, so a missed field is almost never the
+    /// only copy) but add it anyway.
+    private static func billingEvidence(in profile: ModelProfile) -> String? {
+        var unanswered: [String] = []
+        func collect<T>(_ finding: ProbeFinding<T>?) {
+            guard let finding, finding.status != .established,
+                  let evidence = finding.evidence else { return }
+            unanswered.append(evidence)
+        }
+        collect(profile.isAvailable); collect(profile.isAccessDenied)
+        collect(profile.chat); collect(profile.acceptsTemperature)
+        collect(profile.toolCalling); collect(profile.toolResultRoundTrip)
+        collect(profile.vision); collect(profile.pdfInput)
+        collect(profile.maxContextTokens); collect(profile.maxOutputTokens)
+        collect(profile.maxOutputBoundedByContext)
+        collect(profile.trailingSystemMessage)
+        collect(profile.reasoningControl)
+        collect(profile.maxThinkingBudgetTokens); collect(profile.minThinkingBudgetTokens)
+        // Keys sorted so the banner quotes the same evidence string run-to-run.
+        for key in profile.generalEffortLevels.keys.sorted() { collect(profile.generalEffortLevels[key]) }
+        for key in profile.reasoningEffortLevels.keys.sorted() { collect(profile.reasoningEffortLevels[key]) }
+        for key in profile.capabilityFindings.keys.sorted() { collect(profile.capabilityFindings[key]) }
+        return unanswered.first(where: CapabilityProbe.textIndicatesBillingProblem)
     }
 
     /// One sweep worker: pulls admissions until the scheduler drains. The admission read and
@@ -273,6 +339,7 @@ enum CapabilityEvalRunner {
                     await completeTarget(outcome, context: context, kit: kit,
                                          scheduler: scheduler, results: results)
                 } else {
+                    results.recordAbandoned(admission)
                     context.transcript.emit(
                         "  DEADLINE: battery abandoned after \(Int(options.targetTimeout))s — nothing recorded")
                     print(context.transcript.drain().joined(separator: "\n") + "\n")
@@ -495,19 +562,18 @@ enum CapabilityEvalRunner {
         // and the evidence column truncates the message before the useful half. Observed live
         // on an 11-model Anthropic sweep, where the operator could not tell from the summary
         // that the account simply needed topping up. Stop, say so in full, and leave the
-        // stored records alone (nothing was established, so nothing is written).
-        // Scans every step-1 finding, not just `chat`. Gemini and Mistral DECODE `capabilities.chat`
-        // from their /models payload, so the seed makes it `.decoded(true, "provider /models
-        // payload")` and `probe()` skips the chat call entirely — the billing failure then lands
-        // in `acceptsTemperature` and the breaker never fired, which is exactly the sweep-wide
-        // burn its comment above says must not happen. Gemini's quota body even contains one of
-        // the phrases this matches.
-        let firstStepEvidence = [profile.chat, profile.acceptsTemperature, profile.isAvailable]
-            .compactMap(\.evidence)
-        if let billingEvidence = firstStepEvidence.first(where: CapabilityProbe.textIndicatesBillingProblem) {
+        // stored records alone (an interrupted battery is not a measurement, so nothing is written).
+        // Scans every UNANSWERED finding, not a fixed list. A fixed trio was already broken once:
+        // Gemini and Mistral DECODE `capabilities.chat` from their /models payload, so the seed
+        // makes it `.decoded(true, ...)` and `probe()` skips the chat call entirely — the billing
+        // failure then landed in `acceptsTemperature` and the original chat-only breaker never
+        // fired. The same seed can make ANY field the first live call, so enumeration by name
+        // cannot close the hole; `billingEvidence(in:)` walks the whole profile instead.
+        if let billingEvidence = billingEvidence(in: profile) {
             // Short-circuit the battery; the completion write trips the PROVIDER-scoped
             // breaker and renders the banner (the wording needs the skip count, which only
-            // the scheduler knows).
+            // the scheduler knows). Scans every unanswered finding, not a fixed step-1 trio:
+            // the decoded seed can make ANY field the first live call.
             return ProbeTargetOutcome(profile: profile, billingEvidence: billingEvidence)
         }
 
@@ -781,6 +847,17 @@ enum CapabilityEvalRunner {
         // carries the full rationale.
         profile = await context.probeTrailingSystemTurn(profile)
 
+        // The wallet can die MID-battery too — after chat established, during the ladders or
+        // the budget search. Without this second scan the contaminated profile reached
+        // `storeProbeResult`, and because chat was established probed, the store's
+        // no-established-findings guard did NOT refuse it: complete-run-replace
+        // wholesale-destroyed a good prior record. It also meant a wallet dying while the
+        // provider's LAST targets were in flight tripped no breaker and printed no banner
+        // at all. Before the discard check: billing is account-wide and outranks it.
+        if let billingEvidence = billingEvidence(in: profile) {
+            return ProbeTargetOutcome(profile: profile, billingEvidence: billingEvidence)
+        }
+
         // Non-chat models are dropped AFTER probing (chat is a probed result, not known up
         // front). We'll likely discard these downstream anyway; the flag makes that explicit.
         if options.discardNonChat, profile.chat.value == false {
@@ -817,7 +894,7 @@ enum CapabilityEvalRunner {
                     transcript.emit("  Provider disabled for the rest of the sweep: \(skippedCount) queued model(s) skipped rather than re-learning this.")
                 }
                 transcript.emit("  Other providers continue. In-flight probes against this provider fail on their own and record nothing.")
-                transcript.emit("  Probe records are untouched — nothing was established, so nothing was written.")
+                transcript.emit("  Probe records are untouched — an interrupted battery is not a measurement, so nothing was written.")
                 transcript.emit(String(repeating: "!", count: 100))
             } else {
                 transcript.emit("  billing failure — \(target.providerID) is already disabled for this sweep; nothing recorded.")

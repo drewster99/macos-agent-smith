@@ -16,8 +16,21 @@ struct RoleModelConfigOverrideEditor: View {
     @State private var override = ModelConfigurationOverride()
 
     /// Standard effort levels; the model's own ``EffortSupport`` decides which draw a warning,
-    /// not which are offered (overrides are permissive).
-    private static let effortLevels = ["low", "medium", "high", "xhigh", "max"]
+    /// not which are offered (overrides are permissive). "none" is deliberately absent — it is
+    /// the reasoning OFF-switch, and on/off belongs to the Thinking switch, not a depth picker.
+    private static let effortLevels = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+    /// The seed when Override is first flipped on: the shallowest level the model is KNOWN to
+    /// accept that the picker can express, else "high". `knownLevels.first` alone could seed
+    /// "none" — ranked before every real level — which the picker cannot display and which
+    /// silently turns reasoning OFF on the wire.
+    private func effortSeed(_ support: EffortSupport?) -> String {
+        support?.knownLevels?.first(where: { Self.effortLevels.contains($0) }) ?? "high"
+    }
+
+    private var providerAPIType: ProviderAPIType? {
+        shared.llmKit.providers.first(where: { $0.id == providerID })?.apiType
+    }
 
     private var modelInfo: ModelInfo? {
         shared.llmKit.modelInfo(providerID: providerID, modelID: modelID)
@@ -48,14 +61,24 @@ struct RoleModelConfigOverrideEditor: View {
             //  - Effort (general): hidden only when KNOWN-unsupported; emission fails open.
             //  - Effort (reasoning): shown only when KNOWN-supported; emission fails closed, so
             //    a control shown on an unknown ladder would silently do nothing.
+            // Every predicate also mounts when the override FIELD IS SET (`|| override.x != nil`):
+            // a stored value outlives fact changes (a re-probe flipping the mechanism, a ladder
+            // learning it's unsupported) and some keep ACTING on the wire — hiding the row would
+            // strand the only control that can clear them. A row mounted only-because-stored says
+            // so in its help and unmounts the moment Override is toggled off.
             thinkingRow()
-            if showsThinkingBudgetRow {
+            if showsThinkingBudgetRow || override.thinkingBudget != nil {
                 thinkingBudgetRow()
             }
-            if modelInfo?.generalEffort?.isSupported != false {
+            // General effort is Anthropic-only WIRE (`output_config.effort`): no other provider's
+            // request builder reads it, so showing the row elsewhere would offer a knob that never
+            // reaches any request.
+            if (providerAPIType == .anthropic && modelInfo?.generalEffort?.isSupported != false)
+                || override.effort != nil {
                 effortRow()
             }
-            if modelInfo?.reasoningEffort?.isSupported == true {
+            // Reasoning effort fails CLOSED at emission (sent only on KNOWN support).
+            if modelInfo?.reasoningEffort?.isSupported == true || override.reasoningEffort != nil {
                 reasoningEffortRow()
             }
             togglesRow()
@@ -135,9 +158,9 @@ struct RoleModelConfigOverrideEditor: View {
     private func effortRow() -> some View {
         overrideRow(
             title: "Effort (general)",
-            help: "Overall effort. Applies even when reasoning is off. Off = the model / provider default.",
+            help: generalEffortHelp,
             isOn: Binding(get: { override.effort != nil },
-                          set: { override.effort = $0 ? (modelInfo?.generalEffort?.knownLevels?.first ?? "high") : nil }),
+                          set: { override.effort = $0 ? effortSeed(modelInfo?.generalEffort) : nil }),
             defaultText: "provider default",
             warning: warnings[.effort]
         ) {
@@ -153,32 +176,41 @@ struct RoleModelConfigOverrideEditor: View {
 
     // MARK: Thinking
 
-    /// The model's reasoning mechanism, honoring the legacy adaptive behavior flag exactly the way
-    /// emission does — a hand-set flag predates the probe's discovery and must keep working.
+    /// The mechanism EMISSION will act on — the library's one coalesce of recorded control and
+    /// the legacy adaptive flag, so this surface cannot coalesce differently from the providers.
     private var reasoningControl: ReasoningControl? {
-        modelInfo?.reasoningControl
-            ?? (modelInfo?.behaviorFlags.requiresAdaptiveThinking == true ? .anthropicAdaptiveThinking : nil)
+        modelInfo?.effectiveReasoningControl
     }
 
     /// What the CURRENT settings will actually do about thinking — resolved by the library's
-    /// `plannedThinkingState`, the same rules emission applies, so this display cannot drift
-    /// from the wire.
+    /// `plannedThinkingState`, the same rules emission applies (including the per-apiType legacy
+    /// fallbacks), so this display cannot drift from the wire. A nil `modelInfo` passes empty
+    /// facts — correct, since emission's own catalog lookup comes back empty there too and the
+    /// legacy fallbacks still apply.
     private var plannedThinking: PlannedThinkingState {
-        ReasoningControl.plannedThinkingState(
-            control: reasoningControl,
-            capabilities: modelInfo?.capabilities ?? ModelCapabilities(),
+        let inputs = modelInfo.map {
+            PlannedThinkingState.Inputs(
+                model: $0, apiType: providerAPIType,
+                reasoningEnabled: override.reasoningEnabled,
+                thinkingBudget: override.thinkingBudget,
+                reasoningEffort: override.reasoningEffort)
+        } ?? PlannedThinkingState.Inputs(
+            control: nil, apiType: providerAPIType, capabilities: ModelCapabilities(),
             reasoningEnabled: override.reasoningEnabled,
             thinkingBudget: override.thinkingBudget,
             reasoningEffort: override.reasoningEffort,
-            reasoningEffortSupport: modelInfo?.reasoningEffort)
+            reasoningEffortSupport: nil)
+        return ReasoningControl.plannedThinkingState(inputs)
     }
 
-    /// Budget shown for mechanisms that carry one, plus the legacy Anthropic/Alibaba fallback for
-    /// unrecorded mechanisms (emission honors a budget there via the apiType fallback).
+    /// Budget shown for mechanisms that carry one, plus the legacy fallback apiTypes whose
+    /// emission honors a budget with no recorded mechanism (the same set as the resolver's
+    /// `legacyFallbackControl`). Adaptive stays out: its budget is only a redundant ON-signal,
+    /// and the Thinking switch is the verb.
     private var showsThinkingBudgetRow: Bool {
         if let control = reasoningControl { return control.carriesTokenBudget }
-        switch shared.llmKit.providers.first(where: { $0.id == providerID })?.apiType {
-        case .anthropic, .alibabaCloud: return true
+        switch providerAPIType {
+        case .anthropic, .alibabaCloud, .gemini: return true
         default: return false
         }
     }
@@ -191,18 +223,15 @@ struct RoleModelConfigOverrideEditor: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("Thinking").font(.headline)
                 Spacer()
-                if reasoningControl != nil && reasoningControl != .unsupported {
+                // Mounted when the mechanism has a switch OR a stored value exists — a value
+                // stranded by a mechanism re-record keeps acting and needs a way to be cleared.
+                // No budget seeding here: emission itself seeds the minimum on explicit ON
+                // (the deleted 2048 seed disagreed with the 1,024 the wire actually uses).
+                if (reasoningControl != nil && reasoningControl != .unsupported)
+                    || override.reasoningEnabled != nil {
                     Picker("", selection: Binding(
                         get: { override.reasoningEnabled },
-                        set: { newValue in
-                            override.reasoningEnabled = newValue
-                            // Forcing ON on a mechanism that emits nothing without a budget
-                            // (Anthropic's budgeted thinking) seeds one, so On means on.
-                            if newValue == true, reasoningControl == .anthropicThinking,
-                               override.thinkingBudget == nil {
-                                override.thinkingBudget = max(modelInfo?.minThinkingBudgetTokens ?? 0, 2048)
-                            }
-                        })) {
+                        set: { override.reasoningEnabled = $0 })) {
                         Text("Default").tag(Bool?.none)
                         Text("On").tag(Bool?.some(true))
                         Text("Off").tag(Bool?.some(false))
@@ -238,8 +267,8 @@ struct RoleModelConfigOverrideEditor: View {
 
     private var plannedThinkingSymbol: String {
         switch plannedThinking {
-        case .on: return "brain.head.profile"
-        case .off: return "brain.head.profile.fill"
+        case .on: return "brain.head.profile.fill"
+        case .off: return "brain.head.profile"
         case .unsupported: return "nosign"
         case .unknown: return "questionmark.circle"
         }
@@ -251,7 +280,10 @@ struct RoleModelConfigOverrideEditor: View {
             help: budgetHelp,
             isOn: Binding(get: { override.thinkingBudget != nil },
                           set: { override.thinkingBudget = $0
-                              ? max(modelInfo?.minThinkingBudgetTokens ?? 0, 2048) : nil }),
+                              ? ThinkingBudget.overrideSeed(
+                                    measuredMinimum: modelInfo?.minThinkingBudgetTokens,
+                                    measuredMaximum: modelInfo?.maxThinkingBudgetTokens)
+                              : nil }),
             defaultText: "model default",
             warning: warnings[.thinkingBudget]
         ) {
@@ -261,11 +293,19 @@ struct RoleModelConfigOverrideEditor: View {
 
     /// Depth only — on/off belongs to the Thinking switch above ("0 = off" was never true for
     /// most mechanisms; a zero budget emits nothing, which is model-default, not off). The
-    /// measured range is stated so an out-of-range entry is a choice, not a surprise.
+    /// measured range is stated so an out-of-range entry is a choice, not a surprise. The two
+    /// mounted-while-strange cases (adaptive, or a mechanism with no budget at all — reachable
+    /// only when a stored value keeps the row mounted) say exactly what the value does.
     private var budgetHelp: String {
-        var help = reasoningControl == .anthropicAdaptiveThinking
-            ? "Adaptive model — the budget acts as an on-signal; depth is the model's own choice."
-            : "Extended-thinking token depth. On/off is the Thinking switch above."
+        var help: String
+        switch reasoningControl {
+        case .anthropicAdaptiveThinking:
+            help = "Adaptive model — the budget acts only as an on-signal; depth is the model's own choice. Clear it and use the Thinking switch instead."
+        case let control? where !control.carriesTokenBudget:
+            help = "This model's mechanism takes no token budget — nothing is sent; the stored value is inert."
+        default:
+            help = "Extended-thinking token depth. On/off is the Thinking switch above."
+        }
         if let floor = modelInfo?.minThinkingBudgetTokens, let ceiling = modelInfo?.maxThinkingBudgetTokens {
             help += " Measured range \(floor.formatted()) – \(ceiling.formatted())."
         } else if let ceiling = modelInfo?.maxThinkingBudgetTokens {
@@ -359,9 +399,9 @@ struct RoleModelConfigOverrideEditor: View {
     private func reasoningEffortRow() -> some View {
         overrideRow(
             title: "Effort (reasoning)",
-            help: "Reasoning depth (`reasoning_effort`). Off = the model / provider default.",
+            help: reasoningEffortHelp,
             isOn: Binding(get: { override.reasoningEffort != nil },
-                          set: { override.reasoningEffort = $0 ? (modelInfo?.reasoningEffort?.knownLevels?.first ?? "high") : nil }),
+                          set: { override.reasoningEffort = $0 ? effortSeed(modelInfo?.reasoningEffort) : nil }),
             defaultText: "provider default",
             warning: warnings[.reasoningEffort]
         ) {
@@ -381,6 +421,20 @@ struct RoleModelConfigOverrideEditor: View {
     private func effortLabel(_ level: String, _ support: EffortSupport?) -> String {
         guard let support else { return level }
         return support.rejects(level) ? "\(level)*" : level
+    }
+
+    /// Honest about inert values: these rows can be mounted purely because a value is STORED
+    /// (see the body's mount predicates), and a stored value emission won't send must say so.
+    private var reasoningEffortHelp: String {
+        modelInfo?.reasoningEffort?.isSupported == true
+            ? "Reasoning depth (`reasoning_effort`). Off = the model / provider default."
+            : "Reasoning depth (`reasoning_effort`). Not measured-supported — nothing is sent; the stored value is inert."
+    }
+
+    private var generalEffortHelp: String {
+        providerAPIType == .anthropic
+            ? "Overall effort. Applies even when reasoning is off. Off = the model / provider default."
+            : "Overall effort (`output_config.effort`) — an Anthropic parameter. This provider never sends it; the stored value is inert."
     }
 
 }

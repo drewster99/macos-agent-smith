@@ -89,7 +89,7 @@ private struct TranscriptSplitDivider: View {
         Divider()
             .padding(.vertical, (TranscriptSplitMetrics.dividerExtent - 1) / 2)
             .contentShape(Rectangle())
-            .pointerStyle(.frameResize(position: .bottom, directions: [.inward, .outward]))
+            .pointerStyle(.rowResize)
             .gesture(
                 // GLOBAL coordinate space, same reasoning as TaskOverlayBar's grab handle: the
                 // divider moves with the drag, so a local-space translation would be measured

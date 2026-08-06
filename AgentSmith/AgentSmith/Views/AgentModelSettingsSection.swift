@@ -288,25 +288,29 @@ struct AgentModelSettingsSection: View {
     private func effectiveSettingsBar(for info: ModelInfo) -> some View {
         let override = viewModel.shared.roleModelConfigOverride(role: role, providerID: providerID, modelID: modelID)
         let resolved = override.resolved(against: info, name: info.displayName)
+        let apiType = viewModel.shared.llmKit.providers.first(where: { $0.id == providerID })?.apiType
+        // The four-state ACTUAL thinking state, resolved by the same library rules emission
+        // uses — the old `?? "thinking off"` claimed off for every model-default/unknown case.
+        // Inputs(model:) is the canonical construction; the adaptive-flag coalesce lives in
+        // `ModelInfo.effectiveReasoningControl`, never duplicated here.
+        let plan = ReasoningControl.plannedThinkingState(PlannedThinkingState.Inputs(
+            model: info, apiType: apiType,
+            reasoningEnabled: resolved.reasoningEnabled,
+            thinkingBudget: resolved.thinkingBudget,
+            reasoningEffort: resolved.reasoningEffort))
         return WrappingHStack(spacing: 8, lineSpacing: 4) {
             Text("Effective:").foregroundStyle(.tertiary)
             Text(resolved.temperature.map { "temp \(String(format: "%.2f", $0))" } ?? "temp default")
                 .foregroundStyle(.secondary)
-            // The four-state ACTUAL thinking state, resolved by the same library rules emission
-            // uses — the old `?? "thinking off"` claimed off for every model-default/unknown case.
-            Text("thinking " + ReasoningControl.plannedThinkingState(
-                control: info.reasoningControl
-                    ?? (info.behaviorFlags.requiresAdaptiveThinking ? .anthropicAdaptiveThinking : nil),
-                capabilities: info.capabilities,
-                reasoningEnabled: resolved.reasoningEnabled,
-                thinkingBudget: resolved.thinkingBudget,
-                reasoningEffort: resolved.reasoningEffort,
-                reasoningEffortSupport: info.reasoningEffort).label)
-                .foregroundStyle(.secondary)
-            if let effort = resolved.effort, !effort.isEmpty {
+            Text("thinking " + plan.label).foregroundStyle(.secondary)
+            // Chips only for values EMISSION will send: general effort is Anthropic-only wire
+            // (`output_config.effort`), fail-open on its ladder; `reasoning_effort` fails closed.
+            if let effort = resolved.effort, !effort.isEmpty,
+               apiType == .anthropic, info.generalEffort?.isSupported != false {
                 Text("effort \(effort)").foregroundStyle(.secondary)
             }
-            if let reasoningEffort = resolved.reasoningEffort, !reasoningEffort.isEmpty {
+            if let reasoningEffort = resolved.reasoningEffort, !reasoningEffort.isEmpty,
+               info.reasoningEffort?.isSupported == true {
                 Text("reasoning \(reasoningEffort)").foregroundStyle(.secondary)
             }
             // Show a cap only when the user explicitly overrode it (keyed on the override's presence,

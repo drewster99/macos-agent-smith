@@ -298,6 +298,41 @@ import Foundation
         #expect(future.defaultKinds.hiddenKinds == [.memorySaved])
     }
 
+    /// Axis values written by a NEWER build must degrade, never fail the decode — a throw here
+    /// destroys the whole `SessionState`, and the session's next save overwrites it with
+    /// defaults. Unknown allow-list members drop alone; a list with NO surviving member decodes
+    /// as nil (no filtering) while a deliberately-empty one stays empty; an unknown visibility
+    /// falls back to `.all`; an unknown legacy group name is ignored.
+    @Test func unknownForwardValuesFailOpenInsteadOfFailingTheDecode() throws {
+        let partiallyKnown = """
+        {"hiddenKinds":[],"showsChat":true,
+         "allowedSenders":[{"user":{}},{"someFutureSender":{}}],
+         "allowedRecipients":[{"type":"user"},{"type":"someFutureRecipient"}],
+         "visibility":"all","hideTaskScoped":false,"showErrors":true}
+        """
+        let back = try JSONDecoder().decode(TranscriptViewConfig.self, from: Data(partiallyKnown.utf8))
+        #expect(back.allowedSenders == [.user])
+        #expect(back.allowedRecipients == [.user])
+
+        let allUnknownAndEmpty = """
+        {"hiddenKinds":[],"showsChat":true,
+         "allowedSenders":[{"someFutureSender":{}}],
+         "allowedRecipients":[],
+         "visibility":"someFutureVisibility","hideTaskScoped":false,"showErrors":true}
+        """
+        let degraded = try JSONDecoder().decode(TranscriptViewConfig.self, from: Data(allUnknownAndEmpty.utf8))
+        #expect(degraded.allowedSenders == nil)
+        #expect(degraded.allowedRecipients?.isEmpty == true)
+        #expect(degraded.visibility == .all)
+
+        let unknownLegacyGroup = """
+        {"visibleGroups":["chat","system","someFutureGroup"],"visibility":"all"}
+        """
+        let legacy = try JSONDecoder().decode(TranscriptViewConfig.self, from: Data(unknownLegacyGroup.utf8))
+        #expect(legacy.defaultKinds.showsChat)
+        #expect(legacy.defaultKinds.groupVisibility(of: .system) == .all)
+    }
+
     /// Override persistence: rows sort by sender for diff-stable JSON, and a row a NEWER build
     /// wrote with an unknown sender is dropped alone — that sender follows the default (fails
     /// open) — instead of losing the rows behind it or failing the whole config decode.

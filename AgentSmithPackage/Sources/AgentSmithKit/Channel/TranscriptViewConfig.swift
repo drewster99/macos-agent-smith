@@ -254,7 +254,10 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
             defaultKinds = TranscriptKindSelection(
                 hiddenKinds: hidden.reduce(into: Set<ChannelMessageKind>()) { $0.formUnion($1.kinds) },
                 showsChat: !hidden.contains(.chat))
-        } else if let legacyVisible = try c.decodeIfPresent(Set<TranscriptKindGroup>.self, forKey: .visibleGroups) {
+        } else if let legacyVisibleNames = try c.decodeIfPresent(Set<String>.self, forKey: .visibleGroups) {
+            // Decoded as raw strings for the same reason as `hiddenGroups` above: an unknown
+            // group name is ignored rather than failing the decode.
+            let legacyVisible = Set(legacyVisibleNames.compactMap(TranscriptKindGroup.init(rawValue:)))
             // Written by a build that stored the VISIBLE group set and predates `securityReviews`.
             // Security-review rows were kindless then, so the Chat toggle governed them —
             // inheriting Chat's state preserves exactly what this config showed before the upgrade.
@@ -287,11 +290,45 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         } else {
             senderKindOverrides = [:]
         }
-        allowedSenders = try c.decodeIfPresent(Set<ChannelMessage.Sender>.self, forKey: .allowedSenders)
-        allowedRecipients = try c.decodeIfPresent(Set<MessageRecipient>.self, forKey: .allowedRecipients)
-        visibility = try c.decodeIfPresent(TranscriptFilter.Visibility.self, forKey: .visibility) ?? .all
+        // Per-element lenient, same reason as the override rows above: an allow-list member
+        // written by a NEWER build (a sender/recipient case this build doesn't have) drops
+        // alone instead of throwing — a throw here takes the whole `SessionState` decode down,
+        // and the session's next save then overwrites state.json with defaults.
+        allowedSenders = Self.decodeLenientSet(ChannelMessage.Sender.self, from: c, forKey: .allowedSenders)
+        allowedRecipients = Self.decodeLenientSet(MessageRecipient.self, from: c, forKey: .allowedRecipients)
+        // Raw string + `init(rawValue:)` so a visibility mode added by a newer build falls back
+        // to `.all` (shows everything — fails open) instead of throwing.
+        visibility = (try c.decodeIfPresent(String.self, forKey: .visibility))
+            .flatMap(TranscriptFilter.Visibility.init(rawValue:)) ?? .all
         hideTaskScoped = try c.decodeIfPresent(Bool.self, forKey: .hideTaskScoped) ?? false
         showErrors = try c.decodeIfPresent(Bool.self, forKey: .showErrors) ?? true
+    }
+
+    /// Decodes a set one element at a time, dropping any member this build can't represent —
+    /// the same per-row leniency the sender-override decode uses. Returns nil when the key is
+    /// absent or null, or when a NON-EMPTY stored array lost every member: an allow-list this
+    /// build can't honor at all fails open as "no filtering", because honoring it as the EMPTY
+    /// set would hide everything. A stored empty array stays empty — that is deliberate user
+    /// state (every toggle off), not decode fallout.
+    private static func decodeLenientSet<Element: Decodable & Hashable>(
+        _ type: Element.Type,
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) -> Set<Element>? {
+        guard var elements = try? container.nestedUnkeyedContainer(forKey: key) else { return nil }
+        var decoded = Set<Element>()
+        var sawElement = false
+        while !elements.isAtEnd {
+            sawElement = true
+            if let element = try? elements.decode(Element.self) {
+                decoded.insert(element)
+            } else {
+                // A failed `decode` does not advance the container; skip the bad element
+                // explicitly or the loop never terminates.
+                _ = try? elements.decode(AnyDecodableBlob.self)
+            }
+        }
+        return sawElement && decoded.isEmpty ? nil : decoded
     }
 
     /// Kind visibility is persisted as the HIDDEN set, not the visible one, so a kind added in a
@@ -302,6 +339,14 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     /// was a group. Raw values sorted, and override rows sorted by sender, so the persisted JSON
     /// is diff-stable. The default scope keeps the FLAT `hiddenKinds`/`showsChat` keys the
     /// previous generation wrote, so a no-override config round-trips byte-identically with it.
+    ///
+    /// Re-encoding is deliberately lossy across build generations: a hidden-kind name, allow-list
+    /// member, or override row that decode dropped (written by a newer build) is not carried
+    /// through a save from this build — those messages simply show again, the same fail-open
+    /// default every unknown decodes to. Carrying opaque unknowns through would cost a
+    /// non-semantic field on every selection (and an Equatable that either lies or spuriously
+    /// differs) to preserve, across a transient downgrade, a preference whose loss is already
+    /// the safe direction.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(defaultKinds.hiddenKinds.map(\.rawValue).sorted(), forKey: .hiddenKinds)

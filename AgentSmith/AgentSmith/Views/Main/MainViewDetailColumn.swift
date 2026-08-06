@@ -15,8 +15,37 @@ struct MainViewDetailColumn: View {
     let onDrop: ([NSItemProvider]) -> Bool
     
     /// Cached display preferences to avoid creating a new TimestampPreferences instance on every body pass.
-    /// Updated via .onChange when any of the underlying shared preferences change.
-    @State private var cachedDisplayPrefs = TimestampPreferences.default
+    /// Updated via .onChange when any of the underlying shared preferences change. Seeded in `init`
+    /// from the live shared values: the old `.default` seed corrected by `.task` flashed factory
+    /// settings for the first frame(s) for exactly the users who had changed a preference. The
+    /// "AVOID initializing @State from init values" rule's failure mode — stale state after the
+    /// parent passes new values — is neutralized here by the six `.onChange` handlers that keep
+    /// the cache live; State(initialValue:) runs only at identity creation, and this view's
+    /// identity is window-lifetime (the NavigationSplitView detail slot).
+    @State private var cachedDisplayPrefs: TimestampPreferences
+
+    init(viewModel: AppViewModel,
+         shared: SharedAppState,
+         isDropTargeted: Binding<Bool>,
+         selectedImageAttachment: Binding<Attachment?>,
+         isLightboxFocused: FocusState<Bool>.Binding,
+         onAbortReset: @escaping () -> Void,
+         onDrop: @escaping ([NSItemProvider]) -> Bool) {
+        self.viewModel = viewModel
+        self.shared = shared
+        self._isDropTargeted = isDropTargeted
+        self._selectedImageAttachment = selectedImageAttachment
+        self._isLightboxFocused = isLightboxFocused
+        self.onAbortReset = onAbortReset
+        self.onDrop = onDrop
+        self._cachedDisplayPrefs = State(initialValue: TimestampPreferences(
+            taskBanners: shared.showTimestampsOnTaskBanners,
+            toolCalls: shared.showTimestampsOnToolCalls,
+            messaging: shared.showTimestampsOnMessaging,
+            systemMessages: shared.showTimestampsOnSystemMessages,
+            elapsedTimeOnToolCalls: shared.showElapsedTimeOnToolCalls,
+            showRestartChrome: shared.showRestartChrome))
+    }
 
     /// PDF-export action for a "Task Completed" banner, shared by both transcript panes.
     private var exportTaskPDFAction: (UUID, String, String?, Date) -> Void {
@@ -116,17 +145,6 @@ struct MainViewDetailColumn: View {
                 DispatchQueue.main.async {
                     cachedDisplayPrefs.showRestartChrome = newValue
                 }
-            }
-            // Initialize cached preferences on first appearance.
-            .task {
-                cachedDisplayPrefs = TimestampPreferences(
-                    taskBanners: shared.showTimestampsOnTaskBanners,
-                    toolCalls: shared.showTimestampsOnToolCalls,
-                    messaging: shared.showTimestampsOnMessaging,
-                    systemMessages: shared.showTimestampsOnSystemMessages,
-                    elapsedTimeOnToolCalls: shared.showElapsedTimeOnToolCalls,
-                    showRestartChrome: shared.showRestartChrome
-                )
             }
 
             Divider()
@@ -258,7 +276,14 @@ private struct TaskTranscriptTopPane: View {
                 if selected.isTemplate && viewModel.selectedTemplateRunID == nil {
                     TemplateRunHistoryPane(template: selected, viewModel: viewModel)
                 } else {
-                    transcript(showBackToRuns: selected.isTemplate)
+                    TaskTranscriptContent(
+                        viewModel: viewModel,
+                        effectiveTask: effectiveTask,
+                        showBackToRuns: selected.isTemplate,
+                        displayPrefs: displayPrefs,
+                        onExportTaskPDF: onExportTaskPDF,
+                        onOpenMCPSettings: onOpenMCPSettings,
+                        selectedImageAttachment: $selectedImageAttachment)
                 }
             } else {
                 ContentUnavailableView(
@@ -276,15 +301,26 @@ private struct TaskTranscriptTopPane: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
-    private func transcript(showBackToRuns: Bool) -> some View {
-        let effective = effectiveTask
+}
+
+/// The top pane's transcript mode — back-to-runs chrome, the task header, and the right transcript
+/// source. A `View` struct (not a `-> some View` helper) per the project's SwiftUI rules.
+private struct TaskTranscriptContent: View {
+    let viewModel: AppViewModel
+    let effectiveTask: AgentTask?
+    let showBackToRuns: Bool
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
         // Resident in THIS session's live store → its messages are (or are becoming) current here, so
         // the live streaming provider is right — even for a task restored from another origin session
         // and re-running in this window. A finished drilled run is the exception: it's resident but its
         // messages have been trimmed from the bounded resident tail, so it must be read from the log.
-        let residentHere = effective.map { e in viewModel.tasks.contains { $0.id == e.id } } ?? false
-        let finishedDrilledRun = showBackToRuns && (effective?.status.isInProgress == false)
+        let residentHere = effectiveTask.map { e in viewModel.tasks.contains { $0.id == e.id } } ?? false
+        let finishedDrilledRun = showBackToRuns && (effectiveTask?.status.isInProgress == false)
         VStack(spacing: 0) {
             if showBackToRuns {
                 DrilledRunHeader { viewModel.selectedTemplateRunID = nil }
@@ -292,15 +328,15 @@ private struct TaskTranscriptTopPane: View {
             }
             // Names the TASK, in the sidebar's chip and the transcript's own orange — the two
             // transcripts are visually identical otherwise, so this is what distinguishes them.
-            TaskTranscriptHeader(task: effective)
+            TaskTranscriptHeader(task: effectiveTask)
             // Vend a read-only transcript from the origin session's log when the live provider can't be
             // trusted to have it: a task NOT resident in this session (archived/deleted or cross-session
             // and not restored), or a finished drilled run (trimmed from the tail). Otherwise the live
             // streaming provider — a resident, still-running task, including a live drilled run.
-            if let effective, let origin = effective.sessionID, !residentHere || finishedDrilledRun {
+            if let effectiveTask, let origin = effectiveTask.sessionID, !residentHere || finishedDrilledRun {
                 CrossSessionTranscriptView(
                     originSessionID: origin,
-                    taskID: effective.id,
+                    taskID: effectiveTask.id,
                     viewModel: viewModel,
                     displayPrefs: displayPrefs,
                     onExportTaskPDF: onExportTaskPDF,
