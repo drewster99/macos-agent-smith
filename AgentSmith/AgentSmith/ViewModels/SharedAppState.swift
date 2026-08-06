@@ -263,6 +263,19 @@ final class SharedAppState {
     private func notifyOrchestrationSettingsChanged() {
         for observer in orchestrationSettingsObservers.values { observer() }
     }
+
+    /// Drops every per-session observer registered under `sessionID`, across all six observer
+    /// maps. Session deletion is the one path that discards a view model for good; without this,
+    /// its entries (inert `[weak self]` closures, but entries nonetheless) stayed keyed in these
+    /// maps for the life of the app. Safe to call for a session that never registered.
+    func removeSessionObservers(sessionID: UUID) {
+        unregisterWorkerCapacityObserver(sessionID)
+        unregisterCompactionDiffCaptureObserver(sessionID)
+        unregisterAutoArchivePolicyObserver(sessionID)
+        removeToolSecurityObserver(sessionID)
+        removeModelAssignmentObserver(sessionID)
+        removeOrchestrationSettingsObserver(sessionID)
+    }
     private static func loadToolPolicies() -> [String: ToolPolicy] {
         guard let data = UserDefaults.standard.data(forKey: "globalToolPolicies"),
               let decoded = try? JSONDecoder().decode([String: ToolPolicy].self, from: data) else { return [:] }

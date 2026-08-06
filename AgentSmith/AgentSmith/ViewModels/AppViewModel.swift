@@ -1118,12 +1118,16 @@ final class AppViewModel {
         // tasks Smith creates carry this session's immutable origin id.
         await liveTaskStore.setSessionID(session.id)
         await wireDurablePersistHooks(on: liveTaskStore)
-        await liveTaskStore.setOnChange { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+        // `[weak liveTaskStore]` matters: this closure is stored ON the store, so a strong
+        // capture is a store→closure→store cycle that leaks the store (and its task state)
+        // when the view model is discarded without another start() — session deletion.
+        // Mirrors the standalone-store registration above.
+        await liveTaskStore.setOnChange { [weak self, weak liveTaskStore] in
+            Task { @MainActor [weak self, weak liveTaskStore] in
+                guard let self, let store = liveTaskStore else { return }
                 self.taskApplyGeneration &+= 1
                 let myGen = self.taskApplyGeneration
-                let allTasks = await liveTaskStore.allTasks()
+                let allTasks = await store.allTasks()
                 guard myGen == self.taskApplyGeneration else { return }
                 self.tasks = allTasks
                 self.updateTaskOverlay()

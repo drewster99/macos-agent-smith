@@ -97,6 +97,25 @@ public actor OrchestrationRuntime {
     /// Preserved evaluation records from terminated Browns, for inspector display.
     /// (Live evaluators ride on the supervisor's `AgentHandle`s.)
     private var archivedEvaluationRecords: [UUID: [EvaluationRecord]] = [:]
+    /// Bounds `archivedEvaluationRecords`. Its one reader (`securityEvaluationHistory`) consumes
+    /// only the NEWEST entry, but an entry used to land per terminated agent and never leave —
+    /// a worker-churning session accumulated the full evaluation history (prompt + response per
+    /// record) of every Brown it ever cycled. A small recent window keeps the fallback useful
+    /// without the ratchet.
+    private static let maxArchivedEvaluationEntries = 8
+
+    /// The single mutation point for `archivedEvaluationRecords`: stores the terminated agent's
+    /// history and evicts the entries with the oldest final records past the cap.
+    private func archiveEvaluationRecords(_ records: [EvaluationRecord], agentID: UUID) {
+        guard !records.isEmpty else { return }
+        archivedEvaluationRecords[agentID] = records
+        while archivedEvaluationRecords.count > Self.maxArchivedEvaluationEntries {
+            guard let oldest = archivedEvaluationRecords.min(by: {
+                ($0.value.last?.timestamp ?? .distantPast) < ($1.value.last?.timestamp ?? .distantPast)
+            }) else { break }
+            archivedEvaluationRecords.removeValue(forKey: oldest.key)
+        }
+    }
 
     /// Summarizer for generating task summaries after completion/failure.
     private var taskSummarizer: TaskSummarizer?
@@ -3174,9 +3193,7 @@ public actor OrchestrationRuntime {
         for handle in handles {
             guard let evaluator = handle.evaluator else { continue }
             let records = await evaluator.evaluationHistory()
-            if !records.isEmpty {
-                archivedEvaluationRecords[handle.id] = records
-            }
+            archiveEvaluationRecords(records, agentID: handle.id)
         }
 
         // Clear the channel's session stamp. Unconditional: the lifecycle queue means no
@@ -3224,6 +3241,8 @@ public actor OrchestrationRuntime {
         onEvaluationRecorded = nil
         onContextChanged = nil
         onTimerEventForChannel = nil
+        onLearnedModelOutputLimit = nil
+        onCompactionCaptured = nil
     }
 
     /// True iff every observer callback is nil. Surfaced for tests; do not
@@ -3675,7 +3694,7 @@ public actor OrchestrationRuntime {
         // Archive the security evaluator's history.
         if let evaluator {
             let records = await evaluator.evaluationHistory()
-            archivedEvaluationRecords[id] = records
+            archiveEvaluationRecords(records, agentID: id)
         }
 
         await unsubscribe(handle)
@@ -4130,7 +4149,7 @@ Message:
         // Archive security evaluator records before cleanup.
         if let evaluator {
             let records = await evaluator.evaluationHistory()
-            archivedEvaluationRecords[id] = records
+            archiveEvaluationRecords(records, agentID: id)
         }
 
         await unsubscribe(handle)

@@ -49,9 +49,16 @@ final class FilteredTranscriptProvider {
         self.cap = cap
     }
 
-    // No `deinit` cleanup: the consume task captures `self` weakly (no retain cycle), so it self-
-    // terminates once this provider is gone. Call `detach()` for prompt, deterministic teardown — the
-    // session-lifetime primary provider never needs it; a pop-out / second pane detaches on disappear.
+    // The weak `self` capture in the consume task prevents a retain CYCLE, but it is not teardown:
+    // the escape (`guard let self else break`) runs only when the NEXT update arrives, and a store
+    // that never posts again — a deleted session's — leaves the task parked in `for await` forever,
+    // its strong `store` capture pinning the TranscriptStore and its resident tail. Cancelling here
+    // is the guaranteed release: the stream's iterator returns nil on cancellation, the loop exits,
+    // and the task's own unsubscribe runs. `detach()` remains the prompt, deterministic teardown for
+    // panes that outlive their subscription (a pop-out detaches on disappear).
+    isolated deinit {
+        consumeTask?.cancel()
+    }
 
     /// Subscribes to `store` and starts consuming updates. Re-attachable (detaches any prior
     /// subscription first). The first update is always a full snapshot, so `messages` paints correctly

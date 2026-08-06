@@ -190,6 +190,11 @@ final class SessionManager {
                 return .aborted(reason: "Some of this session's tasks couldn't be saved to the global store, so the session was NOT deleted (nothing was lost). Please try again.")
             }
             _ = await shared.persistInactiveTasksNow()
+            // Deliberately AFTER the abort guards: an aborted delete leaves a fully functional
+            // session, so its MCP subprocesses must not be torn down speculatively. stopAll()
+            // never shuts MCP down (the host is reused across runtime restarts); deletion is
+            // the one path where the servers would otherwise be orphaned until app quit.
+            await vm.shutdownMCP()
             viewModels.removeValue(forKey: id)
         } else {
             // Closed session (no live VM): move its active tasks into the global store straight from disk.
@@ -217,6 +222,7 @@ final class SessionManager {
         }
 
         sessions.removeAll { $0.id == id }
+        shared.removeSessionObservers(sessionID: id)
         await persistSessions()
         try? await PersistenceManager(sessionID: id).deleteSessionData()
 

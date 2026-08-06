@@ -118,9 +118,20 @@ final class AgentInspectorStore {
         touchInstance(ref)
     }
 
-    /// Appends a newly completed security evaluation record.
+    /// Bounds `evaluationRecords`: one record lands per security-reviewed tool call, each
+    /// carrying the full evaluation prompt + LLM response, so an uncapped array costs tens of
+    /// MB across a long autonomous run — on the main actor, with `flaggedEvaluationCount`
+    /// re-reducing over the whole thing on observation. Double the evaluator's own per-instance
+    /// history cap (`SecurityEvaluator.maxHistory`, 100) so the inspector can still show more
+    /// than one worker's recent reviews.
+    private static let maxEvaluationRecords = 200
+
+    /// Appends a newly completed security evaluation record, evicting oldest-first past the cap.
     func appendEvaluation(_ record: EvaluationRecord) {
         evaluationRecords.append(record)
+        if evaluationRecords.count > Self.maxEvaluationRecords {
+            evaluationRecords.removeFirst(evaluationRecords.count - Self.maxEvaluationRecords)
+        }
     }
 
     /// Number of evaluations that ended in a non-cancelled denial — UNSAFE/ABORT
