@@ -141,8 +141,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/drewster99/swift-semantic-search.git",
       "state" : {
-        "revision" : "8d19159f0da236291a9ff591a4a52b2f258353db",
-        "version" : "0.0.7"
+        "revision" : "ffc69b30f85457dcb6b5010c48e7b20e4d8e350e",
+        "version" : "0.0.8"
       }
     },
     {

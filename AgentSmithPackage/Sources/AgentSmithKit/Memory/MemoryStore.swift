@@ -538,6 +538,10 @@ public actor MemoryStore {
             let elapsed = Date().timeIntervalSince(start)
             let perDoc = elapsed * 1000 / Double(max(1, memCount + taskCount))
             memoryStoreLogger.notice("reembedStaleEntries: re-embedded \(memCount, privacy: .public) memories + \(taskCount, privacy: .public) task summaries (\(failed, privacy: .public) failed) to model \(taskSignature, privacy: .public) in \(String(format: "%.1f", elapsed), privacy: .public)s (\(String(format: "%.0f", perDoc), privacy: .public) ms/doc)")
+            // The bulk sweep is where MLX's buffer cache balloons (one working set cached per
+            // distinct padded batch shape), so record what the GPU looks like the moment it ends —
+            // this is the number to compare against the process footprint when it reads 30+ GB.
+            memoryStoreLogger.notice("reembedStaleEntries: GPU memory after sweep: \(SemanticSearchEngine.gpuMemoryReport().description, privacy: .public)")
             onChange?()
         }
         return (memCount, taskCount, failed)
