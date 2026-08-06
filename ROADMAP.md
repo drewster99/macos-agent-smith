@@ -89,11 +89,21 @@ what that surfaced). Kind assignment PRESERVES today's Smith visibility message-
 non-error notice that reached Smith via the prefix is `agentLifecycle`/`rateLimit`; everything that
 didn't got a kind outside the pass set.
 
-Two deliberate behavior changes, both narrowings toward documented intent: context-management
+Three deliberate behavior changes, all narrowings toward documented intent: context-management
 notices now stop reaching WORKERS (`contextManagement` sits in `brownMessageFilter`'s
 `workerIrrelevantKinds`, whose own comment already said compaction is none of the worker's
-business), and a system banner whose content merely starts with "Agent " no longer leaks into
-Smith's context.
+business); a system banner whose content merely starts with "Agent " no longer leaks into
+Smith's context; and the "no tools approved for task X" notice — the only non-error
+start-failure post — now carries `taskLifecycle` and so no longer WAKES an idle unrelated
+worker (it still drains into history; `taskLifecycle` is in `nonWakingKinds`, whose comment
+says exactly this).
+
+One display consequence that is inherent to reclassifying kindless messages and is NOT
+migrated: a pre-existing saved transcript filter with Chat and System toggled DIFFERENTLY
+changes what it shows for the newly-kinded rows, because they moved from Chat's governance
+into the System / Task lifecycle groups. Only `securityReviews` could inherit Chat's state
+(it is a NEW group); kinds that joined EXISTING groups take those groups' saved state. With
+the default configs (every group on) nothing changes.
 
 ## Planned
 
