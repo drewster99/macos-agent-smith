@@ -2392,7 +2392,11 @@ final class AppViewModel {
     /// channel) to post through. Mirrors the channel-stream append path so the message
     /// also survives in the persisted history.
     private func appendLocalSystemMessage(_ content: String) {
-        let message = ChannelMessage(sender: .system, content: content)
+        let message = ChannelMessage(
+            sender: .system,
+            content: content,
+            metadata: ["messageKind": .kind(.advisory)]
+        )
         enqueueChannelAppendForPersist(message)           // disk first (debounced JSONL)
         Task { await transcriptStore.ingest(message) }    // display (off-main fan-out + cap)
     }

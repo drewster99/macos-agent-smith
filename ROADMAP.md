@@ -55,7 +55,45 @@ are Chat's domain).
 The same audit that scoped this counted **35 of 70** `sender: .system` post sites emitting NO
 `messageKind` (all Chat-governed today), including every "Agent … stopped/terminated" lifecycle
 notice — the family already flagged by "Smith's system-message filter matches on prose" below. This
-entry closes only the security-review family; the lifecycle-notice kinds remain planned work.
+entry closed only the security-review family; the rest landed the next day (next section).
+
+## Every system message carries a kind ✅ Completed 2026-08-06
+
+The follow-through on the audit above: **every `sender: .system` post site now stamps a
+`messageKind`** (re-verified by the same scan — zero kindless system posts remain). Plain chat
+(user↔agent conversation) stays kindless by design; that is the Chat group's domain.
+
+Six new kinds, assigned by what the message tells a reader, not where it happens to be posted:
+
+- **`agentLifecycle`** — supervisor-relevant agent events: the stall watchdog, terminations
+  (text-only loop, empty-response strike 3, `terminate_agent`), stops (permanent error,
+  consecutive errors, overflow/prune exhaustion), and the two loop-breaker idles.
+- **`agentRecovery`** — corrective action while the run CONTINUES: empty-response strikes 1–2,
+  the output-cap clamp, retry-status notices. A separate kind precisely so recovery chatter
+  stays out of Smith's context.
+- **`rateLimit`** — the per-iteration tool-call cap notice.
+- **`statusUpdate`** — `MonitoringTimer`'s running-tasks digest.
+- **`advisory`** — one-off notices: missing provider configuration, the ABORT banner, app-side
+  lines posted with no runtime.
+- **`taskAmendment`** — `amend_task`'s private delivery to the worker. Deliberately NOT in
+  `parkedWorkerInformationalMessageKinds`, so it keeps resuming a parked worker exactly as its
+  kindless form did (`orchestratorMessage`/`notify_brown` already worked this way — the
+  `resumesParkedWorker` comment claiming both were kindless was stale and is fixed).
+
+Task-start failures (template instantiation, task-not-found, the three scoping refusals) reuse the
+existing **`taskLifecycle`** kind; context prune/rebuild notices reuse **`contextManagement`**.
+
+**Smith's system-message filter now keys on kinds** — `{taskUpdateGuidance, agentLifecycle,
+rateLimit}` — replacing the `"Agent "`/`"Rate limit:"` prefix test (see the ✅ entry in Planned for
+what that surfaced). Kind assignment PRESERVES today's Smith visibility message-for-message: every
+non-error notice that reached Smith via the prefix is `agentLifecycle`/`rateLimit`; everything that
+didn't got a kind outside the pass set.
+
+Two deliberate behavior changes, both narrowings toward documented intent: context-management
+notices now stop reaching WORKERS (`contextManagement` sits in `brownMessageFilter`'s
+`workerIrrelevantKinds`, whose own comment already said compaction is none of the worker's
+business), and a system banner whose content merely starts with "Agent " no longer leaks into
+Smith's context.
 
 ## Planned
 
@@ -2730,7 +2768,16 @@ This surface is why item 3 above cannot be swept mechanically — and that is th
 
 Do this one *with or before* item 3, since it is what makes item 3 tractable.
 
-### Smith's system-message filter matches on prose (2026-07-27)
+### ~~Smith's system-message filter matches on prose~~ (2026-07-27) ✅ Done 2026-08-06
+
+**Resolved** as part of "Every system message carries a kind" (completed section near the top of
+this file): the prefix test is deleted and the filter passes system messages whose kind is in
+`{taskUpdateGuidance, agentLifecycle, rateLimit}`. Two things the fix surfaced that the plan below
+did not know: (1) most of the 11 prefix-dependent messages were `isError`-flagged, and
+`ingestChannelMessage` drops error messages BEFORE the accept filter runs — so for them the prefix
+test was dead code, not a live subscription; (2) the prefix test also matched CONTENT accidentally —
+a completion banner for a task titled "Agent …" passed it straight into Smith's context. The
+original entry follows for the record.
 
 The last surviving instance of "behaviour driven by transcript text" after the `ToolEffect` work.
 `OrchestrationRuntime.swift:2100`, in the filter deciding which system messages reach Smith's context:

@@ -72,6 +72,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// Informational lifecycle chatter. Deliberately does NOT wake an idle agent.
     case taskLifecycle = "task_lifecycle"
     case scheduledRunDeferred = "scheduled_run_deferred"
+    /// A mid-run description amendment delivered privately to a task's worker (`amend_task`).
+    /// Deliberately NOT in `parkedWorkerInformationalMessageKinds` — an amendment is work
+    /// handed back, so like `orchestratorMessage` it resumes a parked worker.
+    case taskAmendment = "task_amendment"
 
     // MARK: Validation
     case changesRequested = "changes_requested"
@@ -112,6 +116,24 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     case mcpStatus = "mcp_status"
     case restartChrome = "restart_chrome"
     case preparing = "preparing"
+
+    /// A supervisor-relevant agent event: stall warning, termination, stop, or a circuit
+    /// breaker idling an agent. One of the three system kinds Smith's message filter passes —
+    /// this kind is HOW Smith learns a worker died, so assign it deliberately.
+    case agentLifecycle = "agent_lifecycle"
+    /// The run loop noticed a bad turn and took corrective action while the run CONTINUES:
+    /// empty-response strikes, an output-cap clamp, retry status. Distinct from
+    /// `agentLifecycle` precisely so mid-recovery chatter does not reach Smith.
+    case agentRecovery = "agent_recovery"
+    /// The per-iteration tool-call cap dropped calls. Smith-visible: the model needs telling
+    /// that some of what it asked for did not run.
+    case rateLimit = "rate_limit"
+    /// `MonitoringTimer`'s running-tasks digest.
+    case statusUpdate = "status_update"
+    /// A one-off system notice with no structured family: missing provider configuration,
+    /// the ABORT banner, app-side lines posted with no runtime. Prefer a real kind when a
+    /// message belongs to a family readers might key on.
+    case advisory = "advisory"
 
     // MARK: Retired
     //

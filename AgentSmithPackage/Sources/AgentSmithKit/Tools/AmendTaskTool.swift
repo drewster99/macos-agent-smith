@@ -121,6 +121,7 @@ struct AmendTaskTool: AgentTool {
             recipient: .agent(.brown),
             content: content,
             attachments: attachments,
+            metadata: ["messageKind": .kind(.taskAmendment)],
             taskID: taskID
         ))
         return true

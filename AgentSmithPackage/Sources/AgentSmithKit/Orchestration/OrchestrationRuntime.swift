@@ -1815,7 +1815,7 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Could not start template \"\(task.title)\": \(message)",
-                metadata: ["isError": .bool(true)]
+                metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
             ))
             return nil
         }
@@ -1868,7 +1868,7 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Could not start task \(taskID.uuidString): it was not found in the task store.",
-                metadata: ["isError": .bool(true)]
+                metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
             ))
             return
         }
@@ -2110,7 +2110,11 @@ public actor OrchestrationRuntime {
 
         guard let smithConfig = llmConfigs[.smith],
               let provider = llmProviders[.smith] else {
-            await channel.post(ChannelMessage(sender: .system, content: "No Smith provider configured — cannot start."))
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "No Smith provider configured — cannot start.",
+                metadata: ["messageKind": .kind(.advisory)]
+            ))
             // A start that fails before any agent exists must not leave a live generation
             // behind: `currentSessionID` would read as "running", and a later tool-driven
             // spawnBrown would register a worker into a session that never started Smith
@@ -2129,7 +2133,7 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "No Security Agent provider configured — cannot start. Smith's open-world tool calls must be security-reviewed, so the system will not run without a Security Agent model assigned.",
-                metadata: ["isError": .bool(true)]
+                metadata: ["messageKind": .kind(.advisory), "isError": .bool(true)]
             ))
             await abandonFailedStart()
             return
@@ -2167,14 +2171,20 @@ public actor OrchestrationRuntime {
                 return false
             }
             // For system messages, only pass through diagnostics directly relevant to Smith:
-            // agent lifecycle events (errors, termination), rate-limit notices, and
-            // system guidance injected by tools (e.g., task_update_guidance).
+            // agent lifecycle events (stalls, terminations, loop-breaker idles), rate-limit
+            // notices, and system guidance injected by tools (task_update_guidance). Everything
+            // else system-sent — context-management chatter, in-progress recovery attempts,
+            // status digests, UI banners — is information for the transcript, not supervisor
+            // signal. Keyed on message KINDS: the prefix test this replaced ("Agent " /
+            // "Rate limit:") silently unsubscribed Smith from any notice someone reworded, and
+            // conversely passed any banner whose content happened to start with "Agent " (a
+            // task titled "Agent cleanup" reached Smith through its completion banner).
             if case .system = message.sender {
-                if message.kind == .taskUpdateGuidance {
-                    // Always pass through — this is system guidance for Smith.
-                } else {
-                    let c = message.content
-                    guard c.hasPrefix("Agent ") || c.hasPrefix("Rate limit:") else { return false }
+                let smithRelevantSystemKinds: Set<ChannelMessageKind> = [
+                    .taskUpdateGuidance, .agentLifecycle, .rateLimit
+                ]
+                guard let kind = message.kind, smithRelevantSystemKinds.contains(kind) else {
+                    return false
                 }
             }
             return true
@@ -3249,7 +3259,8 @@ public actor OrchestrationRuntime {
         let callerName = callerRole?.displayName ?? "safety monitor"
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "ABORT triggered by \(callerName): \(reason). All agents stopped. User interaction required to restart."
+            content: "ABORT triggered by \(callerName): \(reason). All agents stopped. User interaction required to restart.",
+            metadata: ["messageKind": .kind(.advisory)]
         ))
 
         await stopAll()
@@ -3348,12 +3359,20 @@ public actor OrchestrationRuntime {
 
         guard let brownConfig = llmConfigs[.brown],
               let brownProvider = llmProviders[.brown] else {
-            await channel.post(ChannelMessage(sender: .system, content: "No Brown provider configured — cannot spawn."))
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "No Brown provider configured — cannot spawn.",
+                metadata: ["messageKind": .kind(.advisory)]
+            ))
             openSpawnBreakerForInfrastructureFailure()
             return nil
         }
         guard let securityAgentProvider = llmProviders[.securityAgent] else {
-            await channel.post(ChannelMessage(sender: .system, content: "No Security Agent provider configured — Brown requires a security evaluator."))
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "No Security Agent provider configured — Brown requires a security evaluator.",
+                metadata: ["messageKind": .kind(.advisory)]
+            ))
             openSpawnBreakerForInfrastructureFailure()
             return nil
         }
@@ -3462,7 +3481,7 @@ public actor OrchestrationRuntime {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: "Not starting task \"\(task.title)\": the security agent's tool-scoping has failed \(scopingFailureStreak) times in a row — the model backend looks unreachable. Waiting ~\(max(retryInSeconds, 1))s before allowing another attempt. Check the Security Agent's model configuration or backend, then retry the task.",
-                        metadata: ["isError": .bool(true)]
+                        metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
                     ))
                     return nil
                 }
@@ -3498,7 +3517,7 @@ public actor OrchestrationRuntime {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Security Agent's model configuration.",
-                        metadata: ["isError": .bool(true)]
+                        metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
                     ))
                     return nil
                 }
@@ -3509,7 +3528,7 @@ public actor OrchestrationRuntime {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: "The security agent did not approve any tools for task \"\(task.title)\", so it cannot be run.",
-                        metadata: ["isWarning": .bool(true)]
+                        metadata: ["messageKind": .kind(.taskLifecycle), "isWarning": .bool(true)]
                     ))
                     return nil
                 }

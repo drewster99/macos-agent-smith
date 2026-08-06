@@ -78,7 +78,8 @@ actor MonitoringTimer {
 
             await channel.post(ChannelMessage(
                 sender: .system,
-                content: "Status update — \(runningTasks.count) running task(s):\n\(summary)"
+                content: "Status update — \(runningTasks.count) running task(s):\n\(summary)",
+                metadata: ["messageKind": .kind(.statusUpdate)]
             ))
         }
     }

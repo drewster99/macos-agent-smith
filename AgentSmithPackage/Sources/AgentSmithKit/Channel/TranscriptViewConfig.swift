@@ -40,7 +40,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
         case .taskLifecycle: return "Task created / updated / completed, help, worker messages"
         case .validation: return "Acceptance-criteria verdicts and escalations"
         case .memory: return "Memory saves and searches"
-        case .system: return "Timers, context management, MCP status, advisories"
+        case .system: return "Timers, context management, agent lifecycle, MCP status, advisories"
         }
     }
 
@@ -59,7 +59,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
             return [.taskCreated, .taskAcknowledged, .taskContinuing, .taskComplete, .taskCompleted,
                     .taskFailed, .taskUpdate, .taskUpdateGuidance, .taskSummarized, .taskActionScheduled,
                     .taskQueuedAtCapacity, .taskLifecycle, .scheduledRunDeferred, .orchestratorMessage,
-                    .helpRequested, .helpProvided, .taskInterrupted]
+                    .taskAmendment, .helpRequested, .helpProvided, .taskInterrupted]
         case .validation:
             return [.changesRequested, .criteriaUpdated, .validationReport, .validationFailed,
                     .validationEscalation, .submissionAutoRejected, .validationBlocked,
@@ -68,7 +68,8 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
             return [.memorySaved, .memorySearched]
         case .system:
             return [.inboundUserMessage, .contextManagement, .timerActivity, .mcpStatus,
-                    .restartChrome, .preparing, .agentOnline]
+                    .restartChrome, .preparing, .agentOnline,
+                    .agentLifecycle, .agentRecovery, .rateLimit, .statusUpdate, .advisory]
         }
     }
 
