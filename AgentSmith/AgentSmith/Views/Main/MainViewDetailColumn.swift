@@ -53,45 +53,38 @@ struct MainViewDetailColumn: View {
                 ReviewBanner(taskTitle: reviewTask.title, isHelpRequest: reviewTask.status == .awaitingHelp)
             }
 
-            VSplitView {
-                // Top: the selected task's transcript (or a "Select a task" prompt).
-                TaskTranscriptTopPane(
-                    viewModel: viewModel,
-                    displayPrefs: cachedDisplayPrefs,
-                    onExportTaskPDF: exportTaskPDFAction,
-                    onOpenMCPSettings: openMCPSettingsAction,
-                    selectedImageAttachment: $selectedImageAttachment
-                )
-                // An explicit contract that this pane fills its column, NOT the fix — measured, the
-                // pane is already full width because its header carries a Spacer, and VSplitView is
-                // already greedy on both axes. The actual fix is the greedy frame inside
-                // ChannelLogView: a vertical ScrollView otherwise reports its CONTENT's width
-                // (measured: an 11pt ribbon at a 300pt proposal).
-                .frame(maxWidth: .infinity)
-                // maxHeight on the SPLIT AXIS too. Without it the child sizes to its content and
-                // the split has no reason to stretch it: measured at 172pt of content sitting in a
-                // 225pt allocation, with the remaining 53pt showing the bare VSplitView through —
-                // an `element_at` probe there hit the split group itself, so neither child was
-                // drawn in it. That strip is the blank band, and it is why the pane's own header
-                // ended up above the visible area.
-                //
-                // Same rule as ModelMetadataInspectorWindow's split, which gives its flexible child
-                // `maxWidth: .infinity` on ITS split axis for the same reason. `idealHeight` still
-                // sets where the divider rests before the user drags it.
-                .frame(minHeight: 120, idealHeight: 240, maxHeight: .infinity)
-
-                // Bottom: the full session transcript, filtered by the user's per-session config
-                // (its own provider — the inspector still reads the unfiltered firehose).
-                BottomTranscriptPane(
-                    viewModel: viewModel,
-                    displayPrefs: cachedDisplayPrefs,
-                    onExportTaskPDF: exportTaskPDFAction,
-                    onOpenMCPSettings: openMCPSettingsAction,
-                    selectedImageAttachment: $selectedImageAttachment
-                )
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: 200, maxHeight: .infinity)
-            }
+            // NOT a VSplitView — that is AppKit's NSSplitView, and nesting one here made this
+            // column rigid at the window level: with the sidebar and the inspector both open,
+            // the window pushed the SIDEBAR off-screen rather than compress this column.
+            // TranscriptVerticalSplit's doc comment carries the full mechanism; it also owns
+            // the pane floors and the divider's resting position, and applies the greedy
+            // cross-axis frames its panes need. (The greedy frame inside ChannelLogView is
+            // still load-bearing — a vertical ScrollView otherwise reports its CONTENT's
+            // width; measured: an 11pt ribbon at a 300pt proposal.)
+            TranscriptVerticalSplit(
+                top: {
+                    // Top: the selected task's transcript (or a "Select a task" prompt).
+                    TaskTranscriptTopPane(
+                        viewModel: viewModel,
+                        displayPrefs: cachedDisplayPrefs,
+                        onExportTaskPDF: exportTaskPDFAction,
+                        onOpenMCPSettings: openMCPSettingsAction,
+                        selectedImageAttachment: $selectedImageAttachment
+                    )
+                },
+                bottom: {
+                    // Bottom: the full session transcript, filtered by the user's per-session
+                    // config (its own provider — the inspector still reads the unfiltered
+                    // firehose).
+                    BottomTranscriptPane(
+                        viewModel: viewModel,
+                        displayPrefs: cachedDisplayPrefs,
+                        onExportTaskPDF: exportTaskPDFAction,
+                        onOpenMCPSettings: openMCPSettingsAction,
+                        selectedImageAttachment: $selectedImageAttachment
+                    )
+                }
+            )
             // Update cached display preferences when any of the underlying shared preferences change.
             // This avoids creating a new TimestampPreferences instance on every body pass.
             .onChange(of: shared.showTimestampsOnTaskBanners) { _, newValue in
