@@ -854,6 +854,14 @@ final class SharedAppState {
 
     private func performEnsureSemanticEngine() async throws -> SemanticSearchEngine {
         if let engine = semanticSearchEngine { return engine }
+        // Cap MLX's Metal buffer cache BEFORE anything loads. Left at its default the cache may
+        // legally grow to ~min(1.5× GPU working set, 0.95× physical RAM), and embedding is its
+        // worst case: batches are padded to per-batch lengths, so nearly every forward pass
+        // allocates unique buffer sizes that get cached and never reused — measured at 33 GB of
+        // IOAccelerator memory after one launch sweep (2026-08-06). 256 MB keeps reuse for
+        // repeated shapes without the ratchet; the library deliberately ships no policy of its
+        // own, so the app sets it here, the one place the engine is created.
+        SemanticSearchEngine.setGPUCacheLimit(bytes: 256 << 20)
         let engine = SemanticSearchEngine()
         for try await progress in engine.prepare() {
             embeddingPrepareProgress = progress

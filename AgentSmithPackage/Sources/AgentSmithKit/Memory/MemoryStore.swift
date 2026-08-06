@@ -542,6 +542,11 @@ public actor MemoryStore {
             // distinct padded batch shape), so record what the GPU looks like the moment it ends —
             // this is the number to compare against the process footprint when it reads 30+ GB.
             memoryStoreLogger.notice("reembedStaleEntries: GPU memory after sweep: \(SemanticSearchEngine.gpuMemoryReport().description, privacy: .public)")
+            // One forward pass per entry, each with its own sequence length — the worst case for
+            // MLX's by-size buffer recycling. Hand the sweep's cache back to Metal in one shot;
+            // steady-state queries refill only what they actually reuse (within the app's cap).
+            SemanticSearchEngine.clearGPUCache()
+            memoryStoreLogger.notice("reembedStaleEntries: GPU memory after cache clear: \(SemanticSearchEngine.gpuMemoryReport().description, privacy: .public)")
             onChange?()
         }
         return (memCount, taskCount, failed)
