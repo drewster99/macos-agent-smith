@@ -26,6 +26,8 @@ import SwiftLLMKit
 ///                                   old strictly-sequential sweep)
 ///     --provider-concurrency <p=N>  cap for ONE provider's in-flight models (default 4 each;
 ///                                   repeatable, comma-separable: a=2,b=6)
+///     --target-timeout <seconds>    hard deadline per model (default 600); a hung battery is
+///                                   abandoned — logged, nothing recorded — and its slot reclaimed
 ///     --verbose                     extra request logging
 ///   Fetch control (compose with any launch, including a normal GUI launch):
 ///     --force-fetch-models          re-fetch every provider now, ignoring the daily gate
@@ -96,6 +98,17 @@ enum CapabilityEvalRunner {
         let reuseStore = CommandLine.arguments.contains("--reuse-store")
         let reuseMaxAgeDays = argumentValue("--reuse-max-age-days").flatMap(Double.init) ?? 30
         let reuseMaxAge = reuseMaxAgeDays * 86_400
+        // A hung battery must stall one slot, briefly — not the sweep. Malformed is a loud
+        // exit, not a silent default: a mis-sized deadline abandons real measurements.
+        let targetTimeout: TimeInterval
+        if let raw = argumentValue("--target-timeout") {
+            guard let seconds = Double(raw), seconds > 0 else {
+                print("--target-timeout requires a positive number of seconds"); exit(1)
+            }
+            targetTimeout = seconds
+        } else {
+            targetTimeout = 600
+        }
 
         LLMRequestLogger.logDirectoryName = "AgentSmith-CapabilityEval"
         ModelFetchService.verboseLogging = true
@@ -145,16 +158,22 @@ enum CapabilityEvalRunner {
         let overridesNote = limits.perProviderOverrides.isEmpty ? "" :
             "  overrides: " + limits.perProviderOverrides.sorted { $0.key < $1.key }
                 .map { "\($0.key)=\($0.value)" }.joined(separator: " ")
-        print("concurrency: \(limits.global) global, \(limits.perProviderDefault) per provider\(overridesNote)\n")
+        print("concurrency: \(limits.global) global, \(limits.perProviderDefault) per provider\(overridesNote)"
+              + "  ·  target timeout \(Int(targetTimeout))s\n")
 
         let options = SweepOptions(noSeed: noSeed, discardNonChat: discardNonChat,
                                    discardDeprecated: discardDeprecated, reuseStore: reuseStore,
                                    reuseMaxAgeDays: reuseMaxAgeDays, reuseMaxAge: reuseMaxAge,
-                                   fetchPolicy: fetchPolicy)
+                                   targetTimeout: targetTimeout, fetchPolicy: fetchPolicy)
         let scheduler = ProbeSweepScheduler(targets: targets, limits: limits)
         let payloadCache = DecodedPayloadCache()
         let results = SweepResults()
 
+        // Liveness on the terminal: last night a wedged sweep was indistinguishable from a slow
+        // one without process forensics. One line every 30s makes that a glance.
+        let heartbeat = Task {
+            await runHeartbeat(scheduler: scheduler, totalTargets: targets.count)
+        }
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<min(limits.global, targets.count) {
                 group.addTask {
@@ -163,6 +182,7 @@ enum CapabilityEvalRunner {
                 }
             }
         }
+        heartbeat.cancel()
 
         for (providerID, skippedCount) in await scheduler.billingSkipSummary() {
             print("billing breaker: \(providerID) — \(skippedCount) queued model(s) were skipped")
@@ -185,6 +205,7 @@ enum CapabilityEvalRunner {
         let reuseStore: Bool
         let reuseMaxAgeDays: Double
         let reuseMaxAge: TimeInterval
+        let targetTimeout: TimeInterval
         let fetchPolicy: LaunchFetchPolicy
     }
 
@@ -240,11 +261,74 @@ enum CapabilityEvalRunner {
             let providerID = admission.target.providerID
             if let context = await admitTarget(admission, kit: kit, payloadCache: payloadCache,
                                                options: options, totalTargets: totalTargets) {
-                let outcome = await probeTarget(context)
-                await completeTarget(outcome, context: context, kit: kit,
-                                     scheduler: scheduler, results: results)
+                // The deadline guards in-process hangs only: a single stuck call stalls one
+                // slot for at most this long, then the target is abandoned — logged, NOTHING
+                // recorded (an interrupted battery is not a measurement) — and the slot
+                // reclaimed. A cancelled battery unwinds fast: every remaining probe call
+                // throws on entry and grades locally, and the result is discarded.
+                let outcome = await racingDeadline(seconds: options.targetTimeout) {
+                    await probeTarget(context)
+                }
+                if let outcome {
+                    await completeTarget(outcome, context: context, kit: kit,
+                                         scheduler: scheduler, results: results)
+                } else {
+                    context.transcript.emit(
+                        "  DEADLINE: battery abandoned after \(Int(options.targetTimeout))s — nothing recorded")
+                    print(context.transcript.drain().joined(separator: "\n") + "\n")
+                }
             }
             await scheduler.finish(providerID: providerID)
+        }
+    }
+
+    /// Races an operation against a wall-clock deadline; nil means the deadline won. The
+    /// losing child is cancelled, and the group waits for it to unwind before returning, so
+    /// a slot is never freed while its battery is still issuing calls.
+    private static func racingDeadline<T: Sendable>(
+        seconds: TimeInterval,
+        _ operation: @escaping @Sendable () async -> T
+    ) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await operation() }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+                return nil
+            }
+            guard let winner = await group.next() else { return nil }
+            group.cancelAll()
+            return winner
+        }
+    }
+
+    /// One `[sweep]` line every 30 seconds: progress, per-provider in-flight, and a rolling
+    /// rate/ETA over the last five minutes. Interleaves between transcript blocks by design —
+    /// it is the liveness signal, not part of any target's narrative.
+    private static func runHeartbeat(scheduler: ProbeSweepScheduler, totalTargets: Int) async {
+        var recent: [(date: Date, handled: Int)] = []
+        while true {
+            try? await Task.sleep(for: .seconds(30))
+            if Task.isCancelled { return }
+            let snapshot = await scheduler.progressSnapshot()
+            let handled = totalTargets - snapshot.pendingCount - snapshot.totalInFlight
+            let now = Date()
+            recent.append((now, handled))
+            recent.removeAll { now.timeIntervalSince($0.date) > 300 }
+            var line = "[sweep] \(handled)/\(totalTargets) handled"
+            if !snapshot.inFlightByProvider.isEmpty {
+                line += " · in flight: " + snapshot.inFlightByProvider
+                    .map { "\($0.providerID)=\($0.count)" }.joined(separator: " ")
+            }
+            if snapshot.billingSkippedTotal > 0 {
+                line += " · billing-skipped: \(snapshot.billingSkippedTotal)"
+            }
+            if let oldest = recent.first, handled > oldest.handled, now > oldest.date {
+                let perMinute = Double(handled - oldest.handled) / (now.timeIntervalSince(oldest.date) / 60)
+                let remaining = snapshot.pendingCount + snapshot.totalInFlight
+                line += String(format: " · %.1f/min · ~%dm left",
+                               perMinute, Int((Double(remaining) / perMinute).rounded()))
+            }
+            print(line)
         }
     }
 

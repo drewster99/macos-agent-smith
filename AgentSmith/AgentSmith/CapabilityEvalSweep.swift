@@ -92,6 +92,15 @@ actor ProbeSweepScheduler {
         let target: CapabilityEvalRunner.Target
     }
 
+    /// A point-in-time view for the heartbeat line. "Handled" is derived by the reader as
+    /// total − pending − in-flight, so it needs no second counter that could drift.
+    struct ProgressSnapshot: Sendable {
+        let pendingCount: Int
+        let totalInFlight: Int
+        let inFlightByProvider: [(providerID: String, count: Int)]
+        let billingSkippedTotal: Int
+    }
+
     private var pending: [Admission]
     private let limits: SweepConcurrencyLimits
     private var inFlightByProvider: [String: Int] = [:]
@@ -146,6 +155,15 @@ actor ProbeSweepScheduler {
     /// end-of-run summary.
     func billingSkipSummary() -> [(providerID: String, skippedCount: Int)] {
         billingSkippedByProvider.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+
+    func progressSnapshot() -> ProgressSnapshot {
+        ProgressSnapshot(
+            pendingCount: pending.count,
+            totalInFlight: totalInFlight,
+            inFlightByProvider: inFlightByProvider.filter { $0.value > 0 }
+                .sorted { $0.key < $1.key }.map { ($0.key, $0.value) },
+            billingSkippedTotal: billingSkippedByProvider.values.reduce(0, +))
     }
 
     private func hasFreeSlot(providerID: String) -> Bool {
