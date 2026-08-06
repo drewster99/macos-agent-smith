@@ -292,7 +292,16 @@ struct AgentModelSettingsSection: View {
             Text("Effective:").foregroundStyle(.tertiary)
             Text(resolved.temperature.map { "temp \(String(format: "%.2f", $0))" } ?? "temp default")
                 .foregroundStyle(.secondary)
-            Text(resolved.thinkingBudget.map { "thinking \(formatTokenCount($0))" } ?? "thinking off")
+            // The four-state ACTUAL thinking state, resolved by the same library rules emission
+            // uses — the old `?? "thinking off"` claimed off for every model-default/unknown case.
+            Text("thinking " + ReasoningControl.plannedThinkingState(
+                control: info.reasoningControl
+                    ?? (info.behaviorFlags.requiresAdaptiveThinking ? .anthropicAdaptiveThinking : nil),
+                capabilities: info.capabilities,
+                reasoningEnabled: resolved.reasoningEnabled,
+                thinkingBudget: resolved.thinkingBudget,
+                reasoningEffort: resolved.reasoningEffort,
+                reasoningEffortSupport: info.reasoningEffort).label)
                 .foregroundStyle(.secondary)
             if let effort = resolved.effort, !effort.isEmpty {
                 Text("effort \(effort)").foregroundStyle(.secondary)

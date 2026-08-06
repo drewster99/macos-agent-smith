@@ -36,10 +36,27 @@ struct RoleModelConfigOverrideEditor: View {
             temperatureRow()
             maxOutputRow()
             maxContextRow()
-            if selectedProviderSupportsThinking {
-                effortRow()
-                reasoningEffortRow()
+            // Per-row, per-MODEL gating from the probed/decoded facts — the old gate was a
+            // provider allowlist ("Anthropic/Alibaba"), which hid the thinking switch from every
+            // reasoning-capable model on other providers and showed effort to models that reject
+            // it. Each row's rule mirrors the EMISSION rule for its field, so a visible control
+            // is one that can actually reach the wire:
+            //  - Thinking: always visible — its status line is the place that says on / off /
+            //    unsupported / unknown, and "unsupported" is an answer, not an absence.
+            //  - Budget: only for mechanisms that carry one (plus the legacy Anthropic/Alibaba
+            //    fallback for models whose mechanism is unrecorded — emission honors it there).
+            //  - Effort (general): hidden only when KNOWN-unsupported; emission fails open.
+            //  - Effort (reasoning): shown only when KNOWN-supported; emission fails closed, so
+            //    a control shown on an unknown ladder would silently do nothing.
+            thinkingRow()
+            if showsThinkingBudgetRow {
                 thinkingBudgetRow()
+            }
+            if modelInfo?.generalEffort?.isSupported != false {
+                effortRow()
+            }
+            if modelInfo?.reasoningEffort?.isSupported == true {
+                reasoningEffortRow()
             }
             togglesRow()
         }
@@ -134,17 +151,127 @@ struct RoleModelConfigOverrideEditor: View {
         }
     }
 
+    // MARK: Thinking
+
+    /// The model's reasoning mechanism, honoring the legacy adaptive behavior flag exactly the way
+    /// emission does — a hand-set flag predates the probe's discovery and must keep working.
+    private var reasoningControl: ReasoningControl? {
+        modelInfo?.reasoningControl
+            ?? (modelInfo?.behaviorFlags.requiresAdaptiveThinking == true ? .anthropicAdaptiveThinking : nil)
+    }
+
+    /// What the CURRENT settings will actually do about thinking — resolved by the library's
+    /// `plannedThinkingState`, the same rules emission applies, so this display cannot drift
+    /// from the wire.
+    private var plannedThinking: PlannedThinkingState {
+        ReasoningControl.plannedThinkingState(
+            control: reasoningControl,
+            capabilities: modelInfo?.capabilities ?? ModelCapabilities(),
+            reasoningEnabled: override.reasoningEnabled,
+            thinkingBudget: override.thinkingBudget,
+            reasoningEffort: override.reasoningEffort,
+            reasoningEffortSupport: modelInfo?.reasoningEffort)
+    }
+
+    /// Budget shown for mechanisms that carry one, plus the legacy Anthropic/Alibaba fallback for
+    /// unrecorded mechanisms (emission honors a budget there via the apiType fallback).
+    private var showsThinkingBudgetRow: Bool {
+        if let control = reasoningControl { return control.carriesTokenBudget }
+        switch shared.llmKit.providers.first(where: { $0.id == providerID })?.apiType {
+        case .anthropic, .alibabaCloud: return true
+        default: return false
+        }
+    }
+
+    /// The thinking SWITCH (Default / On / Off) with the ACTUAL resolved state underneath.
+    /// Permissive like every other row: choosing a direction the model was measured unable to
+    /// switch shows the warning and the honest "nothing sent" status instead of being disabled.
+    private func thinkingRow() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Thinking").font(.headline)
+                Spacer()
+                if reasoningControl != nil && reasoningControl != .unsupported {
+                    Picker("", selection: Binding(
+                        get: { override.reasoningEnabled },
+                        set: { newValue in
+                            override.reasoningEnabled = newValue
+                            // Forcing ON on a mechanism that emits nothing without a budget
+                            // (Anthropic's budgeted thinking) seeds one, so On means on.
+                            if newValue == true, reasoningControl == .anthropicThinking,
+                               override.thinkingBudget == nil {
+                                override.thinkingBudget = max(modelInfo?.minThinkingBudgetTokens ?? 0, 2048)
+                            }
+                        })) {
+                        Text("Default").tag(Bool?.none)
+                        Text("On").tag(Bool?.some(true))
+                        Text("Off").tag(Bool?.some(false))
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 220)
+                }
+            }
+            // The ACTUAL state — on / off / unsupported / unknown — never the wish. This line is
+            // the whole point of the row: what the next request will do, with the wire form named.
+            HStack(spacing: 5) {
+                Image(systemName: plannedThinkingSymbol).font(.caption)
+                Text(plannedThinking.detail.isEmpty
+                     ? "Thinking \(plannedThinking.label)"
+                     : "Thinking \(plannedThinking.label) — \(plannedThinking.detail)")
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(.secondary)
+            if let warning = warnings[.reasoningEnabled] {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8)
+            .fill(Color.secondary.opacity(override.reasoningEnabled != nil ? 0.10 : 0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(warnings[.reasoningEnabled] == nil ? Color.clear : Color.orange.opacity(0.4), lineWidth: 1))
+    }
+
+    private var plannedThinkingSymbol: String {
+        switch plannedThinking {
+        case .on: return "brain.head.profile"
+        case .off: return "brain.head.profile.fill"
+        case .unsupported: return "nosign"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
     private func thinkingBudgetRow() -> some View {
         overrideRow(
             title: "Thinking budget",
-            help: "Extended-thinking token budget (0 = off). On adaptive models it's a boolean on/off signal.",
+            help: budgetHelp,
             isOn: Binding(get: { override.thinkingBudget != nil },
-                          set: { override.thinkingBudget = $0 ? 2048 : nil }),
-            defaultText: "off",
-            warning: nil
+                          set: { override.thinkingBudget = $0
+                              ? max(modelInfo?.minThinkingBudgetTokens ?? 0, 2048) : nil }),
+            defaultText: "model default",
+            warning: warnings[.thinkingBudget]
         ) {
             numberField(value: Binding(get: { override.thinkingBudget ?? 0 }, set: { override.thinkingBudget = max(0, $0) }))
         }
+    }
+
+    /// Depth only — on/off belongs to the Thinking switch above ("0 = off" was never true for
+    /// most mechanisms; a zero budget emits nothing, which is model-default, not off). The
+    /// measured range is stated so an out-of-range entry is a choice, not a surprise.
+    private var budgetHelp: String {
+        var help = reasoningControl == .anthropicAdaptiveThinking
+            ? "Adaptive model — the budget acts as an on-signal; depth is the model's own choice."
+            : "Extended-thinking token depth. On/off is the Thinking switch above."
+        if let floor = modelInfo?.minThinkingBudgetTokens, let ceiling = modelInfo?.maxThinkingBudgetTokens {
+            help += " Measured range \(floor.formatted()) – \(ceiling.formatted())."
+        } else if let ceiling = modelInfo?.maxThinkingBudgetTokens {
+            help += " Measured maximum \(ceiling.formatted())."
+        }
+        return help
     }
 
     private func togglesRow() -> some View {
@@ -256,12 +383,4 @@ struct RoleModelConfigOverrideEditor: View {
         return support.rejects(level) ? "\(level)*" : level
     }
 
-    /// Only Anthropic/Alibaba honor thinking today; hide the thinking rows elsewhere to keep the
-    /// editor honest about what actually reaches the request.
-    private var selectedProviderSupportsThinking: Bool {
-        switch shared.llmKit.providers.first(where: { $0.id == providerID })?.apiType {
-        case .anthropic, .alibabaCloud: return true
-        default: return false
-        }
-    }
 }
