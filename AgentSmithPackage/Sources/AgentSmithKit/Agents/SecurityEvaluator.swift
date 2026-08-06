@@ -795,7 +795,11 @@ actor SecurityEvaluator {
                     await postToChannel(ChannelMessage(
                         sender: .system,
                         content: "Security Agent error (\(retryCount)/\(Self.maxRetries)): failed to parse security response",
-                        metadata: ["isError": .bool(true), "agentRole": .string(AgentRole.securityAgent.rawValue)]
+                        metadata: [
+                            "messageKind": .kind(.securityReview),
+                            "isError": .bool(true),
+                            "agentRole": .string(AgentRole.securityAgent.rawValue)
+                        ]
                     ))
                 }
                 continue
@@ -819,6 +823,7 @@ actor SecurityEvaluator {
                     sender: .system,
                     content: "Security review: ABORT — \(msg)",
                     metadata: [
+                        "messageKind": .kind(.securityReview),
                         "securityDisposition": .string("abort"),
                         "agentRole": .string(AgentRole.securityAgent.rawValue)
                     ]
@@ -842,7 +847,8 @@ actor SecurityEvaluator {
             }
             await postToChannel(ChannelMessage(
                 sender: .system,
-                content: abortContent
+                content: abortContent,
+                metadata: ["messageKind": .kind(.securityReview)]
             ))
             await abort(
                 "The Security Agent failed to produce valid output after \(consecutiveEvaluationFailures) consecutive evaluations",

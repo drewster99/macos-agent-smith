@@ -101,6 +101,13 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// messages don't (plain chat, most system notices). It does NOT mean "a kind we couldn't
     /// place", because an unrecognized kind traps instead of returning nil.
     ///
+    /// One derived kind: a message with no `messageKind` but a `securityDisposition` metadata
+    /// entry answers `.securityReview`. Security-review rows were posted kindless for months
+    /// before the kind existed, so the persisted corpus is full of them; `securityDisposition`
+    /// is a typed key written only by the security-review posters, which makes it a reliable
+    /// discriminator for exactly those rows. Deriving it HERE (the single accessor) rather than
+    /// at read sites keeps historical and current rows indistinguishable to every consumer.
+    ///
     /// Trapping is the point. The alternative — quietly answering nil — is a silent default of
     /// the worst sort: every `message.kind == .something` comparison downstream evaluates false,
     /// so a tool row renders as plain chat, a gate stops matching, a filter stops filtering, and
@@ -113,8 +120,13 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// on any hand-written `messageKind` string that could sneak past it. It fires for data
     /// written by a build whose enum knew a kind this one doesn't, or hand-edited JSON.
     public var kind: ChannelMessageKind? {
-        // Absent key: the message genuinely has no kind. This is the ONLY thing nil may mean.
-        guard let stored = metadata?["messageKind"] else { return nil }
+        guard let stored = metadata?["messageKind"] else {
+            // Legacy security-review rows (posted before the kind existed) are recognizable by
+            // the `securityDisposition` key their producers have always stamped — see the doc
+            // comment above. Everything else without the key genuinely has no kind.
+            if metadata?["securityDisposition"] != nil { return .securityReview }
+            return nil
+        }
         // Present but not a string. Folding this into the nil above would conflate "no kind"
         // with "the kind is corrupt" — two conditions that demand opposite responses, one of
         // them silently. Whatever wrote a non-string here is broken and should be found.

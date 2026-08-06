@@ -117,7 +117,10 @@ import Foundation
     }
 
     /// A config persisted BEFORE the recipient/task-scope/error axes existed must still decode — the new
-    /// fields fall back to their inits (nil recipients, task-scoped shown, errors shown).
+    /// fields fall back to their inits (nil recipients, task-scoped shown, errors shown). Group
+    /// visibility comes from the legacy `visibleGroups` key; `securityReviews` inherits Chat's state
+    /// because security-review rows were kindless when this config was written, so Chat is the toggle
+    /// that actually governed them — the migrated config shows exactly what the original did.
     @Test func legacyConfigWithoutNewAxesDecodes() throws {
         let legacyJSON = """
         {"visibleGroups":["chat","system"],"visibility":"all"}
@@ -127,6 +130,41 @@ import Foundation
         #expect(back.allowedRecipients == nil)
         #expect(back.hideTaskScoped == false)
         #expect(back.showErrors == true)
-        #expect(back.visibleGroups == [.chat, .system])
+        #expect(back.visibleGroups == [.chat, .system, .securityReviews])
+    }
+
+    /// The Chat-off half of the legacy migration: kindless security rows were hidden, so the migrated
+    /// config keeps them hidden.
+    @Test func legacyConfigWithChatOffKeepsSecurityReviewsHidden() throws {
+        let legacyJSON = """
+        {"visibleGroups":["toolCalls","system"],"visibility":"all"}
+        """
+        let back = try JSONDecoder().decode(
+            TranscriptViewConfig.self, from: Data(legacyJSON.utf8))
+        #expect(back.visibleGroups == [.toolCalls, .system])
+    }
+
+    /// Group visibility persists INVERTED (`hiddenGroups`), so a config saved today with every group
+    /// on stays "everything on" when a future build adds a group — the visible-set encoding silently
+    /// hid any group the saving build didn't know about. Pins the wire shape, the everything-on case,
+    /// and that an unknown hidden name from a newer build is ignored rather than failing the decode.
+    @Test func groupVisibilityPersistsAsHiddenSet() throws {
+        var config = TranscriptViewConfig.everything
+        config.visibleGroups.remove(.securityReviews)
+        let data = try JSONEncoder().encode(config)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["hiddenGroups"] as? [String] == ["securityReviews"])
+        #expect(json["visibleGroups"] == nil)
+
+        let allOn = try JSONDecoder().decode(
+            TranscriptViewConfig.self, from: JSONEncoder().encode(TranscriptViewConfig.everything))
+        #expect(allOn.visibleGroups == Set(TranscriptKindGroup.allCases))
+
+        let futureJSON = """
+        {"hiddenGroups":["memory","someFutureGroup"],"visibility":"all","hideTaskScoped":false,"showErrors":true}
+        """
+        let future = try JSONDecoder().decode(
+            TranscriptViewConfig.self, from: Data(futureJSON.utf8))
+        #expect(future.visibleGroups == Set(TranscriptKindGroup.allCases).subtracting([.memory]))
     }
 }

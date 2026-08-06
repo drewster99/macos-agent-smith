@@ -47,6 +47,14 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// The result of a tool call. Pairs with a `toolRequest` by `requestID`.
     case toolOutput = "tool_output"
 
+    // MARK: Security review
+    /// A security-review outcome for one tool call — the SAFE/WARN/UNSAFE verdict rows,
+    /// auto-approvals, review-disabled approvals, and the evaluator's own ABORT/failure notices.
+    /// Verdict rows persisted before this kind existed carry no `messageKind`;
+    /// `ChannelMessage.kind` derives this case for them from the `securityDisposition` metadata
+    /// the same producers have always stamped, so historical rows filter like current ones.
+    case securityReview = "security_review"
+
     // MARK: Task lifecycle
     case taskCreated = "task_created"
     case taskAcknowledged = "task_acknowledged"

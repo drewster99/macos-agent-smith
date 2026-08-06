@@ -27,6 +27,36 @@ taking the provider's whole model list with it.
 
 Full rationale lives in `CLAUDE.md` (both repos) and swift-llm-kit's `ROADMAP.md`.
 
+## Security-review messages get a typed kind ✅ Completed 2026-08-05
+
+Started from a user report: filtering the transcript by sender "Security Agent" left every
+"Security Agent → Validator: SAFE …" row visible. Those rows are posted `sender: .system` with the
+reviewed party interpolated into the CONTENT — so the sender axis correctly didn't match them, and
+with no `messageKind` they were governed by the **Chat** toggle of all things (kindless messages
+are Chat's domain).
+
+- **`ChannelMessageKind.securityReview`** (`"security_review"`), stamped by all four security-path
+  posters: `postSecurityReviewToChannel` (SAFE/WARN/UNSAFE/auto-approved/review-disabled) and the
+  three `SecurityEvaluator` notices (parse-failure error, ABORT verdict, consecutive-failures abort).
+- **Historical rows classify identically** via a derivation in `ChannelMessage.kind` (the single
+  accessor, already the one file allowed to touch the raw metadata): kindless + `securityDisposition`
+  ⇒ `.securityReview`. That key is written only by the security-review posters and has been stamped
+  since before the kind existed, so the persisted corpus keeps filtering like current data.
+- **New "Security reviews" group** in `TranscriptKindGroup` / the filter popover.
+- **Group visibility now persists INVERTED (`hiddenGroups`)** in `TranscriptViewConfig`. The visible-set
+  encoding meant every already-saved config (which stored "all six groups") would silently hide the
+  seventh group's messages on upgrade — the exact silent-vanish this feature exists to end. Legacy
+  configs still storing `visibleGroups` migrate with `securityReviews` inheriting the CHAT toggle's
+  state, because Chat is what actually governed those rows when the config was saved. Unknown group
+  names from newer builds are ignored on decode (fail-open: that group shows).
+- `ChannelBannerKind` deliberately gains no case — verdict rows keep their current rendering, folded
+  under their `tool_request` row by `securityDisposition`, which nothing stopped writing.
+
+The same audit that scoped this counted **35 of 70** `sender: .system` post sites emitting NO
+`messageKind` (all Chat-governed today), including every "Agent … stopped/terminated" lifecycle
+notice — the family already flagged by "Smith's system-message filter matches on prose" below. This
+entry closes only the security-review family; the lifecycle-notice kinds remain planned work.
+
 ## Planned
 
 ### Task workspace overhaul: filtered transcripts, sidebar redesign, Library, global-ish storage, session deletion (designed 2026-08-02)

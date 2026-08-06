@@ -2854,7 +2854,8 @@ public actor AgentActor {
         var reviewMetadata: [String: AnyCodable] = [
             "requestID": .string(callID),
             "agentID": .string(agentInstanceID.uuidString),
-            "securityDisposition": .string(securityDisposition)
+            "securityDisposition": .string(securityDisposition),
+            "messageKind": .kind(.securityReview)
         ]
         if let agentRoleValue { reviewMetadata["agentRole"] = .string(agentRoleValue) }
         if let msg = disposition.message, !msg.isEmpty {

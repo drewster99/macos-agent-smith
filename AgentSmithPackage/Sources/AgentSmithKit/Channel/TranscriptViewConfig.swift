@@ -11,6 +11,7 @@ import Foundation
 public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identifiable {
     case chat
     case toolCalls
+    case securityReviews
     case taskLifecycle
     case validation
     case memory
@@ -22,6 +23,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
         switch self {
         case .chat: return "Chat"
         case .toolCalls: return "Tool calls"
+        case .securityReviews: return "Security reviews"
         case .taskLifecycle: return "Task lifecycle"
         case .validation: return "Validation"
         case .memory: return "Memory"
@@ -34,6 +36,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
         switch self {
         case .chat: return "Plain conversation with no structural kind"
         case .toolCalls: return "Tool requests and their output"
+        case .securityReviews: return "Security Agent verdicts, auto-approvals, and review errors"
         case .taskLifecycle: return "Task created / updated / completed, help, worker messages"
         case .validation: return "Acceptance-criteria verdicts and escalations"
         case .memory: return "Memory saves and searches"
@@ -50,6 +53,8 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
             return []
         case .toolCalls:
             return [.toolRequest, .toolOutput]
+        case .securityReviews:
+            return [.securityReview]
         case .taskLifecycle:
             return [.taskCreated, .taskAcknowledged, .taskContinuing, .taskComplete, .taskCompleted,
                     .taskFailed, .taskUpdate, .taskUpdateGuidance, .taskSummarized, .taskActionScheduled,
@@ -109,22 +114,53 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case visibleGroups, allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
+        case visibleGroups, hiddenGroups, allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
     }
 
-    /// Custom decode so a config persisted BEFORE the recipient / task-scope / error axes existed still
-    /// reads back — the synthesized decoder emits a hard `decode` for every non-optional key and would
-    /// throw `keyNotFound` on the missing ones, taking the whole `SessionState` decode down with it. Each
-    /// field falls back to the same default as the memberwise init. (Encode stays synthesized.)
+    /// Custom decode, for two reasons. (1) A config persisted BEFORE the recipient / task-scope / error
+    /// axes existed still reads back — the synthesized decoder emits a hard `decode` for every
+    /// non-optional key and would throw `keyNotFound` on the missing ones, taking the whole
+    /// `SessionState` decode down with it. Each field falls back to the same default as the memberwise
+    /// init. (2) Group visibility is stored INVERTED, as `hiddenGroups` — see `encode(to:)`.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        visibleGroups = try c.decodeIfPresent(Set<TranscriptKindGroup>.self, forKey: .visibleGroups)
-            ?? Set(TranscriptKindGroup.allCases)
+        if let hiddenNames = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenGroups) {
+            // Decoded as raw strings, not `Set<TranscriptKindGroup>`, so a group name written by a
+            // NEWER build doesn't throw here. Ignoring an unknown hidden name fails open — that
+            // group's messages show — which beats failing the whole `SessionState` decode.
+            let hidden = Set(hiddenNames.compactMap(TranscriptKindGroup.init(rawValue:)))
+            visibleGroups = Set(TranscriptKindGroup.allCases).subtracting(hidden)
+        } else if let legacyVisible = try c.decodeIfPresent(Set<TranscriptKindGroup>.self, forKey: .visibleGroups) {
+            // Written by a build that stored the VISIBLE set and predates `securityReviews`.
+            // Security-review rows were kindless then, so the Chat toggle governed them —
+            // inheriting Chat's state preserves exactly what this config showed before the upgrade.
+            visibleGroups = legacyVisible.contains(.chat)
+                ? legacyVisible.union([.securityReviews])
+                : legacyVisible
+        } else {
+            visibleGroups = Set(TranscriptKindGroup.allCases)
+        }
         allowedSenders = try c.decodeIfPresent(Set<ChannelMessage.Sender>.self, forKey: .allowedSenders)
         allowedRecipients = try c.decodeIfPresent(Set<MessageRecipient>.self, forKey: .allowedRecipients)
         visibility = try c.decodeIfPresent(TranscriptFilter.Visibility.self, forKey: .visibility) ?? .all
         hideTaskScoped = try c.decodeIfPresent(Bool.self, forKey: .hideTaskScoped) ?? false
         showErrors = try c.decodeIfPresent(Bool.self, forKey: .showErrors) ?? true
+    }
+
+    /// Group visibility is persisted as the HIDDEN set, not the visible one, so a group added in a
+    /// later build defaults to visible in every already-saved config. Storing the visible set had
+    /// the opposite failure mode: a config saved with "all N groups on" silently excluded group
+    /// N+1 the moment one existed, hiding a whole message category with nothing reporting it —
+    /// which is exactly how `securityReviews` would have vanished from every existing session.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        let hidden = Set(TranscriptKindGroup.allCases).subtracting(visibleGroups)
+        try c.encode(Set(hidden.map(\.rawValue)), forKey: .hiddenGroups)
+        try c.encodeIfPresent(allowedSenders, forKey: .allowedSenders)
+        try c.encodeIfPresent(allowedRecipients, forKey: .allowedRecipients)
+        try c.encode(visibility, forKey: .visibility)
+        try c.encode(hideTaskScoped, forKey: .hideTaskScoped)
+        try c.encode(showErrors, forKey: .showErrors)
     }
 
     /// The default bottom-pane view — the Smith↔user ORCHESTRATION conversation: nothing to OR from a

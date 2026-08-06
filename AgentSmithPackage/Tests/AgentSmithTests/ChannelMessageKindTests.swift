@@ -30,6 +30,7 @@ struct ChannelMessageKindTests {
     private static let expectedWireStrings: [(ChannelMessageKind, String)] = [
         (.toolRequest, "tool_request"),
         (.toolOutput, "tool_output"),
+        (.securityReview, "security_review"),
         (.taskCreated, "task_created"),
         (.taskAcknowledged, "task_acknowledged"),
         (.taskContinuing, "task_continuing"),
@@ -128,6 +129,34 @@ struct ChannelMessageKindTests {
     @Test("A message with no metadata has no kind")
     func absentKind() {
         #expect(ChannelMessage(sender: .system, content: "x").kind == nil)
+    }
+
+    /// Security-review rows were posted kindless for months before `securityReview` existed, so the
+    /// persisted corpus is full of them. The accessor derives the kind from the `securityDisposition`
+    /// key their producers have always stamped — this pins that historical rows classify like
+    /// current ones (and that the derivation doesn't leak onto unrelated kindless messages).
+    @Test("A kindless message with securityDisposition derives the securityReview kind")
+    func legacySecurityReviewRowsDeriveTheirKind() {
+        let legacyVerdict = ChannelMessage(
+            sender: .system,
+            content: "Security Agent → Brown: SAFE Read-only file access",
+            metadata: ["requestID": .string("call_1"), "securityDisposition": .string("approved")]
+        )
+        #expect(legacyVerdict.kind == .securityReview)
+        // Unrelated metadata does not trigger the derivation.
+        let plainNotice = ChannelMessage(
+            sender: .system,
+            content: "Status update",
+            metadata: ["isWarning": .bool(true)]
+        )
+        #expect(plainNotice.kind == nil)
+        // An explicit messageKind always wins over the derivation.
+        let explicit = ChannelMessage(
+            sender: .system,
+            content: "x",
+            metadata: ["messageKind": .kind(.toolOutput), "securityDisposition": .string("approved")]
+        )
+        #expect(explicit.kind == .toolOutput)
     }
 }
 
