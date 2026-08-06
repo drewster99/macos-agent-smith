@@ -189,18 +189,79 @@ private struct TranscriptScopeSection: View {
     }
 }
 
-/// The message-kind checklist: the Chat (kindless) toggle, then one row per group with a
-/// tri-state checkbox that expands to a per-kind toggle for every `ChannelMessageKind` — each
-/// kind is individually filterable, and the group checkbox is a convenience over that per-kind
-/// truth, not a separate switch.
+/// The message-kind checklist with a SCOPE picker above it: "All senders" edits the default
+/// selection; picking a sender edits (or creates) that sender's override, so any sender can show
+/// a different set of kinds than the rest of the transcript. The checklist itself is one shared
+/// component bound to whichever scope's `TranscriptKindSelection` is being edited.
 private struct TranscriptKindGroupSection: View {
     @Binding var config: TranscriptViewConfig
+    /// nil = the default ("All senders") scope.
+    @State private var scopeSender: ChannelMessage.Sender?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Message kinds")
                 .font(.headline)
-            Toggle(isOn: $config.showsChat) {
+            Picker("For", selection: $scopeSender) {
+                Text("All senders").tag(ChannelMessage.Sender?.none)
+                ForEach(TranscriptViewConfig.selectableSenders, id: \.self) { sender in
+                    // Mark customized senders right in the picker, so an override you set last
+                    // week is findable without clicking through every sender.
+                    Text(config.hasKindOverride(forSender: sender)
+                         ? "\(sender.displayName) — custom"
+                         : sender.displayName)
+                        .tag(ChannelMessage.Sender?.some(sender))
+                }
+            }
+            .pickerStyle(.menu)
+
+            if let sender = scopeSender, !config.hasKindOverride(forSender: sender) {
+                // No override yet: say what governs this sender, and offer to branch from it.
+                // The override starts as a COPY of the current default, so customizing never
+                // changes what's on screen until a toggle is actually flipped.
+                Text("\(sender.displayName) follows the All-senders selection.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Customize for \(sender.displayName)") {
+                    config.setKindSelection(config.defaultKinds, forSender: sender)
+                }
+            } else {
+                if let sender = scopeSender {
+                    HStack {
+                        Text("Custom selection for \(sender.displayName).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Reset to All senders") {
+                            config.removeKindOverride(forSender: sender)
+                        }
+                        .font(.caption)
+                    }
+                }
+                TranscriptKindChecklist(selection: selectionBinding)
+            }
+        }
+    }
+
+    /// The edited scope's selection, routed through the config's scope accessors so the override
+    /// map stays the only storage.
+    private var selectionBinding: Binding<TranscriptKindSelection> {
+        Binding(
+            get: { config.kindSelection(forSender: scopeSender) },
+            set: { config.setKindSelection($0, forSender: scopeSender) }
+        )
+    }
+}
+
+/// The Chat (kindless) toggle plus one row per group with a tri-state checkbox that expands to a
+/// per-kind toggle for every `ChannelMessageKind` — each kind individually filterable, the group
+/// checkbox a convenience over the per-kind truth, not a separate switch.
+private struct TranscriptKindChecklist: View {
+    @Binding var selection: TranscriptKindSelection
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $selection.showsChat) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(TranscriptKindGroup.chat.displayName)
                     Text(TranscriptKindGroup.chat.detail)
@@ -209,7 +270,7 @@ private struct TranscriptKindGroupSection: View {
                 }
             }
             ForEach(TranscriptKindGroup.allCases.filter { !$0.governsKindless }) { group in
-                TranscriptKindGroupRow(group: group, config: $config)
+                TranscriptKindGroupRow(group: group, selection: $selection)
             }
         }
     }
@@ -218,7 +279,7 @@ private struct TranscriptKindGroupSection: View {
 /// One kind-group: tri-state checkbox in the disclosure label, per-kind toggles inside.
 private struct TranscriptKindGroupRow: View {
     let group: TranscriptKindGroup
-    @Binding var config: TranscriptViewConfig
+    @Binding var selection: TranscriptKindSelection
     @State private var isExpanded = false
 
     /// Wire order is stable and clusters families (`task_*`, `validation_*`) — good enough
@@ -242,8 +303,8 @@ private struct TranscriptKindGroupRow: View {
             .padding(.leading, 4)
         } label: {
             HStack(spacing: 6) {
-                GroupTriStateCheckbox(state: config.groupVisibility(of: group)) { makeAllVisible in
-                    config.setGroup(group, visible: makeAllVisible)
+                GroupTriStateCheckbox(state: selection.groupVisibility(of: group)) { makeAllVisible in
+                    selection.setGroup(group, visible: makeAllVisible)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(group.displayName)
@@ -258,15 +319,15 @@ private struct TranscriptKindGroupRow: View {
     /// A mixed group says WHICH FRACTION shows — the group's stock description would misread as
     /// "all of this is on".
     private var detailLine: String {
-        guard config.groupVisibility(of: group) == .mixed else { return group.detail }
-        let visible = group.kinds.count - group.kinds.intersection(config.hiddenKinds).count
+        guard selection.groupVisibility(of: group) == .mixed else { return group.detail }
+        let visible = group.kinds.count - group.kinds.intersection(selection.hiddenKinds).count
         return "\(visible) of \(group.kinds.count) kinds shown"
     }
 
     private func kindBinding(_ kind: ChannelMessageKind) -> Binding<Bool> {
         Binding(
-            get: { config.isKindVisible(kind) },
-            set: { isOn in config.setKind(kind, visible: isOn) }
+            get: { selection.isKindVisible(kind) },
+            set: { isOn in selection.setKind(kind, visible: isOn) }
         )
     }
 }
@@ -274,7 +335,7 @@ private struct TranscriptKindGroupRow: View {
 /// The group checkbox: checked (all kinds shown), unchecked (none), or dash (mixed). Clicking a
 /// fully-checked group hides all its kinds; clicking a mixed or empty one shows them all.
 private struct GroupTriStateCheckbox: View {
-    let state: TranscriptViewConfig.GroupVisibility
+    let state: TranscriptKindSelection.GroupVisibility
     let onSetAll: (Bool) -> Void
 
     var body: some View {

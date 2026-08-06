@@ -104,8 +104,12 @@ import Foundation
 
     @Test func configRoundTripsThroughJSON() throws {
         let config = TranscriptViewConfig(
-            hiddenKinds: [.toolOutput, .memorySaved, .agentOnline],
-            showsChat: false,
+            defaultKinds: TranscriptKindSelection(
+                hiddenKinds: [.toolOutput, .memorySaved, .agentOnline], showsChat: false),
+            senderKindOverrides: [
+                .agent(.brown): TranscriptKindSelection(hiddenKinds: [.statusUpdate], showsChat: true),
+                .system: TranscriptKindSelection(hiddenKinds: [], showsChat: false)
+            ],
             allowedSenders: [.user, .agent(.brown), .validator],
             allowedRecipients: [.user, .agent(.smith)],
             visibility: .publicOnly,
@@ -118,10 +122,10 @@ import Foundation
     }
 
     /// Hiding one kind must hide exactly that kind: siblings in the same group still match, and
-    /// kindless messages follow `showsChat` — the per-kind axis the popover now edits directly.
+    /// kindless messages follow `showsChat` — the per-kind axis the popover edits directly.
     @Test func singleHiddenKindFiltersJustThatKind() {
         var config = TranscriptViewConfig.everything
-        config.setKind(.toolOutput, visible: false)
+        config.defaultKinds.setKind(.toolOutput, visible: false)
         let filter = config.makeFilter()
         let hidden = ChannelMessage(
             sender: .agent(.brown), content: "output",
@@ -135,22 +139,85 @@ import Foundation
         #expect(filter.matches(kindless))
     }
 
+    /// A sender override replaces the DEFAULT selection for exactly that sender: Brown's hidden
+    /// kind stays visible from Smith, Brown's other kinds still show, and a sender with no
+    /// override follows the default — including for kinds the default hides.
+    @Test func senderOverrideGovernsOnlyThatSender() {
+        var config = TranscriptViewConfig.everything
+        config.defaultKinds.setKind(.memorySaved, visible: false)
+        config.setKindSelection(
+            TranscriptKindSelection(hiddenKinds: [.toolOutput], showsChat: true),
+            forSender: .agent(.brown))
+        let filter = config.makeFilter()
+
+        let brownToolOutput = ChannelMessage(
+            sender: .agent(.brown), content: "out", metadata: ["messageKind": .kind(.toolOutput)])
+        let smithToolOutput = ChannelMessage(
+            sender: .agent(.smith), content: "out", metadata: ["messageKind": .kind(.toolOutput)])
+        let brownToolRequest = ChannelMessage(
+            sender: .agent(.brown), content: "req", metadata: ["messageKind": .kind(.toolRequest)])
+        // Brown's OVERRIDE doesn't hide memorySaved, so it shows from Brown — the override is a
+        // REPLACEMENT, not a delta on the default.
+        let brownMemorySaved = ChannelMessage(
+            sender: .agent(.brown), content: "mem", metadata: ["messageKind": .kind(.memorySaved)])
+        let smithMemorySaved = ChannelMessage(
+            sender: .agent(.smith), content: "mem", metadata: ["messageKind": .kind(.memorySaved)])
+
+        #expect(!filter.matches(brownToolOutput))
+        #expect(filter.matches(smithToolOutput))
+        #expect(filter.matches(brownToolRequest))
+        #expect(filter.matches(brownMemorySaved))
+        #expect(!filter.matches(smithMemorySaved))
+    }
+
+    /// Per-sender chat: an override with `showsChat == false` hides that sender's KINDLESS
+    /// messages while other senders' plain chat still shows.
+    @Test func senderOverrideGovernsKindlessMessages() {
+        var config = TranscriptViewConfig.everything
+        config.setKindSelection(
+            TranscriptKindSelection(hiddenKinds: [], showsChat: false),
+            forSender: .system)
+        let filter = config.makeFilter()
+        #expect(!filter.matches(ChannelMessage(sender: .system, content: "notice")))
+        #expect(filter.matches(ChannelMessage(sender: .user, content: "hi")))
+    }
+
+    /// The scope accessors: reading a sender without an override returns the default; setting
+    /// writes the override; removing returns the sender to following the default.
+    @Test func kindSelectionScopeAccessors() {
+        var config = TranscriptViewConfig.everything
+        config.defaultKinds.setKind(.advisory, visible: false)
+        #expect(config.kindSelection(forSender: .agent(.brown)) == config.defaultKinds)
+        #expect(!config.hasKindOverride(forSender: .agent(.brown)))
+
+        var custom = config.defaultKinds
+        custom.setKind(.toolOutput, visible: false)
+        config.setKindSelection(custom, forSender: .agent(.brown))
+        #expect(config.hasKindOverride(forSender: .agent(.brown)))
+        #expect(config.kindSelection(forSender: .agent(.brown)) == custom)
+        // The default scope is untouched by the override write.
+        #expect(config.defaultKinds.isKindVisible(.toolOutput))
+
+        config.removeKindOverride(forSender: .agent(.brown))
+        #expect(config.kindSelection(forSender: .agent(.brown)) == config.defaultKinds)
+    }
+
     /// The group checkbox is a convenience over the per-kind truth: group state derives from the
     /// hidden set (all / mixed / none), and setting the group rewrites exactly its own kinds.
     @Test func groupVisibilityDerivesFromHiddenKinds() {
-        var config = TranscriptViewConfig.everything
-        #expect(config.groupVisibility(of: .toolCalls) == .all)
-        config.setKind(.toolOutput, visible: false)
-        #expect(config.groupVisibility(of: .toolCalls) == .mixed)
-        config.setGroup(.toolCalls, visible: false)
-        #expect(config.groupVisibility(of: .toolCalls) == .none)
-        #expect(config.hiddenKinds == TranscriptKindGroup.toolCalls.kinds)
-        config.setGroup(.toolCalls, visible: true)
-        #expect(config == .everything)
+        var selection = TranscriptKindSelection.allVisible
+        #expect(selection.groupVisibility(of: .toolCalls) == .all)
+        selection.setKind(.toolOutput, visible: false)
+        #expect(selection.groupVisibility(of: .toolCalls) == .mixed)
+        selection.setGroup(.toolCalls, visible: false)
+        #expect(selection.groupVisibility(of: .toolCalls) == .none)
+        #expect(selection.hiddenKinds == TranscriptKindGroup.toolCalls.kinds)
+        selection.setGroup(.toolCalls, visible: true)
+        #expect(selection == .allVisible)
         // Chat has no kinds; its group state is the kindless switch.
-        config.setGroup(.chat, visible: false)
-        #expect(!config.showsChat)
-        #expect(config.groupVisibility(of: .chat) == .none)
+        selection.setGroup(.chat, visible: false)
+        #expect(!selection.showsChat)
+        #expect(selection.groupVisibility(of: .chat) == .none)
     }
 
     /// A config persisted BEFORE the recipient/task-scope/error axes existed must still decode — the new
@@ -168,11 +235,12 @@ import Foundation
         #expect(back.allowedRecipients == nil)
         #expect(back.hideTaskScoped == false)
         #expect(back.showErrors == true)
-        #expect(back.showsChat)
+        #expect(back.defaultKinds.showsChat)
         let expectedHidden: Set<TranscriptKindGroup> = [.toolCalls, .taskLifecycle, .validation, .memory]
-        #expect(back.hiddenKinds == expectedHidden.reduce(into: Set()) { $0.formUnion($1.kinds) })
-        #expect(back.groupVisibility(of: .system) == .all)
-        #expect(back.groupVisibility(of: .securityReviews) == .all)
+        #expect(back.defaultKinds.hiddenKinds == expectedHidden.reduce(into: Set()) { $0.formUnion($1.kinds) })
+        #expect(back.defaultKinds.groupVisibility(of: .system) == .all)
+        #expect(back.defaultKinds.groupVisibility(of: .securityReviews) == .all)
+        #expect(back.senderKindOverrides.isEmpty)
     }
 
     /// The Chat-off half of the legacy migration: kindless security rows were hidden, so the migrated
@@ -183,10 +251,10 @@ import Foundation
         """
         let back = try JSONDecoder().decode(
             TranscriptViewConfig.self, from: Data(legacyJSON.utf8))
-        #expect(!back.showsChat)
-        #expect(back.groupVisibility(of: .securityReviews) == .none)
-        #expect(back.groupVisibility(of: .toolCalls) == .all)
-        #expect(back.groupVisibility(of: .system) == .all)
+        #expect(!back.defaultKinds.showsChat)
+        #expect(back.defaultKinds.groupVisibility(of: .securityReviews) == .none)
+        #expect(back.defaultKinds.groupVisibility(of: .toolCalls) == .all)
+        #expect(back.defaultKinds.groupVisibility(of: .system) == .all)
     }
 
     /// The group-persisted generation (`hiddenGroups`) migrates the same way: each hidden group
@@ -196,35 +264,77 @@ import Foundation
         {"hiddenGroups":["memory","chat"],"visibility":"all","hideTaskScoped":false,"showErrors":true}
         """
         let back = try JSONDecoder().decode(TranscriptViewConfig.self, from: Data(json.utf8))
-        #expect(back.hiddenKinds == TranscriptKindGroup.memory.kinds)
-        #expect(!back.showsChat)
+        #expect(back.defaultKinds.hiddenKinds == TranscriptKindGroup.memory.kinds)
+        #expect(!back.defaultKinds.showsChat)
     }
 
     /// Kind visibility persists INVERTED (`hiddenKinds`), so a config saved today with everything
     /// on stays "everything on" when a future build adds a kind — the visible-set encoding silently
-    /// hid any kind the saving build didn't know about. Pins the wire shape (sorted raw values),
-    /// the everything-on case, and that an unknown hidden name from a newer build is ignored rather
-    /// than failing the decode.
+    /// hid any kind the saving build didn't know about. Pins the wire shape (sorted raw values,
+    /// flat default keys — the per-kind generation's exact format when no overrides exist, so
+    /// yesterday's configs round-trip unchanged), the everything-on case, and that an unknown
+    /// hidden name from a newer build is ignored rather than failing the decode.
     @Test func kindVisibilityPersistsAsHiddenSet() throws {
         var config = TranscriptViewConfig.everything
-        config.setKind(.securityReview, visible: false)
-        config.setKind(.memorySaved, visible: false)
+        config.defaultKinds.setKind(.securityReview, visible: false)
+        config.defaultKinds.setKind(.memorySaved, visible: false)
         let data = try JSONEncoder().encode(config)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(json["hiddenKinds"] as? [String] == ["memory_saved", "security_review"])
         #expect(json["hiddenGroups"] == nil)
         #expect(json["visibleGroups"] == nil)
+        // No overrides -> no key at all, so the previous per-kind generation's shape is preserved.
+        #expect(json["senderKindOverrides"] == nil)
 
         let allOn = try JSONDecoder().decode(
             TranscriptViewConfig.self, from: JSONEncoder().encode(TranscriptViewConfig.everything))
-        #expect(allOn.hiddenKinds.isEmpty)
-        #expect(allOn.showsChat)
+        #expect(allOn.defaultKinds == .allVisible)
 
         let futureJSON = """
         {"hiddenKinds":["memory_saved","some_future_kind"],"showsChat":true,"visibility":"all","hideTaskScoped":false,"showErrors":true}
         """
         let future = try JSONDecoder().decode(
             TranscriptViewConfig.self, from: Data(futureJSON.utf8))
-        #expect(future.hiddenKinds == [.memorySaved])
+        #expect(future.defaultKinds.hiddenKinds == [.memorySaved])
+    }
+
+    /// Override persistence: rows sort by sender for diff-stable JSON, and a row a NEWER build
+    /// wrote with an unknown sender is dropped alone — that sender follows the default (fails
+    /// open) — instead of losing the rows behind it or failing the whole config decode.
+    @Test func senderOverridesPersistSortedAndFailOpen() throws {
+        var config = TranscriptViewConfig.everything
+        config.setKindSelection(TranscriptKindSelection(hiddenKinds: [.toolOutput], showsChat: true),
+                                forSender: .system)
+        config.setKindSelection(TranscriptKindSelection(hiddenKinds: [], showsChat: false),
+                                forSender: .agent(.brown))
+        let data = try JSONEncoder().encode(config)
+        let back = try JSONDecoder().decode(TranscriptViewConfig.self, from: data)
+        #expect(back == config)
+        // Deterministic ROW order (sorted by sender), proven with `.sortedKeys` so JSON object
+        // key order — which JSONEncoder does not stabilize — can't fail the comparison; array
+        // order is exactly what remains.
+        let stable = JSONEncoder()
+        stable.outputFormatting = .sortedKeys
+        #expect(try stable.encode(back) == (try stable.encode(config)))
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let rows = try #require(json["senderKindOverrides"] as? [[String: Any]])
+        // "agent(…brown)" sorts before "system" under the description sort the encoder uses.
+        #expect(rows.count == 2)
+        #expect(rows[0]["sender"] as? [String: Any] != nil)
+        #expect((rows[0]["showsChat"] as? Bool) == false)   // brown's override
+        #expect((rows[1]["showsChat"] as? Bool) == true)    // system's override
+
+        let mixedJSON = """
+        {"hiddenKinds":[],"showsChat":true,
+         "senderKindOverrides":[
+            {"sender":{"someFutureSender":{}},"hiddenKinds":["tool_output"],"showsChat":true},
+            {"sender":{"system":{}},"hiddenKinds":["memory_saved"],"showsChat":false}
+         ],
+         "visibility":"all","hideTaskScoped":false,"showErrors":true}
+        """
+        let mixed = try JSONDecoder().decode(TranscriptViewConfig.self, from: Data(mixedJSON.utf8))
+        #expect(mixed.senderKindOverrides.count == 1)
+        #expect(mixed.kindSelection(forSender: .system)
+                == TranscriptKindSelection(hiddenKinds: [.memorySaved], showsChat: false))
     }
 }

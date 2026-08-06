@@ -54,7 +54,13 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// view hide everything addressed TO a worker, which the sender axis can't (a Security-Agent-to-Brown
     /// message has an ALLOWED sender).
     public var allowedRecipients: Set<MessageRecipient>?
+    /// The DEFAULT kind rule — applies to any sender without an entry in `kindsBySender`.
     public var kinds: KindRule
+    /// Per-sender kind rules. A sender with an entry uses ITS rule instead of `kinds`; a sender
+    /// without one falls through to the default, so a sender case added later is governed by the
+    /// default rather than silently unfiltered (or silently hidden). This is what lets a view show
+    /// tool output from Smith while hiding it from Brown.
+    public var kindsBySender: [ChannelMessage.Sender: KindRule]
     public var taskScope: TaskScope
     public var visibility: Visibility
     /// When true, messages flagged as errors (`metadata["isError"] == true`) are hidden. Errors are a
@@ -65,6 +71,7 @@ public struct TranscriptFilter: Sendable, Equatable {
         allowedSenders: Set<ChannelMessage.Sender>? = nil,
         allowedRecipients: Set<MessageRecipient>? = nil,
         kinds: KindRule = .all,
+        kindsBySender: [ChannelMessage.Sender: KindRule] = [:],
         taskScope: TaskScope = .any,
         visibility: Visibility = .all,
         hideErrors: Bool = false
@@ -72,6 +79,7 @@ public struct TranscriptFilter: Sendable, Equatable {
         self.allowedSenders = allowedSenders
         self.allowedRecipients = allowedRecipients
         self.kinds = kinds
+        self.kindsBySender = kindsBySender
         self.taskScope = taskScope
         self.visibility = visibility
         self.hideErrors = hideErrors
@@ -90,7 +98,7 @@ public struct TranscriptFilter: Sendable, Equatable {
         }
         if hideErrors, case .bool(true)? = message.metadata?["isError"] { return false }
 
-        switch kinds {
+        switch kindsBySender[message.sender] ?? kinds {
         case .all:
             break
         case .only(let set, let includingKindless):
