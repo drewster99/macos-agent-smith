@@ -713,7 +713,14 @@ private struct FlowingAttachmentChips: View {
         if reveal {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
-            NSWorkspace.shared.open(url)
+            // Quick Look, not "open in the default app" — a preview is the point, and launching
+            // Preview/Xcode/whatever owns the extension is a different, heavier action. Shells out
+            // to qlmanage for the same reason ChannelLogView and MarkdownText do; those carry the
+            // rationale for the shell-out over QLPreviewPanel.
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
+            task.arguments = ["-p", url.path]
+            try? task.run()
         }
     }
 }

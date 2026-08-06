@@ -761,10 +761,16 @@ private struct TaskRow: View {
         .contentShape(Rectangle())
     }
 
-    /// Runs spawned by this task, across active and archived. Empty by construction for
-    /// compact rows, which show no summary.
+    /// Runs spawned by this task, across active and archived.
+    ///
+    /// Gated on the task being able to HAVE runs, not on its density. It used to key on
+    /// `density == .standard`, which was a safe proxy only while runs rendered compact — promoting
+    /// them to standard rows turned this into a full scan of the active + archived lists (546 tasks
+    /// here) for every run in the sidebar, on every redraw. A run has a `parentTaskID` and never
+    /// spawns anything, so it can answer without scanning at all.
     private var childRuns: [AgentTask] {
-        density == .standard ? viewModel.childTasks(of: task.id) : []
+        guard density == .standard, task.parentTaskID == nil else { return [] }
+        return viewModel.childTasks(of: task.id)
     }
 
     // MARK: Layouts
