@@ -22,6 +22,10 @@ import SwiftLLMKit
 ///     --reuse-store                 seed established probed findings from the local record;
 ///                                   only gaps / new / version-invalidated findings re-probe
 ///     --reuse-max-age-days <N>      with --reuse-store, records older than N days re-probe fully (default 30)
+///     --concurrency <N>             models probed at once across all providers (default 10; 1 = the
+///                                   old strictly-sequential sweep)
+///     --provider-concurrency <p=N>  cap for ONE provider's in-flight models (default 4 each;
+///                                   repeatable, comma-separable: a=2,b=6)
 ///     --verbose                     extra request logging
 ///   Fetch control (compose with any launch, including a normal GUI launch):
 ///     --force-fetch-models          re-fetch every provider now, ignoring the daily gate
@@ -47,7 +51,7 @@ enum CapabilityEvalRunner {
     /// on `output_config.effort` and is emitted unconditionally, while elsewhere the field is
     /// flag-gated, which is why the non-Anthropic loop forces `reasoning_effort` through
     /// `extraJSONOverrides` rather than trusting a silent success.
-    struct Target {
+    struct Target: Sendable {
         let providerID: String
         let modelID: String
         let effortLevels: [String]
@@ -137,473 +141,632 @@ enum CapabilityEvalRunner {
             exit(0)
         }
 
-        // Cache the freshly-decoded vendor payload per provider: a provider sweep probes many models
-        // from one provider, and each seed only needs that provider's model list fetched once.
-        // Tri-state facts, NOT materialized ModelInfo — materialization flattens nil to false,
-        // and seeding from it fabricates decoded(false) for fields the vendor never stated.
-        var decodedByProvider: [String: [DecodedModelFacts]] = [:]
+        let limits = SweepConcurrencyLimits.fromArguments()
+        let overridesNote = limits.perProviderOverrides.isEmpty ? "" :
+            "  overrides: " + limits.perProviderOverrides.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        print("concurrency: \(limits.global) global, \(limits.perProviderDefault) per provider\(overridesNote)\n")
 
-        var profiles: [ModelProfile] = []
-        for (index, target) in targets.enumerated() {
-            print(String(repeating: "─", count: 72))
-            print("[\(index + 1)/\(targets.count)] \(target.providerID) / \(target.modelID)")
-            print("  intent: \(target.note)")
+        let options = SweepOptions(noSeed: noSeed, discardNonChat: discardNonChat,
+                                   discardDeprecated: discardDeprecated, reuseStore: reuseStore,
+                                   reuseMaxAgeDays: reuseMaxAgeDays, reuseMaxAge: reuseMaxAge,
+                                   fetchPolicy: fetchPolicy)
+        let scheduler = ProbeSweepScheduler(targets: targets, limits: limits)
+        let payloadCache = DecodedPayloadCache()
+        let results = SweepResults()
 
-            guard let provider = kit.providers.first(where: { $0.id == target.providerID }) else {
-                print("  SKIP: provider not configured\n"); continue
-            }
-            let key = kit.apiKey(for: target.providerID) ?? ""
-            // A missing key only blocks a provider that needs one. Local servers (mlx, LM Studio,
-            // Ollama on localhost) are keyless — probe them anyway; if the server isn't running the
-            // probe reports a connection failure, which is the honest answer rather than a guess.
-            if providerNeedsKey(provider) && key.isEmpty {
-                print("  SKIP: no API key for \(provider.name)\n"); continue
-            }
-            reportCatalogClaims(kit: kit, target: target)
-
-            // Throwaway config: unstreamed, small output cap, no temperature pinned, and — the
-            // point — never clamped against the catalog. The provider it builds exposes no
-            // capability data, so nothing the catalog claims can leak into the measurement.
-            let config = ModelConfiguration(
-                name: "probe:\(target.modelID)", providerID: target.providerID, modelID: target.modelID,
-                temperature: nil, maxOutputTokens: 512, streaming: false
-            )
-            // makeProbeProvider, not makeProvider: necessity flags stay (a malformed request
-            // must not fabricate a capability negative) but the no-temperature restriction is
-            // stripped so the temperature probe measures the raw endpoint instead of trivially
-            // passing under the very flag it exists to derive.
-            let llm = kit.makeProbeProvider(configuration: config, provider: provider)
-
-            // Seed from the PURE vendor payload — fetched directly, not from kit.models, whose
-            // entries have LiteLLM's claims enriched in and would let third-party data wear a
-            // `decoded` badge. --no-seed skips it to re-validate probe-vs-payload agreement;
-            // --no-fetch-models skips it too (a bare seed means "probe everything").
-            var seed = ModelProfile(providerID: target.providerID, modelID: target.modelID)
-            if !noSeed && fetchPolicy != .none {
-                do {
-                    let decodedModels: [DecodedModelFacts]
-                    if let cached = decodedByProvider[target.providerID] {
-                        decodedModels = cached
-                    } else {
-                        decodedModels = try await ModelFetchService().fetchModelFacts(from: provider, apiKey: key.isEmpty ? nil : key)
-                        decodedByProvider[target.providerID] = decodedModels
-                    }
-                    if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {
-                        seed = ModelProber.seedProfile(fromDecodedFacts: decoded, providerID: target.providerID)
-                    }
-                } catch {
-                    print("  seed fetch failed (probing everything): \(error.localizedDescription)")
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<min(limits.global, targets.count) {
+                group.addTask {
+                    await sweepWorker(kit: kit, scheduler: scheduler, payloadCache: payloadCache,
+                                      results: results, options: options, totalTargets: targets.count)
                 }
             }
-
-            // Store-seeded re-sweep: overlay prior probed findings onto the decoded seed, gated
-            // on the SAME prober version (a bump invalidates the whole record) and a max age
-            // (served models drift under fixed IDs). Carried findings keep their own evidence and
-            // timestamps; only gaps re-probe.
-            var reusedFindingSummary = ""
-            if reuseStore {
-                let (localRecord, _) = kit.probeRecords(provider: provider, modelID: target.modelID)
-                if let record = localRecord {
-                    let age = Date().timeIntervalSince(record.recordedAt)
-                    // ONLY the current version is reusable. There was a partial-migration branch for
-                    // v3 — written when 4 was current, on the basis that v3→v4 changed only the
-                    // trailing-system methodology — and it survived two version bumps that
-                    // explicitly invalidated everything else. v5 declared every v4 record suspect
-                    // and v6 declared every v5 budget finding fabricated, so a v3 record is at
-                    // least as stale as the versions those bumps rejected, yet it was the one
-                    // vintage still getting a pass.
-                    //
-                    // It also laundered: `storeProbeResult` stamps the CURRENT prober version, so
-                    // carried v3 findings were re-persisted as v6, and the evidence combiner
-                    // prefers a higher prober version over a newer timestamp — letting the
-                    // laundered data outrank a correct measurement.
-                    if record.proberVersion != ModelProber.proberVersion {
-                        reusedFindingSummary = "  reuse: SKIP — record is prober v\(record.proberVersion), current is v\(ModelProber.proberVersion); full re-probe"
-                    } else if age > reuseMaxAge {
-                        reusedFindingSummary = "  reuse: SKIP — record is \(Int(age / 86_400))d old (> \(Int(reuseMaxAgeDays))d); full re-probe"
-                    } else {
-                        seed.seedProbedFindings(from: record.profile)
-                        reusedFindingSummary = "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
-                    }
-                } else {
-                    reusedFindingSummary = "  reuse: no prior record — full probe"
-                }
-                print(reusedFindingSummary)
-            }
-
-            // Deprecated models are skipped BEFORE probing so no calls are spent on a model the
-            // provider is retiring. The seed carries the vendor's own deprecation date.
-            if discardDeprecated, let deprecatedOn = seed.deprecatedOn {
-                print("  SKIP: deprecated \(Self.dateOnly.string(from: deprecatedOn))\n"); continue
-            }
-
-            // detail:'low' bills OpenAI image input at a flat ~85 tokens instead of tile math —
-            // scoped to api.openai.com, the one host documented to accept the field (the vision
-            // probe still retries hint-free before grading any failure, so it can't misfire).
-            let preferLowImageDetail = provider.endpoint.host?.contains("api.openai.com") == true
-            var profile = await ModelProber.probe(
-                llm: llm, seed: seed,
-                effortLevelsToProbe: target.effortLevels,
-                // Anthropic emits output_config.effort whatever the model claims; a flag-gated
-                // endpoint would silently drop it and turn "no error" into a false positive.
-                supportsUnconditionalGeneralEffortEmission: provider.apiType == .anthropic,
-                preferLowImageDetail: preferLowImageDetail,
-                // The record the provider itself gates on, so the tool-calling probe can tell a
-                // forced call from a free one instead of assuming tool_choice went out.
-                modelCapabilities: kit.modelInfo(providerID: target.providerID,
-                                                 modelID: target.modelID)?.capabilities ?? ModelCapabilities()
-            )
-
-            // An empty wallet is ACCOUNT-wide, not a fact about this model: every remaining call
-            // fails identically. Left running, the sweep spends a call per model and prints one
-            // indistinguishable "?" per row, burying the single fact that explains all of them —
-            // and the evidence column truncates the message before the useful half. Observed live
-            // on an 11-model Anthropic sweep, where the operator could not tell from the summary
-            // that the account simply needed topping up. Stop, say so in full, and leave the
-            // stored records alone (nothing was established, so nothing is written).
-            // Scans every step-1 finding, not just `chat`. Gemini and Mistral DECODE `capabilities.chat`
-            // from their /models payload, so the seed makes it `.decoded(true, "provider /models
-            // payload")` and `probe()` skips the chat call entirely — the billing failure then lands
-            // in `acceptsTemperature` and the breaker never fired, which is exactly the sweep-wide
-            // burn its comment above says must not happen. Gemini's quota body even contains one of
-            // the phrases this matches.
-            let firstStepEvidence = [profile.chat, profile.acceptsTemperature, profile.isAvailable]
-                .compactMap(\.evidence)
-            if let billingEvidence = firstStepEvidence.first(where: CapabilityProbe.textIndicatesBillingProblem) {
-                let remaining = targets.count - index - 1
-                print("")
-                print(String(repeating: "!", count: 100))
-                print("  BILLING PROBLEM — \(target.providerID) refused the call for payment reasons.")
-                print("  This says NOTHING about any model; every call fails the same way until it is resolved.")
-                print("")
-                print("  \(billingEvidence)")
-                print("")
-                if remaining > 0 {
-                    print("  Stopping the sweep: \(remaining) further model(s) skipped rather than re-learning this.")
-                }
-                print("  Probe records are untouched — nothing was established, so nothing was written.")
-                print(String(repeating: "!", count: 100))
-                print("")
-                profiles.append(profile)
-                break
-            }
-
-            // Effort on OpenAI-compatible endpoints can't go through LLMCallOverrides — the
-            // provider only emits reasoning_effort when the supportsReasoningEffort flag is set,
-            // so an unflagged model silently drops it and a "no error" proves nothing. Forcing
-            // the field via extraJSONOverrides bypasses the gate, making effort PROVABLE instead
-            // of hand-authored: one provider per level, graded on the endpoint's own answer.
-            //
-            // Gated on `chat` like the battery below it. It used to sit outside that gate, which was
-            // inert while effort probing was opt-in and an empty list — but once the full ladder
-            // became the default it meant up to 7 paid calls each on every model `probe()` had
-            // already abandoned: unavailable, access-denied, inconclusive-chat, or established
-            // non-chat (embeddings, tts, whisper, babbage-002) across a ~1,700-model catalog.
-            if profile.chat.value == true, provider.apiType != .anthropic, !target.effortLevels.isEmpty {
-                for level in target.effortLevels where profile.reasoningEffortLevels[level] == nil {
-                    let forcedConfig = ModelConfiguration(
-                        name: "probe:\(target.modelID):effort", providerID: target.providerID,
-                        modelID: target.modelID, temperature: nil, maxOutputTokens: 512,
-                        streaming: false,
-                        extraJSONOverrides: ["reasoning_effort": .string(level)]
-                    )
-                    let forcedLLM = kit.makeProvider(configuration: forcedConfig, provider: provider)
-                    profile.reasoningEffortLevels[level] = await ModelProber.probeParameterAcceptance(
-                        llm: forcedLLM,
-                        parameterDescription: "reasoning_effort=\(level)",
-                        rejectionKeywords: ["reasoning_effort", "reasoning", "effort"]
-                    )
-                    profile.callCount += 1
-                }
-            }
-
-            // Capability probes that need the raw field forced past a production gate. Each is
-            // gated on `chat` (a model that can't answer can't answer these either) and skipped
-            // when the store already settled it, so a re-run costs nothing for known facts.
-            if profile.chat.value == true {
-                // The catalog entry supplies the limits that BOUND the budget search; the probed
-                // values win where they exist, since they were measured on this very endpoint.
-                let catalogEntry = kit.modelInfo(providerID: target.providerID, modelID: target.modelID)
-                /// One throwaway provider per forced payload — the same pattern the effort probe
-                /// uses, and the reason none of this needs probe-only code in the request builders.
-                ///
-                /// Explicitly `@MainActor`: the factory it calls is main-actor isolated, and the
-                /// probes are not. Annotating the closure keeps the hop at this boundary instead of
-                /// pushing the caller's isolation into the library's signature.
-                let forcing: @MainActor @Sendable ([String: AnyCodable]) async -> any LLMProvider = { overrides in
-                    kit.makeProvider(
-                        configuration: ModelConfiguration(
-                            name: "probe:\(target.modelID)", providerID: target.providerID,
-                            modelID: target.modelID, temperature: nil, maxOutputTokens: 512,
-                            streaming: false, extraJSONOverrides: overrides),
-                        provider: provider)
-                }
-
-                // Structured output — graded on the RESPONSE, not on acceptance: an endpoint that
-                // ignores response_format returns 200 and would otherwise record as supporting it.
-                let structuredModes: [LLMResponseFormat] = [
-                    .jsonObject,
-                    // The shared strict-valid schema — a bare {"type":"object"} fails OpenAI's
-                    // validator before the model sees it, and 47 models were recorded as lacking
-                    // json_schema off the back of that refusal.
-                    .jsonSchema(name: "probe", schema: CapabilityProbe.probeResponseSchema)
-                ]
-                for mode in structuredModes where profile[mode.requiredCapability] == nil {
-                    // nil = this provider family has no `response_format`; no call is spent.
-                    guard let finding = await ModelProber.probeStructuredOutput(
-                        mode, apiType: provider.apiType, makeProviderForcing: forcing) else { continue }
-                    profile[mode.requiredCapability] = finding
-                    profile.callCount += 1
-                }
-
-                // tool_choice options, each independently — "accepts the parameter" does not mean
-                // "accepts every value of it".
-                // Reasoning on/off — separate probes because neither direction implies the other.
-                // Both are RUN even when one is already answered: they are read together below, and
-                // a conclusion drawn from one observation and one blank would be drawn from a
-                // baseline that was never measured. Only an already-answered PAIR skips.
-                if profile[.reasoningCanBeEnabled] == nil || profile[.reasoningCanBeDisabled] == nil {
-                    // Discovers the mechanism rather than assuming one. OpenAI, Moonshot and
-                    // DeepSeek are all `.openAICompatible` and do not share a way to switch
-                    // reasoning, so asking every endpoint for a `thinking` block earned OpenAI's
-                    // "Unknown parameter: 'thinking'" and recorded 60+ reasoning models as unable
-                    // to reason — literally what the endpoint said, and completely wrong.
-                    let mechanismCalls = ProbeCallCounter()
-                    let found = await ModelProber.probeReasoningMechanism(
-                        apiType: provider.apiType, makeProviderForcing: forcing, calls: mechanismCalls)
-                    let (on, off) = (found.on, found.off)
-                    profile.callCount += mechanismCalls.value
-                    // The mechanism itself is a fact worth keeping: nothing else establishes
-                    // `reasoningControl`, which is why the thinking.keep probe could never fire.
-                    // Only when DEMONSTRATED. A model that reasons unconditionally emits reasoning
-                    // whatever it is sent, so every candidate "demonstrates" acceptance and the
-                    // winner would be decided by the order of the candidate list — pinning a
-                    // request-builder branch on list order and calling it established.
-                    if let control = found.control, found.mechanismWasEstablished {
-                        profile.reasoningControl = .established(
-                            control, found.mechanismWasDemonstrated
-                                ? "the endpoint reasoned when asked via \(control.editorTitle)"
-                                : "the endpoint refused the other mechanism(s) by name and accepted "
-                                + "\(control.editorTitle) — it discriminates between the shapes")
-                    }
-                    // Acceptance says the endpoint took the switch; the reply says whether it DID
-                    // anything. `thinking` is an unknown key to most OpenAI-compatible endpoints and
-                    // unknown keys are ignored rather than refused, so a model that carried on
-                    // thinking was being recorded as one whose reasoning can be turned off.
-                    let conclusions = ModelProber.concludeReasoning(on: on, off: off,
-                                                                    mechanism: found.control)
-                    // Never downgrade: the pair RUNS when either side is missing, so a re-run whose
-                    // calls all failed (a 429 storm) would otherwise overwrite a stored established
-                    // measurement with an inconclusive and re-persist the loss.
-                    func keepBetter(_ capability: ModelCapability, _ candidate: ProbeFinding<Bool>) {
-                        guard profile[capability]?.status != .established
-                                || candidate.status == .established else { return }
-                        profile[capability] = candidate
-                    }
-                    keepBetter(.reasoningCanBeEnabled, on.finding)
-                    keepBetter(.reasoningCanBeDisabled, conclusions.canBeDisabled)
-                    // Observed reasoning is the only thing that establishes the model reasons at
-                    // all; a decoded vendor claim already present is left alone.
-                    if profile[.reasoning] == nil, conclusions.reasons.status == .established {
-                        profile[.reasoning] = conclusions.reasons
-                    }
-                }
-
-                // The capability comes from the choice itself — a hand-paired list here was an
-                // ARRAY literal, so a new LLMToolChoice case would break every switch loudly and
-                // leave this silently one probe short.
-                let toolChoices: [LLMToolChoice] = [
-                    .required, .textOnly, .specific(name: CapabilityProbe.probeToolName)
-                ]
-                // Thinking is turned off first where the model allows it: Moonshot and DeepSeek
-                // both reject `required` and named-function choices as "incompatible with thinking
-                // enabled", so probing with it on measures that incompatibility rather than the
-                // option. Requires the reasoning probes above to have run.
-                //
-                // `!= false`, NOT `== true`, and the asymmetry is load-bearing. The two outcomes are
-                // not equally bad: sending the disable when it does not work costs nothing (the
-                // field is ignored, which is precisely how it earned a `false`), while NOT sending
-                // it when it would have worked produces a confounded tool-choice finding — the same
-                // confound that cost nine findings a re-probe on 2026-08-03. So it attempts the
-                // disable unless the switch is KNOWN useless. This became load-bearing when the OFF
-                // verdict stopped being acceptance-graded: `inconclusive` is now a real outcome (a
-                // model whose thinking only partly reduced), and under `== true` those models would
-                // silently have been probed with thinking left on.
-                //
-                // The payload is the DISCOVERED mechanism's own, never a shape assumed for every
-                // endpoint. Passing a bare Bool made the probe force `thinking: {type: disabled}`
-                // at OpenAI, which has no such field: it answered "Unrecognized request argument
-                // supplied: thinking", and since that names neither tool_choice nor any of its
-                // values, all three findings fell through to inconclusive — 45 records locally.
-                let discoveredMechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
-                let disablePayload = profile[.reasoningCanBeDisabled]?.value == false
-                    ? nil
-                    : discoveredMechanism.flatMap { $0.reasoningDisableOverrides }
-                for choice in toolChoices where profile[choice.requiredCapability] == nil {
-                    // The probe derives this provider's own shape; nil = no such field here.
-                    guard let finding = await ModelProber.probeToolChoice(
-                        choice, apiType: provider.apiType,
-                        disableReasoningWith: disablePayload,
-                        makeProviderForcing: forcing) else { continue }
-                    profile[choice.requiredCapability] = finding
-                    profile.callCount += 1
-                }
-                // nil unless the model's mechanism actually has a `keep` key — acceptance-grading
-                // it everywhere recorded `true` on any endpoint that ignores unknown body keys.
-                if profile[.thinkingSupportsKeepAll] == nil,
-                   let finding = await ModelProber.probeThinkingKeep(
-                       // The DISCOVERED mechanism first — the same resolution the budget gate uses.
-                       // Passing only the catalog's (which nothing decodes) plus the old
-                       // `reasoningCanBeEnabled` stand-in went stale the day discovery landed:
-                       // "can be enabled" now means the model accepted ITS OWN mechanism, which is
-                       // `reasoning_effort` at OpenAI and adaptive at the newest Claude — so this
-                       // would have fired a `thinking` block at endpoints that have none.
-                       reasoningControl: profile.reasoningControl?.value ?? catalogEntry?.reasoningControl,
-                       // No stand-in: `keep` is a key OF the thinking block, so with no
-                       // block-mechanism established there is nothing coherent to probe. The
-                       // models this matters for (DeepSeek, Kimi) now demonstrate `.thinkingBlock`
-                       // and arrive through the parameter above.
-                       acceptedThinkingBlock: false,
-                       makeProviderForcing: forcing) {
-                    profile[.thinkingSupportsKeepAll] = finding
-                    profile.callCount += 1
-                }
-                // nil where the family has no `strict` concept — no call is spent there.
-                if profile[.toolDefinitionsSupportStrict] == nil,
-                   let strict = await ModelProber.probeStrictToolDefinitions(
-                       apiType: provider.apiType, makeProviderForcing: forcing) {
-                    profile[.toolDefinitionsSupportStrict] = strict
-                    profile.callCount += 1
-                }
-                // Behaviour-graded, so each takes the ORDINARY provider rather than a forcing one:
-                // what is being measured is how the endpoint treats a normal request shape, and a
-                // forced body would be measuring something the production path never sends.
-                if profile[.systemMessages] == nil {
-                    profile[.systemMessages] = await ModelProber.probeSystemMessages(llm: llm)
-                    profile.callCount += 1
-                }
-                if profile[.assistantPrefill] == nil {
-                    profile[.assistantPrefill] = await ModelProber.probeAssistantPrefill(llm: llm)
-                    profile.callCount += 1
-                }
-                // Needs tool calling to work at all, or it measures that instead. An established
-                // non-tool-caller is skipped; an unmeasured one still gets asked.
-                if profile[.parallelToolCalls] == nil, profile.toolCalling.value != false {
-                    profile[.parallelToolCalls] = await ModelProber.probeParallelToolCalls(llm: llm)
-                    profile.callCount += 1
-                }
-
-                // Budget range LAST: it is the only multi-call probe here, and running it after the
-                // single-call facts means an interrupted sweep still banks those.
-                //
-                // Requires POSITIVE evidence that there is a reasoning budget to measure. The old
-                // gate was `thinkingSupportsTokenBudget != false`, and nothing ever establishes that
-                // capability — so it passed for every model alive. An endpoint with no budget
-                // parameter ignores one silently and accepts every value, so the searches converge
-                // on nonsense: on 2026-08-04 that wrote a 1-token floor and a fabricated ceiling for
-                // 72 models including gpt-4-turbo and babbage-002, which have no thinking at all.
-                //
-                // Observed reasoning is the evidence, since a model that does not reason cannot have
-                // a reasoning-token budget. A vendor claim counts too, for the models the toggle
-                // probe cannot reach (OpenAI's reasoning models take `reasoning_effort`, not a
-                // `thinking` block, so nothing observes their reasoning here).
-                // "It reasons" is NOT sufficient on its own: OpenAI's reasoning models reason
-                // demonstrably and have no token budget at all — depth there is a named effort
-                // level. Gating on reasoning alone would rebuild the same 72-model bug one layer up
-                // now that the mechanism probe makes those models demonstrate reasoning.
-                // The mechanism gate is now MANDATORY rather than one operand of an `||`, and it
-                // fails CLOSED (`?? false`). As an operand a single hand-authored
-                // `thinkingSupportsTokenBudget` override on a `.reasoningEffortOnly` model bypassed
-                // it entirely and re-opened the bug it names; and `?? true` let a `--reuse-store`
-                // record with no stored mechanism through the same hole.
-                let mechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
-                let reasonsDemonstrably = profile[.reasoning]?.value == true
-                let vendorClaimsBudget = catalogEntry?.capabilities.state(of: .thinkingSupportsTokenBudget) == true
-                // Nothing to force the budget into means nothing worth spending calls on: the
-                // request would carry no budget at all and every value would "succeed", which is
-                // exactly how the fabricated ceilings got written.
-                if profile.maxThinkingBudgetTokens == nil,
-                   profile[.thinkingSupportsTokenBudget]?.value != false,
-                   reasonsDemonstrably || vendorClaimsBudget,
-                   let mechanism, mechanism.carriesTokenBudget {
-                    let calls = ProbeCallCounter()
-                    profile.maxThinkingBudgetTokens = await ModelProber.probeThinkingBudgetRange(
-                        accounting: catalogEntry?.thinkingBudgetAccounting,
-                        maxOutputTokens: profile.maxOutputTokens.value ?? catalogEntry?.maxOutputTokens,
-                        maxContextTokens: profile.maxContextTokens.value ?? catalogEntry?.maxInputTokens,
-                        makeProviderWithBudget: { @MainActor budget, pairedMax in
-                            // FORCED, like every other probe here. Through a ModelConfiguration the
-                            // value is gated (no budget on the wire at all for thinking-block
-                            // models) and floored (1023 became 1024), so the probe measured its own
-                            // clamp rather than the model.
-                            await forcing(mechanism.budgetForcingOverrides(
-                                budget: budget, pairedMaxTokens: pairedMax) ?? [:])
-                        },
-                        calls: calls)
-                    profile.callCount += calls.value
-
-                    // The floor, searched for separately. It needs a known-accepted budget to bound
-                    // the search from above, which is exactly what the range probe just established
-                    // — so it runs here rather than standing alone, and is skipped when that probe
-                    // found no usable range (there is nothing below zero to look for).
-                    if profile.minThinkingBudgetTokens == nil,
-                       let accepted = profile.maxThinkingBudgetTokens?.value, accepted > 0 {
-                        let minCalls = ProbeCallCounter()
-                        profile.minThinkingBudgetTokens = await ModelProber.probeThinkingBudgetMinimum(
-                            knownAcceptedBudget: accepted,
-                            makeProviderWithBudget: { @MainActor budget, pairedMax in
-                                await forcing(mechanism.budgetForcingOverrides(
-                                    budget: budget, pairedMaxTokens: pairedMax) ?? [:])
-                            },
-                            calls: minCalls)
-                        profile.callCount += minCalls.value
-                    }
-                }
-            }
-
-            // Trailing {"role":"system"} steering-turn support — shared with the GUI probe via
-            // TrailingSystemTurnProbe so the flag is measured identically. It runs AFTER probe()
-            // returns (gated on an established chat), excludes Gemini, forces the flag on for the one
-            // call, and probes the real production shape (base system + trailing turn). The helper
-            // carries the full rationale.
-            profile = await TrailingSystemTurnProbe.probing(profile, provider: provider,
-                                                            modelID: target.modelID, kit: kit)
-
-            // Non-chat models are dropped AFTER probing (chat is a probed result, not known up
-            // front). We'll likely discard these downstream anyway; the flag makes that explicit.
-            if discardNonChat, profile.chat.value == false {
-                print("  DISCARD: not a chat model\n"); continue
-            }
-
-            // Persist through the SAME per-record store the GUI reads — never a private file.
-            // The store rejects runs with no established probed findings (an aborted run must
-            // not clobber a real record), so "skipped" here is a verdict, not an error.
-            if reuseStore && profile.callCount == 0 {
-                // Every finding came from the store; nothing was measured this run. Re-storing
-                // would refresh recordedAt on data we didn't re-verify, so leave the record as is.
-                print("  probe record unchanged (fully reused; no new measurements)")
-            } else {
-                do {
-                    let outcome = try kit.storeProbeResult(profile: profile, provider: provider, modelID: target.modelID)
-                    switch outcome {
-                    case .stored:  print("  probe record stored")
-                    case .pruned:  print("  stale probe record PRUNED (payload says non-chat; no capability measurement held)")
-                    case .skipped: print("  probe record skipped (no established probed findings)")
-                    }
-                } catch {
-                    print("  probe record store FAILED: \(error.localizedDescription)")
-                }
-            }
-
-            profiles.append(profile)
-            report(profile)
         }
 
+        for (providerID, skippedCount) in await scheduler.billingSkipSummary() {
+            print("billing breaker: \(providerID) — \(skippedCount) queued model(s) were skipped")
+        }
+
+        let profiles = results.profilesInCatalogOrder()
         writeProfiles(profiles)
         exportProbeRecords(kit: kit)
         await recomposeCatalog(kit: kit, probedProviderIDs: Set(targets.map(\.providerID)))
         printSummary(profiles, kit: kit)
         exit(profiles.contains { $0.chat.status == .inconclusive } ? 2 : 0)
+    }
+
+    /// The sweep flags that shape every target identically, bundled so the worker signatures
+    /// stay readable.
+    struct SweepOptions: Sendable {
+        let noSeed: Bool
+        let discardNonChat: Bool
+        let discardDeprecated: Bool
+        let reuseStore: Bool
+        let reuseMaxAgeDays: Double
+        let reuseMaxAge: TimeInterval
+        let fetchPolicy: LaunchFetchPolicy
+    }
+
+    /// Everything one target's battery needs, snapshotted at admission — the ADMISSION READ of
+    /// the storage contract (see CapabilityEvalSweep.swift). Workers touch the kit only through
+    /// the two `@MainActor` closures below, both stateless factories.
+    struct ProbeTargetContext: Sendable {
+        let admission: ProbeSweepScheduler.Admission
+        let totalTargets: Int
+        let provider: ModelProvider
+        let llm: any LLMProvider
+        let seed: ModelProfile
+        let catalogEntry: ModelInfo?
+        let modelCapabilities: ModelCapabilities
+        let preferLowImageDetail: Bool
+        let options: SweepOptions
+        let transcript: SweepTranscript
+        /// Builds a provider with forced raw-JSON overrides — the probe-only escape hatch past
+        /// production request gates. `configName` preserves today's per-site config naming.
+        let makeForcedProvider: @MainActor @Sendable (_ configName: String, _ overrides: [String: AnyCodable]) async -> any LLMProvider
+        /// The trailing-system-turn probe reads kit state (behavior flags) and uses its factory;
+        /// wrapped here so the worker never holds the kit itself.
+        let probeTrailingSystemTurn: @MainActor @Sendable (ModelProfile) async -> ModelProfile
+    }
+
+    /// What a completed battery hands to the completion write.
+    struct ProbeTargetOutcome: Sendable {
+        var profile: ModelProfile
+        /// Billing evidence found in the step-1 findings — the battery was short-circuited.
+        var billingEvidence: String? = nil
+        var discardedNonChat = false
+    }
+
+    /// Completed profiles keyed by catalog index, so the end-of-run summary and profiles.json
+    /// read in catalog order whatever order the workers finish in.
+    final class SweepResults {
+        private var indexed: [(index: Int, profile: ModelProfile)] = []
+        func append(index: Int, profile: ModelProfile) { indexed.append((index, profile)) }
+        func profilesInCatalogOrder() -> [ModelProfile] {
+            indexed.sorted { $0.index < $1.index }.map(\.profile)
+        }
+    }
+
+    /// One sweep worker: pulls admissions until the scheduler drains. The admission read and
+    /// the completion write run on the main actor; the battery in between is network-bound
+    /// awaiting, so the workers interleave at suspension points without contending on state.
+    /// (No `@concurrent`: the battery's compute between awaits is string grading — moving it
+    /// off main would buy nothing and reopen the isolation surface the contract closes.)
+    private static func sweepWorker(kit: LLMKitManager, scheduler: ProbeSweepScheduler,
+                                    payloadCache: DecodedPayloadCache, results: SweepResults,
+                                    options: SweepOptions, totalTargets: Int) async {
+        while let admission = await scheduler.next() {
+            let providerID = admission.target.providerID
+            if let context = await admitTarget(admission, kit: kit, payloadCache: payloadCache,
+                                               options: options, totalTargets: totalTargets) {
+                let outcome = await probeTarget(context)
+                await completeTarget(outcome, context: context, kit: kit,
+                                     scheduler: scheduler, results: results)
+            }
+            await scheduler.finish(providerID: providerID)
+        }
+    }
+
+    /// The ADMISSION READ: resolves and snapshots everything the battery needs, on the main
+    /// actor. Returns nil — after printing the block — when the target is skipped without
+    /// spending a call (unconfigured provider, missing key, deprecated).
+    private static func admitTarget(_ admission: ProbeSweepScheduler.Admission, kit: LLMKitManager,
+                                    payloadCache: DecodedPayloadCache, options: SweepOptions,
+                                    totalTargets: Int) async -> ProbeTargetContext? {
+        let target = admission.target
+        let transcript = SweepTranscript()
+        transcript.emit(String(repeating: "─", count: 72))
+        transcript.emit("[\(admission.index + 1)/\(totalTargets)] \(target.providerID) / \(target.modelID)")
+        transcript.emit("  intent: \(target.note)")
+
+        func skipTarget(_ line: String) -> ProbeTargetContext? {
+            transcript.emit(line)
+            print(transcript.drain().joined(separator: "\n") + "\n")
+            return nil
+        }
+
+        guard let provider = kit.providers.first(where: { $0.id == target.providerID }) else {
+            return skipTarget("  SKIP: provider not configured")
+        }
+        let key = kit.apiKey(for: target.providerID) ?? ""
+        // A missing key only blocks a provider that needs one. Local servers (mlx, LM Studio,
+        // Ollama on localhost) are keyless — probe them anyway; if the server isn't running the
+        // probe reports a connection failure, which is the honest answer rather than a guess.
+        if providerNeedsKey(provider) && key.isEmpty {
+            return skipTarget("  SKIP: no API key for \(provider.name)")
+        }
+        reportCatalogClaims(kit: kit, target: target, into: transcript.emit)
+
+        // Throwaway config: unstreamed, small output cap, no temperature pinned, and — the
+        // point — never clamped against the catalog. The provider it builds exposes no
+        // capability data, so nothing the catalog claims can leak into the measurement.
+        let config = ModelConfiguration(
+            name: "probe:\(target.modelID)", providerID: target.providerID, modelID: target.modelID,
+            temperature: nil, maxOutputTokens: 512, streaming: false
+        )
+        // makeProbeProvider, not makeProvider: necessity flags stay (a malformed request
+        // must not fabricate a capability negative) but the no-temperature restriction is
+        // stripped so the temperature probe measures the raw endpoint instead of trivially
+        // passing under the very flag it exists to derive.
+        let llm = kit.makeProbeProvider(configuration: config, provider: provider)
+
+        // Seed from the PURE vendor payload — fetched directly, not from kit.models, whose
+        // entries have LiteLLM's claims enriched in and would let third-party data wear a
+        // `decoded` badge. --no-seed skips it to re-validate probe-vs-payload agreement;
+        // --no-fetch-models skips it too (a bare seed means "probe everything").
+        // Tri-state facts, NOT materialized ModelInfo — materialization flattens nil to false,
+        // and seeding from it fabricates decoded(false) for fields the vendor never stated.
+        var seed = ModelProfile(providerID: target.providerID, modelID: target.modelID)
+        if !options.noSeed && options.fetchPolicy != .none {
+            do {
+                let decodedModels = try await payloadCache.models(for: provider,
+                                                                  apiKey: key.isEmpty ? nil : key)
+                if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {
+                    seed = ModelProber.seedProfile(fromDecodedFacts: decoded, providerID: target.providerID)
+                }
+            } catch {
+                transcript.emit("  seed fetch failed (probing everything): \(error.localizedDescription)")
+            }
+        }
+
+        // Store-seeded re-sweep: overlay prior probed findings onto the decoded seed, gated
+        // on the SAME prober version (a bump invalidates the whole record) and a max age
+        // (served models drift under fixed IDs). Carried findings keep their own evidence and
+        // timestamps; only gaps re-probe.
+        var reusedFindingSummary = ""
+        if options.reuseStore {
+            let (localRecord, _) = kit.probeRecords(provider: provider, modelID: target.modelID)
+            if let record = localRecord {
+                let age = Date().timeIntervalSince(record.recordedAt)
+                // ONLY the current version is reusable. There was a partial-migration branch for
+                // v3 — written when 4 was current, on the basis that v3→v4 changed only the
+                // trailing-system methodology — and it survived two version bumps that
+                // explicitly invalidated everything else. v5 declared every v4 record suspect
+                // and v6 declared every v5 budget finding fabricated, so a v3 record is at
+                // least as stale as the versions those bumps rejected, yet it was the one
+                // vintage still getting a pass.
+                //
+                // It also laundered: `storeProbeResult` stamps the CURRENT prober version, so
+                // carried v3 findings were re-persisted as v6, and the evidence combiner
+                // prefers a higher prober version over a newer timestamp — letting the
+                // laundered data outrank a correct measurement.
+                if record.proberVersion != ModelProber.proberVersion {
+                    reusedFindingSummary = "  reuse: SKIP — record is prober v\(record.proberVersion), current is v\(ModelProber.proberVersion); full re-probe"
+                } else if age > options.reuseMaxAge {
+                    reusedFindingSummary = "  reuse: SKIP — record is \(Int(age / 86_400))d old (> \(Int(options.reuseMaxAgeDays))d); full re-probe"
+                } else {
+                    seed.seedProbedFindings(from: record.profile)
+                    reusedFindingSummary = "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
+                }
+            } else {
+                reusedFindingSummary = "  reuse: no prior record — full probe"
+            }
+            transcript.emit(reusedFindingSummary)
+        }
+
+        // Deprecated models are skipped BEFORE probing so no calls are spent on a model the
+        // provider is retiring. The seed carries the vendor's own deprecation date.
+        if options.discardDeprecated, let deprecatedOn = seed.deprecatedOn {
+            return skipTarget("  SKIP: deprecated \(Self.dateOnly.string(from: deprecatedOn))")
+        }
+
+        return ProbeTargetContext(
+            admission: admission,
+            totalTargets: totalTargets,
+            provider: provider,
+            llm: llm,
+            seed: seed,
+            // Snapshotted here, not read mid-battery: nothing recomposes the catalog during a
+            // sweep, and the admission read is the storage contract's one read point.
+            catalogEntry: kit.modelInfo(providerID: target.providerID, modelID: target.modelID),
+            // The record the provider itself gates on, so the tool-calling probe can tell a
+            // forced call from a free one instead of assuming tool_choice went out.
+            modelCapabilities: kit.modelInfo(providerID: target.providerID,
+                                             modelID: target.modelID)?.capabilities ?? ModelCapabilities(),
+            // detail:'low' bills OpenAI image input at a flat ~85 tokens instead of tile math —
+            // scoped to api.openai.com, the one host documented to accept the field (the vision
+            // probe still retries hint-free before grading any failure, so it can't misfire).
+            preferLowImageDetail: provider.endpoint.host?.contains("api.openai.com") == true,
+            options: options,
+            transcript: transcript,
+            makeForcedProvider: { configName, overrides in
+                kit.makeProvider(
+                    configuration: ModelConfiguration(
+                        name: configName, providerID: target.providerID, modelID: target.modelID,
+                        temperature: nil, maxOutputTokens: 512, streaming: false,
+                        extraJSONOverrides: overrides),
+                    provider: provider)
+            },
+            probeTrailingSystemTurn: { profile in
+                await TrailingSystemTurnProbe.probing(profile, provider: provider,
+                                                      modelID: target.modelID, kit: kit)
+            }
+        )
+    }
+
+    /// One target's probe battery — the mid-flight stretch of the storage contract: no kit
+    /// access except through the context's factory closures, no printing except into the
+    /// context's transcript.
+    private static func probeTarget(_ context: ProbeTargetContext) async -> ProbeTargetOutcome {
+        let target = context.admission.target
+        let provider = context.provider
+        let llm = context.llm
+        let options = context.options
+        let catalogEntry = context.catalogEntry
+
+        var profile = await ModelProber.probe(
+            llm: llm, seed: context.seed,
+            effortLevelsToProbe: target.effortLevels,
+            // Anthropic emits output_config.effort whatever the model claims; a flag-gated
+            // endpoint would silently drop it and turn "no error" into a false positive.
+            supportsUnconditionalGeneralEffortEmission: provider.apiType == .anthropic,
+            preferLowImageDetail: context.preferLowImageDetail,
+            modelCapabilities: context.modelCapabilities
+        )
+
+        // An empty wallet is ACCOUNT-wide, not a fact about this model: every remaining call
+        // fails identically. Left running, the sweep spends a call per model and prints one
+        // indistinguishable "?" per row, burying the single fact that explains all of them —
+        // and the evidence column truncates the message before the useful half. Observed live
+        // on an 11-model Anthropic sweep, where the operator could not tell from the summary
+        // that the account simply needed topping up. Stop, say so in full, and leave the
+        // stored records alone (nothing was established, so nothing is written).
+        // Scans every step-1 finding, not just `chat`. Gemini and Mistral DECODE `capabilities.chat`
+        // from their /models payload, so the seed makes it `.decoded(true, "provider /models
+        // payload")` and `probe()` skips the chat call entirely — the billing failure then lands
+        // in `acceptsTemperature` and the breaker never fired, which is exactly the sweep-wide
+        // burn its comment above says must not happen. Gemini's quota body even contains one of
+        // the phrases this matches.
+        let firstStepEvidence = [profile.chat, profile.acceptsTemperature, profile.isAvailable]
+            .compactMap(\.evidence)
+        if let billingEvidence = firstStepEvidence.first(where: CapabilityProbe.textIndicatesBillingProblem) {
+            // Short-circuit the battery; the completion write trips the PROVIDER-scoped
+            // breaker and renders the banner (the wording needs the skip count, which only
+            // the scheduler knows).
+            return ProbeTargetOutcome(profile: profile, billingEvidence: billingEvidence)
+        }
+
+        // Effort on OpenAI-compatible endpoints can't go through LLMCallOverrides — the
+        // provider only emits reasoning_effort when the supportsReasoningEffort flag is set,
+        // so an unflagged model silently drops it and a "no error" proves nothing. Forcing
+        // the field via extraJSONOverrides bypasses the gate, making effort PROVABLE instead
+        // of hand-authored: one provider per level, graded on the endpoint's own answer.
+        //
+        // Gated on `chat` like the battery below it. It used to sit outside that gate, which was
+        // inert while effort probing was opt-in and an empty list — but once the full ladder
+        // became the default it meant up to 7 paid calls each on every model `probe()` had
+        // already abandoned: unavailable, access-denied, inconclusive-chat, or established
+        // non-chat (embeddings, tts, whisper, babbage-002) across a ~1,700-model catalog.
+        if profile.chat.value == true, provider.apiType != .anthropic, !target.effortLevels.isEmpty {
+            for level in target.effortLevels where profile.reasoningEffortLevels[level] == nil {
+                let forcedLLM = await context.makeForcedProvider(
+                    "probe:\(target.modelID):effort",
+                    ["reasoning_effort": .string(level)])
+                profile.reasoningEffortLevels[level] = await ModelProber.probeParameterAcceptance(
+                    llm: forcedLLM,
+                    parameterDescription: "reasoning_effort=\(level)",
+                    rejectionKeywords: ["reasoning_effort", "reasoning", "effort"]
+                )
+                profile.callCount += 1
+            }
+        }
+
+        // Capability probes that need the raw field forced past a production gate. Each is
+        // gated on `chat` (a model that can't answer can't answer these either) and skipped
+        // when the store already settled it, so a re-run costs nothing for known facts.
+        if profile.chat.value == true {
+            // (The catalog entry — from the admission snapshot — supplies the limits that
+            // BOUND the budget search; the probed values win where they exist, since they
+            // were measured on this very endpoint.)
+            /// One throwaway provider per forced payload — the same pattern the effort probe
+            /// uses, and the reason none of this needs probe-only code in the request builders.
+            ///
+            /// `@MainActor` because the factory it wraps is: the hop stays at this boundary
+            /// instead of pushing the caller's isolation into the library's signature.
+            let forcing: @MainActor @Sendable ([String: AnyCodable]) async -> any LLMProvider = { overrides in
+                await context.makeForcedProvider("probe:\(target.modelID)", overrides)
+            }
+
+            // Structured output — graded on the RESPONSE, not on acceptance: an endpoint that
+            // ignores response_format returns 200 and would otherwise record as supporting it.
+            let structuredModes: [LLMResponseFormat] = [
+                .jsonObject,
+                // The shared strict-valid schema — a bare {"type":"object"} fails OpenAI's
+                // validator before the model sees it, and 47 models were recorded as lacking
+                // json_schema off the back of that refusal.
+                .jsonSchema(name: "probe", schema: CapabilityProbe.probeResponseSchema)
+            ]
+            for mode in structuredModes where profile[mode.requiredCapability] == nil {
+                // nil = this provider family has no `response_format`; no call is spent.
+                guard let finding = await ModelProber.probeStructuredOutput(
+                    mode, apiType: provider.apiType, makeProviderForcing: forcing) else { continue }
+                profile[mode.requiredCapability] = finding
+                profile.callCount += 1
+            }
+
+            // tool_choice options, each independently — "accepts the parameter" does not mean
+            // "accepts every value of it".
+            // Reasoning on/off — separate probes because neither direction implies the other.
+            // Both are RUN even when one is already answered: they are read together below, and
+            // a conclusion drawn from one observation and one blank would be drawn from a
+            // baseline that was never measured. Only an already-answered PAIR skips.
+            if profile[.reasoningCanBeEnabled] == nil || profile[.reasoningCanBeDisabled] == nil {
+                // Discovers the mechanism rather than assuming one. OpenAI, Moonshot and
+                // DeepSeek are all `.openAICompatible` and do not share a way to switch
+                // reasoning, so asking every endpoint for a `thinking` block earned OpenAI's
+                // "Unknown parameter: 'thinking'" and recorded 60+ reasoning models as unable
+                // to reason — literally what the endpoint said, and completely wrong.
+                let mechanismCalls = ProbeCallCounter()
+                let found = await ModelProber.probeReasoningMechanism(
+                    apiType: provider.apiType, makeProviderForcing: forcing, calls: mechanismCalls)
+                let (on, off) = (found.on, found.off)
+                profile.callCount += mechanismCalls.value
+                // The mechanism itself is a fact worth keeping: nothing else establishes
+                // `reasoningControl`, which is why the thinking.keep probe could never fire.
+                // Only when DEMONSTRATED. A model that reasons unconditionally emits reasoning
+                // whatever it is sent, so every candidate "demonstrates" acceptance and the
+                // winner would be decided by the order of the candidate list — pinning a
+                // request-builder branch on list order and calling it established.
+                if let control = found.control, found.mechanismWasEstablished {
+                    profile.reasoningControl = .established(
+                        control, found.mechanismWasDemonstrated
+                            ? "the endpoint reasoned when asked via \(control.editorTitle)"
+                            : "the endpoint refused the other mechanism(s) by name and accepted "
+                            + "\(control.editorTitle) — it discriminates between the shapes")
+                }
+                // Acceptance says the endpoint took the switch; the reply says whether it DID
+                // anything. `thinking` is an unknown key to most OpenAI-compatible endpoints and
+                // unknown keys are ignored rather than refused, so a model that carried on
+                // thinking was being recorded as one whose reasoning can be turned off.
+                let conclusions = ModelProber.concludeReasoning(on: on, off: off,
+                                                                mechanism: found.control)
+                // Never downgrade: the pair RUNS when either side is missing, so a re-run whose
+                // calls all failed (a 429 storm) would otherwise overwrite a stored established
+                // measurement with an inconclusive and re-persist the loss.
+                func keepBetter(_ capability: ModelCapability, _ candidate: ProbeFinding<Bool>) {
+                    guard profile[capability]?.status != .established
+                            || candidate.status == .established else { return }
+                    profile[capability] = candidate
+                }
+                keepBetter(.reasoningCanBeEnabled, on.finding)
+                keepBetter(.reasoningCanBeDisabled, conclusions.canBeDisabled)
+                // Observed reasoning is the only thing that establishes the model reasons at
+                // all; a decoded vendor claim already present is left alone.
+                if profile[.reasoning] == nil, conclusions.reasons.status == .established {
+                    profile[.reasoning] = conclusions.reasons
+                }
+            }
+
+            // The capability comes from the choice itself — a hand-paired list here was an
+            // ARRAY literal, so a new LLMToolChoice case would break every switch loudly and
+            // leave this silently one probe short.
+            let toolChoices: [LLMToolChoice] = [
+                .required, .textOnly, .specific(name: CapabilityProbe.probeToolName)
+            ]
+            // Thinking is turned off first where the model allows it: Moonshot and DeepSeek
+            // both reject `required` and named-function choices as "incompatible with thinking
+            // enabled", so probing with it on measures that incompatibility rather than the
+            // option. Requires the reasoning probes above to have run.
+            //
+            // `!= false`, NOT `== true`, and the asymmetry is load-bearing. The two outcomes are
+            // not equally bad: sending the disable when it does not work costs nothing (the
+            // field is ignored, which is precisely how it earned a `false`), while NOT sending
+            // it when it would have worked produces a confounded tool-choice finding — the same
+            // confound that cost nine findings a re-probe on 2026-08-03. So it attempts the
+            // disable unless the switch is KNOWN useless. This became load-bearing when the OFF
+            // verdict stopped being acceptance-graded: `inconclusive` is now a real outcome (a
+            // model whose thinking only partly reduced), and under `== true` those models would
+            // silently have been probed with thinking left on.
+            //
+            // The payload is the DISCOVERED mechanism's own, never a shape assumed for every
+            // endpoint. Passing a bare Bool made the probe force `thinking: {type: disabled}`
+            // at OpenAI, which has no such field: it answered "Unrecognized request argument
+            // supplied: thinking", and since that names neither tool_choice nor any of its
+            // values, all three findings fell through to inconclusive — 45 records locally.
+            let discoveredMechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
+            let disablePayload = profile[.reasoningCanBeDisabled]?.value == false
+                ? nil
+                : discoveredMechanism.flatMap { $0.reasoningDisableOverrides }
+            for choice in toolChoices where profile[choice.requiredCapability] == nil {
+                // The probe derives this provider's own shape; nil = no such field here.
+                guard let finding = await ModelProber.probeToolChoice(
+                    choice, apiType: provider.apiType,
+                    disableReasoningWith: disablePayload,
+                    makeProviderForcing: forcing) else { continue }
+                profile[choice.requiredCapability] = finding
+                profile.callCount += 1
+            }
+            // nil unless the model's mechanism actually has a `keep` key — acceptance-grading
+            // it everywhere recorded `true` on any endpoint that ignores unknown body keys.
+            if profile[.thinkingSupportsKeepAll] == nil,
+               let finding = await ModelProber.probeThinkingKeep(
+                   // The DISCOVERED mechanism first — the same resolution the budget gate uses.
+                   // Passing only the catalog's (which nothing decodes) plus the old
+                   // `reasoningCanBeEnabled` stand-in went stale the day discovery landed:
+                   // "can be enabled" now means the model accepted ITS OWN mechanism, which is
+                   // `reasoning_effort` at OpenAI and adaptive at the newest Claude — so this
+                   // would have fired a `thinking` block at endpoints that have none.
+                   reasoningControl: profile.reasoningControl?.value ?? catalogEntry?.reasoningControl,
+                   // No stand-in: `keep` is a key OF the thinking block, so with no
+                   // block-mechanism established there is nothing coherent to probe. The
+                   // models this matters for (DeepSeek, Kimi) now demonstrate `.thinkingBlock`
+                   // and arrive through the parameter above.
+                   acceptedThinkingBlock: false,
+                   makeProviderForcing: forcing) {
+                profile[.thinkingSupportsKeepAll] = finding
+                profile.callCount += 1
+            }
+            // nil where the family has no `strict` concept — no call is spent there.
+            if profile[.toolDefinitionsSupportStrict] == nil,
+               let strict = await ModelProber.probeStrictToolDefinitions(
+                   apiType: provider.apiType, makeProviderForcing: forcing) {
+                profile[.toolDefinitionsSupportStrict] = strict
+                profile.callCount += 1
+            }
+            // Behaviour-graded, so each takes the ORDINARY provider rather than a forcing one:
+            // what is being measured is how the endpoint treats a normal request shape, and a
+            // forced body would be measuring something the production path never sends.
+            if profile[.systemMessages] == nil {
+                profile[.systemMessages] = await ModelProber.probeSystemMessages(llm: llm)
+                profile.callCount += 1
+            }
+            if profile[.assistantPrefill] == nil {
+                profile[.assistantPrefill] = await ModelProber.probeAssistantPrefill(llm: llm)
+                profile.callCount += 1
+            }
+            // Needs tool calling to work at all, or it measures that instead. An established
+            // non-tool-caller is skipped; an unmeasured one still gets asked.
+            if profile[.parallelToolCalls] == nil, profile.toolCalling.value != false {
+                profile[.parallelToolCalls] = await ModelProber.probeParallelToolCalls(llm: llm)
+                profile.callCount += 1
+            }
+
+            // Budget range LAST: it is the only multi-call probe here, and running it after the
+            // single-call facts means an interrupted sweep still banks those.
+            //
+            // Requires POSITIVE evidence that there is a reasoning budget to measure. The old
+            // gate was `thinkingSupportsTokenBudget != false`, and nothing ever establishes that
+            // capability — so it passed for every model alive. An endpoint with no budget
+            // parameter ignores one silently and accepts every value, so the searches converge
+            // on nonsense: on 2026-08-04 that wrote a 1-token floor and a fabricated ceiling for
+            // 72 models including gpt-4-turbo and babbage-002, which have no thinking at all.
+            //
+            // Observed reasoning is the evidence, since a model that does not reason cannot have
+            // a reasoning-token budget. A vendor claim counts too, for the models the toggle
+            // probe cannot reach (OpenAI's reasoning models take `reasoning_effort`, not a
+            // `thinking` block, so nothing observes their reasoning here).
+            // "It reasons" is NOT sufficient on its own: OpenAI's reasoning models reason
+            // demonstrably and have no token budget at all — depth there is a named effort
+            // level. Gating on reasoning alone would rebuild the same 72-model bug one layer up
+            // now that the mechanism probe makes those models demonstrate reasoning.
+            // The mechanism gate is now MANDATORY rather than one operand of an `||`, and it
+            // fails CLOSED (`?? false`). As an operand a single hand-authored
+            // `thinkingSupportsTokenBudget` override on a `.reasoningEffortOnly` model bypassed
+            // it entirely and re-opened the bug it names; and `?? true` let a `--reuse-store`
+            // record with no stored mechanism through the same hole.
+            let mechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
+            let reasonsDemonstrably = profile[.reasoning]?.value == true
+            let vendorClaimsBudget = catalogEntry?.capabilities.state(of: .thinkingSupportsTokenBudget) == true
+            // Nothing to force the budget into means nothing worth spending calls on: the
+            // request would carry no budget at all and every value would "succeed", which is
+            // exactly how the fabricated ceilings got written.
+            if profile.maxThinkingBudgetTokens == nil,
+               profile[.thinkingSupportsTokenBudget]?.value != false,
+               reasonsDemonstrably || vendorClaimsBudget,
+               let mechanism, mechanism.carriesTokenBudget {
+                let calls = ProbeCallCounter()
+                profile.maxThinkingBudgetTokens = await ModelProber.probeThinkingBudgetRange(
+                    accounting: catalogEntry?.thinkingBudgetAccounting,
+                    maxOutputTokens: profile.maxOutputTokens.value ?? catalogEntry?.maxOutputTokens,
+                    maxContextTokens: profile.maxContextTokens.value ?? catalogEntry?.maxInputTokens,
+                    makeProviderWithBudget: { @MainActor budget, pairedMax in
+                        // FORCED, like every other probe here. Through a ModelConfiguration the
+                        // value is gated (no budget on the wire at all for thinking-block
+                        // models) and floored (1023 became 1024), so the probe measured its own
+                        // clamp rather than the model.
+                        await forcing(mechanism.budgetForcingOverrides(
+                            budget: budget, pairedMaxTokens: pairedMax) ?? [:])
+                    },
+                    calls: calls)
+                profile.callCount += calls.value
+
+                // The floor, searched for separately. It needs a known-accepted budget to bound
+                // the search from above, which is exactly what the range probe just established
+                // — so it runs here rather than standing alone, and is skipped when that probe
+                // found no usable range (there is nothing below zero to look for).
+                if profile.minThinkingBudgetTokens == nil,
+                   let accepted = profile.maxThinkingBudgetTokens?.value, accepted > 0 {
+                    let minCalls = ProbeCallCounter()
+                    profile.minThinkingBudgetTokens = await ModelProber.probeThinkingBudgetMinimum(
+                        knownAcceptedBudget: accepted,
+                        makeProviderWithBudget: { @MainActor budget, pairedMax in
+                            await forcing(mechanism.budgetForcingOverrides(
+                                budget: budget, pairedMaxTokens: pairedMax) ?? [:])
+                        },
+                        calls: minCalls)
+                    profile.callCount += minCalls.value
+                }
+            }
+        }
+
+        // Trailing {"role":"system"} steering-turn support — shared with the GUI probe via
+        // TrailingSystemTurnProbe so the flag is measured identically. It runs AFTER probe()
+        // returns (gated on an established chat), excludes Gemini, forces the flag on for the one
+        // call, and probes the real production shape (base system + trailing turn). The helper
+        // carries the full rationale.
+        profile = await context.probeTrailingSystemTurn(profile)
+
+        // Non-chat models are dropped AFTER probing (chat is a probed result, not known up
+        // front). We'll likely discard these downstream anyway; the flag makes that explicit.
+        if options.discardNonChat, profile.chat.value == false {
+            context.transcript.emit("  DISCARD: not a chat model")
+            return ProbeTargetOutcome(profile: profile, discardedNonChat: true)
+        }
+
+        return ProbeTargetOutcome(profile: profile)
+    }
+
+    /// The COMPLETION WRITE: the storage contract's one store touch per target, plus the
+    /// atomic print of the buffered narrative. Billing evidence trips the provider-scoped
+    /// breaker here — a per-ACCOUNT fact, so only the offending provider stops; the guarantee
+    /// softens from the sequential sweep's "zero further calls" to "at most that provider's
+    /// in-flight probes", which fail on their own within seconds and record nothing.
+    private static func completeTarget(_ outcome: ProbeTargetOutcome, context: ProbeTargetContext,
+                                       kit: LLMKitManager, scheduler: ProbeSweepScheduler,
+                                       results: SweepResults) async {
+        let target = context.admission.target
+        let profile = outcome.profile
+        let transcript = context.transcript
+
+        if let billingEvidence = outcome.billingEvidence {
+            let (firstTrip, skippedCount) = await scheduler.tripBilling(providerID: target.providerID)
+            if firstTrip {
+                transcript.emit("")
+                transcript.emit(String(repeating: "!", count: 100))
+                transcript.emit("  BILLING PROBLEM — \(target.providerID) refused the call for payment reasons.")
+                transcript.emit("  This says NOTHING about any model; every call fails the same way until it is resolved.")
+                transcript.emit("")
+                transcript.emit("  \(billingEvidence)")
+                transcript.emit("")
+                if skippedCount > 0 {
+                    transcript.emit("  Provider disabled for the rest of the sweep: \(skippedCount) queued model(s) skipped rather than re-learning this.")
+                }
+                transcript.emit("  Other providers continue. In-flight probes against this provider fail on their own and record nothing.")
+                transcript.emit("  Probe records are untouched — nothing was established, so nothing was written.")
+                transcript.emit(String(repeating: "!", count: 100))
+            } else {
+                transcript.emit("  billing failure — \(target.providerID) is already disabled for this sweep; nothing recorded.")
+            }
+            results.append(index: context.admission.index, profile: profile)
+        } else if outcome.discardedNonChat {
+            // Nothing stored and nothing summarized — the sequential sweep's `continue`.
+        } else {
+            // Persist through the SAME per-record store the GUI reads — never a private file.
+            // The store rejects runs with no established probed findings (an aborted run must
+            // not clobber a real record), so "skipped" here is a verdict, not an error.
+            if context.options.reuseStore && profile.callCount == 0 {
+                // Every finding came from the store; nothing was measured this run. Re-storing
+                // would refresh recordedAt on data we didn't re-verify, so leave the record as is.
+                transcript.emit("  probe record unchanged (fully reused; no new measurements)")
+            } else {
+                do {
+                    let storeOutcome = try kit.storeProbeResult(profile: profile, provider: context.provider,
+                                                                modelID: target.modelID)
+                    switch storeOutcome {
+                    case .stored:  transcript.emit("  probe record stored")
+                    case .pruned:  transcript.emit("  stale probe record PRUNED (payload says non-chat; no capability measurement held)")
+                    case .skipped: transcript.emit("  probe record skipped (no established probed findings)")
+                    }
+                } catch {
+                    transcript.emit("  probe record store FAILED: \(error.localizedDescription)")
+                }
+            }
+            results.append(index: context.admission.index, profile: profile)
+            report(profile, into: transcript.emit)
+        }
+
+        print(transcript.drain().joined(separator: "\n") + "\n")
     }
 
     /// Folds this run's probe evidence into the model catalog that PRODUCTION reads.
@@ -660,12 +823,12 @@ enum CapabilityEvalRunner {
     // MARK: - Reporting
 
     /// What the merged catalog claims — printed only for contrast. The probe never saw this.
-    private static func reportCatalogClaims(kit: LLMKitManager, target: Target) {
+    private static func reportCatalogClaims(kit: LLMKitManager, target: Target, into emit: (String) -> Void) {
         guard let info = kit.modelInfo(providerID: target.providerID, modelID: target.modelID) else {
-            print("  catalog: (model not in catalog)")
+            emit("  catalog: (model not in catalog)")
             return
         }
-        print("  catalog: maxOut=\(info.maxOutputTokens.map(String.init) ?? "?") mode=\(info.mode ?? "?")")
+        emit("  catalog: maxOut=\(info.maxOutputTokens.map(String.init) ?? "?") mode=\(info.mode ?? "?")")
         // EVERY capability the catalog states an opinion on, not a hand-picked four. Twelve of them
         // (batch, promptCaching, audioInput, videoInput, webSearch, parallelToolCalls, …) have no
         // probe and appear on no other surface, so a fixed list left them invisible everywhere —
@@ -679,20 +842,20 @@ enum CapabilityEvalRunner {
             }
         }
         if stated.contains(where: { $0.hasSuffix("*") }) {
-            print("  catalog: (* = vendor-declared only; no probe can confirm or refute it)")
+            emit("  catalog: (* = vendor-declared only; no probe can confirm or refute it)")
         }
         for chunk in stride(from: 0, to: stated.count, by: 6).map({ Array(stated[$0..<min($0 + 6, stated.count)]) }) {
-            print("  catalog: " + chunk.joined(separator: " "))
+            emit("  catalog: " + chunk.joined(separator: " "))
         }
         if info.generalEffort != nil || info.reasoningEffort != nil || !info.behaviorFlags.isAllDefault {
             let general = info.generalEffort.map(\.editorSummary) ?? "-"
             let reasoning = info.reasoningEffort.map(\.editorSummary) ?? "-"
-            print("  catalog: generalEffort=[\(general)] reasoningEffort=[\(reasoning)] "
-                  + "flags=[\(info.behaviorFlags.displayLabels.joined(separator: ","))]")
+            emit("  catalog: generalEffort=[\(general)] reasoningEffort=[\(reasoning)] "
+                 + "flags=[\(info.behaviorFlags.displayLabels.joined(separator: ","))]")
         }
     }
 
-    private static func report(_ p: ModelProfile) {
+    private static func report(_ p: ModelProfile, into emit: (String) -> Void) {
         func line(_ label: String, _ f: ProbeFinding<some Any>) {
             let v: String
             switch f.status {
@@ -701,10 +864,10 @@ enum CapabilityEvalRunner {
             case .notAttempted: v = "—"
             }
             let ev = f.evidence.map { "  (\($0.prefix(80)))" } ?? ""
-            print("    \(label.padding(toLength: 18, withPad: " ", startingAt: 0)) \(v)\(ev)")
+            emit("    \(label.padding(toLength: 18, withPad: " ", startingAt: 0)) \(v)\(ev)")
         }
         func plain(_ label: String, _ value: String) {
-            print("    \(label.padding(toLength: 18, withPad: " ", startingAt: 0)) \(value)")
+            emit("    \(label.padding(toLength: 18, withPad: " ", startingAt: 0)) \(value)")
         }
         line("isAvailable", p.isAvailable)
         line("isAccessDenied", p.isAccessDenied)
@@ -775,9 +938,9 @@ enum CapabilityEvalRunner {
             ("reasoning", p.reasoningEffortLevels, p.establishedReasoningEffortLevels)
         ] where !ladder.isEmpty {
             let rejected = ladder.filter { $0.value.value == false }.keys.sorted()
-            print("    effort \(label)   accepted=[\(accepted.joined(separator: ","))] rejected=[\(rejected.joined(separator: ","))]")
+            emit("    effort \(label)   accepted=[\(accepted.joined(separator: ","))] rejected=[\(rejected.joined(separator: ","))]")
         }
-        print("    — \(p.callCount) calls, \(String(format: "%.1fs", p.duration))")
+        emit("    — \(p.callCount) calls, \(String(format: "%.1fs", p.duration))")
     }
 
     /// yyyy-MM-dd, for deprecation dates — the time-of-day is noise in a capability table.
