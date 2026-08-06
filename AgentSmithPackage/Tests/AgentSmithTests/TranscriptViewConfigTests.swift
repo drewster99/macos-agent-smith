@@ -104,7 +104,8 @@ import Foundation
 
     @Test func configRoundTripsThroughJSON() throws {
         let config = TranscriptViewConfig(
-            visibleGroups: [.chat, .validation],
+            hiddenKinds: [.toolOutput, .memorySaved, .agentOnline],
+            showsChat: false,
             allowedSenders: [.user, .agent(.brown), .validator],
             allowedRecipients: [.user, .agent(.smith)],
             visibility: .publicOnly,
@@ -116,11 +117,48 @@ import Foundation
         #expect(back == config)
     }
 
+    /// Hiding one kind must hide exactly that kind: siblings in the same group still match, and
+    /// kindless messages follow `showsChat` — the per-kind axis the popover now edits directly.
+    @Test func singleHiddenKindFiltersJustThatKind() {
+        var config = TranscriptViewConfig.everything
+        config.setKind(.toolOutput, visible: false)
+        let filter = config.makeFilter()
+        let hidden = ChannelMessage(
+            sender: .agent(.brown), content: "output",
+            metadata: ["messageKind": .kind(.toolOutput)])
+        let sibling = ChannelMessage(
+            sender: .agent(.brown), content: "request",
+            metadata: ["messageKind": .kind(.toolRequest)])
+        let kindless = ChannelMessage(sender: .user, content: "hi")
+        #expect(!filter.matches(hidden))
+        #expect(filter.matches(sibling))
+        #expect(filter.matches(kindless))
+    }
+
+    /// The group checkbox is a convenience over the per-kind truth: group state derives from the
+    /// hidden set (all / mixed / none), and setting the group rewrites exactly its own kinds.
+    @Test func groupVisibilityDerivesFromHiddenKinds() {
+        var config = TranscriptViewConfig.everything
+        #expect(config.groupVisibility(of: .toolCalls) == .all)
+        config.setKind(.toolOutput, visible: false)
+        #expect(config.groupVisibility(of: .toolCalls) == .mixed)
+        config.setGroup(.toolCalls, visible: false)
+        #expect(config.groupVisibility(of: .toolCalls) == .none)
+        #expect(config.hiddenKinds == TranscriptKindGroup.toolCalls.kinds)
+        config.setGroup(.toolCalls, visible: true)
+        #expect(config == .everything)
+        // Chat has no kinds; its group state is the kindless switch.
+        config.setGroup(.chat, visible: false)
+        #expect(!config.showsChat)
+        #expect(config.groupVisibility(of: .chat) == .none)
+    }
+
     /// A config persisted BEFORE the recipient/task-scope/error axes existed must still decode — the new
-    /// fields fall back to their inits (nil recipients, task-scoped shown, errors shown). Group
-    /// visibility comes from the legacy `visibleGroups` key; `securityReviews` inherits Chat's state
-    /// because security-review rows were kindless when this config was written, so Chat is the toggle
-    /// that actually governed them — the migrated config shows exactly what the original did.
+    /// fields fall back to their inits (nil recipients, task-scoped shown, errors shown). Kind
+    /// visibility comes from the legacy `visibleGroups` key expanded to each hidden group's kinds;
+    /// `securityReviews` inherits Chat's state because security-review rows were kindless when this
+    /// config was written, so Chat is the toggle that actually governed them — the migrated config
+    /// shows exactly what the original did.
     @Test func legacyConfigWithoutNewAxesDecodes() throws {
         let legacyJSON = """
         {"visibleGroups":["chat","system"],"visibility":"all"}
@@ -130,7 +168,11 @@ import Foundation
         #expect(back.allowedRecipients == nil)
         #expect(back.hideTaskScoped == false)
         #expect(back.showErrors == true)
-        #expect(back.visibleGroups == [.chat, .system, .securityReviews])
+        #expect(back.showsChat)
+        let expectedHidden: Set<TranscriptKindGroup> = [.toolCalls, .taskLifecycle, .validation, .memory]
+        #expect(back.hiddenKinds == expectedHidden.reduce(into: Set()) { $0.formUnion($1.kinds) })
+        #expect(back.groupVisibility(of: .system) == .all)
+        #expect(back.groupVisibility(of: .securityReviews) == .all)
     }
 
     /// The Chat-off half of the legacy migration: kindless security rows were hidden, so the migrated
@@ -141,30 +183,48 @@ import Foundation
         """
         let back = try JSONDecoder().decode(
             TranscriptViewConfig.self, from: Data(legacyJSON.utf8))
-        #expect(back.visibleGroups == [.toolCalls, .system])
+        #expect(!back.showsChat)
+        #expect(back.groupVisibility(of: .securityReviews) == .none)
+        #expect(back.groupVisibility(of: .toolCalls) == .all)
+        #expect(back.groupVisibility(of: .system) == .all)
     }
 
-    /// Group visibility persists INVERTED (`hiddenGroups`), so a config saved today with every group
-    /// on stays "everything on" when a future build adds a group — the visible-set encoding silently
-    /// hid any group the saving build didn't know about. Pins the wire shape, the everything-on case,
-    /// and that an unknown hidden name from a newer build is ignored rather than failing the decode.
-    @Test func groupVisibilityPersistsAsHiddenSet() throws {
+    /// The group-persisted generation (`hiddenGroups`) migrates the same way: each hidden group
+    /// expands to its kinds, and a hidden Chat becomes `showsChat == false`.
+    @Test func hiddenGroupsGenerationMigratesToKinds() throws {
+        let json = """
+        {"hiddenGroups":["memory","chat"],"visibility":"all","hideTaskScoped":false,"showErrors":true}
+        """
+        let back = try JSONDecoder().decode(TranscriptViewConfig.self, from: Data(json.utf8))
+        #expect(back.hiddenKinds == TranscriptKindGroup.memory.kinds)
+        #expect(!back.showsChat)
+    }
+
+    /// Kind visibility persists INVERTED (`hiddenKinds`), so a config saved today with everything
+    /// on stays "everything on" when a future build adds a kind — the visible-set encoding silently
+    /// hid any kind the saving build didn't know about. Pins the wire shape (sorted raw values),
+    /// the everything-on case, and that an unknown hidden name from a newer build is ignored rather
+    /// than failing the decode.
+    @Test func kindVisibilityPersistsAsHiddenSet() throws {
         var config = TranscriptViewConfig.everything
-        config.visibleGroups.remove(.securityReviews)
+        config.setKind(.securityReview, visible: false)
+        config.setKind(.memorySaved, visible: false)
         let data = try JSONEncoder().encode(config)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(json["hiddenGroups"] as? [String] == ["securityReviews"])
+        #expect(json["hiddenKinds"] as? [String] == ["memory_saved", "security_review"])
+        #expect(json["hiddenGroups"] == nil)
         #expect(json["visibleGroups"] == nil)
 
         let allOn = try JSONDecoder().decode(
             TranscriptViewConfig.self, from: JSONEncoder().encode(TranscriptViewConfig.everything))
-        #expect(allOn.visibleGroups == Set(TranscriptKindGroup.allCases))
+        #expect(allOn.hiddenKinds.isEmpty)
+        #expect(allOn.showsChat)
 
         let futureJSON = """
-        {"hiddenGroups":["memory","someFutureGroup"],"visibility":"all","hideTaskScoped":false,"showErrors":true}
+        {"hiddenKinds":["memory_saved","some_future_kind"],"showsChat":true,"visibility":"all","hideTaskScoped":false,"showErrors":true}
         """
         let future = try JSONDecoder().decode(
             TranscriptViewConfig.self, from: Data(futureJSON.utf8))
-        #expect(future.visibleGroups == Set(TranscriptKindGroup.allCases).subtracting([.memory]))
+        #expect(future.hiddenKinds == [.memorySaved])
     }
 }

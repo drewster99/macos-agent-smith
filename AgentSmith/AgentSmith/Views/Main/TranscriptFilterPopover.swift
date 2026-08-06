@@ -189,7 +189,10 @@ private struct TranscriptScopeSection: View {
     }
 }
 
-/// The message-kind group checklist.
+/// The message-kind checklist: the Chat (kindless) toggle, then one row per group with a
+/// tri-state checkbox that expands to a per-kind toggle for every `ChannelMessageKind` — each
+/// kind is individually filterable, and the group checkbox is a convenience over that per-kind
+/// truth, not a separate switch.
 private struct TranscriptKindGroupSection: View {
     @Binding var config: TranscriptViewConfig
 
@@ -197,26 +200,117 @@ private struct TranscriptKindGroupSection: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Message kinds")
                 .font(.headline)
-            ForEach(TranscriptKindGroup.allCases) { group in
-                Toggle(isOn: binding(for: group)) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(group.displayName)
-                        Text(group.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            Toggle(isOn: $config.showsChat) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(TranscriptKindGroup.chat.displayName)
+                    Text(TranscriptKindGroup.chat.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ForEach(TranscriptKindGroup.allCases.filter { !$0.governsKindless }) { group in
+                TranscriptKindGroupRow(group: group, config: $config)
+            }
+        }
+    }
+}
+
+/// One kind-group: tri-state checkbox in the disclosure label, per-kind toggles inside.
+private struct TranscriptKindGroupRow: View {
+    let group: TranscriptKindGroup
+    @Binding var config: TranscriptViewConfig
+    @State private var isExpanded = false
+
+    /// Wire order is stable and clusters families (`task_*`, `validation_*`) — good enough
+    /// ordering, and it never shuffles when display labels get reworded.
+    private var orderedKinds: [ChannelMessageKind] {
+        group.kinds.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(orderedKinds, id: \.self) { kind in
+                    Toggle(isOn: kindBinding(kind)) {
+                        Text(kind.transcriptFilterLabel)
                     }
+                    // The wire string, for when "which kind is this exactly?" matters.
+                    .help(kind.rawValue)
+                }
+            }
+            .padding(.top, 4)
+            .padding(.leading, 4)
+        } label: {
+            HStack(spacing: 6) {
+                GroupTriStateCheckbox(state: config.groupVisibility(of: group)) { makeAllVisible in
+                    config.setGroup(group, visible: makeAllVisible)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(group.displayName)
+                    Text(detailLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
     }
 
-    private func binding(for group: TranscriptKindGroup) -> Binding<Bool> {
+    /// A mixed group says WHICH FRACTION shows — the group's stock description would misread as
+    /// "all of this is on".
+    private var detailLine: String {
+        guard config.groupVisibility(of: group) == .mixed else { return group.detail }
+        let visible = group.kinds.count - group.kinds.intersection(config.hiddenKinds).count
+        return "\(visible) of \(group.kinds.count) kinds shown"
+    }
+
+    private func kindBinding(_ kind: ChannelMessageKind) -> Binding<Bool> {
         Binding(
-            get: { config.visibleGroups.contains(group) },
-            set: { isOn in
-                if isOn { config.visibleGroups.insert(group) } else { config.visibleGroups.remove(group) }
-            }
+            get: { config.isKindVisible(kind) },
+            set: { isOn in config.setKind(kind, visible: isOn) }
         )
+    }
+}
+
+/// The group checkbox: checked (all kinds shown), unchecked (none), or dash (mixed). Clicking a
+/// fully-checked group hides all its kinds; clicking a mixed or empty one shows them all.
+private struct GroupTriStateCheckbox: View {
+    let state: TranscriptViewConfig.GroupVisibility
+    let onSetAll: (Bool) -> Void
+
+    var body: some View {
+        Button {
+            onSetAll(state != .all)
+        } label: {
+            Image(systemName: symbolName)
+                .foregroundStyle(state == .none ? Color.secondary : Color.accentColor)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(state == .all ? "Hide all" : "Show all")
+    }
+
+    private var symbolName: String {
+        switch state {
+        case .all: return "checkmark.square.fill"
+        case .mixed: return "minus.square.fill"
+        case .none: return "square"
+        }
+    }
+}
+
+extension ChannelMessageKind {
+    /// Reader-facing label for the per-kind filter rows, derived from the wire string so a newly
+    /// added kind gets a label with no table to update. Only the pairs that would read as
+    /// duplicates — and the acronym — get explicit wording.
+    var transcriptFilterLabel: String {
+        switch self {
+        case .taskComplete: return "Task complete (worker submission)"
+        case .taskCompleted: return "Task completed (final state)"
+        case .taskLifecycle: return "Task lifecycle (informational)"
+        case .mcpStatus: return "MCP status"
+        default:
+            let words = rawValue.split(separator: "_").joined(separator: " ")
+            return words.prefix(1).uppercased() + words.dropFirst()
+        }
     }
 }
 

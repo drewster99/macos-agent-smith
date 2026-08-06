@@ -77,12 +77,21 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
     public var governsKindless: Bool { self == .chat }
 }
 
-/// A persisted, user-editable description of what the bottom transcript pane shows: which kind-groups
-/// are visible, which senders, and public/private. Turned into an off-main `TranscriptFilter` by
-/// `makeFilter`. Persisted per session in `SessionState.transcriptViewConfig`.
+/// A persisted, user-editable description of what the bottom transcript pane shows: which message
+/// kinds are visible (every `ChannelMessageKind` individually), which senders, and public/private.
+/// Turned into an off-main `TranscriptFilter` by `makeFilter`. Persisted per session in
+/// `SessionState.transcriptViewConfig`.
 public struct TranscriptViewConfig: Codable, Sendable, Equatable {
-    /// Which kind-groups are visible. A group absent from this set is hidden.
-    public var visibleGroups: Set<TranscriptKindGroup>
+    /// The kinds that are HIDDEN — the single source of truth for the kind axis. Empty = every
+    /// kind shows. Stored inverted for the same reason the group set was: a kind added in a later
+    /// build defaults to VISIBLE in every already-saved config, instead of silently vanishing.
+    /// `TranscriptKindGroup` is a UI convenience layered over this set (see `groupVisibility(of:)`),
+    /// never a second source of truth.
+    public var hiddenKinds: Set<ChannelMessageKind>
+    /// Whether KINDLESS messages — plain user↔Smith conversation, which carry no `messageKind` —
+    /// are shown. The per-kind set cannot express this (there is no kind to hide), so it is its
+    /// own switch; the popover presents it as the "Chat" row.
+    public var showsChat: Bool
     /// Which senders are shown. `nil` = every sender (the common case); a non-nil set is an allow-list.
     public var allowedSenders: Set<ChannelMessage.Sender>?
     /// Which recipients are shown. `nil` = every recipient; a non-nil set filters PRIVATE (addressed)
@@ -99,14 +108,16 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     public var showErrors: Bool
 
     public init(
-        visibleGroups: Set<TranscriptKindGroup> = Set(TranscriptKindGroup.allCases),
+        hiddenKinds: Set<ChannelMessageKind> = [],
+        showsChat: Bool = true,
         allowedSenders: Set<ChannelMessage.Sender>? = nil,
         allowedRecipients: Set<MessageRecipient>? = nil,
         visibility: TranscriptFilter.Visibility = .all,
         hideTaskScoped: Bool = false,
         showErrors: Bool = true
     ) {
-        self.visibleGroups = visibleGroups
+        self.hiddenKinds = hiddenKinds
+        self.showsChat = showsChat
         self.allowedSenders = allowedSenders
         self.allowedRecipients = allowedRecipients
         self.visibility = visibility
@@ -114,32 +125,78 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         self.showErrors = showErrors
     }
 
+    // MARK: Group + kind accessors (the popover's surface over the per-kind truth)
+
+    /// Group-level visibility DERIVED from the per-kind set — a display state, never stored.
+    public enum GroupVisibility: Sendable, Equatable {
+        case all, none, mixed
+    }
+
+    /// Where a group's kinds stand in the hidden set. `.chat` reports `showsChat` (it has no kinds).
+    public func groupVisibility(of group: TranscriptKindGroup) -> GroupVisibility {
+        if group.governsKindless { return showsChat ? .all : .none }
+        let hidden = group.kinds.intersection(hiddenKinds).count
+        if hidden == 0 { return .all }
+        return hidden == group.kinds.count ? .none : .mixed
+    }
+
+    /// Shows or hides every kind in a group at once — the group checkbox. `.chat` flips `showsChat`.
+    public mutating func setGroup(_ group: TranscriptKindGroup, visible: Bool) {
+        if group.governsKindless {
+            showsChat = visible
+        } else if visible {
+            hiddenKinds.subtract(group.kinds)
+        } else {
+            hiddenKinds.formUnion(group.kinds)
+        }
+    }
+
+    public func isKindVisible(_ kind: ChannelMessageKind) -> Bool {
+        !hiddenKinds.contains(kind)
+    }
+
+    public mutating func setKind(_ kind: ChannelMessageKind, visible: Bool) {
+        if visible { hiddenKinds.remove(kind) } else { hiddenKinds.insert(kind) }
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case visibleGroups, hiddenGroups, allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
+        case hiddenKinds, showsChat, visibleGroups, hiddenGroups,
+             allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
     }
 
     /// Custom decode, for two reasons. (1) A config persisted BEFORE the recipient / task-scope / error
     /// axes existed still reads back — the synthesized decoder emits a hard `decode` for every
     /// non-optional key and would throw `keyNotFound` on the missing ones, taking the whole
     /// `SessionState` decode down with it. Each field falls back to the same default as the memberwise
-    /// init. (2) Group visibility is stored INVERTED, as `hiddenGroups` — see `encode(to:)`.
+    /// init. (2) Kind visibility is stored INVERTED, as `hiddenKinds` — see `encode(to:)` — and two
+    /// generations of GROUP-level persistence migrate here by expanding each hidden group to its kinds:
+    /// the group's kinds ARE what that config hid, so the expansion shows exactly what it showed.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        if let hiddenNames = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenGroups) {
-            // Decoded as raw strings, not `Set<TranscriptKindGroup>`, so a group name written by a
-            // NEWER build doesn't throw here. Ignoring an unknown hidden name fails open — that
-            // group's messages show — which beats failing the whole `SessionState` decode.
-            let hidden = Set(hiddenNames.compactMap(TranscriptKindGroup.init(rawValue:)))
-            visibleGroups = Set(TranscriptKindGroup.allCases).subtracting(hidden)
+        if let hiddenNames = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenKinds) {
+            // Decoded as raw strings, not `Set<ChannelMessageKind>`, so a kind written by a NEWER
+            // build doesn't throw here. Ignoring an unknown hidden name fails open — that kind's
+            // messages show — which beats failing the whole `SessionState` decode.
+            hiddenKinds = Set(hiddenNames.compactMap(ChannelMessageKind.init(rawValue:)))
+            showsChat = try c.decodeIfPresent(Bool.self, forKey: .showsChat) ?? true
+        } else if let hiddenGroupNames = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenGroups) {
+            // The group-persisted generation (same inverted philosophy, coarser grain).
+            let hidden = Set(hiddenGroupNames.compactMap(TranscriptKindGroup.init(rawValue:)))
+            hiddenKinds = hidden.reduce(into: Set<ChannelMessageKind>()) { $0.formUnion($1.kinds) }
+            showsChat = !hidden.contains(.chat)
         } else if let legacyVisible = try c.decodeIfPresent(Set<TranscriptKindGroup>.self, forKey: .visibleGroups) {
-            // Written by a build that stored the VISIBLE set and predates `securityReviews`.
+            // Written by a build that stored the VISIBLE group set and predates `securityReviews`.
             // Security-review rows were kindless then, so the Chat toggle governed them —
             // inheriting Chat's state preserves exactly what this config showed before the upgrade.
-            visibleGroups = legacyVisible.contains(.chat)
+            let visible = legacyVisible.contains(.chat)
                 ? legacyVisible.union([.securityReviews])
                 : legacyVisible
+            let hidden = Set(TranscriptKindGroup.allCases).subtracting(visible)
+            hiddenKinds = hidden.reduce(into: Set<ChannelMessageKind>()) { $0.formUnion($1.kinds) }
+            showsChat = visible.contains(.chat)
         } else {
-            visibleGroups = Set(TranscriptKindGroup.allCases)
+            hiddenKinds = []
+            showsChat = true
         }
         allowedSenders = try c.decodeIfPresent(Set<ChannelMessage.Sender>.self, forKey: .allowedSenders)
         allowedRecipients = try c.decodeIfPresent(Set<MessageRecipient>.self, forKey: .allowedRecipients)
@@ -148,15 +205,16 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         showErrors = try c.decodeIfPresent(Bool.self, forKey: .showErrors) ?? true
     }
 
-    /// Group visibility is persisted as the HIDDEN set, not the visible one, so a group added in a
+    /// Kind visibility is persisted as the HIDDEN set, not the visible one, so a kind added in a
     /// later build defaults to visible in every already-saved config. Storing the visible set had
-    /// the opposite failure mode: a config saved with "all N groups on" silently excluded group
-    /// N+1 the moment one existed, hiding a whole message category with nothing reporting it —
-    /// which is exactly how `securityReviews` would have vanished from every existing session.
+    /// the opposite failure mode: a config saved with "everything on" silently excluded kind N+1
+    /// the moment one existed, hiding a whole message category with nothing reporting it — which
+    /// is exactly how `securityReviews` would have vanished from every existing session when it
+    /// was a group. Raw values sorted so the persisted JSON is diff-stable.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        let hidden = Set(TranscriptKindGroup.allCases).subtracting(visibleGroups)
-        try c.encode(Set(hidden.map(\.rawValue)), forKey: .hiddenGroups)
+        try c.encode(hiddenKinds.map(\.rawValue).sorted(), forKey: .hiddenKinds)
+        try c.encode(showsChat, forKey: .showsChat)
         try c.encodeIfPresent(allowedSenders, forKey: .allowedSenders)
         try c.encodeIfPresent(allowedRecipients, forKey: .allowedRecipients)
         try c.encode(visibility, forKey: .visibility)
@@ -191,16 +249,16 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     ]
 
     /// The off-main `TranscriptFilter` this config represents. `taskScope`, when given, is an explicit
-    /// override (a task-scoped pane); otherwise the config's `hideTaskScoped` switch decides. When every
-    /// group is visible the kind axis collapses to `.all` (cheapest); otherwise it names exactly the
-    /// visible groups' kinds and passes kindless messages iff Chat is on.
+    /// override (a task-scoped pane); otherwise the config's `hideTaskScoped` switch decides. When
+    /// nothing is hidden the kind axis collapses to `.all` (cheapest); otherwise it names exactly the
+    /// visible kinds and passes kindless messages iff Chat is on.
     public func makeFilter(taskScope: TranscriptFilter.TaskScope? = nil) -> TranscriptFilter {
         let kinds: TranscriptFilter.KindRule
-        if visibleGroups == Set(TranscriptKindGroup.allCases) {
+        if hiddenKinds.isEmpty && showsChat {
             kinds = .all
         } else {
-            let named = visibleGroups.reduce(into: Set<ChannelMessageKind>()) { $0.formUnion($1.kinds) }
-            kinds = .only(named, includingKindless: visibleGroups.contains(.chat))
+            kinds = .only(Set(ChannelMessageKind.allCases).subtracting(hiddenKinds),
+                          includingKindless: showsChat)
         }
         return TranscriptFilter(
             allowedSenders: allowedSenders,
