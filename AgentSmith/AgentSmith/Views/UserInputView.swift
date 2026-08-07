@@ -205,7 +205,14 @@ private struct ExpandedEditorSheet: View {
                 .font(AppFonts.inputField)
                 .padding(8)
         }
-        .frame(minWidth: 600, minHeight: 400)
+        // Sheets stopped being user-resizable by default in macOS 15; .fitted plus
+        // a min/max frame range restores resizing. Ideal matches the previous fixed
+        // size so the sheet still opens at 600x400.
+        .frame(
+            minWidth: 600, idealWidth: 600, maxWidth: .infinity,
+            minHeight: 400, idealHeight: 400, maxHeight: .infinity
+        )
+        .presentationSizing(.fitted)
         .onAppear {
             // Project rule: defer @State mutation out of lifecycle closures.
             DispatchQueue.main.async { draft = text }
