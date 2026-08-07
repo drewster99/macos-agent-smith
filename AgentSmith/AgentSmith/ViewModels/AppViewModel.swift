@@ -2168,8 +2168,6 @@ final class AppViewModel {
         stopLogger.notice("VM.pauseAllRunningTasks exit")
     }
 
-    /// Stops this session only. For app-wide Emergency Stop, SessionManager iterates all sessions.
-    ///
     /// One reconciliation tick for the live-activity indicators (see
     /// `agentActivityReconcileTask`). Prunes processing/tool-executing entries whose agent
     /// instance is no longer registered with the runtime, then rebuilds the role-collapsed
@@ -2208,6 +2206,8 @@ final class AppViewModel {
         }
     }
 
+    /// Stops this session only. For app-wide Emergency Stop, SessionManager iterates all sessions.
+    ///
     /// Does NOT call `shared.speechController.stopAll()` because the SpeechController is
     /// shared across sessions — stopping it would silence speech in other running tabs.
     /// Any in-progress utterance from this session's agents will finish naturally; no new
