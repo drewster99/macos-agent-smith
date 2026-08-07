@@ -479,7 +479,7 @@ extension OrchestrationRuntime {
     /// Hard ceiling on items a prepare function may emit for one criterion. Exceeding it
     /// is an ERROR, not a truncation — silently validating a subset could pass work that
     /// fails in the unexamined tail, which is the one thing a validator must never do.
-    static let maxPrepareItems = 50
+    static let maxPrepareItems = 250
 
     /// Telemetry mirror of what LANDED on the task's ledger — one JSONL row per verdict, in the
     /// global append-only metrics file. Written HERE, immediately after the single producer of

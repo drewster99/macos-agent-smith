@@ -1522,7 +1522,8 @@ re-enqueue, mid-round criterion additions run a follow-on round; agent surface �
 shows criteria+verdicts+steps, both prompts rewritten around validation) →
 dynamic prepare/map (✅ 2026-07-09: `AcceptanceCriterion.prepare` names a
 prepare-kind evaluator; items map through the per-item validator via {{item}};
-empty item list auto-accepts, >50 items is a fail-visible ERROR not a silent
+empty item list auto-accepts, exceeding `maxPrepareItems` (50 at build; raised
+to 250 2026-08-06) is a fail-visible ERROR not a silent
 truncation; items run sequentially inside the round's parallel wave) →
 worker pool M1 (✅ `792c656`: taskID+sequence on AgentHandle, handles(role:)/
 workerHandle(taskID:), pool-correct setToolSecurity/overrides/context-save) →
