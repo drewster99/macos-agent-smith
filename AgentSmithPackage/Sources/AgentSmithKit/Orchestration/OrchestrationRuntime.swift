@@ -1768,6 +1768,16 @@ public actor OrchestrationRuntime {
         return live.count == 1 ? live[0] : nil
     }
 
+    /// IDs of the currently registered live agent instances. Ground truth for the app
+    /// layer's activity-indicator reconciliation: the processing/tool-executing badges are
+    /// fed by a push pipeline with several async hops, and a lost "stopped" event used to
+    /// strand a stale "Thinking" badge on an agent that no longer existed (observed
+    /// 2026-08-06: 20 hours). An indicator keyed to an instance absent from this set is
+    /// definitionally stale.
+    public func liveAgentInstanceIDs() -> Set<UUID> {
+        supervisor.allIDs
+    }
+
     /// Starts a task. Despite the historical name, this is no longer a full system
     /// restart when Smith is alive — Phase 2 of the post-incident work made Smith
     /// LONG-LIVED: starting a task cycles the WORKER (terminate old Brown, spawn a fresh

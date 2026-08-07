@@ -185,4 +185,8 @@ struct AgentSupervisor {
     }
 
     var count: Int { handlesByID.count }
+
+    /// IDs of every live registered agent, role-agnostic. Answers "does this instance
+    /// still exist?" for activity-indicator reconciliation without exposing the handles.
+    var allIDs: Set<UUID> { Set(handlesByID.keys) }
 }

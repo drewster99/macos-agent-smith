@@ -165,6 +165,11 @@ private struct RoleAgentCard: View {
     /// rebuilds this card once. See `RecomputeCoalescer`.
     @State private var coalescer = RecomputeCoalescer()
 
+    /// Cadence of the `.task` reconciliation heartbeat below (shared with
+    /// `SummarizerAgentCard`). Two seconds keeps a stuck badge's worst-case staleness in
+    /// line with the second-granularity elapsed timer it sits next to.
+    fileprivate static let reconcileHeartbeat: Duration = .seconds(2)
+
     var body: some View {
         // The Group wrapper gives the view-modifier chain (.onChange) a stable parent View
         // to attach to even when the conditional `if let cached` is unsatisfied.
@@ -183,7 +188,23 @@ private struct RoleAgentCard: View {
         // initial-fires per modifier (one for each watcher) on first body eval was
         // contributing to SwiftUI's "tried to update multiple times per frame" warnings on
         // the Array<ChannelMessage>-typed watchers.
-        .task { scheduleRecompute() }
+        //
+        // The `.task` is also a reconciliation heartbeat (NowLiveSection's stale sweep, same
+        // reasoning). This card's body reads ONLY the @State cache, so the watchers below are
+        // its entire link to live state — and observation registrations are one-shot. A
+        // dirty-mark that gets dropped (observed 2026-08-06: every agent card froze mid-evening
+        // and rendered 20-hour-old "Thinking" badges while the engine ran on) leaves the card
+        // with no observable read left to re-register, and nothing can ever wake it again. The
+        // heartbeat recomputes from live state regardless of observation; `recompute()` skips
+        // the assignment when nothing changed, so a quiet tick costs one struct compare.
+        .task {
+            scheduleRecompute()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.reconcileHeartbeat)
+                guard !Task.isCancelled else { return }
+                scheduleRecompute()
+            }
+        }
         .onChange(of: roleMessages)                                                  { _, _ in scheduleRecompute() }
         .onChange(of: viewModel.inspectorStore.turnsByRole[role])                    { _, _ in scheduleRecompute() }
         .onChange(of: viewModel.inspectorStore.liveContexts[role])                   { _, _ in scheduleRecompute() }
@@ -317,7 +338,17 @@ private struct SummarizerAgentCard: View {
                 cardView(for: cached)
             }
         }
-        .task { scheduleRecompute() }
+        // Initial population + the same reconciliation heartbeat as `RoleAgentCard` (see the
+        // comment there): a cache-only body cannot survive a lost observation dirty-mark
+        // without one.
+        .task {
+            scheduleRecompute()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: RoleAgentCard.reconcileHeartbeat)
+                guard !Task.isCancelled else { return }
+                scheduleRecompute()
+            }
+        }
         .onChange(of: summarizerMessages)                              { _, _ in scheduleRecompute() }
         .onChange(of: viewModel.processingRoles.contains(.summarizer)) { _, _ in scheduleRecompute() }
         .onChange(of: viewModel.toolExecutingByRole[.summarizer])      { _, _ in scheduleRecompute() }
@@ -553,22 +584,6 @@ private struct AgentCard: View {
 
             Divider()
         }
-        .sheet(isPresented: $showingConfig) {
-            AgentConfigSheet(
-                viewModel: viewModel,
-                role: role,
-                roleColor: roleColor,
-                initialSystemPrompt: currentSystemPrompt,
-                initialPollInterval: pollInterval,
-                initialMaxToolCalls: maxToolCalls,
-                speechController: speechController,
-                onSave: { prompt, interval, maxCalls in
-                    onUpdateSystemPrompt(prompt)
-                    onUpdatePollInterval(interval)
-                    onUpdateMaxToolCalls(maxCalls)
-                }
-            )
-        }
         .onAppear {
             // Project rule: defer @State mutations out of lifecycle closures.
             if isProcessing {
@@ -587,6 +602,25 @@ private struct AgentCard: View {
             DispatchQueue.main.async {
                 toolExecutingStartDate = isEmpty ? nil : Date()
             }
+        }
+        // The sheet sits BELOW the lifecycle/change handlers deliberately (project SwiftUI
+        // rule): placed above them, the handlers can silently stop firing — which is how a
+        // card rendered "Thinking" with a never-seeded elapsed timer (2026-08-07).
+        .sheet(isPresented: $showingConfig) {
+            AgentConfigSheet(
+                viewModel: viewModel,
+                role: role,
+                roleColor: roleColor,
+                initialSystemPrompt: currentSystemPrompt,
+                initialPollInterval: pollInterval,
+                initialMaxToolCalls: maxToolCalls,
+                speechController: speechController,
+                onSave: { prompt, interval, maxCalls in
+                    onUpdateSystemPrompt(prompt)
+                    onUpdatePollInterval(interval)
+                    onUpdateMaxToolCalls(maxCalls)
+                }
+            )
         }
     }
 }

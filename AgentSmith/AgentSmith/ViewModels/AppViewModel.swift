@@ -365,6 +365,14 @@ final class AppViewModel {
     /// Kept alive independently of `runtime` so task operations work even when agents aren't running.
     private var taskStore: TaskStore?
     private var channelStreamTask: Task<Void, Never>?
+    /// Convergence backstop for the live-activity indicators (same philosophy as the cost
+    /// rollup's 60s watcher): the processing/tool badges are fed by a push pipeline with
+    /// several async hops and no delivery guarantee, and a single lost "stopped" event
+    /// stranded a "Thinking" badge for 20 hours on a worker torn down the night before
+    /// (2026-08-06). Each tick prunes indicator entries whose agent instance no longer
+    /// exists and rebuilds the role-collapsed mirrors from the instance-keyed truth.
+    private var agentActivityReconcileTask: Task<Void, Never>?
+    private static let agentActivityReconcileInterval: Duration = .seconds(15)
     /// Coalesces channel-log persistence. Messages are appended to an on-disk JSONL log; the
     /// debounce batches a streaming burst into one append call rather than one per message.
     private var channelLogPersistTask: Task<Void, Never>?
@@ -1043,11 +1051,17 @@ final class AppViewModel {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if isProcessing {
-                    self.processingRoles.insert(ref.role)
                     self.processingInstances.insert(ref)
                 } else {
-                    self.processingRoles.remove(ref.role)
                     self.processingInstances.remove(ref)
+                }
+                // The role view is DERIVED from the instance set, never maintained in
+                // parallel: remove-by-role extinguished the whole role's badge while
+                // another same-role instance (a second worker, a concurrent evaluator)
+                // was still mid-call.
+                let rebuiltRoles = Set(self.processingInstances.map(\.role))
+                if self.processingRoles != rebuiltRoles {
+                    self.processingRoles = rebuiltRoles
                 }
             }
         }
@@ -1103,6 +1117,15 @@ final class AppViewModel {
                 self.enqueueChannelAppendForPersist(message)  // disk (debounced JSONL)
                 await self.transcriptStore.ingest(message)    // display (off-main fan-out + cap)
                 self.shared.speechController.handle(message)
+            }
+        }
+
+        agentActivityReconcileTask?.cancel()
+        agentActivityReconcileTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.agentActivityReconcileInterval)
+                guard !Task.isCancelled, let self else { return }
+                await self.reconcileAgentActivityIndicators()
             }
         }
 
@@ -2147,6 +2170,44 @@ final class AppViewModel {
 
     /// Stops this session only. For app-wide Emergency Stop, SessionManager iterates all sessions.
     ///
+    /// One reconciliation tick for the live-activity indicators (see
+    /// `agentActivityReconcileTask`). Prunes processing/tool-executing entries whose agent
+    /// instance is no longer registered with the runtime, then rebuilds the role-collapsed
+    /// mirrors from the instance-keyed truth so the two views cannot drift. Sentinel-keyed
+    /// refs (roles that aren't actor-backed, e.g. the Summarizer) have no handle to check
+    /// against and are left to their own paired events.
+    private func reconcileAgentActivityIndicators() async {
+        guard isRunning, let runtime else { return }
+        let liveIDs = await runtime.liveAgentInstanceIDs()
+        func isStale(_ ref: AgentInstanceRef) -> Bool {
+            ref.instanceID != AgentInstanceRef.roleSentinelID(for: ref.role)
+                && !liveIDs.contains(ref.instanceID)
+        }
+
+        let staleProcessing = processingInstances.filter(isStale)
+        if !staleProcessing.isEmpty {
+            processingInstances.subtract(staleProcessing)
+        }
+        let rebuiltRoles = Set(processingInstances.map(\.role))
+        if processingRoles != rebuiltRoles {
+            processingRoles = rebuiltRoles
+        }
+
+        let staleTools = toolExecutingByInstance.keys.filter(isStale)
+        for ref in staleTools {
+            toolExecutingByInstance.removeValue(forKey: ref)
+        }
+        var rebuiltByRole: [AgentRole: [String: Int]] = [:]
+        for (ref, counts) in toolExecutingByInstance {
+            var roleCounts = rebuiltByRole[ref.role] ?? [:]
+            for (name, n) in counts { roleCounts[name, default: 0] += n }
+            rebuiltByRole[ref.role] = roleCounts
+        }
+        if toolExecutingByRole != rebuiltByRole {
+            toolExecutingByRole = rebuiltByRole
+        }
+    }
+
     /// Does NOT call `shared.speechController.stopAll()` because the SpeechController is
     /// shared across sessions — stopping it would silence speech in other running tabs.
     /// Any in-progress utterance from this session's agents will finish naturally; no new
@@ -2161,6 +2222,8 @@ final class AppViewModel {
         await runtime.stopAll()
         stopLogger.notice("VM.stopAll runtime.stopAll returned session=\(self.session.name, privacy: .public) elapsedMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
         isRunning = false
+        agentActivityReconcileTask?.cancel()
+        agentActivityReconcileTask = nil
         processingRoles.removeAll()
         processingInstances.removeAll()
         toolExecutingByRole.removeAll()
