@@ -125,16 +125,7 @@ public actor MCPClientHost {
     /// Invoked whenever per-server status changes, for the settings UI.
     private var onStatusChanged: (@Sendable ([UUID: MCPServerStatus]) -> Void)?
 
-    /// Ignore SIGPIPE process-wide exactly once. Writing to an MCP server's stdin after
-    /// the server has crashed/exited (a common failure mode — bad command, missing
-    /// package) raises SIGPIPE, which by default terminates the whole app. Ignoring it
-    /// turns those writes into recoverable `EPIPE` errors that surface as tool failures.
-    private static let ignoreSIGPIPE: Void = {
-        signal(SIGPIPE, SIG_IGN)
-    }()
-
     public init(secretStore: MCPSecretStore, clientName: String = "AgentSmith", clientVersion: String = "1.0.0") {
-        _ = Self.ignoreSIGPIPE
         self.secretStore = secretStore
         self.clientName = clientName
         self.clientVersion = clientVersion
@@ -520,6 +511,10 @@ public actor MCPClientHost {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         let stderrBuffer = StderrBuffer()
+        // Scope SIGPIPE suppression to this specific MCP subprocess write FD. This keeps
+        // broken-pipe handling local to MCP tool calls (EPIPE on write) without mutating
+        // process-wide SIGPIPE behavior for unrelated subsystems.
+        try disableSIGPIPEOnWriteFD(stdinPipe.fileHandleForWriting.fileDescriptor)
 
         let process = Process()
         // Launch through `env` so PATH resolution finds npx/node/uvx; the merged login
@@ -548,6 +543,13 @@ public actor MCPClientHost {
         let transport = StdioTransport(input: inputFD, output: outputFD)
         let client = Client(name: clientName, version: clientVersion)
         return (process, client, transport, stdinPipe, stdoutPipe, stderrPipe, stderrBuffer)
+    }
+
+    private func disableSIGPIPEOnWriteFD(_ fd: Int32) throws {
+        if fcntl(fd, F_SETNOSIGPIPE, 1) == -1 {
+            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+            throw POSIXError(code)
+        }
     }
 
     // MARK: - Helpers
