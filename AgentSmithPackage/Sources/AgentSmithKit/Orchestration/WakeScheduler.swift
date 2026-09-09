@@ -77,7 +77,8 @@ actor WakeScheduler {
         replacesID: UUID? = nil,
         recurrence: Recurrence? = nil,
         survivesTaskTermination: Bool = false,
-        action: TaskActionKind? = nil
+        action: TaskActionKind? = nil,
+        extraInstructions: String? = nil
     ) async -> ScheduleWakeOutcome {
         let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -95,7 +96,8 @@ actor WakeScheduler {
             taskID: taskID,
             recurrence: recurrence,
             survivesTaskTermination: survivesTaskTermination,
-            action: action
+            action: action,
+            extraInstructions: extraInstructions
         )
         wakes.append(wake)
         wakes.sort { $0.wakeAt < $1.wakeAt }
@@ -197,7 +199,8 @@ actor WakeScheduler {
                 originalID: wake.originalID,
                 previousFireAt: wake.wakeAt,
                 survivesTaskTermination: wake.survivesTaskTermination,
-                action: wake.action
+                action: wake.action,
+                extraInstructions: wake.extraInstructions
             )
             wakes.append(nextWake)
             onScheduled?(nextWake)

@@ -1,31 +1,43 @@
 import Foundation
 
-/// Smith tool: schedules a future timer that will tell Smith to perform a specific action on
-/// an existing task at the scheduled time. The action is *not* auto-executed — instead, the
-/// timer fires with a pre-rendered imperative ("Call run_task on <id> to start the task")
-/// that Smith reads and executes via the matching tool. This keeps Security Agent in the loop on
-/// every actual side effect without duplicating its evaluation surface for timer-driven
-/// actions.
+/// Smith tool: schedules a future timer that performs a specific action on an existing task.
+///
+/// **How a fired schedule dispatches.** `run` is executed MECHANICALLY by the runtime — the wake
+/// produces a `task_action` notification addressed to `.runtime`, which starts (or durably queues)
+/// the task without an LLM turn. `pause` and `interrupt` are mechanical too. Only `summarize`
+/// routes to Smith, since it is the one action that needs judgment. The `instructions` text on the
+/// wake ("Call `run_task` on <id>…") is what the TIMER UI and the transcript show; it is not what
+/// dispatch reads — that is the wake's structured `action`.
+///
+/// This is worth stating because the doc here used to say the opposite (that Smith reads the
+/// imperative and calls the matching tool), long after the mechanical path replaced it. That gap is
+/// how `run` came to be dispatched down a path with a STRICTER status gate than the `run_task` its
+/// own text names, silently discarding scheduled retries of failed tasks. Both now ask
+/// `TaskStore.prepareForRun`.
+///
+/// Security review is not bypassed: the mechanical path spawns a worker, and every tool call that
+/// worker then makes routes through the Security Agent as usual.
 ///
 /// Use this whenever the user says "do X to task Y at time T" — e.g. "run task <id> at 9pm",
 /// "stop the build task in 30 minutes", "summarize the migration task tomorrow morning."
 struct ScheduleTaskActionTool: AgentTool {
     let name = "schedule_task_action"
     let toolDescription = """
-        Schedule a future imperative to perform an action on an existing task. When the timer \
-        fires you'll receive instructions like "Call run_task on <id>" — execute them. \
+        Schedule a future action on an existing task. run/pause/interrupt are performed \
+        automatically by the system when the timer fires — you are NOT asked to execute them and \
+        must not schedule a duplicate. Only `summarize` comes back to you to carry out. \
         \
         Required: `task_id` (UUID of an existing task), `action`, and either `delay_seconds` \
         OR `at_time` (ISO-8601). \
         \
         `action` must be one of: \
-          • run        — start/resume/restart the task (calls run_task at fire time) \
-          • pause      — flip the task to paused (calls update_task) \
-          • interrupt  — flip the task to interrupted (calls update_task) \
-          • summarize  — describe progress to the user (calls get_task_details + message_user) \
+          • run        — start/resume/restart the task (performed automatically) \
+          • pause      — flip the task to paused (performed automatically) \
+          • interrupt  — flip the task to interrupted (performed automatically) \
+          • summarize  — comes back to YOU: get_task_details, then message_user with progress \
         \
-        Optional: `extra_instructions` — additional context appended to the auto-rendered \
-        imperative (e.g. "and tell Drew it's done"). `recurrence` for repeating actions. \
+        Optional: `extra_instructions` — refinements for that run (e.g. "use Safari only"), \
+        applied to the task when it starts. `recurrence` for repeating actions. \
         `replaces_id` to overwrite an existing scheduled action. \
         \
         For recurring actions, pass `recurrence` as one of: \
@@ -34,9 +46,11 @@ struct ScheduleTaskActionTool: AgentTool {
           • {"type":"weekly","hour":15,"minute":0,"on":["mon","wed","fri"]} \
           • {"type":"monthly","hour":9,"minute":0,"day_of_month":1} \
         \
-        The wake is auto-cancelled if the task transitions to a terminal status (completed/failed) \
-        before the timer fires. For action=run on a recurring schedule, the wake survives the run \
-        because each occurrence reopens the task before running it.
+        For action=run, a failed task is auto-reset and a completed one reopened at fire time, \
+        exactly as run_task does — so scheduling a retry of a failed task works. If the task is in \
+        some other unstartable status when the timer fires (still running, awaiting help), the run \
+        does NOT happen: you are told, and nothing retries it. For action=run on a recurring \
+        schedule, the wake survives the run because each occurrence reopens the task before running it.
         """
 
     private static let minDelaySeconds: Double = 5
@@ -57,7 +71,7 @@ struct ScheduleTaskActionTool: AgentTool {
                     .string("interrupt"),
                     .string("summarize")
                 ]),
-                "description": .string("Action to perform when the timer fires. Required.")
+                "description": .string("Action to perform when the timer fires. run/pause/interrupt happen automatically; summarize returns to you. Required.")
             ]),
             "delay_seconds": .dictionary([
                 "type": .string("number"),
@@ -69,7 +83,7 @@ struct ScheduleTaskActionTool: AgentTool {
             ]),
             "extra_instructions": .dictionary([
                 "type": .string("string"),
-                "description": .string("Optional additional context appended to the auto-rendered imperative.")
+                "description": .string("Optional refinements for this run (e.g. 'use Safari only'), applied to the task when it starts.")
             ]),
             "recurrence": .dictionary([
                 "type": .string("object"),
@@ -163,7 +177,8 @@ struct ScheduleTaskActionTool: AgentTool {
             replacesID: replacesID,
             recurrence: recurrenceResult.value,
             survivesTaskTermination: action.survivesTaskTermination,
-            action: action
+            action: action,
+            extraInstructions: extra
         ))
         // Surface the schedule as a dedicated channel banner so the user sees a task-style
         // row ("Pause", "Stop", "Summarize" — each with its own icon) instead of the
@@ -184,7 +199,38 @@ struct ScheduleTaskActionTool: AgentTool {
                 ]
             ))
         }
-        return TimerArgumentParsing.formatScheduleOutcome(outcome, kind: "Scheduled task action")
+        let result = TimerArgumentParsing.formatScheduleOutcome(outcome, kind: "Scheduled task action")
+        // Re-read (library-aware) rather than reusing the `task` captured at the top: a recurring
+        // run PROMOTES the task to a template above, and promotion moves it into the global library
+        // — so the local copy is stale about both `isTemplate` and which store now owns it.
+        let current = await context.taskStore.taskOrLibraryTemplate(id: taskID) ?? task
+        guard case .scheduled = outcome, let advisory = Self.startabilityAdvisory(for: action, task: current) else {
+            return result
+        }
+        return .success("\(result.output)\n\n\(advisory)")
+    }
+
+    /// A warning, when a `run` is scheduled against a task whose CURRENT status the fire-time path
+    /// would not accept.
+    ///
+    /// Deliberately a warning and not a refusal: nearly every unstartable status is transient, and
+    /// the normal case is precisely that it resolves before the timer fires — a `.running` task is
+    /// usually `.completed` or `.failed` by then, and both of those ARE startable. Refusing here
+    /// would block the most ordinary use of this tool ("retry that when the current run finishes").
+    /// What the caller needs is to know the task isn't startable *right now*, so a schedule aimed at
+    /// a task that will still be stuck reads as a mistake at the time it's made.
+    ///
+    /// `.scheduled` is not flagged: a run wake promotes a `.scheduled` task to `.pending` before
+    /// dispatching it (`WakeScheduler.fireDue`), so it starts fine.
+    private static func startabilityAdvisory(for action: TaskActionKind, task: AgentTask) -> String? {
+        guard action == .run, !task.isTemplate else { return nil }
+        guard !task.status.canBeStarted, task.status != .scheduled else { return nil }
+        return """
+            NOTE: '\(task.title)' is currently '\(task.status.rawValue)', which cannot be started. \
+            That is usually fine — an in-flight task normally reaches completed or failed (both \
+            startable) before the timer fires. But if it is still '\(task.status.rawValue)' at fire \
+            time, the run will NOT start; you'll be told, and nothing will retry it.
+            """
     }
 }
 

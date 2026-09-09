@@ -339,6 +339,18 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
             self == .pending || self == .paused || self == .interrupted
         }
 
+        /// Whether `TaskStore.prepareForRun` can bring a task in this status to a start: the
+        /// runnable three, plus the two terminal states it resets/reopens in place.
+        ///
+        /// A PURE predicate, so a caller can ask the question without performing the reset —
+        /// `schedule_task_action` uses it to warn at schedule time that a task is currently in a
+        /// status the fire-time path won't accept. `prepareForRun` remains the authority on
+        /// actually doing it; `TaskStorePrepareForRunTests` pins the two to the same answer for
+        /// every status, so neither can drift.
+        public var canBeStarted: Bool {
+            isRunnable || self == .failed || self == .completed
+        }
+
         /// Whether the user can edit the task's description in this state. Includes the
         /// runnable states plus terminal states (`completed`, `failed`) and `scheduled`.
         /// Excludes `running` and `awaitingReview` — those are actively in-flight and

@@ -72,6 +72,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// Informational lifecycle chatter. Deliberately does NOT wake an idle agent.
     case taskLifecycle = "task_lifecycle"
     case scheduledRunDeferred = "scheduled_run_deferred"
+    /// A fired scheduled run that could NOT be placed — its task is in a status no start path
+    /// accepts, or the task is gone. The wake is spent and nothing will retry it, so this row is
+    /// the only trace the user gets; posting it is what keeps the drop from being silent.
+    case scheduledRunRefused = "scheduled_run_refused"
     /// A mid-run description amendment delivered privately to a task's worker (`amend_task`).
     /// Deliberately NOT in `parkedWorkerInformationalMessageKinds` — an amendment is work
     /// handed back, so like `orchestratorMessage` it resumes a parked worker.

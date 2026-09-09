@@ -437,18 +437,20 @@ public actor PersistenceManager {
     /// fired while another task was in flight, plus paused tasks queued for resume after
     /// an interrupt. Saved on every mutation (enqueue / dequeue) so the queue survives
     /// app quit and crashes. Stored alongside the per-session wake snapshot.
-    public func savePendingScheduledRunQueue(_ taskIDs: [UUID]) throws {
+    public func savePendingScheduledRunQueue(_ entries: [PendingScheduledRun]) throws {
         try ensureDirectories()
-        let data = try JSONEncoder().encode(taskIDs)
+        let data = try JSONEncoder().encode(entries)
         let url = sessionDirectory.appendingPathComponent("pending_scheduled_run_queue.json")
         try data.write(to: url, options: .atomic)
     }
 
-    public func loadPendingScheduledRunQueue() throws -> [UUID] {
+    /// Reads the queue. `PendingScheduledRun` decodes a bare UUID string as well as its object
+    /// form, so a file written before the entries carried an amendment still loads.
+    public func loadPendingScheduledRunQueue() throws -> [PendingScheduledRun] {
         let url = sessionDirectory.appendingPathComponent("pending_scheduled_run_queue.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode([UUID].self, from: data)
+        return try JSONDecoder().decode([PendingScheduledRun].self, from: data)
     }
 
     // MARK: - Notification delivery ledger (per-session)

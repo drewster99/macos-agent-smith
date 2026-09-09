@@ -8,7 +8,7 @@ struct NotificationBrokerTests {
     // MARK: - Test doubles
 
     private struct NoopRuntime: NotificationRuntime {
-        func autoRunTask(_ taskID: UUID) async {}
+        func autoRunTask(_ taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome { .placed }
         func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { true }
         func taskTitle(_ taskID: UUID) async -> String? { nil }
         func postSystemNotice(_ text: String, taskID: UUID?) async {}
@@ -184,6 +184,29 @@ struct NotificationBrokerTests {
         let id = await broker.post(triggerSource: timerTrigger(), recipient: .runtime, payload: Payload(type: "task_action"), title: "t", idempotencyKey: "err")
 
         #expect(await broker.deliveryStatus(id) == .dropped(reason: .handlerError))
+    }
+
+    @Test("A refused handler drops(runtimeRefused) and never marks delivered")
+    func runtimeRefusalDrops() async {
+        // The distinction that matters: `.refused` means the effect legitimately did not happen, so
+        // it must not be recorded as delivered. A scheduled run that the runtime discarded used to
+        // settle `.delivered` — the ledger asserted a success nothing had performed, which is how a
+        // timer that fired and started nothing left no evidence anywhere that it had failed.
+        let log = CallLog()
+        let broker = makeBroker()
+        await broker.registerHandler(
+            type: "task_action",
+            RecordingHandler(log: log, outcome: .refused("task is still running"))
+        )
+
+        let id = await broker.post(
+            triggerSource: timerTrigger(), recipient: .runtime,
+            payload: Payload(type: "task_action"), title: "t", idempotencyKey: "refused"
+        )
+
+        #expect(await log.handled.count == 1, "the handler still runs — the refusal comes FROM it")
+        #expect(await broker.deliveryStatus(id) == .dropped(reason: .runtimeRefused))
+        #expect(await log.delivered.isEmpty)
     }
 
     @Test("Observers see matching notifications; non-matching filters skip")

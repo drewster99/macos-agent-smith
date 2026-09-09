@@ -9,6 +9,29 @@ public enum HandlerOutcome: Sendable, Equatable {
     /// (the untrusted-content warning for a user message, the "a timer fired" wrapper for a
     /// reminder) is applied HERE by the handler, not by the recipient target.
     case deliver(String)
+    /// The handler ran, but the runtime DECLINED to perform the effect — a scheduled run whose task
+    /// is in a status no start path accepts, say. Distinct from `.acted` (which claims the effect
+    /// happened) and from a thrown `NotificationHandlerError` (which means the payload was
+    /// malformed — our bug, not a state the system can legitimately be in).
+    ///
+    /// The broker settles this as `.dropped(.runtimeRefused)`: never retried, and never recorded as
+    /// delivered, so the ledger can't assert a success that didn't happen. Telling the USER is the
+    /// runtime's job — it knows the task and owns the channel; this text is for the log and audit.
+    case refused(String)
+}
+
+/// What the runtime did with an auto-run request.
+///
+/// Returned so a fired scheduled run settles HONESTLY. Before this existed `autoRunTask` returned
+/// `Void`, the handler always answered `.acted`, and a run the runtime had silently discarded (its
+/// task not being in a startable status) was recorded in the delivery ledger as delivered — the
+/// timer looked like it had worked, and nothing anywhere said otherwise.
+public enum AutoRunDispatchOutcome: Sendable, Equatable {
+    /// The run was started, or durably queued to start as soon as a worker slot frees.
+    case placed
+    /// The run could not be placed and nothing will retry it. The runtime has already told the
+    /// user why; this text carries the reason into the log and the delivery ledger.
+    case refused(String)
 }
 
 /// Thrown by a handler when its own type's `data` is malformed — a bug or corruption, surfaced
@@ -23,8 +46,12 @@ public struct NotificationHandlerError: Error, CustomStringConvertible {
 /// adapter). Keeps the notification subsystem free of a cycle back into orchestration.
 public protocol NotificationRuntime: Sendable {
     /// Start (or resume) a task through the capacity-gated lifecycle path — queues at capacity,
-    /// never evicts a live worker.
-    func autoRunTask(_ taskID: UUID) async
+    /// never evicts a live worker. `amendment` carries the schedule's per-run refinements
+    /// (`schedule_task_action`'s `extra_instructions`) onto the started task.
+    ///
+    /// Returns what actually happened: a task in a status no start path accepts is `.refused`, and
+    /// the runtime reports that to the user before returning.
+    func autoRunTask(_ taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome
     /// Apply a pause/interrupt action: STOP the running worker and flip the task's status, but only
     /// if the task is actively working. Returns `false` WITHOUT effect when the task isn't currently
     /// running/validating (already finished, pending, or paused) — a scheduled pause/interrupt must

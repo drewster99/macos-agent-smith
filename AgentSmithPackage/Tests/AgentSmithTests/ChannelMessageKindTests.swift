@@ -44,6 +44,7 @@ struct ChannelMessageKindTests {
         (.taskQueuedAtCapacity, "task_queued_at_capacity"),
         (.taskLifecycle, "task_lifecycle"),
         (.scheduledRunDeferred, "scheduled_run_deferred"),
+        (.scheduledRunRefused, "scheduled_run_refused"),
         (.taskAmendment, "task_amendment"),
         (.changesRequested, "changes_requested"),
         (.criteriaUpdated, "criteria_updated"),

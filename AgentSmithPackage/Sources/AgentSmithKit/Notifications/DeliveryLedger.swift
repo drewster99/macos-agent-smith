@@ -11,6 +11,7 @@ public enum DeliveryStatus: Sendable, Codable, Equatable {
         case noHandler          // unknown type — no registered handler (safe no-op)
         case noRecipientTarget  // `.deliver` outcome but no target registered for the recipient kind
         case handlerError       // malformed data for a type we own
+        case runtimeRefused     // well-formed, but the runtime declined the effect (HandlerOutcome.refused)
     }
 }
 

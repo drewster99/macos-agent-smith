@@ -79,6 +79,7 @@ struct InspectorRecomputeCacheTests {
             .toolRequest,
             .toolOutput,
             .scheduledRunDeferred,
+            .scheduledRunRefused,
             .submissionAutoRejected
         ]
         // If you remove a kind from `bannerKinds`, also remove its case from

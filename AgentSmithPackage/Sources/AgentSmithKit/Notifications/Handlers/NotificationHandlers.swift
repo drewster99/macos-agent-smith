@@ -29,7 +29,15 @@ public struct TaskActionNotificationHandler: NotificationHandler {
         }
         switch action {
         case .run:
-            await runtime.autoRunTask(taskID)
+            // `extra_instructions` is optional and free-form: absent means "no refinements", which
+            // is not an error. It lands on the started task as its per-run amendment.
+            switch await runtime.autoRunTask(taskID, amendment: stringValue(data, "extra_instructions")) {
+            case .placed:
+                break
+            case .refused(let reason):
+                // Report what happened, don't claim `.acted`. The runtime has already told the user.
+                return .refused(reason)
+            }
         case .pause, .interrupt:
             let targetStatus: AgentTask.Status = (action == .pause) ? .paused : .interrupted
             let verb = (action == .pause) ? "paused" : "stopped"

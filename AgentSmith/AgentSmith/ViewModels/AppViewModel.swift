@@ -1247,9 +1247,9 @@ final class AppViewModel {
                     return []
                 }
             },
-            persist: { taskIDs in
+            persist: { entries in
                 do {
-                    try await persistence.savePendingScheduledRunQueue(taskIDs)
+                    try await persistence.savePendingScheduledRunQueue(entries)
                 } catch {
                     logger.error("Failed to persist pending scheduled-run queue: \(error.localizedDescription)")
                 }

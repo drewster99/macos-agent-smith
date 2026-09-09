@@ -7,6 +7,8 @@ struct NotificationHandlersTests {
 
     private actor RuntimeSpy: NotificationRuntime {
         private(set) var autoRan: [UUID] = []
+        private(set) var autoRunAmendments: [String?] = []
+        var autoRunOutcome: AutoRunDispatchOutcome = .placed
         private(set) var statusSet: [(UUID, AgentTask.Status)] = []
         private(set) var notices: [String] = []
         let titles: [UUID: String]
@@ -19,12 +21,17 @@ struct NotificationHandlersTests {
             self.statusApplies = statusApplies
         }
 
-        func autoRunTask(_ taskID: UUID) async { autoRan.append(taskID) }
+        func autoRunTask(_ taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome {
+            autoRan.append(taskID)
+            autoRunAmendments.append(amendment)
+            return autoRunOutcome
+        }
         func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool {
             guard statusApplies else { return false }
             statusSet.append((taskID, status))
             return true
         }
+        func setAutoRunOutcome(_ outcome: AutoRunDispatchOutcome) { autoRunOutcome = outcome }
         func taskTitle(_ taskID: UUID) async -> String? { titles[taskID] }
         func postSystemNotice(_ text: String, taskID: UUID?) async { notices.append(text) }
     }
@@ -88,6 +95,45 @@ struct NotificationHandlersTests {
         // The legacy "stop" string still maps to interrupt via lenient parsing.
         #expect(try await handler.handle(note("stop"), runtime: runtime) == .acted)
         #expect(await runtime.statusSet.contains { $0.1 == .interrupted })
+    }
+
+    @Test("task_action run passes extra_instructions through as the run's amendment")
+    func taskActionRunCarriesAmendment() async throws {
+        let taskID = UUID()
+        let runtime = RuntimeSpy()
+        let note = AgentNotification(
+            id: NotificationID(namespace: "timer", key: UUID().uuidString),
+            triggerSource: .timer(scheduleID: UUID(), occurrence: Date()),
+            recipient: .runtime, title: "t", createdAt: Date(),
+            payload: Payload(type: "task_action", data: [
+                "action": .string("run"),
+                "task_id": .string(taskID.uuidString),
+                "extra_instructions": .string("Use Safari only.")
+            ])
+        )
+        #expect(try await TaskActionNotificationHandler().handle(note, runtime: runtime) == .acted)
+        #expect(await runtime.autoRunAmendments == ["Use Safari only."])
+    }
+
+    @Test("task_action run reports the runtime's refusal instead of claiming it acted")
+    func taskActionRunSurfacesRefusal() async throws {
+        // The incident's silent half: the runtime discarded the run, the handler answered `.acted`
+        // anyway, and the delivery ledger recorded a success. The outcome must travel.
+        let taskID = UUID()
+        let runtime = RuntimeSpy()
+        await runtime.setAutoRunOutcome(.refused("task is still running"))
+        let note = AgentNotification(
+            id: NotificationID(namespace: "timer", key: UUID().uuidString),
+            triggerSource: .timer(scheduleID: UUID(), occurrence: Date()),
+            recipient: .runtime, title: "t", createdAt: Date(),
+            payload: Payload(type: "task_action", data: [
+                "action": .string("run"), "task_id": .string(taskID.uuidString)
+            ])
+        )
+        #expect(
+            try await TaskActionNotificationHandler().handle(note, runtime: runtime)
+                == .refused("task is still running")
+        )
     }
 
     @Test("A stale pause/interrupt on an already-finished task is skipped, not clobbered")

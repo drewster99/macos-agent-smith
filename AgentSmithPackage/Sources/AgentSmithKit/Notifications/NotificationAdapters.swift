@@ -18,13 +18,13 @@ public struct ClosureRecipientTarget: RecipientTarget {
 /// A `NotificationRuntime` backed by closures — the runtime builds it with `[weak self]` forwards
 /// so the notification handlers can drive task lifecycle without a direct dependency on the actor.
 public struct ClosureNotificationRuntime: NotificationRuntime {
-    private let autoRun: @Sendable (UUID) async -> Void
+    private let autoRun: @Sendable (UUID, String?) async -> AutoRunDispatchOutcome
     private let setStatus: @Sendable (UUID, AgentTask.Status) async -> Bool
     private let title: @Sendable (UUID) async -> String?
     private let systemNotice: @Sendable (String, UUID?) async -> Void
 
     public init(
-        autoRunTask: @escaping @Sendable (UUID) async -> Void,
+        autoRunTask: @escaping @Sendable (UUID, String?) async -> AutoRunDispatchOutcome,
         setTaskStatus: @escaping @Sendable (UUID, AgentTask.Status) async -> Bool,
         taskTitle: @escaping @Sendable (UUID) async -> String?,
         postSystemNotice: @escaping @Sendable (String, UUID?) async -> Void
@@ -35,7 +35,9 @@ public struct ClosureNotificationRuntime: NotificationRuntime {
         self.systemNotice = postSystemNotice
     }
 
-    public func autoRunTask(_ taskID: UUID) async { await autoRun(taskID) }
+    public func autoRunTask(_ taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome {
+        await autoRun(taskID, amendment)
+    }
     public func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { await setStatus(taskID, status) }
     public func taskTitle(_ taskID: UUID) async -> String? { await title(taskID) }
     public func postSystemNotice(_ text: String, taskID: UUID?) async { await systemNotice(text, taskID) }
@@ -58,6 +60,13 @@ public enum WakeNotificationFactory {
                 recipient = .runtime
                 data["action"] = .string(action.rawValue)
                 data["task_id"] = .string(taskID.uuidString)
+                // The schedule's per-run refinements ride the payload as their OWN field. They used
+                // to reach here only inside `wake.instructions`, which this case discards entirely
+                // — so a `run` scheduled with "use Safari only, and wait until the Mac is idle"
+                // started a worker that had never been told either thing.
+                if let extra = wake.extraInstructions, !extra.isEmpty {
+                    data["extra_instructions"] = .string(extra)
+                }
             case .summarize:
                 type = KnownNotificationType.taskSummary.rawValue
                 recipient = .smith

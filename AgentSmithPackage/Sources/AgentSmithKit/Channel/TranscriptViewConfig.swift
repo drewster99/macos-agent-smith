@@ -58,7 +58,8 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
         case .taskLifecycle:
             return [.taskCreated, .taskAcknowledged, .taskContinuing, .taskComplete, .taskCompleted,
                     .taskFailed, .taskUpdate, .taskUpdateGuidance, .taskSummarized, .taskActionScheduled,
-                    .taskQueuedAtCapacity, .taskLifecycle, .scheduledRunDeferred, .orchestratorMessage,
+                    .taskQueuedAtCapacity, .taskLifecycle, .scheduledRunDeferred, .scheduledRunRefused,
+                    .orchestratorMessage,
                     .taskAmendment, .helpRequested, .helpProvided, .taskInterrupted]
         case .validation:
             return [.changesRequested, .criteriaUpdated, .validationReport, .validationFailed,

@@ -221,17 +221,17 @@ public actor OrchestrationRuntime {
     /// Persisted per-session via `persistPendingScheduledRunQueue`; reseeded on every
     /// `start()` from `loadPendingScheduledRunQueue`. Survives app quit and crashes so
     /// a deferred scheduled task isn't lost when the user closes the window mid-run.
-    private var pendingScheduledRunQueue: [UUID] = []
+    private var pendingScheduledRunQueue: [PendingScheduledRun] = []
 
     /// Loads the persisted pending-scheduled-run queue from disk. Set by the app layer
     /// at runtime construction; consulted inside `start()` so a fresh runtime inherits
     /// any deferred scheduled tasks from the previous session lifetime.
-    private var loadPendingScheduledRunQueue: (@Sendable () async -> [UUID])?
+    private var loadPendingScheduledRunQueue: (@Sendable () async -> [PendingScheduledRun])?
 
     /// Persists the pending-scheduled-run queue on every mutation. Wired by the app
     /// layer to `PersistenceManager.savePendingScheduledRunQueue`. Fire-and-forget;
     /// failures log to the app's logger but do not block the runtime.
-    private var persistPendingScheduledRunQueue: (@Sendable ([UUID]) async -> Void)?
+    private var persistPendingScheduledRunQueue: (@Sendable ([PendingScheduledRun]) async -> Void)?
 
     /// Loads the persisted notification delivery ledger from disk. Set by the app layer before
     /// `start()`; consulted once inside `ensureNotificationBroker` to seed the broker so a wake that
@@ -500,8 +500,8 @@ public actor OrchestrationRuntime {
     /// `PersistenceManager(sessionID:)` so the queue lives next to the channel log,
     /// scheduled wakes, and other per-session state.
     public func setPendingScheduledRunQueuePersistence(
-        load: @escaping @Sendable () async -> [UUID],
-        persist: @escaping @Sendable ([UUID]) async -> Void
+        load: @escaping @Sendable () async -> [PendingScheduledRun],
+        persist: @escaping @Sendable ([PendingScheduledRun]) async -> Void
     ) {
         loadPendingScheduledRunQueue = load
         persistPendingScheduledRunQueue = persist
@@ -766,49 +766,79 @@ public actor OrchestrationRuntime {
         await ensureWakeScheduler().restore(wakes)
     }
 
-    /// Routes an auto-run wake fire: start now if a worker slot is free, otherwise queue (never
-    /// evict a running task). A scheduled run is a commitment to the user, so both paths run
-    /// independently of the "Auto-run next task" setting.
+    /// Routes a fired auto-run wake. A scheduled run is a commitment to the user, so every path
+    /// here runs INDEPENDENTLY of the "Auto-run next task" setting.
     ///
-    /// **No task in flight** → `restartForNewTask` immediately, regardless of policy.
+    /// 1. **Resolve and prepare.** A task that is gone, or in a status no start path accepts, is
+    ///    `.refused` — reported to the channel AND to Smith, never dropped quietly.
+    /// 2. **Free worker slot** → enqueue on the durable queue and drain it, which starts the task.
+    /// 3. **At capacity** → enqueue and post the deferred banner. It starts when a slot frees.
     ///
-    /// **Task in flight, interrupt = true** → pause the running task, queue it for
-    /// resume AFTER the scheduled task, then drive `restartForNewTask` for the
-    /// scheduled task. When the scheduled task completes (`onTaskTerminated` →
-    /// `drainPendingScheduledRunQueue`), the paused task auto-resumes.
+    /// Both queue paths go through `pendingScheduledRunQueue` (enqueue → persist → drain) rather
+    /// than calling `restartForNewTask` directly, so the commitment survives a crash between the
+    /// wake settling and the worker spawning.
     ///
-    /// **Task in flight, interrupt = false** → enqueue the scheduled task. It runs as
-    /// soon as the current task finishes (via `drainPendingScheduledRunQueue`).
-    ///
-    /// Both queue-driven paths run INDEPENDENTLY of `autoAdvanceEnabled` — a scheduled
-    /// wake is a commitment to the user, not a deferred suggestion.
-    private func dispatchAutoRunWake(taskID: UUID) async {
+    /// (The former "task in flight, interrupt = true" path — pause the live task, run the scheduled
+    /// one, resume — is gone by design; capacity never evicts a live worker.)
+    private func dispatchAutoRunWake(taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome {
+        // `taskOrLibraryTemplate`, not `task(id:)`: a TEMPLATE lives in the GLOBAL library, not this
+        // session's store, and `schedule_task_action` promotes a task to a template whenever the
+        // schedule is recurring — so the per-session lookup returns nil for exactly the case this
+        // tool creates most often. (The drain used the per-session lookup and `continue`d on nil,
+        // which is the same silent drop, one door down.)
+        guard let scheduledTask = await taskStore.taskOrLibraryTemplate(id: taskID) else {
+            let reason = "task \(taskID.uuidString) no longer exists"
+            await reportScheduledRunRefused(taskID: taskID, title: nil, reason: reason)
+            return .refused(reason)
+        }
+
+        // Bring the task into a startable state FIRST, using the same acceptance `run_task` applies
+        // — which is the whole point, since this wake's own instruction text says "Call `run_task`".
+        // A `.failed` task is reset and a `.completed` one reopened, exactly as a manual retry would.
+        //
+        // Preparing HERE rather than at drain time is deliberate: the decision is made while the
+        // user is watching the timer fire, so an unstartable task is reported at the moment it
+        // disappoints rather than silently later, and the durable queue only ever holds work that
+        // was startable when it was accepted. (Durability itself comes from the persisted queue, not
+        // from the task's status — the cold-boot orphan backstop below is narrower than that, since
+        // it also requires a `scheduledRunAt`.)
+        //
+        // Templates are exempt at the CALL SITE (as in `RunTaskTool`): starting one clones a fresh
+        // instance downstream, and `prepareForRun` is a per-session method that cannot see a
+        // library-resident template at all.
+        if !scheduledTask.isTemplate,
+           case .refused(let reason) = await taskStore.prepareForRun(id: taskID) {
+            await reportScheduledRunRefused(taskID: taskID, title: scheduledTask.title, reason: reason)
+            return .refused(reason)
+        }
+
+        let entry = PendingScheduledRun(taskID: taskID, amendment: amendment)
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let inFlight = activeTasks.first {
-            $0.status == .starting || $0.status == .running || $0.status == .awaitingReview || $0.status == .awaitingHelp || $0.status == .validating
+            $0.id != taskID
+                && ($0.status == .starting || $0.status == .running || $0.status == .awaitingReview
+                    || $0.status == .awaitingHelp || $0.status == .validating)
         }
 
         // A free worker slot means the scheduled task can start right now, no interrupt
         // arbitration needed — other in-flight tasks keep running beside it. Route it through the
         // DURABLE queue (enqueue → persist → drain) rather than `restartForNewTask` directly, so the
-        // commitment survives a crash in the window between the notification settling `.acted` and
-        // the worker actually spawning. `drainPendingScheduledRunQueue` starts it immediately when a
-        // slot is free, and the atomic CAS in `performStartTaskWithLiveSmith` makes the enqueue-then-
-        // drain idempotent — no double-start. A crash after the persist re-drains the queue at boot
-        // (which runs independently of `autoAdvanceEnabled`), so an autoAdvance-off run isn't lost.
+        // commitment survives a crash in the window between the notification settling and the worker
+        // actually spawning. `drainPendingScheduledRunQueue` starts it immediately when a slot is
+        // free, and the atomic CAS in `performStartTaskWithLiveSmith` makes the enqueue-then-drain
+        // idempotent — no double-start. A crash after the persist re-drains the queue at boot (which
+        // runs independently of `autoAdvanceEnabled`), so an autoAdvance-off run isn't lost.
         guard supervisor.handles(role: .brown).count >= maxConcurrentWorkers, let blocker = inFlight else {
-            pendingScheduledRunQueue.append(taskID)
+            pendingScheduledRunQueue.append(entry)
             await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
             await drainPendingScheduledRunQueue()
-            return
+            return .placed
         }
-
-        guard let scheduledTask = await taskStore.task(id: taskID) else { return }
 
         // At capacity, ALWAYS queue — never evict. The former "make room" path (pause a running
         // task to run the scheduled one, resume it after) is gone by design: a scheduled run waits
         // its turn like any other queued work rather than interrupting live work.
-        pendingScheduledRunQueue.append(taskID)
+        pendingScheduledRunQueue.append(entry)
         await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
         await channel.post(ChannelMessage(
             sender: .system,
@@ -822,6 +852,41 @@ public actor OrchestrationRuntime {
                 "blockingTaskStatus": .string(blocker.status.rawValue)
             ]
         ))
+        return .placed
+    }
+
+    /// Announces a fired scheduled run that could NOT be placed — to the CHANNEL (so the user sees
+    /// it next to the `⏰ fired` row that promised it) and to SMITH (so the orchestrator knows the
+    /// commitment it made to the user went unmet and can say so).
+    ///
+    /// This exists because the drop used to be silent on every axis at once: the drain `continue`d
+    /// past an unstartable entry without a log line, the handler reported `.acted` regardless, and
+    /// the delivery ledger recorded the notification as DELIVERED. The transcript showed a timer
+    /// firing and then nothing, and Smith — asked later why the task never started — had no more
+    /// information than the user did.
+    private func reportScheduledRunRefused(taskID: UUID, title: String?, reason: String) async {
+        let name = title.map { "'\($0)'" } ?? "task \(taskID.uuidString)"
+        stopLogger.error("scheduled run refused for \(taskID.uuidString, privacy: .public): \(reason, privacy: .public)")
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Scheduled run for \(name) did NOT start — \(reason). The timer has fired and will not retry.",
+            metadata: [
+                "messageKind": .kind(.scheduledRunRefused),
+                "isError": .bool(true),
+                "scheduledTaskID": .string(taskID.uuidString),
+                "scheduledTaskTitle": .string(title ?? ""),
+                "refusalReason": .string(reason)
+            ],
+            taskID: taskID
+        ))
+        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
+            await smithAgent.appendUserMessage("""
+                [System: A scheduled run you set up has FIRED but did NOT start: \(name) (ID: \
+                \(taskID.uuidString)) — \(reason). The timer is spent and nothing will retry it. If the \
+                user is still expecting this work, say so plainly and start it yourself with `run_task` \
+                (which auto-resets failed tasks and reopens completed ones), or schedule a new timer.]
+                """)
+        }
     }
 
     // MARK: - Notification broker
@@ -843,7 +908,10 @@ public actor OrchestrationRuntime {
     private func ensureNotificationBroker() async -> NotificationBroker {
         if let notificationBroker { return notificationBroker }
         let adapter = ClosureNotificationRuntime(
-            autoRunTask: { [weak self] taskID in await self?.dispatchAutoRunWake(taskID: taskID) },
+            autoRunTask: { [weak self] taskID, amendment in
+                guard let self else { return .refused("the session is shutting down") }
+                return await self.dispatchAutoRunWake(taskID: taskID, amendment: amendment)
+            },
             setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) ?? false },
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
             postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
@@ -968,10 +1036,27 @@ public actor OrchestrationRuntime {
         while let next = pendingScheduledRunQueue.first {
             pendingScheduledRunQueue.removeFirst()
             await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
-            guard let task = await taskStore.task(id: next), task.status.isRunnable else {
+            // Library-aware, for the same reason as `dispatchAutoRunWake`: a recurring run's target
+            // is a template, and templates live in the GLOBAL library. The bare `task(id:)` this
+            // replaced returned nil for every one of them and `continue`d without a word.
+            guard let task = await taskStore.taskOrLibraryTemplate(id: next.taskID) else {
+                await reportScheduledRunRefused(
+                    taskID: next.taskID,
+                    title: nil,
+                    reason: "task \(next.taskID.uuidString) no longer exists"
+                )
                 continue
             }
-            restartForNewTask(taskID: next)
+            // Re-prepare rather than re-check: an entry queued while a slot was busy may have been
+            // failed or completed in the meantime, and this is the same acceptance a manual
+            // `run_task` would apply. The old bare `task.status.isRunnable` check here refused
+            // exactly those cases — and refused them SILENTLY, with a bare `continue`.
+            if !task.isTemplate,
+               case .refused(let reason) = await taskStore.prepareForRun(id: next.taskID) {
+                await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
+                continue
+            }
+            restartForNewTask(taskID: next.taskID, amendment: next.amendment)
             return true
         }
         return false
@@ -2403,7 +2488,7 @@ public actor OrchestrationRuntime {
         // `.pending` — and with auto-advance OFF, nothing starts it. Re-enqueue any promoted-pending
         // scheduled task (identified by a non-nil `scheduledRunAt`) not already queued, so the
         // scheduled-run drain — which runs INDEPENDENTLY of `autoAdvanceEnabled` — picks it up.
-        let alreadyQueued = Set(pendingScheduledRunQueue)
+        let alreadyQueued = Set(pendingScheduledRunQueue.map(\.taskID))
         let orphanedScheduledRuns = await taskStore.allTasks().filter {
             $0.disposition == .active
                 && $0.status == .pending
@@ -2412,7 +2497,11 @@ public actor OrchestrationRuntime {
                 && !alreadyQueued.contains($0.id)
         }
         if !orphanedScheduledRuns.isEmpty {
-            pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map(\.id))
+            // No amendment to recover: the backstop identifies these by task state alone, so a
+            // crash between the enqueue and the start still loses the run's refinements even though
+            // it no longer loses the run. Carrying the amendment in the QUEUE (which IS persisted)
+            // is what keeps that window down to a crash, rather than every deferred run.
+            pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map { PendingScheduledRun(taskID: $0.id) })
             await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
         }
 
@@ -3970,7 +4059,8 @@ public actor OrchestrationRuntime {
                     replacesID: request.replacesID,
                     recurrence: request.recurrence,
                     survivesTaskTermination: request.survivesTaskTermination,
-                    action: request.action
+                    action: request.action,
+                    extraInstructions: request.extraInstructions
                 )
             },
             listScheduledWakes: { [wakeScheduler] in

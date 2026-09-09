@@ -282,6 +282,13 @@ public actor NotificationBroker {
             switch try await handler.handle(notification, runtime: runtime) {
             case .acted:
                 await settle(id, .delivered(now))
+            case .refused(let reason):
+                // A legitimate "couldn't do it", not a bug: settle it so nothing retries a spent
+                // one-shot, but as DROPPED — recording a refused effect as `.delivered` is what let
+                // a silently-discarded scheduled run look like a success in the ledger. The runtime
+                // has already surfaced this to the user; log it for the audit trail.
+                Self.logger.error("Notification handler for '\(notification.payload.type, privacy: .public)' refused: \(reason, privacy: .public)")
+                await settle(id, .dropped(reason: .runtimeRefused))
             case .deliver(let text):
                 let kind = notification.recipient.kind
                 if let target = targets[kind] {

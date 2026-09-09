@@ -132,32 +132,30 @@ struct RunTaskTool: AgentTool {
             }
             task = restored
         }
-        // Allow pending/paused/interrupted directly. For failed, reset the task back to
-        // pending first so the retry runs on the same task ID (preserving history and prior
-        // context). Completed tasks get the same reopen-in-place treatment so the user's
-        // "redo that one" never silently turns into a new duplicate task.
-        // Templates never run or reset in place — starting one clones a fresh instance
-        // (handled downstream in restartForNewTask). Skip the reopen/reset entirely so
-        // the template's own state is left untouched.
-        if task.isTemplate {
-            // fall through to restart, which clones
-        } else if task.status == .failed {
-            _ = await context.taskStore.resetFailedTask(id: taskID)
-            guard let refreshed = await context.taskStore.task(id: taskID), refreshed.status.isRunnable else {
-                return .failure("Could not reset task '\(task.title)' for retry.")
+        // Bring the task into a startable state. `prepareForRun` is the SINGLE definition of which
+        // statuses can start and what it takes: pending/paused/interrupted go as-is, `.failed` is
+        // reset so the retry runs on the same task ID (preserving history and prior context), and
+        // `.completed` is reopened in place so "redo that one" never silently becomes a duplicate.
+        // Templates pass through untouched — starting one clones a fresh instance downstream.
+        //
+        // The scheduled-run drain asks the same method, which is the point: this policy used to be
+        // written here and NOWHERE else, so the timer path — whose own wake text says "Call
+        // `run_task`" — quietly refused statuses this tool accepts.
+        //
+        // Gated on `!isTemplate` at the CALL SITE, not just inside `prepareForRun`: a template may
+        // live in the GLOBAL library rather than this session's store (`taskOrLibraryTemplate`
+        // resolved it above), and asking a per-session method about it would refuse a template that
+        // runs perfectly well.
+        if !task.isTemplate {
+            if case .refused(let reason) = await context.taskStore.prepareForRun(id: taskID) {
+                return .failure("""
+                    Cannot run this task: \(reason). \
+                    Use list_tasks to check current statuses, or create_task if you need a new task.
+                    """)
             }
-            task = refreshed
-        } else if task.status == .completed {
-            _ = await context.taskStore.reopenCompletedTask(id: taskID)
-            guard let refreshed = await context.taskStore.task(id: taskID), refreshed.status.isRunnable else {
-                return .failure("Could not reopen completed task '\(task.title)'.")
+            if let refreshed = await context.taskStore.task(id: taskID) {
+                task = refreshed
             }
-            task = refreshed
-        } else if !task.status.isRunnable {
-            return .failure("""
-                Task '\(task.title)' has status '\(task.status.rawValue)' — run_task only works on pending, paused, interrupted, failed, or completed tasks. \
-                Use list_tasks to check current statuses, or create_task if you need a new task.
-                """)
         }
 
         // Capacity gate: each in-flight task (running/validating, plus awaitingReview —

@@ -947,6 +947,62 @@ public actor TaskStore {
         return true
     }
 
+    /// Whether a task can be brought into a startable state, after `prepareForRun` has tried.
+    public enum RunPreparation: Sendable, Equatable {
+        /// The task is startable now. A `.failed`/`.completed` task was reset/reopened in place.
+        case ready
+        /// The task cannot start. The text names the reason, phrased for whoever asked.
+        case refused(String)
+    }
+
+    /// Brings a task into a startable state, or says why it can't be — the SINGLE definition of
+    /// "which statuses can start a worker, and what it takes to start them."
+    ///
+    /// It exists because that policy used to be written twice, in two places that disagreed.
+    /// `RunTaskTool` accepted `.failed` (auto-reset) and `.completed` (reopen) on top of the
+    /// runnable three; the scheduled-run drain gated on bare `Status.isRunnable` and silently
+    /// `continue`d past everything else. So a wake whose own instruction text read "Call
+    /// `run_task` on <id>" was dispatched down a path STRICTER than the tool it named — a
+    /// scheduled retry of a failed task was discarded with no start, no log line, and no message
+    /// to anyone. Both callers ask this one method now, so the two cannot drift apart again.
+    ///
+    /// The reset/reopen happens INSIDE the store, atomically with the decision, so no caller can
+    /// read a status and then act on a stale answer. Neither reset destroys anything — both
+    /// preserve the prior result into history first.
+    ///
+    /// Templates answer `.ready` untouched: starting one clones a fresh instance downstream
+    /// (`restartForNewTask`), so the template's own state must not be reset or reopened.
+    ///
+    /// **This is a PER-SESSION method and callers must gate templates themselves.** A template can
+    /// live in the GLOBAL library rather than `tasks`, in which case this answers `.refused` (it
+    /// genuinely is not here) — correct for what it can see, wrong as a verdict on whether the task
+    /// can run. So every caller resolves via `taskOrLibraryTemplate` and skips this call for a
+    /// template; the `isTemplate` branch below covers only session-resident ones. Removing that
+    /// call-site gate would break every recurring `schedule_task_action(run)`, since scheduling a
+    /// recurrence PROMOTES the task to a template and promotion moves it into the library.
+    @discardableResult
+    public func prepareForRun(id: UUID) -> RunPreparation {
+        guard let task = tasks[id] else {
+            return .refused("task \(id.uuidString) is not in this session's active list")
+        }
+        if task.isTemplate { return .ready }
+        if task.status.isRunnable { return .ready }
+        switch task.status {
+        case .failed:
+            guard resetFailedTask(id: id), tasks[id]?.status.isRunnable == true else {
+                return .refused("failed task '\(task.title)' could not be reset for a retry")
+            }
+            return .ready
+        case .completed:
+            guard reopenCompletedTask(id: id), tasks[id]?.status.isRunnable == true else {
+                return .refused("completed task '\(task.title)' could not be reopened")
+            }
+            return .ready
+        default:
+            return .refused("task '\(task.title)' has status '\(task.status.rawValue)' — only pending, paused, interrupted, failed, or completed tasks can be started")
+        }
+    }
+
     /// Assigns an agent to a task.
     public func assignAgent(taskID: UUID, agentID: UUID) {
         guard var task = tasks[taskID] else { return }

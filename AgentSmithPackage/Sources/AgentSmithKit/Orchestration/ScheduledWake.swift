@@ -42,6 +42,17 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
     /// task action) and for a wake persisted before this field existed whose prose isn't run-shaped.
     public var action: TaskActionKind?
 
+    /// The scheduler's per-run refinements (`schedule_task_action`'s `extra_instructions`), kept
+    /// SEPARATE from the rendered `instructions` prose.
+    ///
+    /// `instructions` is a sentence composed for a reader — "Call `run_task` on <id> to start the
+    /// task "<title>"." with the extra text appended. Recovering the extra half by stripping that
+    /// prefix at fire time would be exactly the transcript-prose matching this codebase forbids, and
+    /// it would break the first time the imperative is reworded. So the structured half is stored
+    /// once, here, and the mechanical `run` dispatch applies it as the started task's amendment.
+    /// Nil when the schedule carried no refinements.
+    public var extraInstructions: String?
+
     /// Whether this wake performs the `run` task action against a task — the only action whose
     /// execution is fully mechanical (no LLM judgment), so the runtime drives it directly. Reads the
     /// STRUCTURED `action`, never the `instructions` prose. (Legacy wakes with no persisted action
@@ -57,7 +68,8 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         originalID: UUID? = nil,
         previousFireAt: Date? = nil,
         survivesTaskTermination: Bool = false,
-        action: TaskActionKind? = nil
+        action: TaskActionKind? = nil,
+        extraInstructions: String? = nil
     ) {
         self.id = id
         self.wakeAt = wakeAt
@@ -68,11 +80,12 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         self.previousFireAt = previousFireAt
         self.survivesTaskTermination = survivesTaskTermination
         self.action = action
+        self.extraInstructions = extraInstructions
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, wakeAt, instructions, taskID, recurrence, originalID, previousFireAt
-        case survivesTaskTermination, action, structuredDispatch
+        case survivesTaskTermination, action, structuredDispatch, extraInstructions
         case legacyReason = "reason"
     }
 
@@ -90,6 +103,7 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         self.recurrence = try c.decodeIfPresent(Recurrence.self, forKey: .recurrence)
         self.originalID = try c.decodeIfPresent(UUID.self, forKey: .originalID) ?? id
         self.previousFireAt = try c.decodeIfPresent(Date.self, forKey: .previousFireAt)
+        self.extraInstructions = try c.decodeIfPresent(String.self, forKey: .extraInstructions)
         let survivesWasPersisted = c.contains(.survivesTaskTermination)
         self.survivesTaskTermination = try c.decodeIfPresent(Bool.self, forKey: .survivesTaskTermination) ?? false
 
@@ -135,6 +149,7 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
         // Always stamp the marker so an absent key unambiguously flags a pre-migration record.
         try c.encode(true, forKey: .structuredDispatch)
         try c.encodeIfPresent(action, forKey: .action)
+        try c.encodeIfPresent(extraInstructions, forKey: .extraInstructions)
     }
 
     /// Recovers `action` for a wake persisted before the field existed. A FROZEN literal,
@@ -161,6 +176,9 @@ public struct WakeRequest: Sendable {
     /// Nil for a bare reminder. This is what lets the fired wake dispatch structurally, never by
     /// parsing `instructions`.
     public var action: TaskActionKind?
+    /// The per-run refinements to apply when the action executes — see
+    /// `ScheduledWake.extraInstructions`. Nil when the schedule carried none.
+    public var extraInstructions: String?
 
     public init(
         wakeAt: Date,
@@ -169,7 +187,8 @@ public struct WakeRequest: Sendable {
         replacesID: UUID? = nil,
         recurrence: Recurrence? = nil,
         survivesTaskTermination: Bool = false,
-        action: TaskActionKind? = nil
+        action: TaskActionKind? = nil,
+        extraInstructions: String? = nil
     ) {
         self.wakeAt = wakeAt
         self.instructions = instructions
@@ -178,6 +197,7 @@ public struct WakeRequest: Sendable {
         self.recurrence = recurrence
         self.survivesTaskTermination = survivesTaskTermination
         self.action = action
+        self.extraInstructions = extraInstructions
     }
 }
 
