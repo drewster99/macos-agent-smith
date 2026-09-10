@@ -426,6 +426,15 @@ public actor OrchestrationRuntime {
     /// "not busy" and double-dequeue — starting a task only for the second drain's
     /// restart to immediately tear it down (fresh-Opus review finding).
     private var isDrainingTaskQueues = false
+    /// Set when a drain was requested while another was already running.
+    ///
+    /// The reentrancy guard used to just DROP such a request, which was survivable while drains
+    /// were rare. Kicking one from every worker teardown made them frequent enough that a
+    /// legitimate request could be swallowed by an unrelated one already in flight — leaving a free
+    /// slot unfilled with nothing scheduled to notice. Measured: 1 failure in 10 runs of the
+    /// launch-resume suite. Same coalescing shape as `flushLedger`'s `ledgerDirty`: the in-flight
+    /// pass re-runs rather than the request being lost.
+    private var drainRequestedWhileBusy = false
 
     /// Tasks that were `.interrupted` when THIS session came up (Stop, app-quit, orphan
     /// recovery) and are waiting to auto-resume, oldest-first. The cold-launch path fills
@@ -1006,8 +1015,16 @@ public actor OrchestrationRuntime {
     /// never fires. Mirrors that callback's drain: a scheduled run claims the slot first, else the
     /// oldest pending task does. Non-private so the validation coordinator can call it.
     func advanceAfterFreedWorkerSlot() async {
-        let kicked = await drainPendingScheduledRunQueue()
-        if !kicked { await drainPendingTaskQueue() }
+        // Coalescing driver: re-runs while requests keep arriving, so a drain that arrived during
+        // this pass is serviced instead of dropped by the reentrancy guard. Bounded because each
+        // iteration either places work (consuming a queue entry) or finds nothing to place.
+        var iterations = 0
+        repeat {
+            drainRequestedWhileBusy = false
+            let kicked = await drainPendingScheduledRunQueue()
+            if !kicked { await drainPendingTaskQueue() }
+            iterations += 1
+        } while drainRequestedWhileBusy && iterations < 8
     }
 
     /// Drains the head of `pendingScheduledRunQueue` if no task is currently in flight.
@@ -1020,7 +1037,7 @@ public actor OrchestrationRuntime {
     @discardableResult
     private func drainPendingScheduledRunQueue() async -> Bool {
         guard !pendingScheduledRunQueue.isEmpty else { return false }
-        guard !isDrainingTaskQueues else { return false }
+        guard !isDrainingTaskQueues else { drainRequestedWhileBusy = true; return false }
         isDrainingTaskQueues = true
         defer { isDrainingTaskQueues = false }
         // Breaker gate: starting a task while the scoping backend is known-dead would just
@@ -1084,7 +1101,7 @@ public actor OrchestrationRuntime {
         // (autoRunInterruptedTasks) and pending auto-advance (autoAdvanceEnabled). Run if
         // either could place work.
         guard autoAdvanceEnabled || (autoRunInterruptedTasks && !launchResumeQueue.isEmpty) else { return }
-        guard !isDrainingTaskQueues else { return }
+        guard !isDrainingTaskQueues else { drainRequestedWhileBusy = true; return }
         isDrainingTaskQueues = true
         defer { isDrainingTaskQueues = false }
         // Breaker gate: without this, one spawn-failed task (marked .failed → terminated

@@ -28,57 +28,85 @@ actor SecurityBackendHealth {
     /// a probe on the full budget takes twelve minutes, so the breaker would spend far longer open
     /// than closed and could never notice a recovery promptly.
     static let probeAttemptBudget = 2
+    /// How long a probe may hold its exclusive slot before the breaker stops waiting for it.
+    ///
+    /// A SAFETY VALVE, not the mechanism. A probe normally reports back and releases its own slot;
+    /// this bounds the case where it never can — cancelled mid-flight when its worker is stopped,
+    /// or lost to a crash in the evaluator. Without it a boolean "probe in flight" is a permanent
+    /// wedge: every tool call in the app blocked forever, which is far worse than the overlapping
+    /// probes the flag exists to prevent. Generous, so an honest probe honoring a long
+    /// server-directed delay is not overtaken; the cost of expiry is one extra probe, not a wedge.
+    private static let probeLeaseSeconds: TimeInterval = 300
 
     private var consecutiveFailures = 0
     private var openedAt: Date?
-    /// Whether a half-open probe is currently in flight.
+    /// The token of the probe currently holding the exclusive slot, and when it took it.
     ///
-    /// Tracked explicitly because the cooldown timestamp alone cannot express it: admitting a probe
-    /// by resetting `openedAt` lets a SECOND caller through one cooldown later while the first is
-    /// still waiting out a long server-directed delay, so the "one probe" the breaker promises
-    /// becomes several concurrent calls against a backend already known to be down.
-    private var probeInFlight = false
+    /// A TOKEN rather than a bool because a bare flag has no owner: an evaluation that started
+    /// before the breaker opened, and fails while a probe is out, would clear a marker it never
+    /// set — admitting a second probe alongside the first.
+    private var probe: (token: Int, startedAt: Date)?
+    private var nextProbeToken = 1
+
+    /// Whether to skip the LLM entirely and block immediately, and if not, the probe token this
+    /// caller must report back with.
+    enum Admission: Sendable, Equatable {
+        /// Block now, with no LLM attempt.
+        case blocked
+        /// Proceed. `probeToken` is non-nil when this caller is the exclusive half-open probe and
+        /// must pass it to `recordReachable`/`recordUnreachable`.
+        case proceed(probeToken: Int?)
+    }
+
+    func admit(now: Date = Date()) -> Admission {
+        guard let openedAt else { return .proceed(probeToken: nil) }
+
+        // A probe holds the slot until it reports back or its lease lapses.
+        if let probe, now.timeIntervalSince(probe.startedAt) < Self.probeLeaseSeconds {
+            return .blocked
+        }
+
+        if now.timeIntervalSince(openedAt) >= Self.cooldownSeconds {
+            let token = nextProbeToken
+            nextProbeToken += 1
+            probe = (token: token, startedAt: now)
+            return .proceed(probeToken: token)
+        }
+        return .blocked
+    }
 
     /// Records that an evaluation ended with no verdict because the backend did not answer.
     ///
-    /// Takes `now` for the same reason `shouldShortCircuit` does: the two have to agree about the
-    /// clock, and an injected time on only one of them makes the pair untestable — a cooldown
-    /// opened from a real `Date()` and then queried at a synthetic one is simply a different
-    /// question. Defaults to now, so production callers are unaffected.
-    func recordUnreachable(now: Date = Date()) {
+    /// Takes `now` for the same reason `admit` does: the two have to agree about the clock, and an
+    /// injected time on only one of them makes the pair untestable.
+    func recordUnreachable(now: Date = Date(), probeToken: Int? = nil) {
         consecutiveFailures += 1
         // Restart the cooldown on EVERY failure, including a failed probe. Opening only when
-        // `openedAt` was nil left a failed probe's window still measured from when that probe was
-        // admitted — so the next probe went out immediately rather than a cooldown later.
+        // `openedAt` was nil left a failed probe's window measured from when that probe was
+        // admitted, so the next probe went out immediately rather than a cooldown later.
         if consecutiveFailures >= Self.failureThreshold {
             openedAt = now
         }
-        probeInFlight = false
+        releaseProbe(probeToken)
     }
 
     /// Records that the backend answered — whatever the verdict was. Closes the breaker.
-    func recordReachable() {
+    func recordReachable(probeToken: Int? = nil) {
         consecutiveFailures = 0
         openedAt = nil
-        probeInFlight = false
+        probe = nil
     }
 
-    /// Whether to skip the LLM entirely and block immediately.
-    ///
-    /// False once the cooldown lapses, which lets exactly one probe through on the reduced budget;
-    /// that probe then calls `recordReachable`/`recordUnreachable` and either closes the breaker or
-    /// restarts the cooldown.
-    func shouldShortCircuit(now: Date = Date()) -> Bool {
-        guard let openedAt else { return false }
-        // A probe is already out — everyone else keeps blocking until it reports back, however long
-        // it takes. Without this, a probe honoring a long `Retry-After` would let another caller
-        // through on the next cooldown tick while it was still sleeping.
-        if probeInFlight { return true }
-        if now.timeIntervalSince(openedAt) >= Self.cooldownSeconds {
-            probeInFlight = true     // half-open: this caller is THE probe
-            return false
-        }
-        return true
+    /// Releases a probe slot without recording a verdict either way — the evaluation was abandoned
+    /// (cancelled with its worker, say), which says nothing about whether the backend is healthy.
+    func abandonProbe(_ probeToken: Int?) {
+        releaseProbe(probeToken)
+    }
+
+    /// Only the probe that took the slot may release it.
+    private func releaseProbe(_ probeToken: Int?) {
+        guard let probeToken, probe?.token == probeToken else { return }
+        probe = nil
     }
 
     /// The transport budget the next evaluation may spend. Reduced while the backend is known to be
@@ -87,7 +115,7 @@ actor SecurityBackendHealth {
         consecutiveFailures > 0 ? Self.probeAttemptBudget : LLMRetryPolicy.maxAttempts
     }
 
-    /// Whether this is the first unreachable result of a streak — the edge the user-facing alarm
-    /// fires on, so an outage produces one row rather than one per blocked call.
+    /// Whether this is the first unreachable result of a streak — the edge a user-facing alarm
+    /// would fire on, so an outage produces one row rather than one per blocked call.
     func isFirstFailureOfStreak() -> Bool { consecutiveFailures == 1 }
 }

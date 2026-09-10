@@ -644,7 +644,14 @@ actor SecurityEvaluator {
         // Backend known down: block immediately rather than spend another full transport budget.
         // BELOW the auto-approve fast paths on purpose — those need no backend, so a pre-cleared
         // call must keep flying while the reviewer is unreachable.
-        if let backendHealth, await backendHealth.shouldShortCircuit() {
+        // `admit` hands back a probe token when this caller is the exclusive half-open probe; the
+        // token must travel to whichever recording call ends this evaluation, including the
+        // cancellation path, or the probe's slot is never released.
+        var probeToken: Int?
+        if let backendHealth {
+            switch await backendHealth.admit() {
+            case .proceed(let token): probeToken = token
+            case .blocked:
             let disposition = SecurityDisposition(
                 outcome: .reviewerUnavailable(.backendKnownDown),
                 message: "The Security Agent's model backend is not responding; recent evaluations all failed. Blocked without another attempt."
@@ -657,6 +664,7 @@ actor SecurityEvaluator {
                 response: "(no verdict)", disposition: disposition,
                 startTime: Date(), toolCallID: toolCallID ?? "")
             return disposition
+            }
         }
 
         // THE single registration of "the Security Agent is evaluating this call". Everything the
@@ -778,6 +786,11 @@ actor SecurityEvaluator {
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {
                 if Task.isCancelled {
+                    // Release the probe slot WITHOUT recording a verdict: a cancelled call says
+                    // nothing about whether the backend is healthy, and leaving the slot held would
+                    // wedge the breaker open — blocking every tool call in the app — until the
+                    // lease lapsed.
+                    await backendHealth?.abandonProbe(probeToken)
                     let disposition = SecurityDisposition(outcome: .reviewCancelled, message: "Evaluation cancelled")
                     recordEvaluation(toolName: toolName, toolParams: toolParams, taskTitle: taskTitle, prompt: evalPrompt, response: "(cancelled)", disposition: disposition, startTime: startTime)
                     return disposition
@@ -882,7 +895,7 @@ actor SecurityEvaluator {
 
             // The backend answered. Close the breaker here rather than at the verdict — reachability
             // is about the transport, and an unparseable answer is still an answer.
-            await backendHealth?.recordReachable()
+            await backendHealth?.recordReachable(probeToken: probeToken)
 
             if offerTools, !response.toolCalls.isEmpty {
                 continue
@@ -989,7 +1002,7 @@ actor SecurityEvaluator {
         // Only a TRANSPORT failure means the backend is down. An unparseable verdict means it
         // answered — wrong shape, but reachable — so it must not open the breaker.
         if transportFailures > 0 {
-            await backendHealth?.recordUnreachable()
+            await backendHealth?.recordUnreachable(probeToken: probeToken)
         }
         let fallback = SecurityDisposition(
             outcome: .reviewerUnavailable(unavailableReason),

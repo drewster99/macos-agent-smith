@@ -187,4 +187,57 @@ struct LLMRetryPolicyTests {
         #expect(elapsed >= patient.maxElapsedSeconds,
                 "the attempt cap fires before the window — the wall clock would be a dead constant")
     }
+
+    /// Patience must LATCH for the streak, not be re-decided per error.
+    ///
+    /// The natural rule — keep whichever budget has the larger `maxElapsedSeconds` — inverts once
+    /// `standardBudget` is `.infinity`: a single 503 landing between two silent 429s replaces the
+    /// patient budget and drops the ceiling from 300s back to 15s. Simulated below, that stops a
+    /// `429 → 503 → 429…` streak at about 690 s instead of the intended two hours — the exact
+    /// shortening this work exists to prevent. The two budgets do not order on any single field, so
+    /// "more patient" cannot be a comparison.
+    @Test("A 5xx in the middle of a throttle streak does not cancel patience")
+    func patienceLatchesAcrossAMixedStreak() {
+        func silent429() -> LLMRetryPolicy.Classification {
+            LLMRetryPolicy.classify(LLMProviderError.httpError(statusCode: 429, body: "{}", url: nil, retryAfter: nil))
+        }
+        func serverFault() -> LLMRetryPolicy.Classification {
+            LLMRetryPolicy.classify(LLMProviderError.httpError(statusCode: 503, body: "", url: nil, retryAfter: nil))
+        }
+
+        /// Mirrors `AgentActor`'s streak bookkeeping: initialise on the first error, then LATCH.
+        func endurance(of streak: [LLMRetryPolicy.Classification]) -> (elapsed: TimeInterval, ceiling: TimeInterval) {
+            var budget = LLMRetryPolicy.standardBudget
+            var elapsed: TimeInterval = 0
+            for (index, classification) in streak.enumerated() {
+                let attempt = index + 1
+                let errorBudget = LLMRetryPolicy.budget(for: classification, patient: true)
+                if attempt == 1 {
+                    budget = errorBudget
+                } else if errorBudget == LLMRetryPolicy.patientThrottleBudget {
+                    budget = errorBudget
+                }
+                if attempt >= budget.maxAttempts || elapsed >= budget.maxElapsedSeconds { break }
+                elapsed += LLMRetryPolicy.delay(attempt: attempt, retryAfter: nil, budget: budget)
+            }
+            return (elapsed, budget.maxBackoffSeconds)
+        }
+
+        let pure = endurance(of: Array(repeating: silent429(), count: 50))
+        #expect(pure.elapsed >= 7200, "a pure throttle streak must reach the two-hour window")
+        #expect(pure.ceiling == 300)
+
+        // One 5xx in the middle must not reset it to the 15 s curve.
+        var mixed = Array(repeating: silent429(), count: 50)
+        mixed[1] = serverFault()
+        let mixedResult = endurance(of: mixed)
+        #expect(mixedResult.ceiling == 300, "a single 503 dropped the ceiling back to 15 s")
+        #expect(mixedResult.elapsed >= 7200,
+                "stopped after \(Int(mixedResult.elapsed))s — patience was cancelled mid-streak")
+
+        // And a streak that OPENS with a 5xx still gains patience when a silent 429 arrives.
+        var leading5xx = Array(repeating: silent429(), count: 50)
+        leading5xx[0] = serverFault()
+        #expect(endurance(of: leading5xx).elapsed >= 7200)
+    }
 }

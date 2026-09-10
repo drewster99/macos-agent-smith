@@ -1660,11 +1660,22 @@ public actor AgentActor {
                 // the agent's whole lifetime, so a window pinned there would expire on the first
                 // error. It only ever WIDENS within a streak, so a 5xx landing mid-quota-wait can't
                 // swap in the shorter budget and abort a wait that was going to succeed.
+                // Patience LATCHES for the streak: once any error in it was a silent 429, the
+                // streak keeps the patient budget even if a 5xx lands in the middle.
+                //
+                // The obvious rule — keep whichever budget has the larger `maxElapsedSeconds` —
+                // inverted the moment `standardBudget` became `.infinity`, because infinity beats
+                // 7200. A single 503 then replaced the patient budget AND dropped the ceiling from
+                // 300s back to 15s, so `429 → 503 → 429 …` stopped at ~690s: exactly the
+                // shortening this work exists to prevent. The two budgets do not order on any one
+                // field (standard endures unboundedly but asks every 15s; patient asks every 300s
+                // but stops at 2h), so "more patient" cannot be a comparison — it is a property of
+                // the streak.
                 let errorBudget = LLMRetryPolicy.budget(for: classification, patient: true)
                 if consecutiveErrors == 1 {
                     retryWindowStartedAt = Date()
                     retryWindowBudget = errorBudget
-                } else if errorBudget.maxElapsedSeconds > retryWindowBudget.maxElapsedSeconds {
+                } else if errorBudget == LLMRetryPolicy.patientThrottleBudget {
                     retryWindowBudget = errorBudget
                 }
                 let retryWindowElapsed = Date().timeIntervalSince(retryWindowStartedAt ?? Date())
