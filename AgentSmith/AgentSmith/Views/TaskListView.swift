@@ -59,10 +59,11 @@ struct TaskListView: View {
 
                     LibrarySectionView(viewModel: viewModel)
 
-                    bucketButtons(activeCount: viewModel.activeTaskList.count,
-                                  archivedCount: archivedTasks.count,
-                                  deletedTaskCount: deletedTaskCount,
-                                  deletedTemplateCount: deletedTemplateCount)
+                    TaskBucketButtons(activeCount: viewModel.activeTaskList.count,
+                                      archivedCount: archivedTasks.count,
+                                      deletedTaskCount: deletedTaskCount,
+                                      deletedTemplateCount: deletedTemplateCount,
+                                      onSelect: { browserScope = $0 })
                 }
             }
         }
@@ -77,31 +78,50 @@ struct TaskListView: View {
         }
     }
 
-    /// Footer buttons that open a browser pane for a bucket, replacing the old in-place expansion.
-    /// "All" reaches every active task in this session (useful once the sidebar caps its live list).
-    @ViewBuilder
-    private func bucketButtons(activeCount: Int, archivedCount: Int, deletedTaskCount: Int, deletedTemplateCount: Int) -> some View {
+}
+
+/// Footer buttons that open a browser pane for a bucket, replacing the old in-place expansion.
+/// "All" reaches every active task in this session (useful once the sidebar caps its live list).
+private struct TaskBucketButtons: View {
+    let activeCount: Int
+    let archivedCount: Int
+    let deletedTaskCount: Int
+    let deletedTemplateCount: Int
+    let onSelect: (TaskBrowserScope) -> Void
+
+    var body: some View {
         if activeCount > 0 || archivedCount > 0 || deletedTaskCount > 0 || deletedTemplateCount > 0 {
             HStack(spacing: 16) {
                 if activeCount > 0 {
-                    bucketButton("All", systemImage: "square.stack.3d.up") { browserScope = .allSession }
+                    TaskBucketButton(title: "All", systemImage: "square.stack.3d.up",
+                                     action: { onSelect(.allSession) })
                 }
                 if archivedCount > 0 {
-                    bucketButton("Archived (\(archivedCount))", systemImage: "archivebox") { browserScope = .archived }
+                    TaskBucketButton(title: "Archived (\(archivedCount))", systemImage: "archivebox",
+                                     action: { onSelect(.archived) })
                 }
                 if deletedTaskCount > 0 {
-                    bucketButton("Deleted (\(deletedTaskCount))", systemImage: "trash") { browserScope = .deleted }
+                    TaskBucketButton(title: "Deleted (\(deletedTaskCount))", systemImage: "trash",
+                                     action: { onSelect(.deleted) })
                 }
                 if deletedTemplateCount > 0 {
-                    bucketButton("Deleted Templates (\(deletedTemplateCount))", systemImage: "trash.square") { browserScope = .deletedTemplates }
+                    TaskBucketButton(title: "Deleted Templates (\(deletedTemplateCount))",
+                                     systemImage: "trash.square",
+                                     action: { onSelect(.deletedTemplates) })
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
     }
+}
 
-    private func bucketButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+private struct TaskBucketButton: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
         Button(action: action, label: {
             Label(title, systemImage: systemImage)
                 .font(.caption)
@@ -261,11 +281,11 @@ private struct TaskFamilyRows: View {
             if hasChildren {
                 // Live runs first and unconditionally; history below, only when expanded.
                 ForEach(liveChildren) { child in
-                    childRow(child)
+                    TaskFamilyChildRow(task: child, style: style, viewModel: viewModel)
                 }
                 if !isCollapsed {
                     ForEach(finishedChildren) { child in
-                        childRow(child)
+                        TaskFamilyChildRow(task: child, style: style, viewModel: viewModel)
                     }
                 }
                 // The child block carries no internal rules, so this is what closes it off
@@ -277,15 +297,22 @@ private struct TaskFamilyRows: View {
         }
     }
 
-    /// Child runs are indented and tinted as a block. There's deliberately no connector rail:
-    /// drawn per row it broke into dashes at every row's vertical padding, and the indent plus
-    /// the shared background already say "these belong to the task above".
-    ///
-    /// The indent is handed to the row rather than applied here as padding: padding outside
-    /// `TaskListRow` sits outside the row's own Button and `.contextMenu`, which made the
-    /// indent strip a dead zone that swallowed both left- and right-clicks even though it
-    /// looks like part of the row.
-    private func childRow(_ task: AgentTask) -> some View {
+}
+
+/// Child runs are indented and tinted as a block. There's deliberately no connector rail:
+/// drawn per row it broke into dashes at every row's vertical padding, and the indent plus
+/// the shared background already say "these belong to the task above".
+///
+/// The indent is handed to the row rather than applied here as padding: padding outside
+/// `TaskListRow` sits outside the row's own Button and `.contextMenu`, which made the
+/// indent strip a dead zone that swallowed both left- and right-clicks even though it
+/// looks like part of the row.
+private struct TaskFamilyChildRow: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let viewModel: AppViewModel
+
+    var body: some View {
         TaskListRow(task: task, style: style, density: .compact, indent: 16, viewModel: viewModel)
             .frame(maxWidth: .infinity)
             .background(AppColors.subtleRowBackground.opacity(0.35))
@@ -727,11 +754,25 @@ struct TaskFamilySummary {
     }
 }
 
+/// Total attachments referenced anywhere on a task — description, every update, and the result.
+/// Used by the sidebar pip to indicate "this task carries files."
+private func taskAttachmentCount(_ task: AgentTask) -> Int {
+    task.descriptionAttachments.count
+        + task.updates.reduce(0) { $0 + $1.attachments.count }
+        + task.resultAttachments.count
+}
+
 /// Single row layout shared by all three buckets. The `style` argument drives the small
 /// presentational deltas (icon opacity, line limits, strikethrough, etc.) so we don't
 /// duplicate the layout three times. With `AgentTask: Equatable`, SwiftUI's per-input
 /// diff at the ForEach boundary skips unchanged rows when only one task in the array
 /// mutates.
+///
+/// This is the sidebar's hot path — every visible row re-evaluates when any task in the list
+/// mutates — so the three layouts and their pieces are real `View` structs rather than
+/// `@ViewBuilder` branches of one body. As one body they shared a single view identity, so the
+/// running layout's builder re-ran whenever a compact row's timestamp moved, and every leaf's
+/// observable reads were registered against the whole row. Split, each piece invalidates alone.
 private struct TaskRow: View {
     let task: AgentTask
     let style: TaskRowStyle
@@ -741,49 +782,53 @@ private struct TaskRow: View {
     let viewModel: AppViewModel
     let onStartRunnableTask: (AgentTask) -> Void
 
-    @Environment(\.openWindow) private var openWindow
-
     var body: some View {
-        // Resolve the run list ONCE per body pass and thread it into both the layout and the
-        // summary. `childTasks(of:)` scans the active + archived lists, so the earlier
-        // per-piece re-derivation cost a standard row a few full scans on every redraw.
-        let runs = childRuns
         Group {
             if style == .active && task.status.isInProgress {
-                runningLayout()
+                TaskRowRunningLayout(task: task, style: style, density: density, viewModel: viewModel)
             } else {
                 switch density {
-                case .standard: standardLayout(runs: runs)
-                case .compact: compactLayout()
+                case .standard:
+                    TaskRowStandardLayout(
+                        task: task,
+                        style: style,
+                        density: density,
+                        disclosure: disclosure,
+                        viewModel: viewModel,
+                        onStartRunnableTask: onStartRunnableTask
+                    )
+                case .compact:
+                    TaskRowCompactLayout(
+                        task: task,
+                        style: style,
+                        density: density,
+                        indent: indent,
+                        viewModel: viewModel,
+                        onStartRunnableTask: onStartRunnableTask
+                    )
                 }
             }
         }
         .contentShape(Rectangle())
     }
+}
 
-    /// Runs spawned by this task, across active and archived.
-    ///
-    /// Gated on the task being able to HAVE runs, not on its density. It used to key on
-    /// `density == .standard`, which was a safe proxy only while runs rendered compact — promoting
-    /// them to standard rows turned this into a full scan of the active + archived lists (546 tasks
-    /// here) for every run in the sidebar, on every redraw. A run has a `parentTaskID` and never
-    /// spawns anything, so it can answer without scanning at all.
-    private var childRuns: [AgentTask] {
-        guard density == .standard, task.parentTaskID == nil else { return [] }
-        return viewModel.childTasks(of: task.id)
-    }
+// MARK: - Row layouts
 
-    // MARK: Layouts
+/// Two-line layout for an IN-FLIGHT task: line 1 is icon + center-truncated title + the full,
+/// live-ticking elapsed; line 2 is cost + a strip of step-status glyphs (the row's to-do list at a
+/// glance). Pause/Stop live in the context menu — this row's job is progress, not controls.
+private struct TaskRowRunningLayout: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
 
-    /// Two-line layout for an IN-FLIGHT task: line 1 is icon + center-truncated title + the full,
-    /// live-ticking elapsed; line 2 is cost + a strip of step-status glyphs (the row's to-do list at a
-    /// glance). Pause/Stop live in the context menu — this row's job is progress, not controls.
-    @ViewBuilder
-    private func runningLayout() -> some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                leadingStatusOrOutcome()
-                titleText()
+                TaskRowLeadingBadge(task: task, style: style, density: density, viewModel: viewModel)
+                TaskRowTitleText(title: task.title, style: style, density: density)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 // A run now renders exactly like a standalone task, so this is the only thing left
                 // saying it came from a template. Glyph rather than text: it must not compete with
@@ -800,68 +845,48 @@ private struct TaskRow: View {
             HStack(spacing: 6) {
                 TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
                 Spacer(minLength: 4)
-                stepGlyphStrip()
+                TaskStepGlyphStrip(steps: task.steps)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
     }
+}
 
-    /// A compact strip of the ACTIVE steps' status glyphs; overflow past a cap collapses to "+N".
-    @ViewBuilder
-    private func stepGlyphStrip() -> some View {
-        let activeSteps = task.steps.filter(\.isActive)
-        let cap = 8
-        HStack(spacing: 2) {
-            ForEach(Array(activeSteps.prefix(cap)), id: \.id) { step in
-                Image(systemName: Self.stepSymbol(step.status))
-                    .foregroundStyle(Self.stepColor(step.status))
-                    .imageScale(.small)
-            }
-            if activeSteps.count > cap {
-                Text("+\(activeSteps.count - cap)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .fixedSize()
-    }
+private struct TaskRowStandardLayout: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let disclosure: TaskRunListDisclosure?
+    let viewModel: AppViewModel
+    let onStartRunnableTask: (AgentTask) -> Void
 
-    /// Step-status glyph + color, mirroring `TaskOverlayBar` so the sidebar and overlay read the same.
-    private static func stepSymbol(_ status: TaskStep.Status) -> String {
-        switch status {
-        case .pending: return "circle"
-        case .inProgress: return "circle.lefthalf.filled"
-        case .completed: return "checkmark.circle.fill"
-        case .skipped: return "arrow.uturn.right.circle"
-        case .removed: return "trash.circle"
-        }
-    }
-    private static func stepColor(_ status: TaskStep.Status) -> Color {
-        switch status {
-        case .pending: return .secondary
-        case .inProgress: return AppColors.stepInProgress
-        case .completed: return AppColors.stepCompleted
-        case .skipped: return AppColors.stepSkipped
-        case .removed: return AppColors.stepRemoved
-        }
-    }
-
-    @ViewBuilder
-    private func standardLayout(runs: [AgentTask]) -> some View {
+    var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            leadingStatusOrOutcome()
+            TaskRowLeadingBadge(task: task, style: style, density: density, viewModel: viewModel)
 
             VStack(alignment: .leading, spacing: 3) {
-                titleRow()
+                TaskRowTitleRow(
+                    task: task,
+                    style: style,
+                    density: density,
+                    viewModel: viewModel,
+                    onStartRunnableTask: onStartRunnableTask
+                )
 
                 // Description line dropped — the truncated preview was essentially never useful; the
                 // full description lives in Task Detail. Active/archived rows keep the metadata strip +
                 // family summary (which carries the run-list expand/collapse control); a recently-
                 // deleted row is just its struck-through title.
                 if style != .recentlyDeleted {
-                    metadataLine()
-                    TaskFamilySummaryLine(runs: runs, style: style, disclosure: disclosure, viewModel: viewModel)
+                    TaskRowMetadataLine(task: task, style: style, density: density, viewModel: viewModel)
+                    TaskFamilySummaryLine(
+                        taskID: task.id,
+                        isRun: task.parentTaskID != nil,
+                        style: style,
+                        disclosure: disclosure,
+                        viewModel: viewModel
+                    )
                 }
             }
 
@@ -872,31 +897,45 @@ private struct TaskRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }
+}
 
-    /// One line: icon, title, then the run-specific numbers right-aligned. The trailing
-    /// group is `fixedSize` + higher layout priority so the title — the only part that can
-    /// be truncated without losing information the row exists to convey — absorbs the
-    /// squeeze in a narrow sidebar.
-    @ViewBuilder
-    private func compactLayout() -> some View {
+/// One line: icon, title, then the run-specific numbers right-aligned. The trailing
+/// group is `fixedSize` + higher layout priority so the title — the only part that can
+/// be truncated without losing information the row exists to convey — absorbs the
+/// squeeze in a narrow sidebar.
+private struct TaskRowCompactLayout: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let indent: CGFloat
+    let viewModel: AppViewModel
+    let onStartRunnableTask: (AgentTask) -> Void
+
+    var body: some View {
         HStack(spacing: 6) {
-            leadingStatusOrOutcome()
+            TaskRowLeadingBadge(task: task, style: style, density: density, viewModel: viewModel)
 
-            titleText()
+            TaskRowTitleText(title: task.title, style: style, density: density)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            compactMetadata()
-                // layoutPriority WITHOUT fixedSize: the metadata still claims its space before the
-                // title (so the title truncates first, which is what you want), but it can now give
-                // way under real pressure instead of refusing outright.
-                //
-                // `.fixedSize()` here was the horizontal-overflow bug. The chips' own minimums —
-                // cost 40 + elapsed 54 + time 88 + 18 of spacing = 200pt — plus the status icon,
-                // the title's ellipsis and the row spacing put this row's floor at ~250pt, which is
-                // the sidebar column's ENTIRE minimum. fixedSize made that floor absolute, so the
-                // row drew outside its column and was clipped at the window edge: the task list
-                // chopped down its left side, with no window width that fixed it.
-                .layoutPriority(1)
+            TaskRowCompactMetadata(
+                task: task,
+                style: style,
+                density: density,
+                viewModel: viewModel,
+                onStartRunnableTask: onStartRunnableTask
+            )
+            // layoutPriority WITHOUT fixedSize: the metadata still claims its space before the
+            // title (so the title truncates first, which is what you want), but it can now give
+            // way under real pressure instead of refusing outright.
+            //
+            // `.fixedSize()` here was the horizontal-overflow bug. The chips' own minimums —
+            // cost 40 + elapsed 54 + time 88 + 18 of spacing = 200pt — plus the status icon,
+            // the title's ellipsis and the row spacing put this row's floor at ~250pt, which is
+            // the sidebar column's ENTIRE minimum. fixedSize made that floor absolute, so the
+            // row drew outside its column and was clipped at the window edge: the task list
+            // chopped down its left side, with no window width that fixed it.
+            .layoutPriority(1)
         }
         .padding(.leading, 10 + indent)
         .padding(.trailing, 10)
@@ -910,51 +949,62 @@ private struct TaskRow: View {
     private var finishedRunOpacity: Double {
         style == .active && task.status.isTerminal ? 0.6 : 1
     }
+}
 
-    /// Cost, elapsed, and time — the fields that differ between two runs of the same template,
-    /// each in a right-aligned column of fixed minimum width so the numbers line up down a
-    /// stack of runs and can be compared by eye. `minWidth` rather than a hard width: an
-    /// unusually long value (a multi-hour run, a "Next: …" schedule pill) pushes its
-    /// neighbours left on that one row instead of being clipped.
-    ///
-    /// Anything variable-width — the attachment pip, the running controls — sits ahead of the
-    /// columns, where it can't knock them out of alignment.
-    @ViewBuilder
-    private func compactMetadata() -> some View {
+// MARK: - Row pieces
+
+/// Cost, elapsed, and time — the fields that differ between two runs of the same template,
+/// each in a right-aligned column of fixed minimum width so the numbers line up down a
+/// stack of runs and can be compared by eye. `minWidth` rather than a hard width: an
+/// unusually long value (a multi-hour run, a "Next: …" schedule pill) pushes its
+/// neighbours left on that one row instead of being clipped.
+///
+/// Anything variable-width — the attachment pip, the running controls — sits ahead of the
+/// columns, where it can't knock them out of alignment.
+private struct TaskRowCompactMetadata: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
+    let onStartRunnableTask: (AgentTask) -> Void
+
+    var body: some View {
+        let attachments = taskAttachmentCount(task)
         HStack(spacing: 6) {
-            if attachmentCount > 0 {
-                attachmentPip()
+            if attachments > 0 {
+                TaskAttachmentPip(count: attachments)
             }
 
             if style == .active && (task.status == .running || task.status == .validating) {
-                runningInlineControls()
+                TaskRunningInlineControls(taskID: task.id, viewModel: viewModel)
             } else if style == .active && task.status.isRunnable {
-                runInlineControl()
+                TaskRunInlineControl(
+                    help: runActionTitle(for: task.status),
+                    action: { onStartRunnableTask(task) }
+                )
             }
 
             // minWidth is kept: it is what lines these three up as columns across rows. Without
             // `.fixedSize()` above them their 182pt total is the row's floor rather than an
             // absolute, which lands the row just inside the 250pt column instead of outside it.
+            // Each frame stays OUTSIDE its chip so an empty chip still reserves its column.
             TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
                 .frame(minWidth: 40, alignment: .trailing)
-            compactElapsedText()
+            TaskElapsedText(completedAt: task.completedAt, elapsedDisplay: task.elapsedDisplayString)
                 .frame(minWidth: 54, alignment: .trailing)
-            compactTimeLabel()
+            TaskCompactTimeLabel(task: task, style: style, density: density, viewModel: viewModel)
                 .frame(minWidth: 88, alignment: .trailing)
         }
     }
+}
 
-    @ViewBuilder
-    private func compactElapsedText() -> some View {
-        if task.completedAt != nil, let elapsed = task.elapsedDisplayString {
-            Text(elapsed)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-        }
-    }
+private struct TaskCompactTimeLabel: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
 
-    @ViewBuilder
-    private func compactTimeLabel() -> some View {
+    var body: some View {
         switch style {
         case .active:
             ScheduledRunsIndicator(task: task, density: density, viewModel: viewModel)
@@ -966,176 +1016,25 @@ private struct TaskRow: View {
                 .foregroundStyle(.quaternary)
         }
     }
+}
 
-    // MARK: Pieces
+/// Metadata strip rendered below the title: cost (left, orange) and the style-specific
+/// status / timestamp (right). Visible on `.active` and `.archived` rows; `.recentlyDeleted`
+/// rows skip this entirely.
+private struct TaskRowMetadataLine: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
 
-    /// The row's single verdict slot: a task's RESULT when it has one, its lifecycle STATUS
-    /// otherwise. The two never appear together — a graded result only exists for a task that
-    /// already reached a judged endpoint, so pairing it with a status icon states the same
-    /// fact twice and costs a row the width to say something new. Same chip the task detail
-    /// window uses for its Result line, so the two surfaces read identically.
-    @ViewBuilder
-    private func leadingStatusOrOutcome() -> some View {
-        // A template never runs, so its status is permanently `.pending` and the icon was a hollow
-        // circle on every row — a lifecycle glyph for something with no lifecycle. The "Template"
-        // chip on the trailing edge already says what the row is.
-        if task.isTemplate {
-            EmptyView()
-        } else if let outcome = task.outcome {
-            TaskOutcomeChip(outcome: outcome)
-                .opacity(style == .active ? 1 : 0.55)
-                .layoutPriority(1)
-                .padding(.top, density == .standard ? 1 : 0)
-        } else {
-            TaskRowStatusIcon(taskID: task.id, status: task.status, style: style, density: density, viewModel: viewModel)
-        }
-    }
-
-    @ViewBuilder
-    private func titleRow() -> some View {
-        HStack(spacing: 6) {
-            titleText()
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            if task.isTemplate {
-                templatePip()
-            }
-
-            if attachmentCount > 0 {
-                attachmentPip()
-            }
-
-            if style == .active && (task.status == .running || task.status == .validating) {
-                runningInlineControls()
-            } else if style == .active && task.status.isRunnable {
-                runInlineControl()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func runInlineControl() -> some View {
-        Button(action: { onStartRunnableTask(task) }, label: {
-            Image(systemName: "play.fill")
-                .imageScale(.small)
-                .foregroundStyle(.secondary)
-        })
-        .buttonStyle(.plain)
-        .help(runActionTitle(for: task.status))
-    }
-
-    /// Total attachments referenced anywhere on the task — description, every update,
-    /// and the result. Used by the sidebar pip to indicate "this task carries files."
-    private var attachmentCount: Int {
-        task.descriptionAttachments.count
-            + task.updates.reduce(0) { $0 + $1.attachments.count }
-            + task.resultAttachments.count
-    }
-
-    @ViewBuilder
-    private func templatePip() -> some View {
-        HStack(spacing: 2) {
-            Image(systemName: "doc.on.doc")
-                .imageScale(.small)
-            Text("Template")
-                .font(.caption2)
-        }
-        .foregroundStyle(.tertiary)
-        .help("Template — starting it clones a fresh instance to run")
-    }
-
-    @ViewBuilder
-    private func attachmentPip() -> some View {
-        HStack(spacing: 2) {
-            Image(systemName: "paperclip")
-                .imageScale(.small)
-            Text("\(attachmentCount)")
-                .font(.caption2.monospacedDigit())
-        }
-        .foregroundStyle(.secondary)
-        .help("\(attachmentCount) attachment\(attachmentCount == 1 ? "" : "s")")
-    }
-
-    @ViewBuilder
-    private func titleText() -> some View {
-        let isCompact = density == .compact
-        let font = isCompact ? AppFonts.taskTitleCompact : AppFonts.taskTitle
-        switch style {
-        case .active:
-            Text(task.title)
-                .font(font)
-                .lineLimit(isCompact ? 1 : 2)
-                .truncationMode(compactTruncation)
-        case .archived:
-            Text(task.title)
-                .font(font)
-                .lineLimit(isCompact ? 1 : 2)
-                .truncationMode(compactTruncation)
-                .foregroundStyle(.secondary)
-        case .recentlyDeleted:
-            Text(task.title)
-                .font(font)
-                .lineLimit(1)
-                .truncationMode(compactTruncation)
-                .foregroundStyle(.tertiary)
-                .strikethrough(true, color: .secondary)
-        }
-    }
-
-    /// Runs of the same template share a long common prefix ("Monitor iMessages for commands
-    /// from …"), so tail truncation clips away the only part that ever differs. Middle
-    /// truncation keeps both ends and drops the boilerplate in between.
-    private var compactTruncation: Text.TruncationMode {
-        // Center-truncate task titles everywhere: runs of a template share a long common prefix, and
-        // the distinguishing text is at both ends, so middle truncation preserves what identifies them.
-        .middle
-    }
-
-    @ViewBuilder
-    private func runningInlineControls() -> some View {
-        HStack(spacing: 6) {
-            Button(action: {
-                let slug = task.id.uuidString.prefix(8)
-                stopLogger.notice("UI.taskCard inline Pause clicked task=\(slug, privacy: .public)")
-                Task {
-                    stopLogger.notice("UI.taskCard inline Pause Task body running task=\(slug, privacy: .public)")
-                    await viewModel.pauseTask(id: task.id)
-                    stopLogger.notice("UI.taskCard inline Pause Task body returned task=\(slug, privacy: .public)")
-                }
-            }, label: {
-                Image(systemName: "pause.fill")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-            })
-            .buttonStyle(.plain)
-            .help("Pause")
-
-            Button(action: {
-                let slug = task.id.uuidString.prefix(8)
-                stopLogger.notice("UI.taskCard inline Stop clicked task=\(slug, privacy: .public)")
-                Task {
-                    stopLogger.notice("UI.taskCard inline Stop Task body running task=\(slug, privacy: .public)")
-                    await viewModel.stopTask(id: task.id)
-                    stopLogger.notice("UI.taskCard inline Stop Task body returned task=\(slug, privacy: .public)")
-                }
-            }, label: {
-                Image(systemName: "stop.fill")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-            })
-            .buttonStyle(.plain)
-            .help("Stop")
-        }
-    }
-
-    /// Metadata strip rendered below the description: cost (left, orange) and
-    /// the style-specific status / timestamp (right). Visible on `.active` and
-    /// `.archived` rows; `.recentlyDeleted` rows skip this entirely.
-    @ViewBuilder
-    private func metadataLine() -> some View {
+    var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
-            elapsedChip()
+            // Applied here rather than inside the chip: the HStack has to see the negative
+            // priority to know this is what gives way first.
+            TaskElapsedText(completedAt: task.completedAt, elapsedDisplay: task.elapsedDisplayString)
+                .lineLimit(1)
+                .layoutPriority(-1)
 
             Spacer(minLength: 0)
 
@@ -1154,22 +1053,271 @@ private struct TaskRow: View {
             }
         }
     }
+}
 
-    /// Final elapsed runtime, shown just right of cost. Tertiary so cost (orange) stays the
-    /// primary left-edge signal while elapsed rides along as glanceable context. Only for
-    /// FINISHED tasks (`completedAt` set) — a still-running task's elapsed would be frozen at
-    /// last redraw rather than ticking, so we don't pretend the row is a live stopwatch.
-    @ViewBuilder
-    private func elapsedChip() -> some View {
-        if task.completedAt != nil, let elapsed = task.elapsedDisplayString {
-            Text(elapsed)
+/// The row's single verdict slot: a task's RESULT when it has one, its lifecycle STATUS
+/// otherwise. The two never appear together — a graded result only exists for a task that
+/// already reached a judged endpoint, so pairing it with a status icon states the same
+/// fact twice and costs a row the width to say something new. Same chip the task detail
+/// window uses for its Result line, so the two surfaces read identically.
+private struct TaskRowLeadingBadge: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
+
+    var body: some View {
+        // A template never runs, so its status is permanently `.pending` and the icon was a hollow
+        // circle on every row — a lifecycle glyph for something with no lifecycle. The "Template"
+        // chip on the trailing edge already says what the row is.
+        if task.isTemplate {
+            EmptyView()
+        } else if let outcome = task.outcome {
+            TaskOutcomeChip(outcome: outcome)
+                .opacity(style == .active ? 1 : 0.55)
+                .layoutPriority(1)
+                .padding(.top, density == .standard ? 1 : 0)
+        } else {
+            TaskRowStatusIcon(
+                taskID: task.id,
+                status: task.status,
+                style: style,
+                density: density,
+                viewModel: viewModel
+            )
+        }
+    }
+}
+
+private struct TaskRowTitleRow: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
+    let onStartRunnableTask: (AgentTask) -> Void
+
+    var body: some View {
+        let attachments = taskAttachmentCount(task)
+        HStack(spacing: 6) {
+            TaskRowTitleText(title: task.title, style: style, density: density)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if task.isTemplate {
+                TaskTemplatePip()
+            }
+
+            if attachments > 0 {
+                TaskAttachmentPip(count: attachments)
+            }
+
+            if style == .active && (task.status == .running || task.status == .validating) {
+                TaskRunningInlineControls(taskID: task.id, viewModel: viewModel)
+            } else if style == .active && task.status.isRunnable {
+                TaskRunInlineControl(
+                    help: runActionTitle(for: task.status),
+                    action: { onStartRunnableTask(task) }
+                )
+            }
+        }
+    }
+}
+
+/// The row's title.
+///
+/// Runs of the same template share a long common prefix ("Monitor iMessages for commands
+/// from …"), so tail truncation clips away the only part that ever differs. Middle
+/// truncation keeps both ends and drops the boilerplate in between — everywhere, since the
+/// distinguishing text of a task title is at both ends.
+private struct TaskRowTitleText: View {
+    let title: String
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+
+    var body: some View {
+        let isCompact = density == .compact
+        let font = isCompact ? AppFonts.taskTitleCompact : AppFonts.taskTitle
+        switch style {
+        case .active:
+            Text(title)
+                .font(font)
+                .lineLimit(isCompact ? 1 : 2)
+                .truncationMode(.middle)
+        case .archived:
+            Text(title)
+                .font(font)
+                .lineLimit(isCompact ? 1 : 2)
+                .truncationMode(.middle)
+                .foregroundStyle(.secondary)
+        case .recentlyDeleted:
+            Text(title)
+                .font(font)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(.tertiary)
+                .strikethrough(true, color: .secondary)
+        }
+    }
+}
+
+/// Final elapsed runtime, shown just right of cost. Tertiary so cost (orange) stays the
+/// primary left-edge signal while elapsed rides along as glanceable context. Only for
+/// FINISHED tasks (`completedAt` set) — a still-running task's elapsed would be frozen at
+/// last redraw rather than ticking, so we don't pretend the row is a live stopwatch.
+///
+/// Renders nothing at all for an unfinished task, so the two call sites can decide for
+/// themselves whether the empty case still reserves width: the compact row's column frame
+/// sits outside this view, the standard row's does not.
+private struct TaskElapsedText: View {
+    let completedAt: Date?
+    let elapsedDisplay: String?
+
+    var body: some View {
+        if completedAt != nil, let elapsedDisplay {
+            Text(elapsedDisplay)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .layoutPriority(-1)
+        }
+    }
+}
+
+/// A compact strip of the ACTIVE steps' status glyphs; overflow past a cap collapses to "+N".
+///
+/// Takes the whole step list rather than a pre-filtered one so the filter is gated by the step
+/// list's own diff — a value computed in the parent would re-run on every row render instead.
+private struct TaskStepGlyphStrip: View {
+    let steps: [TaskStep]
+
+    private static let cap = 8
+
+    var body: some View {
+        let activeSteps = steps.filter(\.isActive)
+        HStack(spacing: 2) {
+            ForEach(Array(activeSteps.prefix(Self.cap)), id: \.id) { step in
+                Image(systemName: Self.symbol(step.status))
+                    .foregroundStyle(Self.color(step.status))
+                    .imageScale(.small)
+            }
+            if activeSteps.count > Self.cap {
+                Text("+\(activeSteps.count - Self.cap)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize()
+    }
+
+    /// Step-status glyph, mirroring `TaskOverlayBar` so the sidebar and overlay read the same.
+    private static func symbol(_ status: TaskStep.Status) -> String {
+        switch status {
+        case .pending: return "circle"
+        case .inProgress: return "circle.lefthalf.filled"
+        case .completed: return "checkmark.circle.fill"
+        case .skipped: return "arrow.uturn.right.circle"
+        case .removed: return "trash.circle"
         }
     }
 
+    /// Step-status color, mirroring `TaskOverlayBar` so the sidebar and overlay read the same.
+    private static func color(_ status: TaskStep.Status) -> Color {
+        switch status {
+        case .pending: return .secondary
+        case .inProgress: return AppColors.stepInProgress
+        case .completed: return AppColors.stepCompleted
+        case .skipped: return AppColors.stepSkipped
+        case .removed: return AppColors.stepRemoved
+        }
+    }
+}
+
+/// Start/resume control for a runnable task, inline on the row.
+private struct TaskRunInlineControl: View {
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action, label: {
+            Image(systemName: "play.fill")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+        })
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+/// Pause/Stop for a task that is running or validating.
+///
+/// Takes the task ID rather than the task: the controls are identical for every in-flight task,
+/// so nothing here should re-evaluate when the task's title, steps or updates move.
+private struct TaskRunningInlineControls: View {
+    let taskID: UUID
+    let viewModel: AppViewModel
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: {
+                let slug = taskID.uuidString.prefix(8)
+                stopLogger.notice("UI.taskCard inline Pause clicked task=\(slug, privacy: .public)")
+                Task {
+                    stopLogger.notice("UI.taskCard inline Pause Task body running task=\(slug, privacy: .public)")
+                    await viewModel.pauseTask(id: taskID)
+                    stopLogger.notice("UI.taskCard inline Pause Task body returned task=\(slug, privacy: .public)")
+                }
+            }, label: {
+                Image(systemName: "pause.fill")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+            })
+            .buttonStyle(.plain)
+            .help("Pause")
+
+            Button(action: {
+                let slug = taskID.uuidString.prefix(8)
+                stopLogger.notice("UI.taskCard inline Stop clicked task=\(slug, privacy: .public)")
+                Task {
+                    stopLogger.notice("UI.taskCard inline Stop Task body running task=\(slug, privacy: .public)")
+                    await viewModel.stopTask(id: taskID)
+                    stopLogger.notice("UI.taskCard inline Stop Task body returned task=\(slug, privacy: .public)")
+                }
+            }, label: {
+                Image(systemName: "stop.fill")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+            })
+            .buttonStyle(.plain)
+            .help("Stop")
+        }
+    }
+}
+
+/// Marks a row as a template rather than something that has run or will run on its own.
+private struct TaskTemplatePip: View {
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "doc.on.doc")
+                .imageScale(.small)
+            Text("Template")
+                .font(.caption2)
+        }
+        .foregroundStyle(.tertiary)
+        .help("Template — starting it clones a fresh instance to run")
+    }
+}
+
+/// "This task carries files", with the count.
+private struct TaskAttachmentPip: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "paperclip")
+                .imageScale(.small)
+            Text("\(count)")
+                .font(.caption2.monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .help("\(count) attachment\(count == 1 ? "" : "s")")
+    }
 }
 
 // MARK: - Row leaves that own their own observable reads
@@ -1291,10 +1439,23 @@ private struct TaskRowStatusIcon: View {
 /// the cost chip would have left every one of them behind, making that change a no-op on exactly
 /// the rows that cost the most.
 private struct TaskFamilySummaryLine: View {
-    let runs: [AgentTask]
+    let taskID: UUID
+    /// Whether this row is itself a run. A run has a `parentTaskID` and never spawns anything, so
+    /// it can answer "what runs do I have?" without scanning at all.
+    let isRun: Bool
     let style: TaskRowStyle
     let disclosure: TaskRunListDisclosure?
     let viewModel: AppViewModel
+
+    /// Runs spawned by this task, across active and archived.
+    ///
+    /// Fetched HERE rather than threaded down from the row. `childTasks(of:)` scans the active +
+    /// archived lists (546 tasks on this machine) and reads the observable task lists to do it, so
+    /// resolving it in `TaskRow.body` made every row in the sidebar a dependent of both lists —
+    /// one task changing re-scanned them once per visible row. This is the only consumer.
+    private var runs: [AgentTask] {
+        isRun ? [] : viewModel.childTasks(of: taskID)
+    }
 
     var body: some View {
         if let summary = TaskFamilySummary(runs: runs, viewModel: viewModel) {
