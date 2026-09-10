@@ -59,7 +59,16 @@ struct WorkerSlotDrainTests {
             providers: providers,
             configurations: configurations,
             providerAPITypes: [:],
-            agentTuning: [:],
+            // Long poll intervals so the mock workers sit IDLE instead of burning turns. Without
+            // this, Brown trips the degenerate-loop guard within about a second and self-terminates
+            // — and that path removes its handle BEFORE writing the status, which is the ordering
+            // the bug under test does NOT have. So a spinning worker let the test sometimes
+            // exercise the already-correct path and pass with the fix reverted.
+            agentTuning: [
+                .brown: AgentTuningConfig(pollInterval: 3600),
+                .smith: AgentTuningConfig(pollInterval: 3600),
+                .securityAgent: AgentTuningConfig(pollInterval: 3600)
+            ],
             semanticSearchEngine: SemanticSearchEngine(),
             usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
             autoAdvanceEnabled: true,
@@ -103,6 +112,12 @@ struct WorkerSlotDrainTests {
 
         await store.updateStatus(id: taskA.id, status: .validating)
         await runtime.startTaskValidation(taskID: taskA.id)
+
+        // A must reach `.completed` SPECIFICALLY — not merely leave the slot. The bug is that the
+        // validation-completion path flips the status while the worker is still registered; the
+        // self-terminate path removes the handle FIRST and was always correct. Accepting `.failed`
+        // here let the test exercise the correct path instead and pass with the fix reverted, which
+        // is why it must stay strict. The idle poll intervals above are what make it reachable.
         let aCompleted = await waitUntil { await store.task(id: taskA.id)?.status == .completed }
         let aStatus = await store.task(id: taskA.id)?.status
         #expect(aCompleted, "A never completed; it is \(String(describing: aStatus))")
@@ -115,7 +130,7 @@ struct WorkerSlotDrainTests {
         }
         #expect(
             advanced,
-            "B stayed .pending after A completed — the freed slot never drained the queue"
+            "B stayed .pending after A released the only slot — the freed slot never drained the queue"
         )
 
         await runtime.stopAll()

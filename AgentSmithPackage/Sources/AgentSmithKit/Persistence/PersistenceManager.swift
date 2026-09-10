@@ -391,12 +391,23 @@ public actor PersistenceManager {
             // messages than asked for — and the one caller uses this to hunt for a trailing user
             // message, which it would then miss.
             var windowBytes = max(limit, 1) * 8 * 1024
-            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? nil
+            var previousByteCount = -1
             while true {
                 let bytes = try JSONLScanner.readTailBytes(url: url, byteCount: windowBytes)
                 let decoded = Self.decodeJSONL(bytes, limit: limit)
-                let coversWholeFile = fileSize.map { windowBytes >= $0 } ?? false
-                if decoded.messages.count >= limit || coversWholeFile { return decoded.messages }
+                // Stop on ENOUGH, or on NO PROGRESS — a widened window that read no more bytes has
+                // already reached the start of the file. `bytes.count` is bounded by the file size
+                // and never decreases, so it must plateau: the loop cannot fail to terminate.
+                //
+                // This deliberately does not ask `stat` for the size. It used to, and that made
+                // termination depend on an external call whose failure `try?` collapses to nil —
+                // so a file with fewer messages than `limit` (any fresh session) would loop
+                // forever and then trap on `Int` overflow. A loop's exit condition should not be
+                // something that can fail.
+                if decoded.messages.count >= limit || bytes.count == previousByteCount {
+                    return decoded.messages
+                }
+                previousByteCount = bytes.count
                 windowBytes *= 4
             }
         }

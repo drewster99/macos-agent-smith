@@ -179,4 +179,45 @@ struct RecurrenceCatchUpTests {
         }
         #expect(time == TimeOfDay(hour: 9, minute: 0))
     }
+
+    /// Every stored property of `TimerEvent` must have a `CodingKeys` case.
+    ///
+    /// `TimerEvent` gained a hand-written `init(from:)` so an unrecognized `cancellationCause`
+    /// degrades instead of taking the whole log down. That costs the type its SYNTHESIZED key list,
+    /// and the resulting footgun is the one `ledgerCodingKeyCoverage` was written for: a stored
+    /// property with a default (every optional here) that is missing a case is silently never
+    /// persisted, and a round-trip test stays GREEN because the field decodes back to the same
+    /// default it was given. Reflection is what catches it; a round trip is not.
+    @Test("Every TimerEvent stored property has a CodingKeys case")
+    func timerEventCodingKeyCoverage() throws {
+        // Every optional populated, or an absent key would be indistinguishable from an uncovered one.
+        let event = TimerEvent(
+            id: UUID(),
+            timestamp: Date(timeIntervalSince1970: 1),
+            kind: .cancelled,
+            wakeID: UUID(),
+            originalID: UUID(),
+            instructions: "do the thing",
+            taskID: UUID(),
+            recurrenceDescription: "Daily at 09:00",
+            coalescedCount: 3,
+            scheduledFireAt: Date(timeIntervalSince1970: 2),
+            cancellationCause: .recurrenceExhausted,
+            action: .run
+        )
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any]
+        )
+        let expected = Set(Mirror(reflecting: event).children.compactMap(\.label))
+        let missing = expected.subtracting(object.keys).sorted()
+        #expect(missing.isEmpty, """
+            \(missing.joined(separator: ", ")) is a stored property with no CodingKeys case, so it is \
+            silently never persisted. Add it to TimerEvent.CodingKeys AND to init(from:).
+            """)
+
+        // The hand-written decoder must also READ every key the encoder writes — a case present in
+        // CodingKeys but missing from `init(from:)` passes the check above and still loses the field.
+        let decoded = try JSONDecoder().decode(TimerEvent.self, from: JSONEncoder().encode(event))
+        #expect(decoded == event)
+    }
 }

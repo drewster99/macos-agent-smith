@@ -340,4 +340,25 @@ struct ChannelLogJSONLTests {
         #expect(result.messages.isEmpty)
         #expect(result.totalCount == 30)
     }
+
+    /// A file holding FEWER messages than the caller asked for must return promptly.
+    ///
+    /// The widening loop's only exit for this case used to be a `stat` comparison, and `try?` plus
+    /// `as? Int` collapses a failed stat to nil — making that condition permanently false and the
+    /// loop unbounded, on what is simply "a fresh session". It now terminates on read progress,
+    /// which cannot fail. The timeout is the assertion: a regression hangs rather than fails.
+    @Test("Asking for more messages than exist returns what exists, promptly", .timeLimit(.minutes(1)))
+    func fewerMessagesThanRequestedTerminates() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+        try await pm.appendChannelMessages((0..<3).map { message("m\($0)") })
+
+        let recent = try await pm.loadRecentChannelMessages(limit: 32)
+        #expect(recent.map(\.content) == ["m0", "m1", "m2"])
+
+        // And the degenerate case: an empty log.
+        let empty = try await PersistenceManager(testingRoot: try makeTempRoot()).loadRecentChannelMessages(limit: 32)
+        #expect(empty.isEmpty)
+    }
 }
