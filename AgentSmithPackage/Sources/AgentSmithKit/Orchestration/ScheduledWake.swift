@@ -199,6 +199,24 @@ public struct WakeRequest: Sendable {
         self.action = action
         self.extraInstructions = extraInstructions
     }
+
+    /// Rebuilds the request for an EXISTING wake, changing only what a reschedule changes.
+    ///
+    /// Preserving by default rather than restating each field: `RescheduleWakeTool` used to copy the
+    /// wake across field by field, so every field added to `ScheduledWake` was silently dropped by
+    /// the next reschedule until someone remembered to add a line. `extraInstructions` was dropped
+    /// exactly that way the day it was introduced — a rescheduled run lost its refinements while
+    /// reporting success. Enumerating fails lossy; preserving fails safe.
+    public init(replacing wake: ScheduledWake, wakeAt: Date, recurrence: Recurrence?) {
+        self.wakeAt = wakeAt
+        self.instructions = wake.instructions
+        self.taskID = wake.taskID
+        self.replacesID = wake.id
+        self.recurrence = recurrence
+        self.survivesTaskTermination = wake.survivesTaskTermination
+        self.action = wake.action
+        self.extraInstructions = wake.extraInstructions
+    }
 }
 
 /// Result of a `scheduleWake` request.

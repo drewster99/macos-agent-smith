@@ -112,7 +112,12 @@ struct ScheduleTaskActionTool: AgentTool {
               let action = TaskActionKind(lenient: actionRaw) else {
             return .failure("action is required and must be one of: run, pause, interrupt, summarize.")
         }
-        guard let task = await context.taskStore.task(id: taskID) else {
+        // Library-aware: scheduling a RECURRING run promotes the task to a template, and promotion
+        // moves it into the global library — so the per-session lookup stops finding the very task
+        // this tool just created a schedule for. Without this, a follow-up call (changing the
+        // recurrence, or `replaces_id`) answered "not found" and a recurring schedule could never
+        // be edited after it was made.
+        guard let task = await context.taskStore.taskOrLibraryTemplate(id: taskID) else {
             return .failure("Task \(taskID.uuidString) not found.")
         }
 

@@ -95,15 +95,12 @@ struct RescheduleWakeTool: AgentTool {
             newRecurrence = existing.recurrence
         }
 
-        let outcome = await context.scheduleWake(WakeRequest(
-            wakeAt: newFireTime,
-            instructions: existing.instructions,
-            taskID: existing.taskID,
-            replacesID: existing.id,
-            recurrence: newRecurrence,
-            survivesTaskTermination: existing.survivesTaskTermination,
-            action: existing.action
-        ))
+        // A reschedule changes WHEN and how often, nothing else — so copy the wake wholesale and
+        // override only those two, rather than restating each field and losing whichever ones this
+        // call site hasn't heard about.
+        let outcome = await context.scheduleWake(
+            WakeRequest(replacing: existing, wakeAt: newFireTime, recurrence: newRecurrence)
+        )
         return TimerArgumentParsing.formatScheduleOutcome(outcome, kind: "Rescheduled wake")
     }
 }

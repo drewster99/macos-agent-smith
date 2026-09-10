@@ -207,4 +207,36 @@ struct ScheduledRunAcceptanceTests {
             return
         }
     }
+
+    // MARK: - Rescheduling preserves the whole wake
+
+    /// A reschedule changes WHEN and how often. Everything else must survive it.
+    ///
+    /// `RescheduleWakeTool` used to rebuild the request field by field, which drops any field the
+    /// call site hasn't been taught about — `extraInstructions` was lost that way on the day it was
+    /// added, so a rescheduled run silently shed its refinements while reporting success. The
+    /// preserving initializer is what makes that structurally impossible; this pins it.
+    @Test("Rescheduling a wake preserves action, extraInstructions, and survival")
+    func rescheduleCopiesTheWholeWake() {
+        let taskID = UUID()
+        let existing = ScheduledWake(
+            wakeAt: Date(timeIntervalSince1970: 1_000),
+            instructions: "Call `run_task` on \(taskID.uuidString) to start the task \"X\". Safari only.",
+            taskID: taskID,
+            recurrence: nil,
+            survivesTaskTermination: true,
+            action: .run,
+            extraInstructions: "Safari only."
+        )
+        let later = Date(timeIntervalSince1970: 9_000)
+        let request = WakeRequest(replacing: existing, wakeAt: later, recurrence: nil)
+
+        #expect(request.wakeAt == later, "the reschedule's whole job")
+        #expect(request.replacesID == existing.id)
+        #expect(request.action == .run)
+        #expect(request.extraInstructions == "Safari only.")
+        #expect(request.survivesTaskTermination)
+        #expect(request.taskID == taskID)
+        #expect(request.instructions == existing.instructions)
+    }
 }
