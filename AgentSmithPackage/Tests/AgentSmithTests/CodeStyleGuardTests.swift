@@ -82,18 +82,90 @@ struct CodeStyleGuardTests {
     ///
     /// The fix is to extract a `View` struct — NOT to convert to a `@ViewBuilder` function, which
     /// this message used to recommend and which the project rule forbids just as firmly. That advice
-    /// is why there are now ~188 `-> some View` functions and zero `some View` properties: the guard
+    /// is why there are ~184 `-> some View` functions and zero `some View` properties: the guard
     /// worked, and everyone followed its instructions into the other half of the same rule. See
     /// `someViewFunctionRatchet` below, which holds that number still.
     @Test("No `: some View` properties besides body in app target")
     func noSomeViewProperties() throws {
-        // Match `[@ViewBuilder] [private] var <name>: some View` where name != body
-        let hits = try Self.scan(
-            regex: #"^\s*(@ViewBuilder\s*\n\s*)?(private |fileprivate )?var (?!body\b)[a-zA-Z_][a-zA-Z0-9_]*: some View\b"#
-        )
+        var hits: [String] = []
+        let rootPath = Self.appTargetRoot.path
+        for url in Self.swiftFiles() {
+            let relative = url.path.replacingOccurrences(of: rootPath + "/", with: "")
+            let source = Self.strippingComments(try String(contentsOf: url, encoding: .utf8))
+            for (offset, line) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+            where Self.declaresSomeViewProperty(line: String(line)) {
+                hits.append("  \(relative):\(offset + 1) — \(line.trimmingCharacters(in: .whitespaces))")
+            }
+        }
         if !hits.isEmpty {
-            let formatted = hits.map { "  \($0.path):\($0.line) — \($0.text)" }.joined(separator: "\n")
-            Issue.record("Found `: some View` properties (extract a `View` struct — do NOT convert to a @ViewBuilder func, which violates the same rule):\n\(formatted)")
+            Issue.record("""
+                Found `: some View` properties (extract a `View` struct — do NOT convert to a \
+                @ViewBuilder func, which violates the same rule):
+                \(hits.joined(separator: "\n"))
+                """)
+        }
+    }
+
+    /// Whether one line declares a non-`body` stored/computed property of type `some View`.
+    ///
+    /// Deliberately NOT the modifier-alternation regex this replaced. That one matched only bare
+    /// `var` and `private `/`fileprivate  var`, required exactly one space after the colon, and
+    /// required `@ViewBuilder` to sit on its OWN line — so `public var x: some View`,
+    /// `private(set) var x: some View`, `@MainActor var x: some View`, `var x:  some View` and a
+    /// single-line `@ViewBuilder var x: some View` all sailed past a guard that looked strict.
+    /// Tokenizing sidesteps the whole family: find `var`, take the next identifier, check the type.
+    static func declaresSomeViewProperty(line: String) -> Bool {
+        // Normalize so spacing and attribute placement cannot matter.
+        let collapsed = line.replacingOccurrences(
+            of: #"\s+"#, with: " ", options: .regularExpression
+        ).trimmingCharacters(in: .whitespaces)
+        guard let typeRange = collapsed.range(of: ": some View") else { return false }
+        // Everything before the colon must end in `var <identifier>`; `let` cannot be `some View`
+        // in a stored property, and a function's `->` return never reaches here.
+        let head = collapsed[collapsed.startIndex..<typeRange.lowerBound]
+        let words = head.split(separator: " ").map(String.init)
+        guard words.count >= 2, let name = words.last else { return false }
+        guard words[words.count - 2] == "var" else { return false }
+        return name != "body"
+    }
+
+    /// Every spelling the previous modifier-alternation regex let through.
+    ///
+    /// It matched only bare `var` and `private `/`fileprivate  var`, demanded exactly one space
+    /// after the colon, and required `@ViewBuilder` to sit on its own line. So the guard read as
+    /// strict while six ordinary spellings walked past it. None of these are exotic — `public var`
+    /// and a single-line `@ViewBuilder` are what someone writes without thinking.
+    @Test("The property guard catches every modifier spelling, not just `private var`")
+    func propertyGuardIsNotEvadable() {
+        let shouldCatch = [
+            "var chip: some View",
+            "private var chip: some View",
+            "fileprivate var chip: some View",
+            "public var chip: some View",                 // missed before
+            "internal var chip: some View",               // missed before
+            "static var chip: some View",                 // missed before
+            "private(set) var chip: some View",           // missed before
+            "@MainActor var chip: some View",             // missed before
+            "@ViewBuilder var chip: some View",           // missed before (same-line attribute)
+            "private @ViewBuilder var chip: some View",   // missed before (modifier order)
+            "var chip:  some View",                       // missed before (two spaces)
+            "    @ViewBuilder public var chip : some View"
+        ]
+        for line in shouldCatch {
+            #expect(CodeStyleGuardTests.declaresSomeViewProperty(line: line), "missed: \(line)")
+        }
+
+        let shouldAllow = [
+            "var body: some View",
+            "    var body: some View {",
+            "@ViewBuilder var body: some View",
+            "private func chip() -> some View {",          // the function form, counted elsewhere
+            "func body(content: Content) -> some View {",
+            "let text: String",
+            "var isExpanded: Bool = false"
+        ]
+        for line in shouldAllow {
+            #expect(!CodeStyleGuardTests.declaresSomeViewProperty(line: line), "false positive: \(line)")
         }
     }
 
