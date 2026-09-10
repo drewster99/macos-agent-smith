@@ -130,4 +130,61 @@ struct LLMRetryPolicyTests {
         #expect(LLMRetryPolicy.formatDelay(7200) == "2h")
         #expect(LLMRetryPolicy.formatDelay(7500) == "2h 5m")
     }
+
+    /// The standard budget must be bounded by ATTEMPTS ONLY.
+    ///
+    /// Any finite wall clock here is a silent tightening, because a server-directed `Retry-After`
+    /// is honored uncapped: a 429 asking for two hours selects this budget (a stated delay needs no
+    /// patience), sleeps two hours, and would then find a finite window already spent — so the next
+    /// transient error, which today simply retries, would instead kill the agent. Nothing in this
+    /// change was allowed to make any caller's endurance SHORTER.
+    @Test("The standard budget is bounded by attempts, never by wall clock")
+    func standardBudgetHasNoWallClockBound() {
+        #expect(LLMRetryPolicy.standardBudget.maxElapsedSeconds == .infinity)
+        #expect(LLMRetryPolicy.standardBudget.maxAttempts == LLMRetryPolicy.maxAttempts)
+        #expect(LLMRetryPolicy.standardBudget.maxBackoffSeconds == LLMRetryPolicy.maxBackoffSeconds)
+
+        // The concrete scenario: a two-hour Retry-After picks the standard budget, and honoring it
+        // must not consume an allowance that then stops the next attempt.
+        let longWait = LLMRetryPolicy.classify(
+            LLMProviderError.httpError(statusCode: 429, body: "", url: nil, retryAfter: 7200)
+        )
+        let budget = LLMRetryPolicy.budget(for: longWait, patient: true)
+        #expect(budget.maxElapsedSeconds == .infinity, "a stated long wait must not shorten endurance")
+        #expect(LLMRetryPolicy.delay(attempt: 1, retryAfter: 7200, budget: budget) == 7200,
+                "a server-directed wait is honored uncapped")
+    }
+
+    /// The patient budget is the only one the wall clock bounds, and it must stay long enough to
+    /// cover the recoveries this app has actually observed (65 and 98 minutes).
+    @Test("The patient budget endures past the observed recoveries and asks less often")
+    func patientBudgetOutlastsObservedRecoveries() {
+        let patient = LLMRetryPolicy.patientThrottleBudget
+        #expect(patient.maxElapsedSeconds >= 6000, "under ~100 min discards an observed recovery")
+        #expect(patient.maxBackoffSeconds > LLMRetryPolicy.maxBackoffSeconds, "endure longer, ask less often")
+
+        // A 429 with NO stated delay is the only thing that gets it, and only for a patient caller.
+        let silent429 = LLMRetryPolicy.classify(
+            LLMProviderError.httpError(statusCode: 429, body: "{}", url: nil, retryAfter: nil)
+        )
+        #expect(LLMRetryPolicy.budget(for: silent429, patient: true) == patient)
+        #expect(LLMRetryPolicy.budget(for: silent429, patient: false) == LLMRetryPolicy.standardBudget,
+                "the four non-agent callers keep today's behavior exactly")
+
+        // Neither a 5xx nor a stated-delay 429 gets patience.
+        let serverFault = LLMRetryPolicy.classify(
+            LLMProviderError.httpError(statusCode: 503, body: "", url: nil, retryAfter: nil)
+        )
+        #expect(LLMRetryPolicy.budget(for: serverFault, patient: true) == LLMRetryPolicy.standardBudget)
+
+        // Neither bound is dead: the curve must reach the window inside the attempt cap.
+        var elapsed: TimeInterval = 0
+        var attempt = 1
+        while elapsed < patient.maxElapsedSeconds && attempt <= patient.maxAttempts {
+            elapsed += LLMRetryPolicy.delay(attempt: attempt, retryAfter: nil, budget: patient)
+            attempt += 1
+        }
+        #expect(elapsed >= patient.maxElapsedSeconds,
+                "the attempt cap fires before the window — the wall clock would be a dead constant")
+    }
 }

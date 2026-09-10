@@ -31,19 +31,36 @@ actor SecurityBackendHealth {
 
     private var consecutiveFailures = 0
     private var openedAt: Date?
+    /// Whether a half-open probe is currently in flight.
+    ///
+    /// Tracked explicitly because the cooldown timestamp alone cannot express it: admitting a probe
+    /// by resetting `openedAt` lets a SECOND caller through one cooldown later while the first is
+    /// still waiting out a long server-directed delay, so the "one probe" the breaker promises
+    /// becomes several concurrent calls against a backend already known to be down.
+    private var probeInFlight = false
 
     /// Records that an evaluation ended with no verdict because the backend did not answer.
-    func recordUnreachable() {
+    ///
+    /// Takes `now` for the same reason `shouldShortCircuit` does: the two have to agree about the
+    /// clock, and an injected time on only one of them makes the pair untestable — a cooldown
+    /// opened from a real `Date()` and then queried at a synthetic one is simply a different
+    /// question. Defaults to now, so production callers are unaffected.
+    func recordUnreachable(now: Date = Date()) {
         consecutiveFailures += 1
-        if consecutiveFailures >= Self.failureThreshold, openedAt == nil {
-            openedAt = Date()
+        // Restart the cooldown on EVERY failure, including a failed probe. Opening only when
+        // `openedAt` was nil left a failed probe's window still measured from when that probe was
+        // admitted — so the next probe went out immediately rather than a cooldown later.
+        if consecutiveFailures >= Self.failureThreshold {
+            openedAt = now
         }
+        probeInFlight = false
     }
 
     /// Records that the backend answered — whatever the verdict was. Closes the breaker.
     func recordReachable() {
         consecutiveFailures = 0
         openedAt = nil
+        probeInFlight = false
     }
 
     /// Whether to skip the LLM entirely and block immediately.
@@ -53,8 +70,12 @@ actor SecurityBackendHealth {
     /// restarts the cooldown.
     func shouldShortCircuit(now: Date = Date()) -> Bool {
         guard let openedAt else { return false }
+        // A probe is already out — everyone else keeps blocking until it reports back, however long
+        // it takes. Without this, a probe honoring a long `Retry-After` would let another caller
+        // through on the next cooldown tick while it was still sleeping.
+        if probeInFlight { return true }
         if now.timeIntervalSince(openedAt) >= Self.cooldownSeconds {
-            self.openedAt = now      // half-open: this caller is the probe, others keep blocking
+            probeInFlight = true     // half-open: this caller is THE probe
             return false
         }
         return true

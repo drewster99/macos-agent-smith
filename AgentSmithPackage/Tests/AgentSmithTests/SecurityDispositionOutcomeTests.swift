@@ -181,4 +181,53 @@ struct SecurityDispositionOutcomeTests {
         // The probe re-armed the window, so a concurrent caller still blocks rather than piling on.
         #expect(await health.shouldShortCircuit(now: past))
     }
+
+    /// Only ONE probe may be out at a time, however long it takes to come back.
+    ///
+    /// Admitting a probe by resetting the cooldown timestamp is not enough: a probe honoring a long
+    /// server-directed delay is still sleeping when the next cooldown elapses, so a second worker
+    /// is admitted against a backend already known to be down — and then a third, and so on.
+    @Test("A second caller cannot start a probe while one is still out")
+    func onlyOneProbeIsEverInFlight() async {
+        let health = SecurityBackendHealth()
+        await health.recordUnreachable()
+        await health.recordUnreachable()
+
+        let past = Date().addingTimeInterval(120)
+        #expect(await health.shouldShortCircuit(now: past) == false, "the cooldown lapsed — one probe goes")
+        // Even much later, while that probe has not reported back, nobody else goes.
+        let muchLater = Date().addingTimeInterval(100_000)
+        #expect(await health.shouldShortCircuit(now: muchLater), "a second probe was admitted")
+    }
+
+    /// A probe that FAILS must restart the cooldown, not leave the window measured from when it was
+    /// admitted — otherwise the next probe goes out immediately instead of a cooldown later.
+    @Test("A failed probe restarts the cooldown")
+    func failedProbeRestartsCooldown() async {
+        let health = SecurityBackendHealth()
+        await health.recordUnreachable()
+        await health.recordUnreachable()
+
+        let probeTime = Date().addingTimeInterval(120)
+        #expect(await health.shouldShortCircuit(now: probeTime) == false)
+        await health.recordUnreachable(now: probeTime)   // the probe failed, at probe time
+
+        // One second later the breaker must still be closed to everyone.
+        #expect(await health.shouldShortCircuit(now: probeTime.addingTimeInterval(1)),
+                "a new probe went out immediately after the last one failed")
+    }
+
+    /// A probe that SUCCEEDS clears everything, including the in-flight marker — otherwise the
+    /// breaker would never admit anyone again.
+    @Test("A successful probe fully closes the breaker")
+    func successfulProbeClosesTheBreaker() async {
+        let health = SecurityBackendHealth()
+        await health.recordUnreachable()
+        await health.recordUnreachable()
+        _ = await health.shouldShortCircuit(now: Date().addingTimeInterval(120))
+        await health.recordReachable()
+
+        #expect(await health.shouldShortCircuit() == false)
+        #expect(await health.transportAttemptBudget() == LLMRetryPolicy.maxAttempts)
+    }
 }

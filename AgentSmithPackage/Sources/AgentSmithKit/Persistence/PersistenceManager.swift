@@ -391,23 +391,22 @@ public actor PersistenceManager {
             // messages than asked for — and the one caller uses this to hunt for a trailing user
             // message, which it would then miss.
             var windowBytes = max(limit, 1) * 8 * 1024
-            var previousByteCount = -1
             while true {
-                let bytes = try JSONLScanner.readTailBytes(url: url, byteCount: windowBytes)
-                let decoded = Self.decodeJSONL(bytes, limit: limit)
-                // Stop on ENOUGH, or on NO PROGRESS — a widened window that read no more bytes has
-                // already reached the start of the file. `bytes.count` is bounded by the file size
-                // and never decreases, so it must plateau: the loop cannot fail to terminate.
+                let tail = try JSONLScanner.readTailBytes(url: url, byteCount: windowBytes)
+                let decoded = Self.decodeJSONL(tail.data, limit: limit)
+                // Stop on ENOUGH, or once the window has reached the START OF THE FILE — there is
+                // nothing older to widen into. Both conditions are facts about data already read,
+                // so the loop cannot fail to terminate, and `reachedStart` is monotonic once true.
                 //
-                // This deliberately does not ask `stat` for the size. It used to, and that made
-                // termination depend on an external call whose failure `try?` collapses to nil —
-                // so a file with fewer messages than `limit` (any fresh session) would loop
-                // forever and then trap on `Int` overflow. A loop's exit condition should not be
-                // something that can fail.
-                if decoded.messages.count >= limit || bytes.count == previousByteCount {
+                // Two earlier versions of this exit were wrong in instructive ways. Asking `stat`
+                // for the size made termination depend on a fallible call whose failure `try?`
+                // collapses to nil — an unbounded loop on any file with fewer messages than `limit`.
+                // Comparing successive byte counts looked safe but is not: two windows that both
+                // begin inside one very large record return identical bytes, so "no progress" fires
+                // with older messages still unread.
+                if decoded.messages.count >= limit || tail.reachedStart {
                     return decoded.messages
                 }
-                previousByteCount = bytes.count
                 windowBytes *= 4
             }
         }
@@ -445,18 +444,18 @@ public actor PersistenceManager {
         // (Measured on the real log: 4,830 candidates for 4,665 true matches. The extras carry the
         // id in `metadata` with no top-level `taskID`, and the typed check rejects them.)
         //
-        // Both cases are searched. `JSONEncoder` writes UUIDs uppercase, and every one of the
-        // 106,066 values on disk is uppercase — but `UUID(uuidString:)` accepts lowercase, so a
-        // single-case needle would SILENTLY DROP a message the typed check would have accepted.
-        // Silently dropping is the worst failure available here; 0.2 s is a cheap price to remove it.
-        let upper = Data(taskID.uuidString.utf8)
-        let lower = Data(taskID.uuidString.lowercased().utf8)
+        // The match is case-INSENSITIVE. `JSONEncoder` writes UUIDs uppercase and every one of the
+        // 106,066 values on disk is uppercase — but `UUID(uuidString:)` accepts ANY casing, so a
+        // record carrying `aBcDeF01-…` decodes and compares equal while matching neither an
+        // all-uppercase nor an all-lowercase needle. Fixed-case needles (even two of them) leave the
+        // prefilter able to produce a FALSE NEGATIVE, which is the one thing it must never do.
+        let needle = Data(taskID.uuidString.utf8)
         return try await FileIO.perform {
             let data = try Data(contentsOf: url)
             let decoder = JSONDecoder()
             var found: [ChannelMessage] = []
             for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
-                guard line.contains(subsequence: upper) || line.contains(subsequence: lower) else { continue }
+                guard line.containsCaseInsensitive(needle) else { continue }
                 guard let message = try? decoder.decode(ChannelMessage.self, from: Data(line)),
                       message.taskID == taskID else { continue }
                 found.append(message)

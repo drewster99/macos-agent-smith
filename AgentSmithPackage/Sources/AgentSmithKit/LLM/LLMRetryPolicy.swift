@@ -64,15 +64,16 @@ public enum LLMRetryPolicy {
         }
     }
 
-    /// Today's behavior, unchanged.
+    /// Today's behavior, byte for byte: bounded by ATTEMPTS ONLY.
     ///
-    /// `maxElapsedSeconds` is deliberately far above what 50 attempts can take, so it is a backstop
-    /// against a pathologically slow call and NEVER the binding constraint — attempts still decide.
-    /// Sizing it to the ~690 s of *sleep* those attempts imply would have been a silent tightening:
-    /// each attempt also spends its own call latency (up to a provider timeout), so a run that
-    /// legitimately reached attempt 50 today could be cut off at 40 by a wall clock set to 780.
+    /// `maxElapsedSeconds` is `.infinity` on purpose, not as a placeholder. Any finite value is a
+    /// silent tightening, because a server-directed `Retry-After` is honored UNCAPPED: a 429 asking
+    /// for two hours picks this budget (the server stated a delay, so patience isn't needed), sleeps
+    /// two hours, and would then find any finite window already spent — so the NEXT transient error,
+    /// which today would simply retry, would instead kill the agent. The wall clock exists to bound
+    /// the patient budget below, where attempts alone bound nothing useful; here attempts already do.
     public static let standardBudget = RetryBudget(
-        maxAttempts: maxAttempts, maxElapsedSeconds: 5400, maxBackoffSeconds: maxBackoffSeconds)
+        maxAttempts: maxAttempts, maxElapsedSeconds: .infinity, maxBackoffSeconds: maxBackoffSeconds)
 
     /// For a 429 that states NO delay, when nothing is blocked behind the caller.
     ///

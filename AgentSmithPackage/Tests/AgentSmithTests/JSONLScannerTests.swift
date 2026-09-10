@@ -139,7 +139,7 @@ struct JSONLScannerTests {
         let data = Data((lines.joined(separator: "\n") + "\n").utf8)
         try withTempFile(data) { url in
             // A window that lands mid-record.
-            let bytes = try JSONLScanner.readTailBytes(url: url, byteCount: 137)
+            let bytes = try JSONLScanner.readTailBytes(url: url, byteCount: 137).data
             let text = String(data: bytes, encoding: .utf8) ?? ""
             for line in text.split(separator: "\n") {
                 #expect(line.hasPrefix("record-number-"), "partial line leaked: \(line)")
@@ -147,15 +147,21 @@ struct JSONLScannerTests {
         }
     }
 
-    @Test("The prefilter finds a needle regardless of position, and reports absence")
+    @Test("The prefilter finds a needle regardless of position and casing, and reports absence")
     func subsequenceSearch() {
         let haystack = Data(#"{"id":"A","taskID":"DEAD-BEEF"}"#.utf8)
-        #expect(haystack.contains(subsequence: Data("DEAD-BEEF".utf8)))
-        #expect(haystack.contains(subsequence: Data(#"{"id"#.utf8)))
-        #expect(haystack.contains(subsequence: Data("}".utf8)))
-        #expect(!haystack.contains(subsequence: Data("CAFE-BABE".utf8)))
+        #expect(haystack.containsCaseInsensitive(Data("DEAD-BEEF".utf8)))
+        #expect(haystack.containsCaseInsensitive(Data(#"{"id"#.utf8)))
+        #expect(haystack.containsCaseInsensitive(Data("}".utf8)))
+        #expect(!haystack.containsCaseInsensitive(Data("CAFE-BABE".utf8)))
         // A slice's indices are offsets into its parent — the search must not assume zero-based.
         let slice = haystack.split(separator: 0x2C).last!
-        #expect(slice.contains(subsequence: Data("DEAD-BEEF".utf8)))
+        #expect(slice.containsCaseInsensitive(Data("DEAD-BEEF".utf8)))
+        // Casing must not matter in EITHER direction — the haystack or the needle.
+        #expect(haystack.containsCaseInsensitive(Data("dead-beef".utf8)))
+        #expect(haystack.containsCaseInsensitive(Data("DeAd-BeEf".utf8)))
+        #expect(Data("taskID:dEaD-bEeF".utf8).containsCaseInsensitive(Data("DEAD-BEEF".utf8)))
+        // And a reachedStart signal is what the widening caller terminates on.
+        #expect(!haystack.containsCaseInsensitive(Data("cafe-babe".utf8)))
     }
 }

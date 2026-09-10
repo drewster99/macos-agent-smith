@@ -106,7 +106,15 @@ enum JSONLScanner {
     /// For a caller that wants the last handful of messages and does NOT need a total. Skipping the
     /// count is what takes the cost from a full-file pass to a single small read — the recovery
     /// caller that wanted 32 messages was paying 1.0 s and 345 MB for them.
-    static func readTailBytes(url: URL, byteCount: Int) throws -> Data {
+    /// Returns the bytes AND whether the window reached the start of the file.
+    ///
+    /// `reachedStart` is the only sound termination signal for a caller that widens the window until
+    /// it has enough lines. Comparing successive BYTE COUNTS is not: if two windows both begin
+    /// inside the same very large record, `readTailBytes` discards that partial head in both cases
+    /// and returns byte-for-byte identical data — so a caller reading "no progress" would stop with
+    /// older messages still unread, which for the lost-message recovery path means missing the very
+    /// message it exists to find.
+    static func readTailBytes(url: URL, byteCount: Int) throws -> (data: Data, reachedStart: Bool) {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         let size = Int(try handle.seekToEnd())
@@ -114,23 +122,34 @@ enum JSONLScanner {
         try handle.seek(toOffset: UInt64(start))
         let data = try handle.readToEnd() ?? Data()
         // At offset 0 the first line is whole by definition; otherwise drop the partial head.
-        guard start > 0, let firstNewline = data.firstIndex(of: 0x0A) else { return data }
-        return data.subdata(in: data.index(after: firstNewline)..<data.endIndex)
+        guard start > 0, let firstNewline = data.firstIndex(of: 0x0A) else { return (data, start == 0) }
+        return (data.subdata(in: data.index(after: firstNewline)..<data.endIndex), false)
     }
 }
 
 extension DataProtocol where Self.Index == Int {
-    /// Whether `needle` appears in this collection. Used as the task-transcript prefilter, where a
-    /// hit only means "worth decoding" — never "matches".
-    func contains(subsequence needle: Data) -> Bool {
+    /// Whether `needle` appears in this collection, comparing ASCII letters case-INSENSITIVELY.
+    ///
+    /// Used as the task-transcript prefilter, where a hit only means "worth decoding" and the typed
+    /// `taskID` check remains the authority. Case-insensitive because `UUID(uuidString:)` accepts
+    /// any casing, so a persisted `aBcDeF01-…` decodes and compares equal to the requested UUID
+    /// while matching neither an all-uppercase nor an all-lowercase needle. Two fixed-case needles
+    /// therefore made the prefilter capable of a FALSE NEGATIVE — a message silently missing from a
+    /// transcript that a full decode would have found — which is the one failure a prefilter must
+    /// not have.
+    func containsCaseInsensitive(_ needle: Data) -> Bool {
         guard !needle.isEmpty, count >= needle.count else { return false }
-        let first = needle[needle.startIndex]
+        func folded(_ byte: UInt8) -> UInt8 {
+            (byte >= 0x41 && byte <= 0x5A) ? byte + 32 : byte   // ASCII A-Z -> a-z
+        }
+        let first = folded(needle[needle.startIndex])
         var index = startIndex
         let last = endIndex - needle.count
         while index <= last {
-            if self[index] == first {
+            if folded(self[index]) == first {
                 var matched = true
-                for offset in 1..<needle.count where self[index + offset] != needle[needle.startIndex + offset] {
+                for offset in 1..<needle.count
+                where folded(self[index + offset]) != folded(needle[needle.startIndex + offset]) {
                     matched = false
                     break
                 }

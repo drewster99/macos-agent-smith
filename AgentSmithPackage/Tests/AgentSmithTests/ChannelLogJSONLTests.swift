@@ -361,4 +361,56 @@ struct ChannelLogJSONLTests {
         let empty = try await PersistenceManager(testingRoot: try makeTempRoot()).loadRecentChannelMessages(limit: 32)
         #expect(empty.isEmpty)
     }
+
+    /// The window must widen until it reaches the START OF THE FILE, not until the byte count
+    /// stops growing.
+    ///
+    /// Two windows that both begin inside one very large record return byte-for-byte identical
+    /// data, because `readTailBytes` discards the partial head in both cases. A byte-count
+    /// comparison reads that as "no progress" and stops with older messages unread — and the one
+    /// caller uses this to hunt for a trailing user message, so it would miss exactly what it
+    /// exists to find.
+    @Test("A huge record between the tail and an older message does not hide that message")
+    func widensPastALargeRecordToReachOlderMessages() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+
+        try await pm.appendChannelMessages([message("THE-OLD-ONE")])
+        try await pm.appendChannelMessages([message(String(repeating: "x", count: 1_200_000))])
+        try await pm.appendChannelMessages((0..<10).map { message("recent\($0)") })
+
+        // 32 * 8 KB = 256 KB, then 1 MB — both land inside the 1.2 MB record.
+        let recent = try await pm.loadRecentChannelMessages(limit: 32)
+        #expect(recent.count == 12, "expected all 12; got \(recent.count)")
+        #expect(recent.first?.content == "THE-OLD-ONE", "the oldest message was never reached")
+    }
+
+    /// `UUID(uuidString:)` accepts any casing, so a mixed-case persisted id decodes and compares
+    /// equal — while matching neither an all-uppercase nor an all-lowercase needle. A prefilter
+    /// may over-match freely; it must never under-match.
+    @Test("A mixed-case UUID on disk is still found by the prefilter")
+    func mixedCaseUUIDIsFound() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+        let target = try #require(UUID(uuidString: "ABCDEF01-2345-6789-ABCD-EF0123456789"))
+
+        try await pm.appendChannelMessages([message("placeholder")])
+        let url = root.appendingPathComponent("AgentSmith", isDirectory: true)
+            .appendingPathComponent("channel_log.jsonl")
+        let mixed = "aBcDeF01-2345-6789-aBcD-eF0123456789"
+        #expect(UUID(uuidString: mixed) == target, "precondition: the casing really is equivalent")
+        let row = """
+            {"id":"\(UUID().uuidString)","sender":{"system":{}},"content":"mixed","timestamp":123,\
+            "taskID":"\(mixed)"}
+            """
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((row + "\n").utf8))
+        try handle.close()
+
+        let found = try await pm.loadTaskTranscript(taskID: target)
+        #expect(found.map(\.content) == ["mixed"])
+    }
 }

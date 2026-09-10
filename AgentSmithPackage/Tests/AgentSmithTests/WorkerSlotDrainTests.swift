@@ -93,8 +93,8 @@ struct WorkerSlotDrainTests {
         )
     }
 
-    @Test("A completing task at capacity 1 advances the queued task behind it")
-    func completionAdvancesQueueAtCapacityOne() async {
+    @Test("Tearing down the only worker at capacity 1 advances the queued task behind it")
+    func teardownAdvancesQueueAtCapacityOne() async throws {
         let runtime = makeRuntime()
         await configureForCompletionWithoutValidators(runtime)
         await runtime.setWorkerCapacity(1)
@@ -110,27 +110,25 @@ struct WorkerSlotDrainTests {
         let taskB = await store.addTask(title: "B", description: "d")
         #expect(await store.task(id: taskB.id)?.status == .pending)
 
-        await store.updateStatus(id: taskA.id, status: .validating)
-        await runtime.startTaskValidation(taskID: taskA.id)
+        // Tear the worker down with A still `.running`, so NO terminal status transition fires and
+        // the only thing that can admit B is the drain this teardown kicks.
+        //
+        // Deliberately not driven through validation-completion. That is the shape the bug had, but
+        // it cannot be tested with a mock worker: the mock repeats its last canned response, trips
+        // the text-turn guard within a second or two, and self-terminates — and that death both
+        // frees the slot and races the terminal-status hook's own drain, so the test passed with
+        // the fix reverted 4 times in 5. Isolating the teardown removes every confound: with A
+        // `.running` and its worker gone, nothing else in the system has any reason to start B.
+        let brownForA = try #require(await runtime.agentIDForRole(.brown))
+        #expect(await store.task(id: taskA.id)?.status == .running)
+        _ = await runtime.terminateAgent(id: brownForA)
 
-        // A must reach `.completed` SPECIFICALLY — not merely leave the slot. The bug is that the
-        // validation-completion path flips the status while the worker is still registered; the
-        // self-terminate path removes the handle FIRST and was always correct. Accepting `.failed`
-        // here let the test exercise the correct path instead and pass with the fix reverted, which
-        // is why it must stay strict. The idle poll intervals above are what make it reachable.
-        let aCompleted = await waitUntil { await store.task(id: taskA.id)?.status == .completed }
-        let aStatus = await store.task(id: taskA.id)?.status
-        #expect(aCompleted, "A never completed; it is \(String(describing: aStatus))")
-
-        // Assert on "left .pending", not "== .running": the mock worker trips the degenerate-loop
-        // guard within about a second and lands `.failed`, so polling for `.running` reports a
-        // false stall. What is under test is whether B was ever ADMITTED.
         let advanced = await waitUntil(timeout: .seconds(15)) {
             await store.task(id: taskB.id)?.status != .pending
         }
         #expect(
             advanced,
-            "B stayed .pending after A released the only slot — the freed slot never drained the queue"
+            "B stayed .pending after the only worker was torn down — the freed slot never drained the queue"
         )
 
         await runtime.stopAll()
