@@ -239,4 +239,42 @@ struct ScheduledRunAcceptanceTests {
         #expect(request.taskID == taskID)
         #expect(request.instructions == existing.instructions)
     }
+
+    // MARK: - Recurrence links copy the whole wake
+
+    /// The lossy-rebuild bug, third and fourth doorways.
+    ///
+    /// `RescheduleWakeTool` was fixed by a preserving initializer, but `WakeScheduler.fireDue` and
+    /// BOTH branches of `OrchestrationRuntime.rolledForwardRecurrence` each restated the fields they
+    /// knew about, so all three dropped `extraInstructions` — a recurring run lost its refinements at
+    /// the first roll-forward, silently, while reporting success. `nextOccurrence(at:previousFireAt:)`
+    /// copies `self`, so a field added later rides along by construction.
+    @Test("A recurrence link keeps every field but id, wakeAt and previousFireAt")
+    func recurrenceLinkCopiesTheWholeWake() {
+        let taskID = UUID()
+        let original = ScheduledWake(
+            wakeAt: Date(timeIntervalSince1970: 1_000),
+            instructions: "Call `run_task` on \(taskID.uuidString) to start the task \"X\". Safari only.",
+            taskID: taskID,
+            recurrence: .interval(seconds: 3_600),
+            survivesTaskTermination: true,
+            action: .run,
+            extraInstructions: "Safari only."
+        )
+        let fireAt = Date(timeIntervalSince1970: 4_600)
+        let previous = Date(timeIntervalSince1970: 1_000)
+        let next = original.nextOccurrence(at: fireAt, previousFireAt: previous)
+
+        #expect(next.id != original.id, "each occurrence needs its own id — it is the dedup key")
+        #expect(next.wakeAt == fireAt)
+        #expect(next.previousFireAt == previous)
+        // Everything else must survive the link.
+        #expect(next.extraInstructions == "Safari only.", "the field that was being dropped")
+        #expect(next.action == .run)
+        #expect(next.taskID == taskID)
+        #expect(next.recurrence == .interval(seconds: 3_600))
+        #expect(next.survivesTaskTermination)
+        #expect(next.originalID == original.originalID, "the chain must stay groupable in the UI")
+        #expect(next.instructions == original.instructions)
+    }
 }

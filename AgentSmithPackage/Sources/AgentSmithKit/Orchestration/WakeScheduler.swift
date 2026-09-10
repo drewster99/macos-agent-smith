@@ -191,17 +191,7 @@ actor WakeScheduler {
         for wake in due {
             guard let recurrence = wake.recurrence,
                   let next = recurrence.nextOccurrence(after: wake.wakeAt, notBefore: now) else { continue }
-            let nextWake = ScheduledWake(
-                wakeAt: next,
-                instructions: wake.instructions,
-                taskID: wake.taskID,
-                recurrence: recurrence,
-                originalID: wake.originalID,
-                previousFireAt: wake.wakeAt,
-                survivesTaskTermination: wake.survivesTaskTermination,
-                action: wake.action,
-                extraInstructions: wake.extraInstructions
-            )
+            let nextWake = wake.nextOccurrence(at: next, previousFireAt: wake.wakeAt)
             wakes.append(nextWake)
             onScheduled?(nextWake)
         }

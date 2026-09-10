@@ -8,7 +8,10 @@ import Foundation
 /// id) immediately after firing, using `Recurrence.nextOccurrence(after:)`. The wake's
 /// `originalID` is preserved across the recurrence chain so the timers UI can group fires.
 public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
-    public let id: UUID
+    /// `private(set)` rather than `let` so `nextOccurrence(at:previousFireAt:)` can mint the fresh
+    /// id a recurrence link needs while COPYING every other field — see that method for why copying
+    /// beats restating. Externally immutable exactly as before.
+    public private(set) var id: UUID
     public var wakeAt: Date
     /// Imperative instructions the agent should execute when the wake fires. Written as a
     /// direct directive to the agent (e.g. "Call run_task on 07EA…", "Tell Drew his shower
@@ -58,6 +61,24 @@ public struct ScheduledWake: Sendable, Identifiable, Codable, Equatable {
     /// STRUCTURED `action`, never the `instructions` prose. (Legacy wakes with no persisted action
     /// recover `.run` from their prose once, at decode; see `legacyActionFromInstructions`.)
     public var isAutoRunRunTask: Bool { action == .run && taskID != nil }
+
+    /// The next link in this wake's recurring chain: a fresh `id`, the supplied fire time and
+    /// previous-fire stamp, and EVERY other field copied from self.
+    ///
+    /// A COPYING factory, not a field-by-field rebuild, for the reason `WakeRequest.init(replacing:)`
+    /// gives one type down. Three separate sites each restated the fields they happened to know
+    /// about — `WakeScheduler.fireDue` and both branches of
+    /// `OrchestrationRuntime.rolledForwardRecurrence` — and all of them silently dropped
+    /// `extraInstructions` the day it was added, so a recurring run's per-run refinements vanished at
+    /// the first roll-forward while every path reported success. Copying `self` means a field added
+    /// tomorrow is carried by construction; enumerating means it is dropped until someone remembers.
+    public func nextOccurrence(at fireAt: Date, previousFireAt: Date?) -> ScheduledWake {
+        var next = self
+        next.id = UUID()
+        next.wakeAt = fireAt
+        next.previousFireAt = previousFireAt
+        return next
+    }
 
     public init(
         id: UUID = UUID(),

@@ -1446,16 +1446,7 @@ public actor OrchestrationRuntime {
             // than reschedule a still-past wake that would re-fire every tick — a storm. The calendar
             // path below already returns nil in this case via its bounded loop.
             guard fireAt > now else { return nil }
-            return ScheduledWake(
-                wakeAt: fireAt,
-                instructions: wake.instructions,
-                taskID: wake.taskID,
-                recurrence: recurrence,
-                originalID: wake.originalID,
-                previousFireAt: fireAt.addingTimeInterval(-interval),
-                survivesTaskTermination: wake.survivesTaskTermination,
-                action: wake.action
-            )
+            return wake.nextOccurrence(at: fireAt, previousFireAt: fireAt.addingTimeInterval(-interval))
         }
 
         // Calendar recurrences step at most once per day, so the cap spans ~27 years —
@@ -1467,16 +1458,7 @@ public actor OrchestrationRuntime {
             previousFireAt = fireAt
             fireAt = next
             if fireAt > now {
-                return ScheduledWake(
-                    wakeAt: fireAt,
-                    instructions: wake.instructions,
-                    taskID: wake.taskID,
-                    recurrence: recurrence,
-                    originalID: wake.originalID,
-                    previousFireAt: previousFireAt,
-                    survivesTaskTermination: wake.survivesTaskTermination,
-                    action: wake.action
-                )
+                return wake.nextOccurrence(at: fireAt, previousFireAt: previousFireAt)
             }
         }
         return nil
