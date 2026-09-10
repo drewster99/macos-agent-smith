@@ -262,7 +262,6 @@ struct CodeStyleGuardTests {
     /// Ceilings fail UPWARD only, so paying one off never breaks the build; the global total below
     /// fails in BOTH directions, so the debt cannot be paid down on paper without the number moving.
     private static let someViewFunctionBudget: [String: Int] = [
-        "Views/TaskDetailWindow.swift": 30,
         "Views/TaskListView.swift": 4,
         "Views/SpendingDashboardView.swift": 13,
         "Views/ModelMetadataInspectorWindow.swift": 12,
@@ -295,7 +294,7 @@ struct CodeStyleGuardTests {
 
     /// The sum of the ceilings. Pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number, and so unused headroom cannot quietly accumulate in the table.
-    private static let someViewFunctionTotal = 160
+    private static let someViewFunctionTotal = 130
 
     /// Counts `func … -> some View` declarations in one file, excluding the two forms that have no
     /// `View`-struct spelling:

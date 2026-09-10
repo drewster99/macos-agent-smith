@@ -1,12 +1,234 @@
 import SwiftUI
 import AgentSmithKit
 
+// MARK: - Section vocabulary
+
+/// All sections that could ever render in this window. `orderedSections(for:)` filters and orders
+/// them by status.
+private enum TaskDetailSectionKind: Hashable {
+    case error
+    case summary
+    case result
+    case acceptance
+    case steps
+    case updates
+    case description
+    case relatedContext
+
+    var label: String {
+        switch self {
+        case .error:          return "Error"
+        case .summary:        return "Summary"
+        case .result:         return "Result"
+        case .acceptance:     return "Acceptance"
+        case .steps:          return "Steps"
+        case .updates:        return "Updates"
+        case .description:    return "Description"
+        case .relatedContext: return "Context"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .error:          return "exclamationmark.triangle.fill"
+        case .summary:        return "text.quote"
+        case .result:         return "checkmark.seal.fill"
+        case .acceptance:     return "checklist"
+        case .steps:          return "list.bullet"
+        case .updates:        return "clock.arrow.circlepath"
+        case .description:    return "doc.text"
+        case .relatedContext: return "link"
+        }
+    }
+}
+
+private enum TaskDetailSectionMode {
+    case hidden
+    case preview
+    case expanded
+}
+
+/// Distinct scroll-anchor identity for a content section. Kept separate from `TaskDetailSectionKind`
+/// (which the jump-bar chips already use as their `ForEach` id) so `scrollTo` resolves only to the
+/// section in the vertical scroll view, not the same-id chip in the jump bar.
+private struct TaskDetailSectionAnchorID: Hashable {
+    let kind: TaskDetailSectionKind
+}
+
+/// Reports each section's top offset within the scroll coordinate space so the jump bar's current
+/// section can be derived on scroll.
+private struct TaskDetailSectionOffsetKey: PreferenceKey {
+    static let defaultValue: [TaskDetailSectionOffset] = []
+    static func reduce(value: inout [TaskDetailSectionOffset], nextValue: () -> [TaskDetailSectionOffset]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+private struct TaskDetailSectionOffset: Equatable {
+    let kind: TaskDetailSectionKind
+    let minY: CGFloat
+}
+
+private func orderedSections(for status: AgentTask.Status) -> [TaskDetailSectionKind] {
+    // `.acceptance` and `.steps` render nothing when the task has no criteria/steps,
+    // so they can be listed unconditionally.
+    switch status {
+    case .pending, .scheduled:
+        return [.description, .acceptance, .steps, .relatedContext]
+    case .starting, .running, .paused, .interrupted, .awaitingReview, .awaitingHelp, .validating:
+        return [.updates, .acceptance, .steps, .description, .relatedContext]
+    case .completed:
+        return [.summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
+    case .failed:
+        return [.error, .summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
+    }
+}
+
+/// Sections that actually have content to show (or are editable), in canonical order — the set
+/// the jump bar offers.
+private func presentSections(_ task: AgentTask) -> [TaskDetailSectionKind] {
+    orderedSections(for: task.status).filter { kind in
+        switch kind {
+        case .description:    return true
+        case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
+        case .summary:        return !(task.summary ?? "").isEmpty
+        case .result:         return !(task.result ?? "").isEmpty
+        case .acceptance:     return !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable
+        case .steps:          return !task.steps.isEmpty || task.status.isValidationContractEditable
+        case .updates:        return !task.updates.isEmpty
+        case .relatedContext: return (task.relevantMemories?.isEmpty == false) || (task.relevantPriorTasks?.isEmpty == false)
+        }
+    }
+}
+
+/// True while the task is in an active validation loop. During that loop the status
+/// OSCILLATES between `.validating` (judging) and `.running` (worker reworking a rejection)
+/// once per round. If the acceptance section's default expansion keyed on the raw status it
+/// would expand and collapse on every round, yanking the scroll position out from under the
+/// user — so the sections key on this stable flag instead.
+private func validationActive(_ task: AgentTask) -> Bool {
+    guard !task.acceptanceCriteria.isEmpty else { return false }
+    switch task.status {
+    case .validating, .awaitingReview:
+        return true
+    case .running, .paused, .interrupted:
+        // Mid-rework between rejection and resubmission still counts as "in the loop"
+        // once at least one validation round has run.
+        return (task.validation?.round ?? 0) > 0
+    default:
+        return false
+    }
+}
+
+/// Default mode for a section, driven by task status EXCEPT for acceptance, which keys on the
+/// stable `validationActive` flag so it doesn't oscillate. The user can override to/from
+/// `.preview` and `.expanded` via the header chevron; `.hidden` is not user-toggleable.
+private func defaultMode(_ kind: TaskDetailSectionKind, for task: AgentTask) -> TaskDetailSectionMode {
+    let status = task.status
+    switch (kind, status) {
+    case (.error, .failed):                       return .expanded
+    case (.error, _):                             return .hidden
+
+    case (.description, .pending), (.description, .scheduled):
+        return .expanded
+    case (.description, _):                       return .preview
+
+    case (.relatedContext, _):                    return .preview
+
+    // Front-and-center throughout the validation loop; compact otherwise. Keyed on the
+    // stable flag, not the raw status, so the validating↔running oscillation doesn't flip it.
+    case (.acceptance, _):
+        return validationActive(task) ? .expanded : .preview
+
+    case (.steps, _):                             return .preview
+
+    case (.updates, .pending), (.updates, .scheduled):
+        return .hidden
+    case (.updates, _):                           return .preview
+
+    case (.result, .completed):                   return .expanded
+    case (.result, .failed):                      return .expanded
+    case (.result, _):                            return .hidden
+
+    case (.summary, .completed), (.summary, .failed):
+        return .preview
+    case (.summary, _):                           return .hidden
+    }
+}
+
+// MARK: - Shared formatting
+
+/// Returns the first `lines` newline-separated lines of `text`, joined back. Used to
+/// build a preview for sections that wrap MarkdownText — `.lineLimit(N)` does not
+/// clip cleanly across MarkdownText's multi-block VStack, so we trim the source instead.
+/// If the trimmed prefix opens a fenced code block but doesn't close it, a closing
+/// fence is appended so the renderer doesn't bleed code styling into the rest of the
+/// section.
+private func linePrefix(_ text: String, lines: Int) -> String {
+    let prefix = text.components(separatedBy: "\n").prefix(lines).joined(separator: "\n")
+    return balancingCodeFences(prefix)
+}
+
+/// Appends a closing ``` ``` ``` or `~~~` fence when `text` contains an odd number
+/// of fence markers, so a preview cut mid-code-block doesn't leave the markdown
+/// renderer in code mode.
+private func balancingCodeFences(_ text: String) -> String {
+    let backticks = text.components(separatedBy: "```").count - 1
+    if backticks % 2 == 1 { return text + "\n```" }
+    let tildes = text.components(separatedBy: "~~~").count - 1
+    if tildes % 2 == 1 { return text + "\n~~~" }
+    return text
+}
+
+/// Builds a copy-friendly text rendering of an attachment list for a section's copy button.
+/// Each line: `filename (mime, size) — id=<UUID>`.
+private func formattedAttachments(_ attachments: [Attachment]) -> String {
+    attachments.map { attachment in
+        "\(attachment.filename) (\(attachment.mimeType), \(attachment.formattedSize)) — id=\(attachment.id.uuidString)"
+    }.joined(separator: "\n")
+}
+
+private func verdictSymbol(_ verdict: CriterionVerdictRecord.Verdict?) -> String {
+    switch verdict {
+    case .accepted: return "checkmark.circle.fill"
+    case .rejected: return "xmark.circle.fill"
+    case .waived: return "minus.circle.fill"
+    case .error: return "exclamationmark.triangle.fill"
+    case nil: return "circle"
+    }
+}
+
+private func verdictColor(_ verdict: CriterionVerdictRecord.Verdict?) -> Color {
+    switch verdict {
+    case .accepted: return AppColors.verdictAccepted
+    case .rejected: return AppColors.verdictRejected
+    case .waived: return AppColors.verdictWaived
+    case .error: return AppColors.verdictError
+    case nil: return AppColors.verdictPending
+    }
+}
+
+private func criterionQualifiers(_ criterion: AcceptanceCriterion) -> String? {
+    var parts: [String] = []
+    if criterion.waivable { parts.append("waivable") }
+    if criterion.inputEnumeratorPrompt != nil { parts.append("enumerated inputs") }
+    if criterion.usesDefaultValidator { parts.append("default validator") }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
+}
+
+// MARK: - The window
+
 /// Standalone window showing full task detail. Sections are reordered and pre-expanded
 /// based on the task's `Status` so the most relevant data is at the top:
 /// - `pending` / `scheduled`: full description on top.
 /// - `running` / `paused` / `interrupted` / `awaitingReview`: latest updates first.
 /// - `completed`: summary preview, then the full result with AI Commentary inset.
 /// - `failed`: the error first, then optional summary, then result/commentary.
+///
+/// The window itself owns only the task it is showing and the sheets it presents. Everything
+/// below is a real `View` that owns its own state: this used to be one 1,700-line struct holding
+/// thirteen `@State` properties, so a copy button flashing its checkmark, a debug transcript
+/// opening, or a criterion expanding re-evaluated every section in the window.
 struct TaskDetailWindow: View {
     let taskID: UUID
     @Bindable var viewModel: AppViewModel
@@ -14,139 +236,17 @@ struct TaskDetailWindow: View {
     /// window opens scoped to that task's actual session, not this window's session.
     var sessionManager: SessionManager
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openWindow) private var openWindow
-    @State private var isEditingDescription = false
-    @State private var editedDescription = ""
-    @State private var recentlyCopiedSection: String?
 
     /// Drives the "Save as PDF…" element-picker sheet and the field selection it edits.
     @State private var isShowingPDFSheet = false
     @State private var pdfOptions = TaskPDFFieldOptions.full
-
-    /// Per-section toggle state. Empty on first render — `currentMode(_:for:)` falls back
-    /// to status-driven defaults until the user interacts. Resets on each window open
-    /// because @State is reinitialized when SwiftUI recreates this view per `WindowGroup`
-    /// instance.
-    @State private var modeOverrides: [SectionKind: SectionMode] = [:]
-    /// Identity-keyed expansion state for related-context rows. Survives memory-array
-    /// re-orderings and avoids the `id: \.offset` aliasing bug where per-index state
-    /// would silently bind to a different memory if the array ever changed shape.
-    @State private var expandedMemoryContents: Set<String> = []
-    @State private var expandedPriorTaskIDs: Set<UUID> = []
-    /// Verdict records whose debug transcript (rendered input + response log) is open.
-    @State private var expandedDebugRecordIDs: Set<UUID> = []
-    /// Criteria whose pinned validator definition (system prompt + input template) is open.
-    @State private var expandedValidatorPromptIDs: Set<UUID> = []
-    @State private var isEditingAcceptance = false
-    @State private var editedCriteria: [EditableCriterion] = []
-    @State private var isEditingSteps = false
-    @State private var editedSteps: [EditableStep] = []
     @State private var templateRunInputTask: AgentTask?
     @State private var taskEditorPresentation: TaskEditorPresentation?
-
-    /// Editing model for one acceptance criterion. Criterion identity is preserved
-    /// through edits; the store resets sticky verdicts only when the validation contract changes.
-    private struct EditableCriterion: Identifiable {
-        let id: UUID
-        var name: String
-        var validationPrompt: String
-        var inputEnumeratorPrompt: String
-        var waivable: Bool
-        let origin: TaskAuthorship
-
-        init(criterion: AcceptanceCriterion) {
-            id = criterion.id
-            name = criterion.name
-            validationPrompt = criterion.validationPrompt
-            inputEnumeratorPrompt = criterion.inputEnumeratorPrompt ?? ""
-            waivable = criterion.waivable
-            origin = criterion.origin
-        }
-
-        init() {
-            id = UUID()
-            name = ""
-            validationPrompt = ""
-            inputEnumeratorPrompt = ""
-            waivable = false
-            origin = .user
-        }
-
-        /// `nil` only when the row carries no name — a genuinely empty row the user never filled in.
-        ///
-        /// An empty `validationPrompt` is NOT a reason to drop the row: that is exactly the shape of
-        /// the implicit criterion materialized for a criterion-less task, and dropping it meant
-        /// opening this editor on such a task and saving WITHOUT CHANGING ANYTHING silently deleted
-        /// the criterion — which then wiped the entire verdict ledger via `setAcceptanceCriteria`'s
-        /// no-longer-present filter, and reset the round and stall counters. Preserving the empty
-        /// prompt round-trips the criterion unchanged and keeps it on the default validator.
-        func built() -> AcceptanceCriterion? {
-            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedName.isEmpty else { return nil }
-            let trimmedValidationPrompt = validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            let trimmedEnumeratorPrompt = inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            return AcceptanceCriterion(
-                id: id,
-                name: trimmedName,
-                validationPrompt: trimmedValidationPrompt,
-                inputEnumeratorPrompt: trimmedEnumeratorPrompt.isEmpty ? nil : trimmedEnumeratorPrompt,
-                waivable: waivable,
-                origin: origin
-            )
-        }
-    }
-
-    /// Editing model for one step. The user holds full authority over the plan, so
-    /// rows can be deleted outright (no tombstone requirement, unlike the worker).
-    private struct EditableStep: Identifiable {
-        let id: UUID
-        var text: String
-        var status: TaskStep.Status
-        var note: String
-        let origin: TaskAuthorship
-
-        init(step: TaskStep) {
-            id = step.id
-            text = step.text
-            status = step.status
-            note = step.note ?? ""
-            origin = step.origin
-        }
-
-        init() {
-            id = UUID()
-            text = ""
-            status = .pending
-            note = ""
-            origin = .user
-        }
-
-        func built() -> TaskStep? {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
-            return TaskStep(
-                id: id,
-                text: trimmed,
-                status: status,
-                note: trimmedNote.isEmpty ? nil : trimmedNote,
-                origin: origin
-            )
-        }
-    }
 
     /// Local copy of the current task. Sync'd from `viewModel.tasks` via `.onChange` so
     /// the body reads only @State and SwiftUI can short-circuit re-renders when this
     /// specific task didn't change. `AgentTask` is `Equatable`, so the diff is cheap.
     @State private var task: AgentTask?
-
-    /// Whether the current task's description can be edited. Mirrors
-    /// `AgentTask.Status.isDescriptionEditable` so completed/failed/scheduled tasks accept
-    /// late corrections; only `running` and `awaitingReview` are read-only.
-    private var isDescriptionEditable: Bool {
-        guard let task else { return false }
-        return task.status.isDescriptionEditable
-    }
 
     /// Pulls the matching task out of `viewModel.tasks` and writes it to local @State.
     /// Called from `.onAppear` and from `.onChange(of: viewModel.tasks)` — body reads
@@ -168,10 +268,27 @@ struct TaskDetailWindow: View {
         viewModel.persistenceManager.attachmentURL(id: attachment.id, filename: attachment.filename)
     }
 
+    private func startRunnableTask(_ task: AgentTask) {
+        if task.shouldPromptForTemplateRunInputs {
+            templateRunInputTask = task
+            return
+        }
+        Task { await viewModel.startTask(task) }
+    }
+
     var body: some View {
         Group {
             if let task {
-                taskContent(task)
+                TaskDetailContent(
+                    task: task,
+                    viewModel: viewModel,
+                    sessionManager: sessionManager,
+                    attachmentURLResolver: attachmentURLResolver,
+                    onEditTask: { taskEditorPresentation = .editing(task) },
+                    onStartTask: { startRunnableTask(task) },
+                    onSavePDF: { isShowingPDFSheet = true },
+                    onDone: { dismiss() }
+                )
             } else {
                 ContentUnavailableView(
                     "Task Not Found",
@@ -228,85 +345,84 @@ struct TaskDetailWindow: View {
             }
         }
     }
+}
 
-    // MARK: - Body
+// MARK: - Scrolling content
 
-    /// A pinned bar of section chips at the top of the window: always visible, highlights the
-    /// section currently under the viewport top, and jumps to a section on tap. Addresses "the
-    /// detail view is long and I can't tell what section I'm in."
-    @ViewBuilder
-    private func sectionJumpBar(sections: [SectionKind], proxy: ScrollViewProxy) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(sections, id: \.self) { kind in
-                    let isCurrent = kind == currentSection
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            proxy.scrollTo(SectionAnchorID(kind: kind), anchor: .top)
-                        }
-                        currentSection = kind
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: kind.icon)
-                                .font(.caption2)
-                            Text(kind.label)
-                                .font(.caption.weight(isCurrent ? .semibold : .regular))
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule().fill(isCurrent ? AppColors.disclosureToggle.opacity(0.18) : Color.secondary.opacity(0.08))
-                        )
-                        .foregroundStyle(isCurrent ? AppColors.disclosureToggle : Color.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-        }
-        .background(.bar)
+/// The window's scrolling body: jump bar, header, metadata grid, and the ordered sections.
+///
+/// Owns the two pieces of state that describe "where am I and what's open" — the current
+/// section for the jump bar, and the per-section expand overrides. Both used to sit on the
+/// window, where a scroll event invalidated every section in it.
+private struct TaskDetailContent: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+    let sessionManager: SessionManager
+    let attachmentURLResolver: (Attachment) -> URL?
+    let onEditTask: () -> Void
+    let onStartTask: () -> Void
+    let onSavePDF: () -> Void
+    let onDone: () -> Void
+
+    /// The section whose top is currently nearest the scroll viewport top — highlighted in the jump
+    /// bar so the user always knows where they are. Updated from scroll-offset preferences.
+    @State private var currentSection: TaskDetailSectionKind = .description
+
+    /// Per-section toggle state. Empty on first render — `currentMode(_:)` falls back to
+    /// status-driven defaults until the user interacts. Resets on each window open because @State
+    /// is reinitialized when SwiftUI recreates this view per `WindowGroup` instance.
+    @State private var modeOverrides: [TaskDetailSectionKind: TaskDetailSectionMode] = [:]
+
+    private func currentMode(_ kind: TaskDetailSectionKind) -> TaskDetailSectionMode {
+        if let overridden = modeOverrides[kind] { return overridden }
+        return defaultMode(kind, for: task)
     }
 
-    /// Sections that actually have content to show (or are editable), in canonical order — the set
-    /// the jump bar offers.
-    private func presentSections(_ task: AgentTask) -> [SectionKind] {
-        orderedSections(for: task.status).filter { kind in
-            switch kind {
-            case .description:    return true
-            case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
-            case .summary:        return !(task.summary ?? "").isEmpty
-            case .result:         return !(task.result ?? "").isEmpty
-            case .acceptance:     return !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable
-            case .steps:          return !task.steps.isEmpty || task.status.isValidationContractEditable
-            case .updates:        return !task.updates.isEmpty
-            case .relatedContext: return (task.relevantMemories?.isEmpty == false) || (task.relevantPriorTasks?.isEmpty == false)
-            }
+    private func toggleSection(_ kind: TaskDetailSectionKind) {
+        let next: TaskDetailSectionMode
+        switch currentMode(kind) {
+        case .preview, .hidden:  next = .expanded
+        case .expanded:          next = .preview
         }
+        modeOverrides[kind] = next
     }
 
-    private func taskContent(_ task: AgentTask) -> some View {
+    var body: some View {
         let sections = presentSections(task)
-        return ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
             VStack(spacing: 0) {
-                sectionJumpBar(sections: sections, proxy: proxy)
+                TaskDetailJumpBar(sections: sections, currentSection: $currentSection, proxy: proxy)
                 Divider()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        headerRow(task)
-                        metadataSection(for: task)
+                        TaskDetailHeaderRow(
+                            task: task,
+                            onEditTask: onEditTask,
+                            onStartTask: onStartTask,
+                            onSavePDF: onSavePDF,
+                            onDone: onDone
+                        )
+                        TaskDetailMetadataGrid(task: task, viewModel: viewModel)
                         Divider()
                         ForEach(orderedSections(for: task.status), id: \.self) { kind in
-                            sectionView(kind, task: task)
-                                .id(SectionAnchorID(kind: kind))
-                                .background(
-                                    GeometryReader { geo in
-                                        Color.clear.preference(
-                                            key: SectionOffsetKey.self,
-                                            value: [SectionOffset(kind: kind, minY: geo.frame(in: .named("taskScroll")).minY)]
-                                        )
-                                    }
-                                )
+                            TaskDetailSectionView(
+                                kind: kind,
+                                task: task,
+                                mode: currentMode(kind),
+                                viewModel: viewModel,
+                                sessionManager: sessionManager,
+                                attachmentURLResolver: attachmentURLResolver,
+                                onToggle: { toggleSection(kind) }
+                            )
+                            .id(TaskDetailSectionAnchorID(kind: kind))
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: TaskDetailSectionOffsetKey.self,
+                                        value: [TaskDetailSectionOffset(kind: kind, minY: geo.frame(in: .named("taskScroll")).minY)]
+                                    )
+                                }
+                            )
                         }
                         Divider()
                         Text("ID: \(task.id.uuidString)")
@@ -317,7 +433,7 @@ struct TaskDetailWindow: View {
                     .padding(24)
                 }
                 .coordinateSpace(name: "taskScroll")
-                .onPreferenceChange(SectionOffsetKey.self) { offsets in
+                .onPreferenceChange(TaskDetailSectionOffsetKey.self) { offsets in
                     // The current section is the last one whose top has crossed above a small band
                     // below the viewport top (so it counts as "current" just before it reaches the
                     // top). Falls back to the first present section.
@@ -334,8 +450,58 @@ struct TaskDetailWindow: View {
         // `cachedTaskCost` / `cachedTaskTokens`, so they track a running task rather than
         // needing a fetch on appear and a re-fetch when it finishes.
     }
+}
 
-    private func headerRow(_ task: AgentTask) -> some View {
+/// A pinned bar of section chips at the top of the window: always visible, highlights the
+/// section currently under the viewport top, and jumps to a section on tap. Addresses "the
+/// detail view is long and I can't tell what section I'm in."
+private struct TaskDetailJumpBar: View {
+    let sections: [TaskDetailSectionKind]
+    @Binding var currentSection: TaskDetailSectionKind
+    let proxy: ScrollViewProxy
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(sections, id: \.self) { kind in
+                    let isCurrent = kind == currentSection
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            proxy.scrollTo(TaskDetailSectionAnchorID(kind: kind), anchor: .top)
+                        }
+                        currentSection = kind
+                    }, label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: kind.icon)
+                                .font(.caption2)
+                            Text(kind.label)
+                                .font(.caption.weight(isCurrent ? .semibold : .regular))
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().fill(isCurrent ? AppColors.disclosureToggle.opacity(0.18) : Color.secondary.opacity(0.08))
+                        )
+                        .foregroundStyle(isCurrent ? AppColors.disclosureToggle : Color.secondary)
+                    })
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
+        .background(.bar)
+    }
+}
+
+private struct TaskDetailHeaderRow: View {
+    let task: AgentTask
+    let onEditTask: () -> Void
+    let onStartTask: () -> Void
+    let onSavePDF: () -> Void
+    let onDone: () -> Void
+
+    var body: some View {
         HStack(alignment: .top) {
             Image(systemName: TaskStatusBadge.icon(for: task.status))
                 .font(.title2)
@@ -345,222 +511,72 @@ struct TaskDetailWindow: View {
                 .textSelection(.enabled)
             Spacer()
             if task.status.isDescriptionEditable {
-                Button {
-                    taskEditorPresentation = .editing(task)
-                } label: {
-                    Label("Edit", systemImage: "pencil")
-                }
-                .help("Edit this task")
+                Button(action: onEditTask, label: { Label("Edit", systemImage: "pencil") })
+                    .help("Edit this task")
             }
             if task.status.isRunnable {
-                Button {
-                    startRunnableTask(task)
-                } label: {
+                Button(action: onStartTask, label: {
                     Label(runActionTitle(for: task.status), systemImage: "play.fill")
-                }
+                })
                 .buttonStyle(.borderedProminent)
                 .help("Start this task now")
             }
-            Button {
-                isShowingPDFSheet = true
-            } label: {
-                Label("Save as PDF…", systemImage: "doc.richtext")
-            }
-            .help("Save this task as a PDF")
-            Button("Done") { dismiss() }
+            Button(action: onSavePDF, label: { Label("Save as PDF…", systemImage: "doc.richtext") })
+                .help("Save this task as a PDF")
+            Button("Done", action: onDone)
                 .keyboardShortcut(.cancelAction)
         }
     }
+}
 
-    private func startRunnableTask(_ task: AgentTask) {
-        if task.shouldPromptForTemplateRunInputs {
-            templateRunInputTask = task
-            return
-        }
-        Task { await viewModel.startTask(task) }
-    }
+// MARK: - Section dispatch
 
-    // MARK: - Section dispatch
+private struct TaskDetailSectionView: View {
+    let kind: TaskDetailSectionKind
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let viewModel: AppViewModel
+    let sessionManager: SessionManager
+    let attachmentURLResolver: (Attachment) -> URL?
+    let onToggle: () -> Void
 
-    /// All sections that could ever render in this window, in the canonical order
-    /// `orderedSections(for:)` filters from based on status.
-    /// Distinct scroll-anchor identity for a content section. Kept separate from `SectionKind`
-    /// (which the jump-bar chips already use as their `ForEach` id) so `scrollTo` resolves only
-    /// to the section in the vertical scroll view, not the same-id chip in the jump bar.
-    private struct SectionAnchorID: Hashable {
-        let kind: SectionKind
-    }
-
-    private enum SectionKind: Hashable {
-        case error
-        case summary
-        case result
-        case acceptance
-        case steps
-        case updates
-        case description
-        case relatedContext
-
-        var label: String {
-            switch self {
-            case .error:          return "Error"
-            case .summary:        return "Summary"
-            case .result:         return "Result"
-            case .acceptance:     return "Acceptance"
-            case .steps:          return "Steps"
-            case .updates:        return "Updates"
-            case .description:    return "Description"
-            case .relatedContext: return "Context"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .error:          return "exclamationmark.triangle.fill"
-            case .summary:        return "text.quote"
-            case .result:         return "checkmark.seal.fill"
-            case .acceptance:     return "checklist"
-            case .steps:          return "list.bullet"
-            case .updates:        return "clock.arrow.circlepath"
-            case .description:    return "doc.text"
-            case .relatedContext: return "link"
-            }
-        }
-    }
-
-    /// The section whose top is currently nearest the scroll viewport top — highlighted in the jump
-    /// bar so the user always knows where they are. Updated from scroll-offset preferences.
-    @State private var currentSection: SectionKind = .description
-
-    /// Reports each section's top offset within the scroll coordinate space so `currentSection`
-    /// can be derived on scroll.
-    private struct SectionOffsetKey: PreferenceKey {
-        static let defaultValue: [SectionOffset] = []
-        static func reduce(value: inout [SectionOffset], nextValue: () -> [SectionOffset]) {
-            value.append(contentsOf: nextValue())
-        }
-    }
-    private struct SectionOffset: Equatable {
-        let kind: SectionKind
-        let minY: CGFloat
-    }
-
-    private enum SectionMode {
-        case hidden
-        case preview
-        case expanded
-    }
-
-    private func orderedSections(for status: AgentTask.Status) -> [SectionKind] {
-        // `.acceptance` and `.steps` render nothing when the task has no criteria/steps,
-        // so they can be listed unconditionally.
-        switch status {
-        case .pending, .scheduled:
-            return [.description, .acceptance, .steps, .relatedContext]
-        case .starting, .running, .paused, .interrupted, .awaitingReview, .awaitingHelp, .validating:
-            return [.updates, .acceptance, .steps, .description, .relatedContext]
-        case .completed:
-            return [.summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
-        case .failed:
-            return [.error, .summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
-        }
-    }
-
-    /// True while the task is in an active validation loop. During that loop the status
-    /// OSCILLATES between `.validating` (judging) and `.running` (worker reworking a rejection)
-    /// once per round. If the acceptance section's default expansion keyed on the raw status it
-    /// would expand and collapse on every round, yanking the scroll position out from under the
-    /// user — so the sections key on this stable flag instead.
-    private func validationActive(_ task: AgentTask) -> Bool {
-        guard !task.acceptanceCriteria.isEmpty else { return false }
-        switch task.status {
-        case .validating, .awaitingReview:
-            return true
-        case .running, .paused, .interrupted:
-            // Mid-rework between rejection and resubmission still counts as "in the loop"
-            // once at least one validation round has run.
-            return (task.validation?.round ?? 0) > 0
-        default:
-            return false
-        }
-    }
-
-    /// Default mode for a section, driven by task status EXCEPT for acceptance, which keys on the
-    /// stable `validationActive` flag so it doesn't oscillate. The user can override to/from
-    /// `.preview` and `.expanded` via the header chevron; `.hidden` is not user-toggleable.
-    private func defaultMode(_ kind: SectionKind, for task: AgentTask) -> SectionMode {
-        let status = task.status
-        switch (kind, status) {
-        case (.error, .failed):                       return .expanded
-        case (.error, _):                             return .hidden
-
-        case (.description, .pending), (.description, .scheduled):
-            return .expanded
-        case (.description, _):                       return .preview
-
-        case (.relatedContext, _):                    return .preview
-
-        // Front-and-center throughout the validation loop; compact otherwise. Keyed on the
-        // stable flag, not the raw status, so the validating↔running oscillation doesn't flip it.
-        case (.acceptance, _):
-            return validationActive(task) ? .expanded : .preview
-
-        case (.steps, _):                             return .preview
-
-        case (.updates, .pending), (.updates, .scheduled):
-            return .hidden
-        case (.updates, _):                           return .preview
-
-        case (.result, .completed):                   return .expanded
-        case (.result, .failed):                      return .expanded
-        case (.result, _):                            return .hidden
-
-        case (.summary, .completed), (.summary, .failed):
-            return .preview
-        case (.summary, _):                           return .hidden
-        }
-    }
-
-    private func currentMode(_ kind: SectionKind, for task: AgentTask) -> SectionMode {
-        if let overridden = modeOverrides[kind] { return overridden }
-        return defaultMode(kind, for: task)
-    }
-
-    private func toggleSection(_ kind: SectionKind, for task: AgentTask) {
-        let next: SectionMode
-        switch currentMode(kind, for: task) {
-        case .preview, .hidden:  next = .expanded
-        case .expanded:          next = .preview
-        }
-        modeOverrides[kind] = next
-    }
-
-    @ViewBuilder
-    private func sectionView(_ kind: SectionKind, task: AgentTask) -> some View {
-        let mode = currentMode(kind, for: task)
+    var body: some View {
         if mode != .hidden {
             switch kind {
-            case .error:           errorSection(task)
-            case .summary:         summarySection(task, mode: mode)
-            case .result:          resultSection(task)
-            case .acceptance:      acceptanceSection(task, mode: mode)
-            case .steps:           stepsSection(task, mode: mode)
-            case .updates:         updatesSection(task, mode: mode)
-            case .description:     descriptionSection(task, mode: mode)
-            case .relatedContext:  relatedContextSection(task)
+            case .error:
+                TaskDetailErrorSection(task: task)
+            case .summary:
+                TaskDetailSummarySection(task: task, mode: mode, onToggle: onToggle)
+            case .result:
+                TaskDetailResultSection(task: task, attachmentURLResolver: attachmentURLResolver)
+            case .acceptance:
+                TaskDetailAcceptanceSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
+            case .steps:
+                TaskDetailStepsSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
+            case .updates:
+                TaskDetailUpdatesSection(task: task, mode: mode,
+                                         attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
+            case .description:
+                TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel,
+                                             attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
+            case .relatedContext:
+                TaskDetailRelatedContextSection(task: task, viewModel: viewModel, sessionManager: sessionManager)
             }
         }
     }
+}
 
-    // MARK: - Sections
+// MARK: - Sections
 
-    @ViewBuilder
-    private func errorSection(_ task: AgentTask) -> some View {
+private struct TaskDetailErrorSection: View {
+    let task: AgentTask
+
+    var body: some View {
         // Failures land in `task.result` today; surface that as the Error body.
         let errorText = task.result ?? ""
         if !errorText.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                sectionTitleRow(
+                TaskDetailSectionTitleRow(
                     title: "Error",
                     titleColor: AppColors.errorSectionAccent,
                     copyText: errorText
@@ -574,13 +590,18 @@ struct TaskDetailWindow: View {
             Divider()
         }
     }
+}
 
-    @ViewBuilder
-    private func summarySection(_ task: AgentTask, mode: SectionMode) -> some View {
+private struct TaskDetailSummarySection: View {
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let onToggle: () -> Void
+
+    var body: some View {
         if let summary = task.summary, !summary.isEmpty {
             let isExpandable = (linePrefix(summary, lines: 4) != summary)
             VStack(alignment: .leading, spacing: 8) {
-                sectionTitleRow(title: "Summary", copyText: summary)
+                TaskDetailSectionTitleRow(title: "Summary", copyText: summary)
                 let body = (mode == .expanded || !isExpandable) ? summary : linePrefix(summary, lines: 4)
                 MarkdownText(content: body, baseFont: .body)
                     .textSelection(.enabled)
@@ -589,17 +610,19 @@ struct TaskDetailWindow: View {
                     .background(AppColors.summarySectionBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 if isExpandable {
-                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                        toggleSection(.summary, for: task)
-                    }
+                    DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
                 }
             }
             Divider()
         }
     }
+}
 
-    @ViewBuilder
-    private func resultSection(_ task: AgentTask) -> some View {
+private struct TaskDetailResultSection: View {
+    let task: AgentTask
+    let attachmentURLResolver: (Attachment) -> URL?
+
+    var body: some View {
         let result = task.result ?? ""
         let commentary = task.commentary ?? ""
         let hasResult = !result.isEmpty
@@ -610,13 +633,13 @@ struct TaskDetailWindow: View {
 
         if (hasResult && !suppressDueToError) || hasCommentary {
             VStack(alignment: .leading, spacing: 10) {
-                sectionTitleRow(
+                TaskDetailSectionTitleRow(
                     title: "Result",
                     copyText: result.isEmpty ? commentary : result
                 )
 
                 if hasCommentary {
-                    aiCommentaryInset(commentary)
+                    TaskDetailAICommentaryInset(commentary: commentary)
                 }
 
                 if hasResult && !suppressDueToError {
@@ -633,7 +656,8 @@ struct TaskDetailWindow: View {
         // tags. Skipped for tasks that never produced structured items.
         if !task.resultItems.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                sectionHeader("Deliverables", copyText: DeliverablesView.plainText(task.resultItems))
+                TaskDetailSectionTitleRow(title: "Deliverables",
+                                          copyText: DeliverablesView.plainText(task.resultItems))
                 DeliverablesView(items: task.resultItems, urlResolver: attachmentURLResolver)
             }
             Divider()
@@ -641,11 +665,12 @@ struct TaskDetailWindow: View {
 
         // Render result attachments whenever they exist on a completed/failed task,
         // even when the Result section was suppressed (e.g. failed task with attachments
-        // but no commentary). The status check is implicit — this function is only
-        // reached for statuses that include `.result` in `orderedSections`.
+        // but no commentary). The status check is implicit — this view is only reached
+        // for statuses that include `.result` in `orderedSections`.
         if !task.resultAttachments.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                sectionHeader("Result Attachments", copyText: Self.formattedAttachments(task.resultAttachments))
+                TaskDetailSectionTitleRow(title: "Result Attachments",
+                                          copyText: formattedAttachments(task.resultAttachments))
                 TaskAttachmentList(
                     attachments: task.resultAttachments,
                     urlResolver: attachmentURLResolver
@@ -654,15 +679,19 @@ struct TaskDetailWindow: View {
             Divider()
         }
     }
+}
 
-    private func aiCommentaryInset(_ commentary: String) -> some View {
+private struct TaskDetailAICommentaryInset: View {
+    let commentary: String
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("AI commentary")
                     .font(AppFonts.aiCommentaryTitle)
                     .foregroundStyle(.secondary)
                 Spacer()
-                copyButton(text: commentary, id: "ai-commentary")
+                TaskDetailCopyButton(text: commentary)
             }
             MarkdownText(content: commentary, baseFont: AppFonts.aiCommentaryBody)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -677,11 +706,87 @@ struct TaskDetailWindow: View {
                 .strokeBorder(AppColors.aiCommentaryBorder, lineWidth: 0.5)
         )
     }
+}
 
-    // MARK: - Acceptance criteria + validation
+// MARK: - Acceptance criteria + validation
 
-    @ViewBuilder
-    private func acceptanceSection(_ task: AgentTask, mode: SectionMode) -> some View {
+/// Editing model for one acceptance criterion. Criterion identity is preserved
+/// through edits; the store resets sticky verdicts only when the validation contract changes.
+private struct EditableCriterion: Identifiable {
+    let id: UUID
+    var name: String
+    var validationPrompt: String
+    var inputEnumeratorPrompt: String
+    var waivable: Bool
+    let origin: TaskAuthorship
+
+    init(criterion: AcceptanceCriterion) {
+        id = criterion.id
+        name = criterion.name
+        validationPrompt = criterion.validationPrompt
+        inputEnumeratorPrompt = criterion.inputEnumeratorPrompt ?? ""
+        waivable = criterion.waivable
+        origin = criterion.origin
+    }
+
+    init() {
+        id = UUID()
+        name = ""
+        validationPrompt = ""
+        inputEnumeratorPrompt = ""
+        waivable = false
+        origin = .user
+    }
+
+    /// `nil` only when the row carries no name — a genuinely empty row the user never filled in.
+    ///
+    /// An empty `validationPrompt` is NOT a reason to drop the row: that is exactly the shape of
+    /// the implicit criterion materialized for a criterion-less task, and dropping it meant
+    /// opening this editor on such a task and saving WITHOUT CHANGING ANYTHING silently deleted
+    /// the criterion — which then wiped the entire verdict ledger via `setAcceptanceCriteria`'s
+    /// no-longer-present filter, and reset the round and stall counters. Preserving the empty
+    /// prompt round-trips the criterion unchanged and keeps it on the default validator.
+    func built() -> AcceptanceCriterion? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return nil }
+        let trimmedValidationPrompt = validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEnumeratorPrompt = inputEnumeratorPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AcceptanceCriterion(
+            id: id,
+            name: trimmedName,
+            validationPrompt: trimmedValidationPrompt,
+            inputEnumeratorPrompt: trimmedEnumeratorPrompt.isEmpty ? nil : trimmedEnumeratorPrompt,
+            waivable: waivable,
+            origin: origin
+        )
+    }
+}
+
+/// The acceptance contract and its verdict history.
+///
+/// Owns the editor's draft rows and the two expansion sets (`expandedValidatorPromptIDs`,
+/// `expandedDebugRecordIDs`). Those sets used to live on the window, so opening one verdict's
+/// debug transcript re-evaluated every other section in it.
+private struct TaskDetailAcceptanceSection: View {
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let viewModel: AppViewModel
+    let onToggle: () -> Void
+
+    @State private var isEditing = false
+    @State private var editedCriteria: [EditableCriterion] = []
+    /// Criteria whose pinned validator definition (system prompt + input template) is open.
+    @State private var expandedValidatorPromptIDs: Set<UUID> = []
+    /// Verdict records whose debug transcript (rendered input + response log) is open.
+    @State private var expandedDebugRecordIDs: Set<UUID> = []
+
+    private func beginEditing() {
+        editedCriteria = task.acceptanceCriteria.map(EditableCriterion.init)
+        if editedCriteria.isEmpty { editedCriteria = [EditableCriterion()] }
+        isEditing = true
+    }
+
+    var body: some View {
         // Shown when the task has criteria OR when the user could author some
         // (an editable empty state offers the pencil).
         if !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable {
@@ -694,29 +799,34 @@ struct TaskDetailWindow: View {
                     Text("Acceptance")
                         .font(.title3.bold())
                     if !task.acceptanceCriteria.isEmpty {
-                        Text(acceptanceSubtitle(task: task, settledCount: settled.count))
+                        Text("\(settled.count) of \(task.acceptanceCriteria.count) settled")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     if !task.acceptanceCriteria.isEmpty {
-                        copyButton(text: Self.formattedAcceptance(task), id: "Acceptance")
+                        TaskDetailCopyButton(text: Self.formattedAcceptance(task))
                     }
-                    if task.status.isValidationContractEditable && !isEditingAcceptance {
-                        Button {
-                            beginEditingAcceptance(task)
-                        } label: {
+                    if task.status.isValidationContractEditable && !isEditing {
+                        Button(action: beginEditing, label: {
                             Image(systemName: "pencil")
                                 .font(.callout)
-                        }
+                        })
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
                         .help("Edit acceptance criteria")
                     }
                 }
 
-                if isEditingAcceptance {
-                    acceptanceEditor(task)
+                if isEditing {
+                    TaskDetailAcceptanceEditor(
+                        rows: $editedCriteria,
+                        onCancel: { isEditing = false },
+                        onSave: { criteria in
+                            Task { await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteria) }
+                            isEditing = false
+                        }
+                    )
                 } else if task.acceptanceCriteria.isEmpty {
                     Text("No acceptance criteria — validation will run the default whole-task check.")
                         .font(.callout)
@@ -724,38 +834,52 @@ struct TaskDetailWindow: View {
                 } else {
                     VStack(alignment: .leading, spacing: mode == .expanded ? 12 : 6) {
                         ForEach(Array(task.acceptanceCriteria.enumerated()), id: \.element.id) { index, criterion in
-                            criterionRow(criterion, number: index + 1, task: task, expanded: mode == .expanded)
+                            TaskDetailCriterionRow(
+                                criterion: criterion,
+                                number: index + 1,
+                                task: task,
+                                expanded: mode == .expanded,
+                                expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
+                                expandedDebugRecordIDs: $expandedDebugRecordIDs
+                            )
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                        toggleSection(.acceptance, for: task)
-                    }
+                    DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
                 }
             }
             Divider()
         }
     }
 
-    private func beginEditingAcceptance(_ task: AgentTask) {
-        editedCriteria = task.acceptanceCriteria.map(EditableCriterion.init)
-        if editedCriteria.isEmpty { editedCriteria = [EditableCriterion()] }
-        isEditingAcceptance = true
+    private static func formattedAcceptance(_ task: AgentTask) -> String {
+        task.acceptanceCriteria.map { criterion in
+            var line = "- \(criterion.name)"
+            if let qualifiers = criterionQualifiers(criterion) { line += " (\(qualifiers))" }
+            if let latest = task.validation?.latestVerdict(for: criterion.id) {
+                line += "\n  \(latest.verdict.displayLabel)"
+                if let detail = latest.verdict.detailText { line += ": \(detail)" }
+            }
+            return line
+        }.joined(separator: "\n")
     }
+}
 
-    @ViewBuilder
-    private func acceptanceEditor(_ task: AgentTask) -> some View {
+private struct TaskDetailAcceptanceEditor: View {
+    @Binding var rows: [EditableCriterion]
+    let onCancel: () -> Void
+    let onSave: ([AcceptanceCriterion]) -> Void
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach($editedCriteria) { $row in
+            ForEach($rows) { $row in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         TextField("Display name", text: $row.name)
                             .textFieldStyle(.roundedBorder)
-                        Button {
-                            editedCriteria.removeAll { $0.id == row.id }
-                        } label: {
+                        Button(action: { rows.removeAll { $0.id == row.id } }, label: {
                             Image(systemName: "minus.circle")
-                        }
+                        })
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
                         .help("Remove criterion")
@@ -772,12 +896,10 @@ struct TaskDetailWindow: View {
                     }
                 }
             }
-            Button {
-                editedCriteria.append(EditableCriterion())
-            } label: {
+            Button(action: { rows.append(EditableCriterion()) }, label: {
                 Label("Add criterion", systemImage: "plus.circle")
                     .font(.callout)
-            }
+            })
             .buttonStyle(.plain)
             .foregroundStyle(AppColors.disclosureToggle)
 
@@ -786,27 +908,23 @@ struct TaskDetailWindow: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Cancel") {
-                    isEditingAcceptance = false
-                }
-                Button("Save") {
-                    let criteria = editedCriteria.compactMap { $0.built() }
-                    Task {
-                        await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteria)
-                    }
-                    isEditingAcceptance = false
-                }
-                .buttonStyle(.borderedProminent)
+                Button("Cancel", action: onCancel)
+                Button("Save", action: { onSave(rows.compactMap { $0.built() }) })
+                    .buttonStyle(.borderedProminent)
             }
         }
     }
+}
 
-    private func acceptanceSubtitle(task: AgentTask, settledCount: Int) -> String {
-        "\(settledCount) of \(task.acceptanceCriteria.count) settled"
-    }
+private struct TaskDetailCriterionRow: View {
+    let criterion: AcceptanceCriterion
+    let number: Int
+    let task: AgentTask
+    let expanded: Bool
+    @Binding var expandedValidatorPromptIDs: Set<UUID>
+    @Binding var expandedDebugRecordIDs: Set<UUID>
 
-    @ViewBuilder
-    private func criterionRow(_ criterion: AcceptanceCriterion, number: Int, task: AgentTask, expanded: Bool) -> some View {
+    var body: some View {
         let latest = task.validation?.latestVerdict(for: criterion.id)
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -820,17 +938,17 @@ struct TaskDetailWindow: View {
                     // verdict WORD, always shown (an accepted criterion previously showed only a
                     // bare icon). Separating it from the body means the criterion's own in-text
                     // "…this criterion FAILS" can never be read as the verdict.
-                    Label(latest?.verdict.displayLabel ?? "Pending", systemImage: Self.verdictSymbol(latest?.verdict))
+                    Label(latest?.verdict.displayLabel ?? "Pending", systemImage: verdictSymbol(latest?.verdict))
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Self.verdictColor(latest?.verdict))
+                        .foregroundStyle(verdictColor(latest?.verdict))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Capsule().fill(Self.verdictColor(latest?.verdict).opacity(0.15)))
+                        .background(Capsule().fill(verdictColor(latest?.verdict).opacity(0.15)))
                     Text(criterion.name)
                         .font(.body)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
-                    if let qualifiers = Self.criterionQualifiers(criterion) {
+                    if let qualifiers = criterionQualifiers(criterion) {
                         Text(qualifiers)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -839,7 +957,7 @@ struct TaskDetailWindow: View {
                     if let latest, let detail = latest.verdict.detailText {
                         Text(detail)
                             .font(.callout)
-                            .foregroundStyle(Self.verdictColor(latest.verdict))
+                            .foregroundStyle(verdictColor(latest.verdict))
                             .lineLimit(expanded ? nil : 2)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
@@ -848,154 +966,68 @@ struct TaskDetailWindow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if expanded {
-                criterionExpandedDetail(criterion, task: task)
-                    .padding(.leading, 24)
+                TaskDetailCriterionExpandedDetail(
+                    criterion: criterion,
+                    task: task,
+                    expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
+                    expandedDebugRecordIDs: $expandedDebugRecordIDs
+                )
+                .padding(.leading, 24)
             }
         }
     }
+}
 
-    /// Expanded per-criterion detail: the pinned validator prompt and the full verdict
-    /// history with per-record debug transcripts — the assessment-debugging surface.
-    @ViewBuilder
-    private func criterionExpandedDetail(_ criterion: AcceptanceCriterion, task: AgentTask) -> some View {
+/// Expanded per-criterion detail: the pinned validator prompt and the full verdict
+/// history with per-record debug transcripts — the assessment-debugging surface.
+private struct TaskDetailCriterionExpandedDetail: View {
+    let criterion: AcceptanceCriterion
+    let task: AgentTask
+    @Binding var expandedValidatorPromptIDs: Set<UUID>
+    @Binding var expandedDebugRecordIDs: Set<UUID>
+
+    private var isValidatorPromptOpen: Bool { expandedValidatorPromptIDs.contains(criterion.id) }
+
+    var body: some View {
         let records = (task.validation?.verdictRecords ?? []).filter { $0.criterionID == criterion.id }
         VStack(alignment: .leading, spacing: 6) {
             // A default-validated criterion has no authored prompt (it's empty); its stance is
             // the shipped default, shown by the "Validator prompt" disclosure below.
             if !criterion.usesDefaultValidator {
-                debugTextBox(title: "Validation prompt", text: criterion.validationPrompt)
+                TaskDetailDebugTextBox(title: "Validation prompt", text: criterion.validationPrompt)
             }
             if let inputEnumeratorPrompt = criterion.inputEnumeratorPrompt {
-                debugTextBox(title: "Input enumerator prompt", text: inputEnumeratorPrompt)
+                TaskDetailDebugTextBox(title: "Input enumerator prompt", text: inputEnumeratorPrompt)
             }
             if let pinned = Self.resolvedValidator(for: criterion) {
-                Button {
-                    if expandedValidatorPromptIDs.contains(criterion.id) {
+                Button(action: {
+                    if isValidatorPromptOpen {
                         expandedValidatorPromptIDs.remove(criterion.id)
                     } else {
                         expandedValidatorPromptIDs.insert(criterion.id)
                     }
-                } label: {
+                }, label: {
                     Label(
-                        expandedValidatorPromptIDs.contains(criterion.id)
+                        isValidatorPromptOpen
                             ? "Hide validator prompt (\(pinned.name))"
                             : "Validator prompt (\(pinned.name))",
                         systemImage: "text.alignleft"
                     )
                     .font(.caption)
-                }
+                })
                 .buttonStyle(.plain)
                 .foregroundStyle(AppColors.disclosureToggle)
-                if expandedValidatorPromptIDs.contains(criterion.id) {
-                    debugTextBox(title: "Validator definition — base prompt (the criterion & response format are appended at judge time; see a round's debug for the full sent prompt)", text: pinned.systemPrompt)
+                if isValidatorPromptOpen {
+                    TaskDetailDebugTextBox(
+                        title: "Validator definition — base prompt (the criterion & response format are appended at judge time; see a round's debug for the full sent prompt)",
+                        text: pinned.systemPrompt
+                    )
                 }
             }
             ForEach(records.reversed()) { record in
-                verdictRecordRow(record)
+                TaskDetailVerdictRecordRow(record: record, expandedDebugRecordIDs: $expandedDebugRecordIDs)
             }
         }
-    }
-
-    @ViewBuilder
-    private func verdictRecordRow(_ record: CriterionVerdictRecord) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Image(systemName: Self.verdictSymbol(record.verdict))
-                    .foregroundStyle(Self.verdictColor(record.verdict))
-                    .font(.caption)
-                Text("Round \(record.round) · \(record.verdict.displayLabel) · \(record.validatorName)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(record.recordedAt, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                if record.renderedInput != nil || record.responseLog != nil {
-                    Button {
-                        if expandedDebugRecordIDs.contains(record.id) {
-                            expandedDebugRecordIDs.remove(record.id)
-                        } else {
-                            expandedDebugRecordIDs.insert(record.id)
-                        }
-                    } label: {
-                        Text(expandedDebugRecordIDs.contains(record.id) ? "hide debug" : "debug")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(AppColors.disclosureToggle)
-                }
-            }
-            if let detail = record.verdict.detailText {
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .padding(.leading, 18)
-            }
-            if expandedDebugRecordIDs.contains(record.id) {
-                VStack(alignment: .leading, spacing: 6) {
-                    if let sys = record.renderedSystemPrompt, !sys.isEmpty {
-                        debugTextBox(title: "System prompt (exactly as sent — includes the criterion & response format)", text: sys)
-                    }
-                    if let input = record.renderedInput, !input.isEmpty {
-                        debugTextBox(title: "User message (the results/evidence the validator judged)", text: input)
-                    }
-                    if let log = record.responseLog, !log.isEmpty {
-                        debugTextBox(title: "Validator output (turn by turn)", text: log)
-                    }
-                }
-                .padding(.leading, 18)
-            }
-        }
-    }
-
-    private func debugTextBox(title: String, text: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                copyButton(text: text, id: title + String(text.prefix(24)))
-            }
-            ScrollView(.vertical) {
-                Text(text)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
-            }
-            .frame(maxHeight: 220)
-            .background(AppColors.secondaryBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-    }
-
-    private static func verdictSymbol(_ verdict: CriterionVerdictRecord.Verdict?) -> String {
-        switch verdict {
-        case .accepted: return "checkmark.circle.fill"
-        case .rejected: return "xmark.circle.fill"
-        case .waived: return "minus.circle.fill"
-        case .error: return "exclamationmark.triangle.fill"
-        case nil: return "circle"
-        }
-    }
-
-    private static func verdictColor(_ verdict: CriterionVerdictRecord.Verdict?) -> Color {
-        switch verdict {
-        case .accepted: return AppColors.verdictAccepted
-        case .rejected: return AppColors.verdictRejected
-        case .waived: return AppColors.verdictWaived
-        case .error: return AppColors.verdictError
-        case nil: return AppColors.verdictPending
-        }
-    }
-
-    private static func criterionQualifiers(_ criterion: AcceptanceCriterion) -> String? {
-        var parts: [String] = []
-        if criterion.waivable { parts.append("waivable") }
-        if criterion.inputEnumeratorPrompt != nil { parts.append("enumerated inputs") }
-        if criterion.usesDefaultValidator { parts.append("default validator") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// The validator definition a criterion resolves to, for display. Mirrors the coordinator's
@@ -1015,23 +1047,156 @@ struct TaskDetailWindow: View {
         case .failure: return nil
         }
     }
+}
 
-    private static func formattedAcceptance(_ task: AgentTask) -> String {
-        task.acceptanceCriteria.map { criterion in
-            var line = "- \(criterion.name)"
-            if let qualifiers = criterionQualifiers(criterion) { line += " (\(qualifiers))" }
-            if let latest = task.validation?.latestVerdict(for: criterion.id) {
-                line += "\n  \(latest.verdict.displayLabel)"
-                if let detail = latest.verdict.detailText { line += ": \(detail)" }
+private struct TaskDetailVerdictRecordRow: View {
+    let record: CriterionVerdictRecord
+    @Binding var expandedDebugRecordIDs: Set<UUID>
+
+    private var isDebugOpen: Bool { expandedDebugRecordIDs.contains(record.id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: verdictSymbol(record.verdict))
+                    .foregroundStyle(verdictColor(record.verdict))
+                    .font(.caption)
+                Text("Round \(record.round) · \(record.verdict.displayLabel) · \(record.validatorName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(record.recordedAt, style: .time)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                if record.renderedInput != nil || record.responseLog != nil {
+                    Button(action: {
+                        if isDebugOpen {
+                            expandedDebugRecordIDs.remove(record.id)
+                        } else {
+                            expandedDebugRecordIDs.insert(record.id)
+                        }
+                    }, label: {
+                        Text(isDebugOpen ? "hide debug" : "debug")
+                            .font(.caption)
+                    })
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AppColors.disclosureToggle)
+                }
             }
-            return line
-        }.joined(separator: "\n")
+            if let detail = record.verdict.detailText {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(.leading, 18)
+            }
+            if isDebugOpen {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let sys = record.renderedSystemPrompt, !sys.isEmpty {
+                        TaskDetailDebugTextBox(
+                            title: "System prompt (exactly as sent — includes the criterion & response format)",
+                            text: sys
+                        )
+                    }
+                    if let input = record.renderedInput, !input.isEmpty {
+                        TaskDetailDebugTextBox(
+                            title: "User message (the results/evidence the validator judged)",
+                            text: input
+                        )
+                    }
+                    if let log = record.responseLog, !log.isEmpty {
+                        TaskDetailDebugTextBox(title: "Validator output (turn by turn)", text: log)
+                    }
+                }
+                .padding(.leading, 18)
+            }
+        }
+    }
+}
+
+private struct TaskDetailDebugTextBox: View {
+    let title: String
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                TaskDetailCopyButton(text: text)
+            }
+            ScrollView(.vertical) {
+                Text(text)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+            }
+            .frame(maxHeight: 220)
+            .background(AppColors.secondaryBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+    }
+}
+
+// MARK: - Worker steps
+
+/// Editing model for one step. The user holds full authority over the plan, so
+/// rows can be deleted outright (no tombstone requirement, unlike the worker).
+private struct EditableStep: Identifiable {
+    let id: UUID
+    var text: String
+    var status: TaskStep.Status
+    var note: String
+    let origin: TaskAuthorship
+
+    init(step: TaskStep) {
+        id = step.id
+        text = step.text
+        status = step.status
+        note = step.note ?? ""
+        origin = step.origin
     }
 
-    // MARK: - Worker steps
+    init() {
+        id = UUID()
+        text = ""
+        status = .pending
+        note = ""
+        origin = .user
+    }
 
-    @ViewBuilder
-    private func stepsSection(_ task: AgentTask, mode: SectionMode) -> some View {
+    func built() -> TaskStep? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return TaskStep(
+            id: id,
+            text: trimmed,
+            status: status,
+            note: trimmedNote.isEmpty ? nil : trimmedNote,
+            origin: origin
+        )
+    }
+}
+
+private struct TaskDetailStepsSection: View {
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let viewModel: AppViewModel
+    let onToggle: () -> Void
+
+    @State private var isEditing = false
+    @State private var editedSteps: [EditableStep] = []
+
+    private func beginEditing() {
+        editedSteps = task.steps.map(EditableStep.init)
+        if editedSteps.isEmpty { editedSteps = [EditableStep()] }
+        isEditing = true
+    }
+
+    var body: some View {
         if !task.steps.isEmpty || task.status.isValidationContractEditable {
             let visible = mode == .expanded ? task.steps : task.steps.filter(\.isActive)
             let completedCount = task.steps.filter { $0.status == .completed }.count
@@ -1047,23 +1212,28 @@ struct TaskDetailWindow: View {
                     }
                     Spacer()
                     if !task.steps.isEmpty {
-                        copyButton(text: Self.formattedSteps(task.steps), id: "Steps")
+                        TaskDetailCopyButton(text: Self.formattedSteps(task.steps))
                     }
-                    if task.status.isValidationContractEditable && !isEditingSteps {
-                        Button {
-                            beginEditingSteps(task)
-                        } label: {
+                    if task.status.isValidationContractEditable && !isEditing {
+                        Button(action: beginEditing, label: {
                             Image(systemName: "pencil")
                                 .font(.callout)
-                        }
+                        })
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
                         .help("Edit steps")
                     }
                 }
 
-                if isEditingSteps {
-                    stepsEditor(task)
+                if isEditing {
+                    TaskDetailStepsEditor(
+                        rows: $editedSteps,
+                        onCancel: { isEditing = false },
+                        onSave: { steps in
+                            Task { await viewModel.setTaskSteps(id: task.id, steps: steps) }
+                            isEditing = false
+                        }
+                    )
                 } else if task.steps.isEmpty {
                     Text("No steps yet — the worker plans its own; seed some here if you want to steer it.")
                         .font(.callout)
@@ -1071,14 +1241,12 @@ struct TaskDetailWindow: View {
                 } else {
                     VStack(alignment: .leading, spacing: 5) {
                         ForEach(visible) { step in
-                            stepRow(step)
+                            TaskDetailStepRow(step: step)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     if task.steps.contains(where: { !$0.isActive }) || mode == .expanded {
-                        DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                            toggleSection(.steps, for: task)
-                        }
+                        DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
                     }
                 }
             }
@@ -1086,26 +1254,33 @@ struct TaskDetailWindow: View {
         }
     }
 
-    private func beginEditingSteps(_ task: AgentTask) {
-        editedSteps = task.steps.map(EditableStep.init)
-        if editedSteps.isEmpty { editedSteps = [EditableStep()] }
-        isEditingSteps = true
+    private static func formattedSteps(_ steps: [TaskStep]) -> String {
+        steps.map { step in
+            var line = "- [\(step.status.rawValue)] \(step.text)"
+            if let note = step.note, !note.isEmpty { line += " — \(note)" }
+            return line
+        }.joined(separator: "\n")
     }
+}
+
+private struct TaskDetailStepsEditor: View {
+    @Binding var rows: [EditableStep]
+    let onCancel: () -> Void
+    let onSave: ([TaskStep]) -> Void
 
     /// Skipped/removed steps must say why — validators read the notes, and the rule
     /// applies to the user's editor the same as the worker's tool.
-    private var stepsMissingRequiredNotes: Bool {
-        editedSteps.contains { row in
+    private var missingRequiredNotes: Bool {
+        rows.contains { row in
             (row.status == .skipped || row.status == .removed)
                 && !row.text.trimmingCharacters(in: .whitespaces).isEmpty
                 && row.note.trimmingCharacters(in: .whitespaces).isEmpty
         }
     }
 
-    @ViewBuilder
-    private func stepsEditor(_ task: AgentTask) -> some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach($editedSteps) { $row in
+            ForEach($rows) { $row in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Picker("", selection: $row.status) {
@@ -1119,11 +1294,9 @@ struct TaskDetailWindow: View {
                         .frame(width: 110)
                         TextField("Step", text: $row.text, axis: .vertical)
                             .textFieldStyle(.roundedBorder)
-                        Button {
-                            editedSteps.removeAll { $0.id == row.id }
-                        } label: {
+                        Button(action: { rows.removeAll { $0.id == row.id } }, label: {
                             Image(systemName: "minus.circle")
-                        }
+                        })
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
                         .help("Delete step")
@@ -1136,16 +1309,14 @@ struct TaskDetailWindow: View {
                     }
                 }
             }
-            Button {
-                editedSteps.append(EditableStep())
-            } label: {
+            Button(action: { rows.append(EditableStep()) }, label: {
                 Label("Add step", systemImage: "plus.circle")
                     .font(.callout)
-            }
+            })
             .buttonStyle(.plain)
             .foregroundStyle(AppColors.disclosureToggle)
 
-            if stepsMissingRequiredNotes {
+            if missingRequiredNotes {
                 Text("Skipped and removed steps need a note — validators read it.")
                     .font(.caption)
                     .foregroundStyle(AppColors.verdictError)
@@ -1153,26 +1324,22 @@ struct TaskDetailWindow: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") {
-                    isEditingSteps = false
-                }
-                Button("Save") {
-                    let steps = editedSteps.compactMap { $0.built() }
-                    Task {
-                        await viewModel.setTaskSteps(id: task.id, steps: steps)
-                    }
-                    isEditingSteps = false
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(stepsMissingRequiredNotes)
+                Button("Cancel", action: onCancel)
+                Button("Save", action: { onSave(rows.compactMap { $0.built() }) })
+                    .buttonStyle(.borderedProminent)
+                    .disabled(missingRequiredNotes)
             }
         }
     }
+}
 
-    private func stepRow(_ step: TaskStep) -> some View {
+private struct TaskDetailStepRow: View {
+    let step: TaskStep
+
+    var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: Self.stepSymbol(step.status))
-                .foregroundStyle(Self.stepColor(step.status))
+            Image(systemName: Self.symbol(step.status))
+                .foregroundStyle(Self.color(step.status))
                 .font(.callout)
             VStack(alignment: .leading, spacing: 1) {
                 Text(step.text)
@@ -1190,7 +1357,7 @@ struct TaskDetailWindow: View {
         }
     }
 
-    private static func stepSymbol(_ status: TaskStep.Status) -> String {
+    private static func symbol(_ status: TaskStep.Status) -> String {
         switch status {
         case .pending: return "circle"
         case .inProgress: return "circle.lefthalf.filled"
@@ -1200,7 +1367,7 @@ struct TaskDetailWindow: View {
         }
     }
 
-    private static func stepColor(_ status: TaskStep.Status) -> Color {
+    private static func color(_ status: TaskStep.Status) -> Color {
         switch status {
         case .pending: return .secondary
         case .inProgress: return AppColors.stepInProgress
@@ -1209,17 +1376,17 @@ struct TaskDetailWindow: View {
         case .removed: return AppColors.stepRemoved
         }
     }
+}
 
-    private static func formattedSteps(_ steps: [TaskStep]) -> String {
-        steps.map { step in
-            var line = "- [\(step.status.rawValue)] \(step.text)"
-            if let note = step.note, !note.isEmpty { line += " — \(note)" }
-            return line
-        }.joined(separator: "\n")
-    }
+// MARK: - Updates, description, related context
 
-    @ViewBuilder
-    private func updatesSection(_ task: AgentTask, mode: SectionMode) -> some View {
+private struct TaskDetailUpdatesSection: View {
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let attachmentURLResolver: (Attachment) -> URL?
+    let onToggle: () -> Void
+
+    var body: some View {
         if !task.updates.isEmpty {
             // Newest at top. When the total count fits in the 5-item preview the section
             // is treated as fully expanded — no `(more)`/`(less)` link, since toggling
@@ -1229,7 +1396,7 @@ struct TaskDetailWindow: View {
             let effectiveExpanded = mode == .expanded || !isExpandable
             let visible = effectiveExpanded ? reversed : Array(reversed.prefix(5))
             VStack(alignment: .leading, spacing: 8) {
-                sectionTitleRow(
+                TaskDetailSectionTitleRow(
                     title: "Updates",
                     subtitle: (!effectiveExpanded && isExpandable) ? "showing 5 of \(reversed.count)" : nil,
                     copyText: Self.formattedUpdates(task.updates)
@@ -1241,17 +1408,41 @@ struct TaskDetailWindow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if isExpandable {
-                    DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                        toggleSection(.updates, for: task)
-                    }
+                    DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
                 }
             }
             Divider()
         }
     }
 
-    @ViewBuilder
-    private func descriptionSection(_ task: AgentTask, mode: SectionMode) -> some View {
+    private static func formattedUpdates(_ updates: [AgentTask.TaskUpdate]) -> String {
+        updates.map { update in
+            var line = "[\(update.date.formatted(date: .omitted, time: .standard))] \(update.message)"
+            if !update.attachments.isEmpty {
+                let names = update.attachments.map { $0.filename }.joined(separator: ", ")
+                line += " (attachments: \(names))"
+            }
+            return line
+        }.joined(separator: "\n")
+    }
+}
+
+private struct TaskDetailDescriptionSection: View {
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let viewModel: AppViewModel
+    let attachmentURLResolver: (Attachment) -> URL?
+    let onToggle: () -> Void
+
+    @State private var isEditing = false
+    @State private var editedDescription = ""
+
+    /// Whether the task's description can be edited. Mirrors `AgentTask.Status.isDescriptionEditable`
+    /// so completed/failed/scheduled tasks accept late corrections; only `running` and
+    /// `awaitingReview` are read-only.
+    private var isEditable: Bool { task.status.isDescriptionEditable }
+
+    var body: some View {
         // Display (and copy) the same composition every agent sees — `## Template inputs` above
         // the prose. The EDITOR below still seeds from the raw `description`: the block is
         // derived from the stored input values, not authored text, so it must never round-trip
@@ -1266,22 +1457,22 @@ struct TaskDetailWindow: View {
                     EditedBadge(editedAt: editedAt)
                 }
                 Spacer()
-                copyButton(text: displayedDescription, id: "description")
-                if isDescriptionEditable && !isEditingDescription {
-                    Button {
+                TaskDetailCopyButton(text: displayedDescription)
+                if isEditable && !isEditing {
+                    Button(action: {
                         editedDescription = task.description
-                        isEditingDescription = true
-                    } label: {
+                        isEditing = true
+                    }, label: {
                         Image(systemName: "pencil")
                             .font(.callout)
-                    }
+                    })
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .help("Edit description")
                 }
             }
 
-            if isEditingDescription {
+            if isEditing {
                 TextEditor(text: $editedDescription)
                     .font(.body)
                     .frame(minHeight: 80, maxHeight: 200)
@@ -1291,20 +1482,18 @@ struct TaskDetailWindow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 HStack {
                     Spacer()
-                    Button("Cancel") {
-                        isEditingDescription = false
-                    }
-                    Button("Save") {
+                    Button("Cancel", action: { isEditing = false })
+                    Button("Save", action: {
                         Task {
                             await viewModel.updateTaskDescription(
                                 id: task.id,
                                 description: editedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
                             )
                         }
-                        isEditingDescription = false
-                    }
+                        isEditing = false
+                    })
                     .buttonStyle(.borderedProminent)
-                    .disabled(!isDescriptionEditable || editedDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!isEditable || editedDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             } else {
                 let body = (mode == .expanded || !isExpandable)
@@ -1316,27 +1505,39 @@ struct TaskDetailWindow: View {
             }
 
             if !task.descriptionAttachments.isEmpty && mode == .expanded {
-                sectionHeader("Attachments", copyText: Self.formattedAttachments(task.descriptionAttachments))
+                TaskDetailSectionTitleRow(title: "Attachments",
+                                          copyText: formattedAttachments(task.descriptionAttachments))
                 TaskAttachmentList(
                     attachments: task.descriptionAttachments,
                     urlResolver: attachmentURLResolver
                 )
             }
 
-            if isExpandable && !isEditingDescription {
-                DisclosureMoreLessLink(isExpanded: mode == .expanded) {
-                    toggleSection(.description, for: task)
-                }
+            if isExpandable && !isEditing {
+                DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
             }
         }
         Divider()
     }
+}
 
-    @ViewBuilder
-    private func relatedContextSection(_ task: AgentTask) -> some View {
+private struct TaskDetailRelatedContextSection: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+    let sessionManager: SessionManager
+
+    @Environment(\.openWindow) private var openWindow
+
+    /// Identity-keyed expansion state for related-context rows. Survives memory-array
+    /// re-orderings and avoids the `id: \.offset` aliasing bug where per-index state
+    /// would silently bind to a different memory if the array ever changed shape.
+    @State private var expandedMemoryContents: Set<String> = []
+    @State private var expandedPriorTaskIDs: Set<UUID> = []
+
+    var body: some View {
         if Self.hasRelevantContext(task) {
             VStack(alignment: .leading, spacing: 8) {
-                sectionTitleRow(
+                TaskDetailSectionTitleRow(
                     title: "Related context",
                     copyText: Self.formattedContext(task)
                 )
@@ -1411,310 +1612,11 @@ struct TaskDetailWindow: View {
         )
     }
 
-    // MARK: - Headers
-
-    /// Section header with the title on the leading edge plus the section's copy
-    /// button on the trailing edge. The header is no longer click-to-toggle — the
-    /// `(more)`/`(less)` disclosure link in the section body handles expansion.
-    private func sectionTitleRow(
-        title: String,
-        subtitle: String? = nil,
-        titleColor: Color? = nil,
-        copyText: String? = nil
-    ) -> some View {
-        HStack(spacing: 8) {
-            Text(title)
-                .font(.title3.bold())
-                .foregroundStyle(titleColor ?? .primary)
-            if let subtitle {
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if let copyText, !copyText.isEmpty {
-                copyButton(text: copyText, id: title)
-            }
-        }
-    }
-
-    // MARK: - Metadata grid
-
-    private func metadataSection(for task: AgentTask) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-            GridRow {
-                metadataLabel("Status")
-                Text(task.status.displayName)
-                    .foregroundStyle(TaskStatusBadge.color(for: task.status))
-                    .fontWeight(.medium)
-            }
-
-            if let outcome = task.outcome {
-                GridRow(alignment: .firstTextBaseline) {
-                    metadataLabel("Result")
-                    HStack(spacing: 8) {
-                        TaskOutcomeChip(outcome: outcome)
-                        Text(outcome.detailText)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            GridRow {
-                metadataLabel("Template")
-                templateLine(for: task)
-            }
-
-            if let parentTaskID = task.parentTaskID {
-                GridRow {
-                    metadataLabel("Parent")
-                    copyablePath(parentTaskID.uuidString, compact: true)
-                }
-            }
-
-            GridRow {
-                metadataLabel("Created")
-                Text(task.createdAt.formatted(date: .abbreviated, time: .standard))
-            }
-
-            if let startedAt = task.startedAt {
-                GridRow {
-                    metadataLabel("Started")
-                    Text(startedAt.formatted(date: .abbreviated, time: .standard))
-                }
-            }
-
-            if let completedAt = task.completedAt {
-                GridRow {
-                    metadataLabel(task.status == .failed ? "Failed" : "Completed")
-                    Text(completedAt.formatted(date: .abbreviated, time: .standard))
-                }
-            }
-
-            if let elapsed = task.elapsedDisplayString {
-                GridRow {
-                    metadataLabel("Elapsed")
-                    Text(elapsed)
-                }
-            }
-
-            if let scheduled = task.scheduledRunAt {
-                GridRow {
-                    metadataLabel("Scheduled")
-                    scheduledLine(for: scheduled)
-                }
-            }
-
-            let wakes = viewModel.scheduledWakes(for: task.id)
-            if !wakes.isEmpty {
-                GridRow(alignment: .top) {
-                    metadataLabel(wakes.count == 1 ? "Next Run" : "Next Runs")
-                    scheduledWakesLine(wakes)
-                }
-            }
-
-            if let tokens = viewModel.cachedTaskTokens(task.id), tokens.total > 0 {
-                GridRow {
-                    metadataLabel("Tokens")
-                    Text(tokens.formattedLine())
-                        .monospacedDigit()
-                }
-            }
-
-            if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
-                GridRow {
-                    metadataLabel("Cost")
-                    HStack(spacing: 6) {
-                        Text(String(format: "$%.2f", cost))
-                            .monospacedDigit()
-                            .foregroundStyle(.orange)
-                        if let ratePerHour = task.costPerHourString(cost: cost) {
-                            Text("(\(ratePerHour))")
-                                .font(.caption)
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-
-            if task.approvedTools != nil || task.status.isRunnable || task.status == .scheduled || task.isTemplate {
-                GridRow(alignment: .top) {
-                    metadataLabel("Tools")
-                    TaskToolOverrideEditor(task: task, viewModel: viewModel)
-                }
-            }
-
-            let workspaceRows = viewModel.workspaceReferences(for: task)
-            if !workspaceRows.isEmpty {
-                GridRow(alignment: .top) {
-                    metadataLabel("Folders")
-                    workspaceLines(workspaceRows)
-                }
-            }
-        }
-        .font(.callout)
-    }
-
-    private func templateLine(for task: AgentTask) -> some View {
-        HStack(spacing: 8) {
-            if task.isTemplate {
-                Label("Template", systemImage: "doc.on.doc")
-                    .foregroundStyle(AppColors.scheduledFutureAccent)
-            } else if task.parentTaskID != nil {
-                Label("Template instance", systemImage: "arrow.triangle.branch")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("No")
-                    .foregroundStyle(.secondary)
-            }
-            if task.isTemplate && task.shouldPromptForTemplateRunInputs {
-                Text("\(task.templateInputDefinitions.count) input\(task.templateInputDefinitions.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func scheduledWakesLine(_ wakes: [ScheduledWake]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(wakes, id: \.id) { wake in
-                HStack(spacing: 6) {
-                    Image(systemName: wake.recurrence == nil ? "clock" : "arrow.triangle.2.circlepath")
-                        .foregroundStyle(TaskStatusBadge.color(for: .scheduled))
-                    scheduledLine(for: wake.wakeAt)
-                    if let recurrence = wake.recurrence {
-                        Text(recurrence.displayDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-    }
-
-    private func workspaceLines(_ rows: [(label: String, path: String)]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(row.label)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 64, alignment: .leading)
-                    copyablePath(row.path, compact: false)
-                }
-            }
-        }
-    }
-
-    private func copyablePath(_ text: String, compact: Bool) -> some View {
-        HStack(spacing: 4) {
-            Text(text)
-                .font(compact ? .caption.monospaced() : .caption2.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            copyButton(text: text, id: text)
-        }
-    }
-
-    private func scheduledLine(for date: Date) -> some View {
-        let now = Date()
-        let pastDue = date < now
-        let isToday = Calendar.current.isDateInToday(date)
-        let dateString = date.formatted(.dateTime.year().month(.abbreviated).day())
-        let timeString = date.formatted(date: .omitted, time: .standard)
-
-        let dateColor: Color = pastDue
-            ? AppColors.scheduledPastDueAccent
-            : (isToday ? .primary : AppColors.scheduledFutureAccent)
-        let timeColor: Color = pastDue
-            ? AppColors.scheduledPastDueAccent
-            : AppColors.scheduledFutureAccent
-
-        return HStack(spacing: 4) {
-            Text(dateString).foregroundStyle(dateColor)
-            Text("at").foregroundStyle(.secondary)
-            Text(timeString).foregroundStyle(timeColor)
-            if pastDue {
-                Text("(past due)")
-                    .foregroundStyle(AppColors.scheduledPastDueAccent)
-                    .fontWeight(.medium)
-            }
-        }
-    }
-
-    private func metadataLabel(_ text: String) -> some View {
-        Text(text)
-            .foregroundStyle(.secondary)
-            .gridColumnAlignment(.trailing)
-    }
-
-    /// Plain (non-collapsible) section header used by sub-sections like Result Attachments
-    /// and Description Attachments that nest inside a parent collapsible section.
-    private func sectionHeader(_ title: String, copyText: String? = nil) -> some View {
-        HStack {
-            Text(title)
-                .font(.title3.bold())
-            Spacer()
-            if let copyText, !copyText.isEmpty {
-                copyButton(text: copyText, id: title)
-            }
-        }
-    }
-
-    private func copyButton(text: String, id: String? = nil) -> some View {
-        let sectionID = id ?? text
-        let isCopied = recentlyCopiedSection == sectionID
-        return Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            withAnimation {
-                recentlyCopiedSection = sectionID
-            }
-            Task {
-                try? await Task.sleep(for: .seconds(1.5))
-                if recentlyCopiedSection == sectionID {
-                    withAnimation {
-                        recentlyCopiedSection = nil
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                .font(.callout)
-                .foregroundStyle(isCopied ? .green : .secondary)
-        }
-        .buttonStyle(.plain)
-        .help("Copy to clipboard")
-    }
-
     /// Whether the task has any relevant memories or prior task summaries attached.
     private static func hasRelevantContext(_ task: AgentTask) -> Bool {
         let hasMemories = task.relevantMemories.map { !$0.isEmpty } ?? false
         let hasPriorTasks = task.relevantPriorTasks.map { !$0.isEmpty } ?? false
         return hasMemories || hasPriorTasks
-    }
-
-    // MARK: - Copy text formatters
-
-    private static func formattedUpdates(_ updates: [AgentTask.TaskUpdate]) -> String {
-        updates.map { update in
-            var line = "[\(update.date.formatted(date: .omitted, time: .standard))] \(update.message)"
-            if !update.attachments.isEmpty {
-                let names = update.attachments.map { $0.filename }.joined(separator: ", ")
-                line += " (attachments: \(names))"
-            }
-            return line
-        }.joined(separator: "\n")
-    }
-
-    /// Builds a copy-friendly text rendering of an attachment list for the section's
-    /// copy button. Each line: `filename (mime, size) — id=<UUID>`.
-    private static func formattedAttachments(_ attachments: [Attachment]) -> String {
-        attachments.map { a in
-            "\(a.filename) (\(a.mimeType), \(a.formattedSize)) — id=\(a.id.uuidString)"
-        }.joined(separator: "\n")
     }
 
     private static func formattedContext(_ task: AgentTask) -> String {
@@ -1735,27 +1637,315 @@ struct TaskDetailWindow: View {
         }
         return parts.joined(separator: "\n")
     }
+}
 
-    /// Returns the first `lines` newline-separated lines of `text`, joined back. Used to
-    /// build a preview for sections that wrap MarkdownText — `.lineLimit(N)` does not
-    /// clip cleanly across MarkdownText's multi-block VStack, so we trim the source instead.
-    /// If the trimmed prefix opens a fenced code block but doesn't close it, a closing
-    /// fence is appended so the renderer doesn't bleed code styling into the rest of the
-    /// section.
-    private func linePrefix(_ text: String, lines: Int) -> String {
-        let prefix = text.components(separatedBy: "\n").prefix(lines).joined(separator: "\n")
-        return Self.balancingCodeFences(prefix)
+// MARK: - Metadata grid
+
+/// The window's fact table.
+///
+/// Its own `View` because it holds every live read in the window — scheduled wakes, cached
+/// tokens, cached cost, workspace references — each of which republishes on a timer or a
+/// coalesced tick while a task runs. In the window's body those reads made the whole detail
+/// view, every section included, a dependent of all of them.
+private struct TaskDetailMetadataGrid: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            GridRow {
+                TaskDetailMetadataLabel(text: "Status")
+                Text(task.status.displayName)
+                    .foregroundStyle(TaskStatusBadge.color(for: task.status))
+                    .fontWeight(.medium)
+            }
+
+            if let outcome = task.outcome {
+                GridRow(alignment: .firstTextBaseline) {
+                    TaskDetailMetadataLabel(text: "Result")
+                    HStack(spacing: 8) {
+                        TaskOutcomeChip(outcome: outcome)
+                        Text(outcome.detailText)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            GridRow {
+                TaskDetailMetadataLabel(text: "Template")
+                TaskDetailTemplateLine(task: task)
+            }
+
+            if let parentTaskID = task.parentTaskID {
+                GridRow {
+                    TaskDetailMetadataLabel(text: "Parent")
+                    TaskDetailCopyablePath(text: parentTaskID.uuidString, compact: true)
+                }
+            }
+
+            GridRow {
+                TaskDetailMetadataLabel(text: "Created")
+                Text(task.createdAt.formatted(date: .abbreviated, time: .standard))
+            }
+
+            if let startedAt = task.startedAt {
+                GridRow {
+                    TaskDetailMetadataLabel(text: "Started")
+                    Text(startedAt.formatted(date: .abbreviated, time: .standard))
+                }
+            }
+
+            if let completedAt = task.completedAt {
+                GridRow {
+                    TaskDetailMetadataLabel(text: task.status == .failed ? "Failed" : "Completed")
+                    Text(completedAt.formatted(date: .abbreviated, time: .standard))
+                }
+            }
+
+            if let elapsed = task.elapsedDisplayString {
+                GridRow {
+                    TaskDetailMetadataLabel(text: "Elapsed")
+                    Text(elapsed)
+                }
+            }
+
+            if let scheduled = task.scheduledRunAt {
+                GridRow {
+                    TaskDetailMetadataLabel(text: "Scheduled")
+                    TaskDetailScheduledLine(date: scheduled)
+                }
+            }
+
+            let wakes = viewModel.scheduledWakes(for: task.id)
+            if !wakes.isEmpty {
+                GridRow(alignment: .top) {
+                    TaskDetailMetadataLabel(text: wakes.count == 1 ? "Next Run" : "Next Runs")
+                    TaskDetailScheduledWakesLine(wakes: wakes)
+                }
+            }
+
+            if let tokens = viewModel.cachedTaskTokens(task.id), tokens.total > 0 {
+                GridRow {
+                    TaskDetailMetadataLabel(text: "Tokens")
+                    Text(tokens.formattedLine())
+                        .monospacedDigit()
+                }
+            }
+
+            if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
+                GridRow {
+                    TaskDetailMetadataLabel(text: "Cost")
+                    HStack(spacing: 6) {
+                        Text(String(format: "$%.2f", cost))
+                            .monospacedDigit()
+                            .foregroundStyle(.orange)
+                        if let ratePerHour = task.costPerHourString(cost: cost) {
+                            Text("(\(ratePerHour))")
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if task.approvedTools != nil || task.status.isRunnable || task.status == .scheduled || task.isTemplate {
+                GridRow(alignment: .top) {
+                    TaskDetailMetadataLabel(text: "Tools")
+                    TaskToolOverrideEditor(task: task, viewModel: viewModel)
+                }
+            }
+
+            let workspaceRows = viewModel.workspaceReferences(for: task)
+            if !workspaceRows.isEmpty {
+                GridRow(alignment: .top) {
+                    TaskDetailMetadataLabel(text: "Folders")
+                    TaskDetailWorkspaceLines(rows: workspaceRows)
+                }
+            }
+        }
+        .font(.callout)
     }
+}
 
-    /// Appends a closing ``` ``` ``` or `~~~` fence when `text` contains an odd number
-    /// of fence markers, so a preview cut mid-code-block doesn't leave the markdown
-    /// renderer in code mode.
-    private static func balancingCodeFences(_ text: String) -> String {
-        let backticks = text.components(separatedBy: "```").count - 1
-        if backticks % 2 == 1 { return text + "\n```" }
-        let tildes = text.components(separatedBy: "~~~").count - 1
-        if tildes % 2 == 1 { return text + "\n~~~" }
-        return text
+private struct TaskDetailTemplateLine: View {
+    let task: AgentTask
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if task.isTemplate {
+                Label("Template", systemImage: "doc.on.doc")
+                    .foregroundStyle(AppColors.scheduledFutureAccent)
+            } else if task.parentTaskID != nil {
+                Label("Template instance", systemImage: "arrow.triangle.branch")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("No")
+                    .foregroundStyle(.secondary)
+            }
+            if task.isTemplate && task.shouldPromptForTemplateRunInputs {
+                Text("\(task.templateInputDefinitions.count) input\(task.templateInputDefinitions.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct TaskDetailScheduledWakesLine: View {
+    let wakes: [ScheduledWake]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(wakes, id: \.id) { wake in
+                HStack(spacing: 6) {
+                    Image(systemName: wake.recurrence == nil ? "clock" : "arrow.triangle.2.circlepath")
+                        .foregroundStyle(TaskStatusBadge.color(for: .scheduled))
+                    TaskDetailScheduledLine(date: wake.wakeAt)
+                    if let recurrence = wake.recurrence {
+                        Text(recurrence.displayDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct TaskDetailWorkspaceLines: View {
+    let rows: [(label: String, path: String)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(row.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64, alignment: .leading)
+                    TaskDetailCopyablePath(text: row.path, compact: false)
+                }
+            }
+        }
+    }
+}
+
+private struct TaskDetailCopyablePath: View {
+    let text: String
+    let compact: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(text)
+                .font(compact ? .caption.monospaced() : .caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            TaskDetailCopyButton(text: text)
+        }
+    }
+}
+
+private struct TaskDetailScheduledLine: View {
+    let date: Date
+
+    var body: some View {
+        let now = Date()
+        let pastDue = date < now
+        let isToday = Calendar.current.isDateInToday(date)
+        let dateString = date.formatted(.dateTime.year().month(.abbreviated).day())
+        let timeString = date.formatted(date: .omitted, time: .standard)
+
+        let dateColor: Color = pastDue
+            ? AppColors.scheduledPastDueAccent
+            : (isToday ? .primary : AppColors.scheduledFutureAccent)
+        let timeColor: Color = pastDue
+            ? AppColors.scheduledPastDueAccent
+            : AppColors.scheduledFutureAccent
+
+        HStack(spacing: 4) {
+            Text(dateString).foregroundStyle(dateColor)
+            Text("at").foregroundStyle(.secondary)
+            Text(timeString).foregroundStyle(timeColor)
+            if pastDue {
+                Text("(past due)")
+                    .foregroundStyle(AppColors.scheduledPastDueAccent)
+                    .fontWeight(.medium)
+            }
+        }
+    }
+}
+
+private struct TaskDetailMetadataLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .foregroundStyle(.secondary)
+            .gridColumnAlignment(.trailing)
+    }
+}
+
+// MARK: - Shared chrome
+
+/// Section header with the title on the leading edge plus the section's copy button on the
+/// trailing edge. The header is not click-to-toggle — the `(more)`/`(less)` disclosure link in
+/// the section body handles expansion. Also serves the nested sub-section headings
+/// (Deliverables, Result Attachments, Description Attachments), which differed only in
+/// carrying no subtitle or accent color.
+private struct TaskDetailSectionTitleRow: View {
+    let title: String
+    var subtitle: String?
+    var titleColor: Color?
+    var copyText: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.title3.bold())
+                .foregroundStyle(titleColor ?? .primary)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let copyText, !copyText.isEmpty {
+                TaskDetailCopyButton(text: copyText)
+            }
+        }
+    }
+}
+
+/// Copy-to-clipboard button that flashes a checkmark for a moment after a copy.
+///
+/// The "recently copied" flag is this button's OWN state. It used to be a single
+/// `recentlyCopiedSection: String?` on the window, keyed by a hand-built section id, which meant
+/// every copy — and the timed reset 1.5s later — re-evaluated the entire detail view, and every
+/// call site had to invent an id unique enough not to collide (one of them concatenated a
+/// 24-character prefix of the copied text). Per-button state needs no id at all.
+private struct TaskDetailCopyButton: View {
+    let text: String
+
+    @State private var isCopied = false
+
+    var body: some View {
+        Button(action: {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            withAnimation { isCopied = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                withAnimation { isCopied = false }
+            }
+        }, label: {
+            Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                .font(.callout)
+                .foregroundStyle(isCopied ? .green : .secondary)
+        })
+        .buttonStyle(.plain)
+        .help("Copy to clipboard")
     }
 }
 
@@ -1765,10 +1955,10 @@ private struct EditedBadge: View {
     let editedAt: Date
 
     private static let tooltipFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .medium
-        return f
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+        return formatter
     }()
 
     var body: some View {
