@@ -212,20 +212,18 @@ struct CodeStyleGuardTests {
         "Views/ModelStatsPopover.swift": 2,
         "Views/TaskToolOverrideEditor.swift": 2,
         "Views/ToolsSettingsView.swift": 2,
-        "Views/ChannelLogView.swift": 1,
         "Views/ConfigValidationView.swift": 1,
         "Views/Inspector/AgentCardModelInfoLine.swift": 1,
         "Views/Inspector/CostEstimateSection.swift": 1,
         "Views/Inspector/ValidatorAgentCard.swift": 1,
         "Views/MCPServerManagementView.swift": 1,
-        "Views/MarkdownText.swift": 1,
         "Views/TaskDetail/TaskRelevantPriorTaskRow.swift": 1,
         "Views/Tasks/TemplateRunInputSheet.swift": 1
     ]
 
     /// The sum of the ceilings. Pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number, and so unused headroom cannot quietly accumulate in the table.
-    private static let someViewFunctionTotal = 186
+    private static let someViewFunctionTotal = 184
 
     /// Counts `func … -> some View` declarations in one file, excluding the two forms that have no
     /// `View`-struct spelling:
@@ -236,6 +234,11 @@ struct CodeStyleGuardTests {
     /// Matched by SHAPE rather than by filename, so a new `ViewModifier` in a new file is fine while
     /// an ordinary helper hiding in an exempt file still counts.
     static func someViewFunctionCount(in source: String) -> Int {
+        // Strip comments FIRST. Two of the three counters that produced a baseline for this table
+        // were fooled by prose — including, with some irony, `// MARK: - Extracted View structs
+        // (refactored from func ... -> some View)`, a comment recording that the violation had been
+        // REMOVED. A count that rises when someone documents the rule is worse than no count.
+        let source = Self.strippingComments(source)
         let viewExtensionRanges = Self.braceRanges(in: source, after: #"\bextension\s+View\s*\{"#)
         var count = 0
         var index = source.startIndex
@@ -256,6 +259,41 @@ struct CodeStyleGuardTests {
             count += 1
         }
         return count
+    }
+
+    /// Blanks out `//` line comments and `/* */` blocks, preserving length and newlines so any
+    /// offsets computed afterwards still line up with the original source.
+    ///
+    /// Deliberately does not try to be a full lexer: a `//` inside a string literal is blanked too.
+    /// For this counter that is harmless — it can only ever cause an UNDER-count of a declaration
+    /// hidden inside a string, which is not a thing that exists.
+    static func strippingComments(_ source: String) -> String {
+        var out = Array(source)
+        var index = 0
+        var inLine = false
+        var inBlock = false
+        while index < out.count {
+            let c = out[index]
+            let next = index + 1 < out.count ? out[index + 1] : "\0"
+            if inLine {
+                if c == "\n" { inLine = false } else { out[index] = " " }
+            } else if inBlock {
+                if c == "*", next == "/" { out[index] = " "; out[index + 1] = " "; index += 2; inBlock = false; continue }
+                if c != "\n" { out[index] = " " }
+            } else if c == "/", next == "/" {
+                inLine = true
+                out[index] = " "; out[index + 1] = " "
+                index += 2
+                continue
+            } else if c == "/", next == "*" {
+                inBlock = true
+                out[index] = " "; out[index + 1] = " "
+                index += 2
+                continue
+            }
+            index += 1
+        }
+        return String(out)
     }
 
     /// Brace-balanced ranges of every construct matching `pattern`, used to exempt `extension View`.
@@ -346,5 +384,15 @@ struct CodeStyleGuardTests {
                 ) -> some View { Text(title) }
             }
             """) == 1)
+        // Prose is not code. Two of the three counters that produced a baseline for the table above
+        // were fooled by exactly these lines — one of which records that the violation was removed.
+        #expect(CodeStyleGuardTests.someViewFunctionCount(in: """
+            // MARK: - Extracted View structs (refactored from func ... -> some View)
+            /// A `View` struct (not a `-> some View` helper) per the project's SwiftUI rules.
+            /* func legacy() -> some View { EmptyView() } */
+            struct Row: View {
+                var body: some View { Text("x") }
+            }
+            """) == 0)
     }
 }
