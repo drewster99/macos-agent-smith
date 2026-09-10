@@ -794,29 +794,17 @@ private struct TaskRow: View {
                         .foregroundStyle(.tertiary)
                         .help("A run of a template")
                 }
-                runningElapsed()
+                TaskRunningElapsed(start: task.startedAt ?? task.createdAt)
                     .fixedSize()
             }
             HStack(spacing: 6) {
-                costChip()
+                TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
                 Spacer(minLength: 4)
                 stepGlyphStrip()
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-    }
-
-    /// Live-ticking elapsed since the run started, always shown in full (a running row is a stopwatch).
-    @ViewBuilder
-    private func runningElapsed() -> some View {
-        let start = task.startedAt ?? task.createdAt
-        TimelineView(.periodic(from: start, by: 1)) { context in
-            Text(durationDisplayString(context.date.timeIntervalSince(start)))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
     }
 
     /// A compact strip of the ACTIVE steps' status glyphs; overflow past a cap collapses to "+N".
@@ -873,7 +861,7 @@ private struct TaskRow: View {
                 // deleted row is just its struck-through title.
                 if style != .recentlyDeleted {
                     metadataLine()
-                    familySummaryLine(runs: runs)
+                    TaskFamilySummaryLine(runs: runs, style: style, disclosure: disclosure, viewModel: viewModel)
                 }
             }
 
@@ -947,72 +935,12 @@ private struct TaskRow: View {
             // minWidth is kept: it is what lines these three up as columns across rows. Without
             // `.fixedSize()` above them their 182pt total is the row's floor rather than an
             // absolute, which lands the row just inside the 250pt column instead of outside it.
-            costChip()
+            TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
                 .frame(minWidth: 40, alignment: .trailing)
             compactElapsedText()
                 .frame(minWidth: 54, alignment: .trailing)
             compactTimeLabel()
                 .frame(minWidth: 88, alignment: .trailing)
-        }
-    }
-
-    /// Roll-up of every run this task has spawned — count, how they turned out, total spend,
-    /// total time. A recurring template's own row otherwise says nothing about the thing the
-    /// user actually wants to know, which is how the schedule has been going; its individual
-    /// runs are scattered across the active and archived buckets.
-    @ViewBuilder
-    private func familySummaryLine(runs: [AgentTask]) -> some View {
-        if let summary = TaskFamilySummary(runs: runs, viewModel: viewModel) {
-            HStack(spacing: 8) {
-                runListToggle(runCount: summary.runCount)
-
-                ForEach(summary.buckets) { bucket in
-                    Text("\(bucket.count) \(bucket.label)")
-                        .foregroundStyle(bucket.color)
-                }
-
-                Spacer(minLength: 4)
-
-                if summary.totalCost > 0 {
-                    Text(String(format: "$%.2f", summary.totalCost))
-                        .foregroundStyle(.orange)
-                }
-                if summary.totalElapsed > 0 {
-                    Text(durationDisplayString(summary.totalElapsed))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .font(.caption2.monospacedDigit())
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .opacity(style == .active ? 1 : 0.6)
-        }
-    }
-
-    /// The run count doubles as the expand/collapse control for the run list below. Plain text
-    /// when there's no history to hide — a chevron that toggles nothing is worse than none.
-    @ViewBuilder
-    private func runListToggle(runCount: Int) -> some View {
-        let label = "\(runCount) run\(runCount == 1 ? "" : "s")"
-        if let disclosure {
-            Button(action: disclosure.toggle, label: {
-                HStack(spacing: 3) {
-                    Image(systemName: disclosure.isCollapsed ? "chevron.right" : "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                    Text(label)
-                }
-                .foregroundStyle(.secondary)
-                .contentShape(Rectangle())
-            })
-            .buttonStyle(.plain)
-            .help(
-                disclosure.isCollapsed
-                    ? "Show \(disclosure.hiddenRunCount) finished run\(disclosure.hiddenRunCount == 1 ? "" : "s")"
-                    : "Hide finished runs"
-            )
-        } else {
-            Text(label)
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -1059,51 +987,7 @@ private struct TaskRow: View {
                 .layoutPriority(1)
                 .padding(.top, density == .standard ? 1 : 0)
         } else {
-            statusIcon()
-        }
-    }
-
-    @ViewBuilder
-    private func statusIcon() -> some View {
-        Image(systemName: statusIconName)
-            .foregroundStyle(iconForeground)
-            .font(density == .compact ? .caption : nil)
-            .imageScale(.medium)
-            .frame(width: density == .compact ? 13 : 18)
-            .padding(.top, standardStatusIconTopPadding)
-            .symbolEffect(
-                .rotate,
-                options: .repeat(.continuous),
-                isActive: style == .active && task.status == .running
-            )
-            // With the status word gone from the row, hover is where the exact lifecycle
-            // state (paused vs interrupted vs scheduled — all circle-ish glyphs) still lives.
-            .help(task.status.displayName)
-    }
-
-    private var standardStatusIconTopPadding: CGFloat {
-        guard density == .standard else { return 0 }
-        return style == .recentlyDeleted ? 0 : 2
-    }
-
-    private var statusIconName: String {
-        if style == .active, hasScheduledWakes, task.status != .starting, task.status != .running, task.status != .validating {
-            return "clock"
-        }
-        return TaskStatusBadge.icon(for: task.status)
-    }
-
-    private var iconForeground: AnyShapeStyle {
-        switch style {
-        case .active:
-            if hasScheduledWakes, task.status != .starting, task.status != .running, task.status != .validating {
-                return AnyShapeStyle(TaskStatusBadge.color(for: .scheduled))
-            }
-            return AnyShapeStyle(TaskStatusBadge.color(for: task.status))
-        case .archived:
-            return AnyShapeStyle(TaskStatusBadge.color(for: task.status).opacity(0.5))
-        case .recentlyDeleted:
-            return AnyShapeStyle(AppColors.dimSecondary35)
+            TaskRowStatusIcon(taskID: task.id, status: task.status, style: style, density: density, viewModel: viewModel)
         }
     }
 
@@ -1250,7 +1134,7 @@ private struct TaskRow: View {
     @ViewBuilder
     private func metadataLine() -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            costChip()
+            TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
             elapsedChip()
 
             Spacer(minLength: 0)
@@ -1271,33 +1155,6 @@ private struct TaskRow: View {
         }
     }
 
-    private var hasScheduledWakes: Bool {
-        !(viewModel.pendingWakesByTaskID[task.id] ?? []).isEmpty
-    }
-
-    /// Estimated cost chip. Reads from the cache populated by the row-level
-    /// `.task(id:)` loader — never queries `UsageStore` itself. Rendered in
-    /// orange so the eye picks it out at a glance. Shows for any task with
-    /// non-zero accrued cost, regardless of status — a failed task that burned
-    /// real money is information the user needs.
-    @ViewBuilder
-    private func costChip() -> some View {
-        if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
-            // A nested plain button: clicking the money opens the standalone Task Cost window,
-            // while clicking anywhere else on the row still opens Task Detail (the outer button).
-            Button(action: {
-                AgentSmithApp.showOrOpenTaskCostDetail(taskID: task.id, openWindow: openWindow)
-            }, label: {
-                Text(String(format: "$%.2f", cost))
-                    .font(density == .compact ? .caption2.monospacedDigit() : .caption.monospacedDigit())
-                    .foregroundStyle(.orange)
-                    .fixedSize()
-            })
-            .buttonStyle(.plain)
-            .help("Show cost breakdown")
-        }
-    }
-
     /// Final elapsed runtime, shown just right of cost. Tertiary so cost (orange) stays the
     /// primary left-edge signal while elapsed rides along as glanceable context. Only for
     /// FINISHED tasks (`completedAt` set) — a still-running task's elapsed would be frozen at
@@ -1313,6 +1170,207 @@ private struct TaskRow: View {
         }
     }
 
+}
+
+// MARK: - Row leaves that own their own observable reads
+
+/// Cost chip for one task.
+///
+/// A separate `View` because the read of `viewModel.cachedTaskCost` reaches `SharedAppState`'s
+/// `taskUsage` map, which is republished on a coalesced tick while any task is running. `@Observable`
+/// tracks per stored property, not per key, so performing that read inside `TaskRow.body` registered
+/// the WHOLE row as a dependent of the WHOLE dictionary — every visible row re-ran its entire body
+/// (and `childRuns`, a scan of the active + archived lists) whenever any task's cost moved. Here it
+/// invalidates one `Text`.
+///
+/// It must own the read. Handing it a `cost: Double` computed by the parent leaves the dependency in
+/// the parent and undoes the entire point.
+private struct TaskCostChip: View {
+    let taskID: UUID
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
+
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        // The conditional stays, and stays HERE. It is what lets a task with no spend contribute
+        // zero width; rendering a hidden "$0.00" would reserve width in `runningLayout` and
+        // `metadataLine`, which do not wrap this in a `minWidth` frame the way `compactMetadata`
+        // does. Hoisting it to the parent would put the `taskUsage` read back in the row.
+        if let cost = viewModel.cachedTaskCost(taskID), cost > 0 {
+            // A nested plain button: clicking the money opens the standalone Task Cost window,
+            // while clicking anywhere else on the row still opens Task Detail (the outer button).
+            Button(action: {
+                AgentSmithApp.showOrOpenTaskCostDetail(taskID: taskID, openWindow: openWindow)
+            }, label: {
+                Text(String(format: "$%.2f", cost))
+                    .font(density == .compact ? .caption2.monospacedDigit() : .caption.monospacedDigit())
+                    .foregroundStyle(.orange)
+                    .fixedSize()
+            })
+            .buttonStyle(.plain)
+            .help("Show cost breakdown")
+        }
+    }
+}
+
+/// The row's lifecycle glyph, or a clock when the task has wakes queued.
+///
+/// Extracted so the read of `viewModel.pendingWakesByTaskID` — which changes whenever ANY wake in
+/// the session is scheduled or fires — invalidates an 18pt image rather than every row in the
+/// sidebar. `status` is passed by value rather than the whole task, so the glyph is inert to title,
+/// description, step and update churn on its own task.
+///
+/// This also collapses five declarations into one: `statusIcon`, `statusIconName`, `iconForeground`,
+/// `standardStatusIconTopPadding` and `hasScheduledWakes`. The first three each re-derived the same
+/// four-way status guard independently; `showsScheduledClock` is now the single source.
+private struct TaskRowStatusIcon: View {
+    let taskID: UUID
+    let status: AgentTask.Status
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
+
+    var body: some View {
+        Image(systemName: iconName)
+            .foregroundStyle(foreground)
+            .font(density == .compact ? .caption : nil)
+            .imageScale(.medium)
+            .frame(width: density == .compact ? 13 : 18)
+            .padding(.top, topPadding)
+            .symbolEffect(
+                .rotate,
+                options: .repeat(.continuous),
+                isActive: style == .active && status == .running
+            )
+            // With the status word gone from the row, hover is where the exact lifecycle
+            // state (paused vs interrupted vs scheduled — all circle-ish glyphs) still lives.
+            .help(status.displayName)
+    }
+
+    /// A queued wake outranks the lifecycle glyph, but only for a task that is not itself mid-run —
+    /// a running task's own state is the more urgent fact.
+    private var showsScheduledClock: Bool {
+        guard style == .active, status != .starting, status != .running, status != .validating else {
+            return false
+        }
+        return !(viewModel.pendingWakesByTaskID[taskID] ?? []).isEmpty
+    }
+
+    private var iconName: String {
+        showsScheduledClock ? "clock" : TaskStatusBadge.icon(for: status)
+    }
+
+    private var foreground: AnyShapeStyle {
+        switch style {
+        case .active:
+            if showsScheduledClock { return AnyShapeStyle(TaskStatusBadge.color(for: .scheduled)) }
+            return AnyShapeStyle(TaskStatusBadge.color(for: status))
+        case .archived:
+            return AnyShapeStyle(TaskStatusBadge.color(for: status).opacity(0.5))
+        case .recentlyDeleted:
+            return AnyShapeStyle(AppColors.dimSecondary35)
+        }
+    }
+
+    private var topPadding: CGFloat {
+        guard density == .standard else { return 0 }
+        return style == .recentlyDeleted ? 0 : 2
+    }
+}
+
+/// Roll-up of every run this task has spawned — count, how they turned out, total spend, total
+/// time — and the run-list disclosure control the count doubles as. A recurring template's own row
+/// otherwise says nothing about the thing the user actually wants to know, which is how the
+/// schedule has been going; its individual runs are scattered across the active and archived
+/// buckets.
+///
+/// The most important of these extractions, and the least obvious. `TaskFamilySummary.init` calls
+/// `viewModel.cachedTaskCost` once PER RUN — the file's own comment names a template with 177 runs
+/// — so building it inside `TaskRow.body` performed 177 reads of `taskUsage` there. Extracting only
+/// the cost chip would have left every one of them behind, making that change a no-op on exactly
+/// the rows that cost the most.
+private struct TaskFamilySummaryLine: View {
+    let runs: [AgentTask]
+    let style: TaskRowStyle
+    let disclosure: TaskRunListDisclosure?
+    let viewModel: AppViewModel
+
+    var body: some View {
+        if let summary = TaskFamilySummary(runs: runs, viewModel: viewModel) {
+            HStack(spacing: 8) {
+                TaskRunListToggle(runCount: summary.runCount, disclosure: disclosure)
+
+                ForEach(summary.buckets) { bucket in
+                    Text("\(bucket.count) \(bucket.label)")
+                        .foregroundStyle(bucket.color)
+                }
+
+                Spacer(minLength: 4)
+
+                if summary.totalCost > 0 {
+                    Text(String(format: "$%.2f", summary.totalCost))
+                        .foregroundStyle(.orange)
+                }
+                if summary.totalElapsed > 0 {
+                    Text(durationDisplayString(summary.totalElapsed))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .font(.caption2.monospacedDigit())
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(style == .active ? 1 : 0.6)
+        }
+    }
+}
+
+/// The run count doubles as the expand/collapse control for the run list below. Plain text
+/// when there's no history to hide — a chevron that toggles nothing is worse than none.
+private struct TaskRunListToggle: View {
+    let runCount: Int
+    let disclosure: TaskRunListDisclosure?
+
+    var body: some View {
+        let label = "\(runCount) run\(runCount == 1 ? "" : "s")"
+        if let disclosure {
+            Button(action: disclosure.toggle, label: {
+                HStack(spacing: 3) {
+                    Image(systemName: disclosure.isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                    Text(label)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            })
+            .buttonStyle(.plain)
+            .help(
+                disclosure.isCollapsed
+                    ? "Show \(disclosure.hiddenRunCount) finished run\(disclosure.hiddenRunCount == 1 ? "" : "s")"
+                    : "Hide finished runs"
+            )
+        } else {
+            Text(label)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Live-ticking elapsed for an in-flight task.
+///
+/// Its own `View` so the once-a-second `TimelineView` tick invalidates a single `Text` rather than
+/// the row that contains it. Takes the start date by value — it reads nothing observable at all.
+private struct TaskRunningElapsed: View {
+    let start: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: start, by: 1)) { context in
+            Text(durationDisplayString(context.date.timeIntervalSince(start)))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
 }
 
 // MARK: - Scheduled-runs indicator
