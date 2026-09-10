@@ -261,7 +261,14 @@ public actor PersistenceManager {
     /// counted. When the entire file is read the returned total is the decoded count; for a tail
     /// read older lines aren't inspected, so the raw line count is used (a stray partial record
     /// then only slightly over-counts a large history, affecting just the restore-button label).
-    private func decodeJSONL(_ data: Data, limit: Int? = nil) -> (messages: [ChannelMessage], totalCount: Int) {
+    /// `nonisolated static` so the whole decode can run inside `FileIO.perform`. As an actor
+    /// method it resumed on the persistence actor after the read's `await`, so a one-second split
+    /// of a 357 MB log blocked every append, task save and ledger flush behind it.
+    nonisolated static func decodeJSONL(
+        _ data: Data,
+        limit: Int? = nil,
+        logSkipped: (@Sendable (Int) -> Void)? = nil
+    ) -> (messages: [ChannelMessage], totalCount: Int) {
         let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
         let lineCount = lines.count
         let decodingAll = (limit == nil) || (limit! >= lineCount)
@@ -277,9 +284,7 @@ public actor PersistenceManager {
                 skipped += 1
             }
         }
-        if skipped > 0 {
-            logger.error("channel_log.jsonl: skipped \(skipped, privacy: .public) undecodable line(s) — likely a partial record from an unclean shutdown")
-        }
+        if skipped > 0 { logSkipped?(skipped) }
         return (messages, decodingAll ? messages.count : lineCount)
     }
 
@@ -345,9 +350,56 @@ public actor PersistenceManager {
     /// trailing line — which `decodeJSONL` skips by design (same as a partial record from `kill -9`).
     public func loadChannelLogTail(limit: Int) async throws -> (messages: [ChannelMessage], totalCount: Int) {
         try migrateLegacyChannelLogIfNeeded()
-        guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return ([], 0) }
-        let data = try await FileIO.read(channelLogJSONLURL)
-        return decodeJSONL(data, limit: limit)
+        let url = channelLogJSONLURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return ([], 0) }
+        let log = logger
+        // Scan AND decode off the actor. The scan reads the file in 1 MiB chunks and keeps only a
+        // ring of line offsets, so a 357 MB log costs ~0.03 s and a couple of megabytes instead of
+        // a 345 MB `Data` plus ~98,000 subsequences. The tail read is clamped to where the scan
+        // stopped so a concurrent append can't return more lines than the count it's compared to.
+        return try await FileIO.perform {
+            let scan = try JSONLScanner.scan(url: url, tailLimit: limit)
+            let tailBytes = try JSONLScanner.readRange(url: url, from: scan.tailOffset, upTo: scan.scanEnd)
+            // `limit <= 0` asks for no messages, and must still report the real total — the old
+            // path returned `(­[], lineCount)` for it. Without this the zero case falls into the
+            // "everything fit" branch and decodes the WHOLE file to count it.
+            guard limit > 0 else { return ([], scan.lineCount) }
+            let decoded = Self.decodeJSONL(tailBytes, logSkipped: { skipped in
+                log.error("channel_log.jsonl: skipped \(skipped, privacy: .public) undecodable line(s) — likely a partial record from an unclean shutdown")
+            })
+            // `totalCount` keeps its exact prior meaning: the decoded count when everything fit,
+            // the raw line count otherwise (which over-counts by any torn record, as before).
+            let total = scan.tailOffset == 0 ? decoded.messages.count : scan.lineCount
+            return (decoded.messages, total)
+        }
+    }
+
+    /// The last `limit` messages, with NO total.
+    ///
+    /// Separate from `loadChannelLogTail` because skipping the count is the entire saving: a caller
+    /// that wants the last 32 messages was paying a full-file pass — about 1.0 s and 345 MB — for
+    /// them. Without a total there is nothing for `hasRestoredHistory` to compare against, so the
+    /// one-pass consistency argument does not apply and a bounded backward read is correct.
+    public func loadRecentChannelMessages(limit: Int) async throws -> [ChannelMessage] {
+        try migrateLegacyChannelLogIfNeeded()
+        let url = channelLogJSONLURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        return try await FileIO.perform {
+            // Widen until the window actually holds `limit` lines, or until it covers the file.
+            // A fixed estimate is not safe: the real corpus averages ~3.6 KB per line but its
+            // largest is 399 KB, so a few big records at the end would silently return FEWER
+            // messages than asked for — and the one caller uses this to hunt for a trailing user
+            // message, which it would then miss.
+            var windowBytes = max(limit, 1) * 8 * 1024
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? nil
+            while true {
+                let bytes = try JSONLScanner.readTailBytes(url: url, byteCount: windowBytes)
+                let decoded = Self.decodeJSONL(bytes, limit: limit)
+                let coversWholeFile = fileSize.map { windowBytes >= $0 } ?? false
+                if decoded.messages.count >= limit || coversWholeFile { return decoded.messages }
+                windowBytes *= 4
+            }
+        }
     }
 
     /// Loads the entire channel log. Used only by the user-initiated "Restore full history"
@@ -358,16 +410,48 @@ public actor PersistenceManager {
     /// skipped by `decodeJSONL`. The missed in-flight message is on disk and appears on the next load.
     public func loadFullChannelLog() async throws -> [ChannelMessage] {
         try migrateLegacyChannelLogIfNeeded()
-        guard FileManager.default.fileExists(atPath: channelLogJSONLURL.path) else { return [] }
-        let data = try await FileIO.read(channelLogJSONLURL)
-        return decodeJSONL(data).messages
+        let url = channelLogJSONLURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        // Decode off the actor as well as read: for this file the decode is by far the expensive
+        // half (measured ~4 s against ~0.04 s for the read).
+        return try await FileIO.perform {
+            let data = try Data(contentsOf: url)
+            return Self.decodeJSONL(data).messages
+        }
     }
 
     /// Loads only the messages belonging to `taskID` from this session's channel log. Reads and filters
     /// the (potentially large) full log here in the package — off the caller's actor — so the scan never
     /// blocks the main thread. Backs the top pane's read-only cross-session transcript.
     public func loadTaskTranscript(taskID: UUID) async throws -> [ChannelMessage] {
-        try await loadFullChannelLog().filter { $0.taskID == taskID }
+        try migrateLegacyChannelLogIfNeeded()
+        let url = channelLogJSONLURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        // A line that does not contain the task's UUID cannot decode to a message whose `taskID` is
+        // this task, so it is skipped without being parsed. This is a PREFILTER, not a decision:
+        // it only ever adds candidates, and `message.taskID == taskID` below remains the sole
+        // authority — a false positive costs one wasted decode, a false negative is impossible.
+        // (Measured on the real log: 4,830 candidates for 4,665 true matches. The extras carry the
+        // id in `metadata` with no top-level `taskID`, and the typed check rejects them.)
+        //
+        // Both cases are searched. `JSONEncoder` writes UUIDs uppercase, and every one of the
+        // 106,066 values on disk is uppercase — but `UUID(uuidString:)` accepts lowercase, so a
+        // single-case needle would SILENTLY DROP a message the typed check would have accepted.
+        // Silently dropping is the worst failure available here; 0.2 s is a cheap price to remove it.
+        let upper = Data(taskID.uuidString.utf8)
+        let lower = Data(taskID.uuidString.lowercased().utf8)
+        return try await FileIO.perform {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            var found: [ChannelMessage] = []
+            for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+                guard line.contains(subsequence: upper) || line.contains(subsequence: lower) else { continue }
+                guard let message = try? decoder.decode(ChannelMessage.self, from: Data(line)),
+                      message.taskID == taskID else { continue }
+                found.append(message)
+            }
+            return found
+        }
     }
 
     // MARK: - Tasks (per-session)

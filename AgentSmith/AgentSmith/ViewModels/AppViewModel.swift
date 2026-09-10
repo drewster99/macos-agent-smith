@@ -1308,7 +1308,10 @@ final class AppViewModel {
         // last conversational message.
         await newRuntime.setRecentChannelMessagesLoader {
             do {
-                return try await persistence.loadChannelLogTail(limit: 32).messages
+                // The count is discarded here, so don't pay for it: `loadChannelLogTail` scans the
+                // WHOLE log to produce one, which cost about a second and a 345 MB allocation to
+                // look at 32 messages. This reads a bounded window off the end instead.
+                return try await persistence.loadRecentChannelMessages(limit: 32)
             } catch {
                 logger.error("Failed to load channel-log tail for message recovery: \(error.localizedDescription)")
                 return []

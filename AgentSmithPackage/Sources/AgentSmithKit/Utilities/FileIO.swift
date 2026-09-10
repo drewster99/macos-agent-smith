@@ -41,6 +41,25 @@ public enum FileIO {
         }
     }
 
+    /// Runs arbitrary synchronous file work off the calling actor's executor.
+    ///
+    /// The escape hatch `read`/`readJSON` don't cover: a scan that reads a file in chunks, or a
+    /// read whose decode must not resume on the caller. `read` returns `Data` to the CALLER's
+    /// executor, so anything done with it afterwards runs there — which is how a 1-second JSONL
+    /// split ended up blocking the persistence actor, and with it every append and task save.
+    /// `readJSON` already had the right shape; this generalizes it.
+    public static func perform<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    continuation.resume(returning: try work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     /// Reads and JSON-decodes a file off the calling actor's executor. Both the read AND the decode
     /// run on the background queue — for a large snapshot (e.g. `inactive_tasks.json`) the decode of
     /// tens of thousands of objects is the expensive part, so leaving it on the actor would defeat

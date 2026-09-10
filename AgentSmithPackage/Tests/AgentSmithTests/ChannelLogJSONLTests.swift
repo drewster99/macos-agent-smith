@@ -216,4 +216,128 @@ struct ChannelLogJSONLTests {
         #expect(full.count == total)
         #expect(full.last?.id == tail.last?.id)
     }
+
+    // MARK: - Bounded reads (added when the whole-file reads were replaced)
+
+    /// The prefilter's superset property, which is what makes it safe.
+    ///
+    /// `loadTaskTranscript` skips a line that does not contain the task's UUID rather than decoding
+    /// it. That is only sound if the prefilter can never REJECT a line the typed check would have
+    /// accepted — a false negative is a silently missing message, the worst failure available here.
+    /// So the result must equal the read-everything-then-filter version exactly, including for a
+    /// line that mentions the id somewhere other than `taskID`.
+    @Test("loadTaskTranscript equals a full decode + filter, prefilter included")
+    func taskTranscriptMatchesFullFilter() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+
+        let target = UUID()
+        let other = UUID()
+        var messages: [ChannelMessage] = []
+        messages.append(ChannelMessage(sender: .system, content: "mine 1", taskID: target))
+        messages.append(ChannelMessage(sender: .system, content: "someone else", taskID: other))
+        messages.append(ChannelMessage(sender: .system, content: "no task at all"))
+        // Mentions the id in CONTENT but belongs to no task: a prefilter hit the typed check rejects.
+        messages.append(ChannelMessage(sender: .system, content: "log line about \(target.uuidString)"))
+        // Carries the id in METADATA with no top-level taskID — the real corpus has 63 of these.
+        messages.append(ChannelMessage(sender: .system, content: "meta only",
+                                       metadata: ["taskID": .string(target.uuidString)]))
+        messages.append(ChannelMessage(sender: .system, content: "mine 2", taskID: target))
+        try await pm.appendChannelMessages(messages)
+
+        let viaPrefilter = try await pm.loadTaskTranscript(taskID: target)
+        let viaFullDecode = try await pm.loadFullChannelLog().filter { $0.taskID == target }
+        #expect(viaPrefilter.map(\.content) == viaFullDecode.map(\.content))
+        #expect(viaPrefilter.map(\.content) == ["mine 1", "mine 2"])
+    }
+
+    /// `UUID.uuidString` is uppercase and `JSONEncoder` writes it that way, but
+    /// `UUID(uuidString:)` accepts lowercase — so a single-case needle would drop a hand-written or
+    /// future-producer line that the typed check would have accepted.
+    @Test("A lowercase-UUID line is still found")
+    func lowercaseUUIDLineIsFound() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+        let target = UUID()
+
+        try await pm.appendChannelMessages([ChannelMessage(sender: .system, content: "placeholder")])
+        // Hand-write a record whose taskID is lowercase, as a non-JSONEncoder producer might.
+        let url = root.appendingPathComponent("AgentSmith", isDirectory: true)
+            .appendingPathComponent("channel_log.jsonl")
+        let handWritten = """
+            {"id":"\(UUID().uuidString)","sender":{"system":{}},"content":"lowercase","timestamp":123,\
+            "taskID":"\(target.uuidString.lowercased())"}
+            """
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((handWritten + "\n").utf8))
+        try handle.close()
+
+        let found = try await pm.loadTaskTranscript(taskID: target)
+        #expect(found.map(\.content) == ["lowercase"])
+    }
+
+    /// The bounded backward read used by the lost-message recovery path, which discards the total.
+    @Test("loadRecentChannelMessages returns the same tail as loadChannelLogTail")
+    func recentMessagesMatchTail() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+        try await pm.appendChannelMessages((0..<200).map { message("m\($0)") })
+
+        for limit in [1, 32, 199, 200, 201] {
+            let recent = try await pm.loadRecentChannelMessages(limit: limit)
+            let tail = try await pm.loadChannelLogTail(limit: limit).messages
+            #expect(recent.map(\.content) == tail.map(\.content), "limit=\(limit)")
+        }
+    }
+
+    /// `totalCount` gates `hasRestoredHistory`, which gates transcript trimming and the Restore
+    /// button — so the scan-based tail must report exactly what a full decode would.
+    @Test("totalCount is unchanged by the bounded scan, at and around the limit")
+    func totalCountSurvivesTheBoundedScan() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+        try await pm.appendChannelMessages((0..<75).map { message("m\($0)") })
+
+        for limit in [1, 74, 75, 76, 1000] {
+            let result = try await pm.loadChannelLogTail(limit: limit)
+            #expect(result.totalCount == 75, "limit=\(limit) reported \(result.totalCount)")
+            #expect(result.messages.count == min(limit, 75), "limit=\(limit)")
+        }
+    }
+
+    /// The recovery caller asks for a fixed number of recent messages and uses them to hunt for a
+    /// trailing user message. A fixed byte window would silently return fewer than asked for when
+    /// the tail happens to hold large records — the real corpus averages ~3.6 KB per line but its
+    /// largest is 399 KB — and the caller would then miss the message it exists to find.
+    @Test("loadRecentChannelMessages returns the full count even when the tail records are huge")
+    func recentMessagesWidenTheWindowForLargeRecords() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+
+        let big = String(repeating: "x", count: 200_000)
+        try await pm.appendChannelMessages((0..<40).map { message("\(big)-\($0)") })
+
+        let recent = try await pm.loadRecentChannelMessages(limit: 32)
+        #expect(recent.count == 32, "window did not widen; got \(recent.count)")
+        #expect(recent.last?.content.hasSuffix("-39") == true, "must be the LAST 32, in order")
+    }
+
+    /// `limit <= 0` must still report the real total without decoding the whole file for it.
+    @Test("A zero limit reports the true total and decodes nothing")
+    func zeroLimitReportsTotalWithoutDecoding() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pm = PersistenceManager(testingRoot: root)
+        try await pm.appendChannelMessages((0..<30).map { message("m\($0)") })
+
+        let result = try await pm.loadChannelLogTail(limit: 0)
+        #expect(result.messages.isEmpty)
+        #expect(result.totalCount == 30)
+    }
 }
