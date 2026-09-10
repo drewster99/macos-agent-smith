@@ -940,7 +940,7 @@ private struct MessageRow: View, Equatable {
                   case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
             switch d {
             case "autoApproved": return nil
-            case "warning", "denied", "abort":
+            case "warning", "denied", "abort", "unavailable", "cancelled":
                 if case .string(let msg) = review.metadata?["dispositionMessage"], !msg.isEmpty {
                     return msg
                 }
@@ -954,7 +954,7 @@ private struct MessageRow: View, Equatable {
             switch d {
             case "autoApproved": return AppColors.securityApproved
             case "warning": return AppColors.securityWarning
-            case "denied": return AppColors.securityDenied
+            case "denied", "unavailable", "cancelled": return AppColors.securityDenied
             case "abort": return AppColors.securityAbort
             default: return .secondary
             }
@@ -1035,8 +1035,13 @@ private struct MessageRow: View, Equatable {
             case "autoApproved": return "\u{2699}\u{FE0F}"
             case "warning": return "\u{26A0}\u{FE0F}"
             case "denied": return "\u{1F6AB}"
+            // Blocked, but not judged — a distinct glyph so an outage never reads as a refusal.
+            // "cancelled" previously had a `return nil` arm here that no producer ever reached:
+            // the evaluator set the flag, but the channel renderer never wrote the tag, so a
+            // cancelled review reached this switch tagged "denied". It is a real blocked state and
+            // now gets the blocked glyph rather than disappearing.
+            case "unavailable", "cancelled": return "\u{26D4}"
             case "abort": return "\u{1F6D1}"
-            case "cancelled": return nil
             default: return nil
             }
         }()
@@ -1052,6 +1057,8 @@ private struct MessageRow: View, Equatable {
                 return "Safety: Auto-approved"
             case "warning": return "Safety: Warning"
             case "denied": return "Safety: Denied"
+            case "unavailable": return "Safety: BLOCKED — not reviewed (reviewer unavailable)"
+            case "cancelled": return "Safety: blocked — review cancelled"
             case "abort": return "Safety: Abort triggered"
             default: return nil
             }
@@ -1165,7 +1172,7 @@ private struct MessageRow: View, Equatable {
             if _isErrorMessage { return AppColors.errorBackground }
             if _isSmithToUser { return AppColors.smithToUserBackground }
             switch _securityDisposition {
-            case "warning", "denied": return AppColors.warningRowBackground
+            case "warning", "denied", "unavailable", "cancelled": return AppColors.warningRowBackground
             case "abort": return AppColors.errorBackground
             default: break
             }

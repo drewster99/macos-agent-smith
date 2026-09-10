@@ -120,7 +120,7 @@ actor TaskSummarizer {
                 return summary
             } catch {
                 lastError = error
-                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
                       attempt < LLMRetryPolicy.maxAttempts else { break }
                 let delay = LLMRetryPolicy.delay(attempt: attempt, retryAfter: retryAfter)
                 await postToChannel(ChannelMessage(
@@ -218,7 +218,7 @@ actor TaskSummarizer {
                 return Self.parseReconciliation(text)
             } catch {
                 lastError = error
-                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
                       attempt < LLMRetryPolicy.maxAttempts,
                       await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
             }
@@ -305,7 +305,7 @@ actor TaskSummarizer {
                 return text.trimmingCharacters(in: .whitespacesAndNewlines)
             } catch {
                 lastError = error
-                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
                       attempt < LLMRetryPolicy.maxAttempts,
                       await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
             }

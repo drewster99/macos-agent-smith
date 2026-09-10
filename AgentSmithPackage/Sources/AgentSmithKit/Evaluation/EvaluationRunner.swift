@@ -126,7 +126,7 @@ public enum EvaluationRunner {
                     )
                     break
                 } catch {
-                    guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                    guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
                           transportAttempt < LLMRetryPolicy.maxAttempts,
                           Date() <= deadline,
                           !Task.isCancelled else {

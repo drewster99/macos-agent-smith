@@ -3371,6 +3371,10 @@ public actor OrchestrationRuntime {
     /// reviews every tool call) and Smith (which reviews only open-world/egress calls). `executionTracker`
     /// is the instance the requesting agent's tool context writes to, so the evaluator can see whether a
     /// prior approved call actually succeeded — pass the agent's own tracker to keep them consistent.
+    /// One breaker for the whole runtime. Every evaluator this factory builds shares it — a
+    /// per-evaluator breaker would fragment across concurrent workers and reset on every respawn.
+    private let securityBackendHealth = SecurityBackendHealth()
+
     private func makeSecurityEvaluator(provider: any LLMProvider, executionTracker: ToolExecutionTracker) -> SecurityEvaluator {
         SecurityEvaluator(
             provider: provider,
@@ -3397,6 +3401,7 @@ public actor OrchestrationRuntime {
             },
             attachmentURLProvider: attachmentURLProviderClosure,
             activityTracker: liveActivityTracker,
+            backendHealth: securityBackendHealth,
             hasToolSucceeded: { [executionTracker] toolCallID in
                 await executionTracker.hasSucceeded(toolCallID: toolCallID)
             },
@@ -3738,9 +3743,29 @@ public actor OrchestrationRuntime {
 
     /// Terminates a specific agent. If it's a Brown, also cleans up its SecurityEvaluator.
     public func terminateAgent(id: UUID, callerID: UUID? = nil) async -> Bool {
-        await lifecycleQueue.run { [weak self] in
+        let wasWorker = supervisor.role(of: id) == .brown
+        let removed = await lifecycleQueue.run { [weak self] in
             await self?.performTerminateAgent(id: id, callerID: callerID) ?? false
         }
+        // A freed worker slot is a schedulable event, and THIS is the moment it frees.
+        //
+        // The terminal-status hook fires too early to see it: `TaskStore.updateStatus` calls
+        // `onTaskTerminated` synchronously from inside the status write, and the validation
+        // coordinator flips the task to `.completed` BEFORE tearing its worker down. So the drain
+        // that hook schedules observes the finished task's Brown still registered, computes zero
+        // free slots, and admits nothing — and nothing re-drains. At `maxConcurrentWorkers == 1`
+        // that stranded a queued task permanently, while `create_task` had already told Smith
+        // "auto-run will start it when a slot frees. Do NOT call run_task on it."
+        // Measured before the fix: 11 of 12 runs stalled; 8 of 8 pass with this kick.
+        //
+        // Deliberately OUTSIDE the lifecycle queue item, so the drain's restarts enqueue behind
+        // this teardown rather than deadlocking on it. Idempotent: both drains are reentrancy-
+        // guarded and self-checking, and any overshoot is re-pended by the serialized capacity
+        // gate in `performStartTaskWithLiveSmith`. Deliberately NOT wired into
+        // `performTerminateAgent`, whose other caller is the idle reap — that path is immediately
+        // followed by a start which claims the slot itself.
+        if removed, wasWorker { await advanceAfterFreedWorkerSlot() }
+        return removed
     }
 
     /// The actual terminate implementation. Runs ONLY as a lifecycle-queue item (or from
@@ -4223,6 +4248,21 @@ Message:
         // completion — a guaranteed 5 s grace-timeout stall plus a self-cancellation.
         await agent.markTerminated()
 
+        // Preserve the worker's context BEFORE anything below can move its task out of an
+        // actionable status. `taskForAgent` resolves only actionable tasks, and the force-fail
+        // loop further down writes `.failed`, which is not one — so a worker killed by retry
+        // exhaustion or a crash lost `lastBrownContext` entirely, the one artifact a later
+        // `run_task` retry reads back to resume with. Verified against live data: a task with 42
+        // updates of real work carried `lastBrownContext: null`.
+        //
+        // Safe here: `markTerminated()` only clears `isRunning`, so `contextSnapshot()` still
+        // returns the full history, and this method already re-enters the agent twice below.
+        // No double-save — `stopAll` saves before `supervisor.endGeneration()`, after which this
+        // path's `supervisor.remove(id:)` guard returns early.
+        if role == .brown {
+            await saveBrownContextToTask(brownID: id, brown: agent)
+        }
+
         // Archive the agent's state after stop so the inspector can still display it.
         if let role {
             await archiveAgent(agent, role: role)
@@ -4259,6 +4299,12 @@ Message:
         // Without this, the periodic "assigned to N agents" status grows monotonically
         // every time an agent's run loop exits on its own.
         await taskStore.unassignAgentFromAllTasks(agentID: id)
+
+        // This path removes the handle itself rather than going through `terminateAgent`, so it
+        // needs its own kick. A worker dying under a task the CAS above declines to fail — a
+        // `.validating` submission, an `.awaitingHelp` park — still frees the pool slot it held,
+        // and without this nothing notices until some unrelated event drains the queue.
+        if role == .brown { await advanceAfterFreedWorkerSlot() }
     }
 
     /// Extracts Brown's last few assistant messages and saves a compressed context summary

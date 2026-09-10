@@ -125,7 +125,7 @@ struct SecurityEvaluatorTests {
         let (evaluator, _, _) = makeEvaluator(responses: [textResponse("WARN possibly destructive")])
         let d = await evaluate(evaluator)
         #expect(d.approved == false)
-        #expect(d.isWarning)
+        #expect(d.outcome == .warned)
     }
 
     @Test("clean UNSAFE first line denies without warning")
@@ -133,7 +133,7 @@ struct SecurityEvaluatorTests {
         let (evaluator, _, _) = makeEvaluator(responses: [textResponse("UNSAFE dangerous rm")])
         let d = await evaluate(evaluator)
         #expect(d.approved == false)
-        #expect(d.isWarning == false)
+        #expect(d.outcome != .warned)
     }
 
     @Test("clean ABORT first line denies and triggers the abort closure")
@@ -460,12 +460,12 @@ struct SecurityEvaluatorTests {
         ])
         let d1 = await evaluate(evaluator, toolName: "bash", toolParams: "{\"command\":\"rm -rf /tmp/foo\"}")
         #expect(d1.approved == false)
-        #expect(d1.isWarning)
+        #expect(d1.outcome == .warned)
         #expect(provider.callCount == 1)
 
         let d2 = await evaluate(evaluator, toolName: "bash", toolParams: "{\"command\":\"rm -rf /tmp/foo\"}")
         #expect(d2.approved)
-        #expect(d2.isAutoApproval)
+        #expect(d2.outcome == .autoApproved)
         // No second LLM call — pending-warn slot consumed.
         #expect(provider.callCount == 1)
     }

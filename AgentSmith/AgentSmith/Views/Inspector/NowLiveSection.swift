@@ -195,16 +195,24 @@ struct NowLiveSection: View {
         case "approved": phase = .approved
         case "autoApproved": phase = .autoApproved
         case "warning": phase = .warned
-        case "denied": phase = .denied
+        case "denied", "abort": phase = .denied
+        // Blocked, and NOT by a verdict. These must render as blocked — falling into the default
+        // below would paint a green check on a call that never ran, because that branch reads
+        // "a row exists" as "it got past the gate". It does not: `reviewDisabled` has been
+        // rendering that way since it shipped, and `unavailable`/`cancelled` would have joined it.
+        case "unavailable", "cancelled": phase = .denied
+        case "reviewDisabled": phase = .autoApproved
         // No verdict on the wire yet. "Under review" is ASKED, not inferred: the registry
         // `SecurityEvaluator` writes says whether this exact call is in front of the LLM right
         // now. Inferring it from a missing verdict was also true before evaluation started and
         // during any delivery gap, so a call could show "Security" while nothing was looking at
-        // it. A verdict carrying an unrecognised disposition is treated as reviewed-and-allowed
-        // rather than guessed at — it got past the gate, which is all this row claims.
+        // it. An UNRECOGNISED disposition is deliberately NOT treated as allowed: a value this
+        // build has not heard of is most likely a newer build's block, and painting it green is
+        // the one wrong answer that hides a call which never ran. Blocked-looking is the safe
+        // reading, and `SecurityDisposition.channelTag` is the closed set it comes from.
         default:
             if review != nil {
-                phase = .approved
+                phase = .denied
             } else {
                 phase = security.isEvaluating(callID: key.callID, agentInstanceID: key.agentInstanceID)
                     ? .evaluating

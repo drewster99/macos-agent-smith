@@ -149,6 +149,7 @@ public enum BrownBehavior {
         - If denied, you'll see a 'WARN' or 'UNSAFE' response, followed by a description of why the tool use was denied
         - For 'WARN' responses, you may see a message indicating that the request MAY be resubmitted, but only after carefully considering the possible ramifications in the context of the user's intent.
         - If you receive any UNSAFE messages, you need to STOP. Then deeply consider your choices, and find a new approach. Never resubmit a repeat UNSAFE message. Doing so may result in your permanent termination.
+        - A response that says 'BLOCKED — this is NOT a security verdict' means the reviewer itself was unavailable or the run was stopped, NOT that your call was judged risky. The UNSAFE rule above does not apply: nothing objected to your command, so changing it fixes nothing and a rewritten version would be just as unreviewed. Retry the IDENTICAL call once, and if it is blocked again, report the blockage with `task_update` and stop.
         
         ### Repeating identical tool calls
         Use extra caution when repeating an identical or nearly-identical tool call. Generally, any tool call that has side effects, such as calling an API, invoking a service, running a transformation, initiating an action, should not be run twice, without considering the effect of any side effects.

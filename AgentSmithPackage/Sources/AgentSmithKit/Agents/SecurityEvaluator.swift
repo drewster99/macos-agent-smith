@@ -3,32 +3,104 @@ import SwiftLLMKit
 
 /// The outcome of a security evaluation of a tool request.
 public struct SecurityDisposition: Sendable, Equatable {
-    public let approved: Bool
-    /// Explanation — required when denied, recommended for medium-risk warnings.
-    public let message: String?
-    /// True when this is a WARN denial — the request can be retried once for auto-approval.
-    public let isWarning: Bool
-    /// True when this approval was automatic (identical retry of a WARN'd request).
-    public let isAutoApproval: Bool
-    /// True when the evaluation was cancelled mid-flight (user stop/abort/escape). The
-    /// tool was not actually deemed unsafe — the surrounding agent was just torn down
-    /// before Security Agent could finish. Inspector rendering treats this as a neutral
-    /// "CANCELLED" label rather than red UNSAFE.
-    public let isCancelled: Bool
-    /// False ONLY when per-emitter tool-call review was DISABLED (Orchestration setting) and the call
-    /// was approved WITHOUT being evaluated. Distinct from `isAutoApproval` (cheap-but-recorded via
-    /// the auto-approve table): a `wasEvaluated == false` call was never judged, and must render as
-    /// "review disabled", never as SAFE.
-    public let wasEvaluated: Bool
 
-    /// Creates a security disposition with the given approval state and optional metadata.
-    public init(approved: Bool, message: String? = nil, isWarning: Bool = false, isAutoApproval: Bool = false, isCancelled: Bool = false, wasEvaluated: Bool = true) {
-        self.approved = approved
+    /// What actually happened to this call.
+    ///
+    /// This replaced a cluster of five booleans that could express *approved*-but-unjudged
+    /// (`wasEvaluated == false`) yet had no way to say *blocked*-but-unjudged. So a Security Agent
+    /// whose model backend never answered produced `approved: false` with a prose message, and
+    /// every renderer's `else` branch called that UNSAFE — a verdict on the command, when no
+    /// verdict had been reached at all. Brown is instructed to abandon an approach on UNSAFE and
+    /// never resubmit, so an outage made it rewrite commands nothing had objected to.
+    ///
+    /// A closed enum rather than another boolean because the boolean version already failed that
+    /// way once: `isCancelled` was read by the Inspector and forgotten by the channel renderer, so
+    /// a cancelled review printed as UNSAFE for months. Every consumer now switches exhaustively,
+    /// and the compiler is what guarantees a new case reaches all of them.
+    public enum Outcome: Sendable, Equatable {
+
+        /// How bad a real refusal was. `.abort` additionally tears the system down.
+        public enum Severity: Sendable, Equatable { case unsafe, abort }
+
+        /// Judged by the Security Agent and allowed.
+        case approved
+        /// Allowed with no LLM round-trip — the pre-cleared auto-approve table, or an identical
+        /// retry of a WARN. Recorded and posted, never invisible; cheap, not unjudged-in-principle.
+        case autoApproved
+        /// Allowed with NO judgement: per-emitter review is switched off in Orchestration settings.
+        /// Must never render as SAFE.
+        case approvedWithoutReview
+        /// Judged and blocked, but an identical retry will be auto-approved.
+        case warned
+        /// Judged and refused. The command itself was found unacceptable.
+        case refused(Severity)
+        /// BLOCKED, NEVER JUDGED — the reviewer could not produce a verdict (backend unreachable,
+        /// or output that never parsed). Blocking is correct and fail-closed; calling it a verdict
+        /// is not.
+        case reviewerUnavailable(UnavailableReason)
+        /// BLOCKED, NEVER JUDGED — the surrounding agent was torn down mid-review (user stop).
+        case reviewCancelled
+    }
+
+    /// Why no verdict was reached. Kept typed because the two causes need different fixes —
+    /// "check the backend" versus "check the model" — and the prose that used to carry the
+    /// distinction was the only place it lived.
+    public enum UnavailableReason: Sendable, Equatable {
+        /// Transport failures exhausted the retry budget.
+        case backendUnreachable(failedCalls: Int)
+        /// The model answered, but never in the required verdict form.
+        case unparseableVerdict(attempts: Int)
+        case mixed(unparseable: Int, failedCalls: Int)
+        /// The evaluator short-circuited because the backend is already known to be down.
+        case backendKnownDown
+        /// No Security Agent evaluator is wired at all.
+        case noEvaluatorConfigured
+    }
+
+    public let outcome: Outcome
+    /// Explanation for humans and for the blocked agent. Nothing branches on it.
+    public let message: String?
+
+    public init(outcome: Outcome, message: String? = nil) {
+        self.outcome = outcome
         self.message = message
-        self.isWarning = isWarning
-        self.isAutoApproval = isAutoApproval
-        self.isCancelled = isCancelled
-        self.wasEvaluated = wasEvaluated
+    }
+
+    /// The ONE thing that gates execution. Fail-closed by construction: a new case has to be
+    /// classified here before it compiles, and everything that is not an explicit allow blocks.
+    public var approved: Bool {
+        switch outcome {
+        case .approved, .autoApproved, .approvedWithoutReview:
+            return true
+        case .warned, .refused, .reviewerUnavailable, .reviewCancelled:
+            return false
+        }
+    }
+
+    /// Whether a reviewer actually ruled on THIS call. False for both not-judged outcomes, and
+    /// false for `approvedWithoutReview` — which is allowed, but was never judged either.
+    public var wasJudged: Bool {
+        switch outcome {
+        case .approved, .warned, .refused:
+            return true
+        case .autoApproved, .approvedWithoutReview, .reviewerUnavailable, .reviewCancelled:
+            return false
+        }
+    }
+
+    /// The `securityDisposition` metadata tag for this outcome — the single place the wire strings
+    /// are produced, so a renderer cannot invent a new one.
+    public var channelTag: String {
+        switch outcome {
+        case .approved:               return "approved"
+        case .autoApproved:           return "autoApproved"
+        case .approvedWithoutReview:  return "reviewDisabled"
+        case .warned:                 return "warning"
+        case .refused(.unsafe):       return "denied"
+        case .refused(.abort):        return "abort"
+        case .reviewerUnavailable:    return "unavailable"
+        case .reviewCancelled:        return "cancelled"
+        }
     }
 }
 
@@ -367,6 +439,9 @@ actor SecurityEvaluator {
     /// Bumps the live-activity counter while an LLM-backed evaluation is in flight, feeding the
     /// inspector's concurrency strip. Nil in tests / callers that don't wire it.
     private let activityTracker: LiveActivityTracker?
+    /// Shared across every evaluator in the runtime — see `SecurityBackendHealth` for why this
+    /// cannot live on the instance.
+    private let backendHealth: SecurityBackendHealth?
     /// Resolves whether tool calls FROM `role` are reviewed (Orchestration setting). Fail-closed
     /// default (review on) so a runtime that never wires it evaluates every call.
     private let reviewsToolCalls: @Sendable (AgentRole) async -> Bool
@@ -388,6 +463,7 @@ actor SecurityEvaluator {
         ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))? = nil,
         attachmentURLProvider: (@Sendable (UUID, String) -> URL?)? = nil,
         activityTracker: LiveActivityTracker? = nil,
+        backendHealth: SecurityBackendHealth? = nil,
         // Forgetting to wire these causes Security Agent to misclassify failed-then-retried calls as
         // duplicates (the original 394bbbc bug). `assertionFailure` surfaces the wiring
         // mistake loudly in debug/tests; a release build degrades to `false` (the neutral
@@ -417,6 +493,7 @@ actor SecurityEvaluator {
         self.ingestAttachmentFile = ingestAttachmentFile
         self.attachmentURLProvider = attachmentURLProvider
         self.activityTracker = activityTracker
+        self.backendHealth = backendHealth
         self.hasToolSucceeded = hasToolSucceeded
         self.hasToolFailed = hasToolFailed
         self.reviewsToolCalls = reviewsToolCalls
@@ -513,7 +590,7 @@ actor SecurityEvaluator {
         // reaches approval without a verdict; it is intentionally loud in the transcript.
         if await reviewsToolCalls(callerRole) == false {
             let disposition = SecurityDisposition(
-                approved: true, message: "review disabled for \(callerRole.displayName)", wasEvaluated: false)
+                outcome: .approvedWithoutReview, message: "review disabled for \(callerRole.displayName)")
             appendSummary(toolName: toolName, toolParams: toolParams,
                           verdict: "APPROVED (review disabled for \(callerRole.displayName))", toolCallID: toolCallID)
             recordEvaluation(
@@ -537,7 +614,7 @@ actor SecurityEvaluator {
         // Keyed on TOOL NAME as well as role, so nothing mutating or network-bound can ride this
         // path by virtue of who asked.
         if Self.isAutoApproved(toolName: toolName, role: callerRole) {
-            let disposition = SecurityDisposition(approved: true, message: "pre-cleared for \(callerRole.displayName)", isAutoApproval: true)
+            let disposition = SecurityDisposition(outcome: .autoApproved, message: "pre-cleared for \(callerRole.displayName)")
             appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved: pre-cleared for \(callerRole.displayName))", toolCallID: toolCallID)
             recordEvaluation(
                 toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
@@ -553,7 +630,7 @@ actor SecurityEvaluator {
             $0.toolName == toolName && $0.toolParams == parsedParams
         }) {
             pendingWarnRetries.remove(at: matchIndex)
-            let disposition = SecurityDisposition(approved: true, message: "WARN retry", isAutoApproval: true)
+            let disposition = SecurityDisposition(outcome: .autoApproved, message: "WARN retry")
             appendSummary(toolName: toolName, toolParams: toolParams, verdict: "SAFE (auto-approved retry of prior WARN)", toolCallID: toolCallID)
             recordEvaluation(
                 toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
@@ -561,6 +638,24 @@ actor SecurityEvaluator {
                 response: "SAFE — auto-approved identical retry of a prior WARN",
                 disposition: disposition, startTime: Date(), toolCallID: toolCallID ?? ""
             )
+            return disposition
+        }
+
+        // Backend known down: block immediately rather than spend another full transport budget.
+        // BELOW the auto-approve fast paths on purpose — those need no backend, so a pre-cleared
+        // call must keep flying while the reviewer is unreachable.
+        if let backendHealth, await backendHealth.shouldShortCircuit() {
+            let disposition = SecurityDisposition(
+                outcome: .reviewerUnavailable(.backendKnownDown),
+                message: "The Security Agent's model backend is not responding; recent evaluations all failed. Blocked without another attempt."
+            )
+            appendSummary(toolName: toolName, toolParams: toolParams,
+                          verdict: "NOT REVIEWED (reviewer unavailable — backend known down)", toolCallID: toolCallID)
+            recordEvaluation(
+                toolName: toolName, toolParams: toolParams, taskTitle: taskTitle,
+                prompt: "(skipped — security backend known unreachable)",
+                response: "(no verdict)", disposition: disposition,
+                startTime: Date(), toolCallID: toolCallID ?? "")
             return disposition
         }
 
@@ -683,7 +778,7 @@ actor SecurityEvaluator {
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {
                 if Task.isCancelled {
-                    let disposition = SecurityDisposition(approved: false, message: "Evaluation cancelled", isCancelled: true)
+                    let disposition = SecurityDisposition(outcome: .reviewCancelled, message: "Evaluation cancelled")
                     recordEvaluation(toolName: toolName, toolParams: toolParams, taskTitle: taskTitle, prompt: evalPrompt, response: "(cancelled)", disposition: disposition, startTime: startTime)
                     return disposition
                 }
@@ -692,8 +787,12 @@ actor SecurityEvaluator {
                 // is why all 8 attempts landed inside a single ~20s provider outage on
                 // 2026-07-25 and the tool call was denied for want of a verdict.
                 transportFailures += 1
-                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
-                      transportFailures < LLMRetryPolicy.maxAttempts,
+                // While the backend is known to be struggling this is a short PROBE budget, not the
+                // full ~12-minute one: a probe that costs twelve minutes makes the breaker's
+                // cooldown meaningless and delays noticing a recovery.
+                let transportBudget = await backendHealth?.transportAttemptBudget() ?? LLMRetryPolicy.maxAttempts
+                guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
+                      transportFailures < transportBudget,
                       await LLMRetryPolicy.sleep(attempt: transportFailures, retryAfter: retryAfter) else {
                     break
                 }
@@ -781,6 +880,10 @@ actor SecurityEvaluator {
 
             emitTurnRecord(response: response, latencyMs: callLatencyMs, messageCount: conversationMessages.count)
 
+            // The backend answered. Close the breaker here rather than at the verdict — reachability
+            // is about the transport, and an unparseable answer is still an answer.
+            await backendHealth?.recordReachable()
+
             if offerTools, !response.toolCalls.isEmpty {
                 continue
             }
@@ -811,11 +914,14 @@ actor SecurityEvaluator {
             // Record the summary with the verdict (after evaluation, so we have the result).
             appendSummary(toolName: toolName, toolParams: toolParams, verdict: Self.verdictSummary(from: responseText), toolCallID: toolCallID)
 
-            // Handle ABORT — trigger system-wide shutdown. Uses verdictSummary so
-            // ABORT is detected even when the model prefixes the verdict with preamble.
-            // Case-sensitive: ABORT must be ALL-CAPS to count.
-            if !disposition.approved,
-               Self.verdictSummary(from: responseText).hasPrefix("ABORT") {
+            // Handle ABORT — trigger system-wide shutdown. Reads the STRUCTURED severity that
+            // `parseDisposition` already matched, not the prose it matched it in. The re-grep this
+            // replaced (`verdictSummary(from:).hasPrefix("ABORT")`) was a second, subtly different
+            // matcher over the same text — `parseDisposition` strips leading punctuation and
+            // `verdictSummary` does not — so a response like "(ABORT) rm -rf on home" parsed as an
+            // abort and then silently failed to trigger one. Two scanners that must agree, and
+            // didn't.
+            if case .refused(.abort) = disposition.outcome {
                 // A bare `ABORT` (no trailing reason) parses to a nil message, but it
                 // must still trigger the system-wide abort.
                 let msg = disposition.message ?? "(no reason given)"
@@ -870,13 +976,32 @@ actor SecurityEvaluator {
         if let desc = lastErrorDescription {
             fallbackMessage += "\nLast error: \(desc)"
         }
+        // NOT a verdict: nothing about this call was judged. The typed reason keeps the
+        // "check the backend" / "check the model" distinction that previously lived only in prose.
+        let unavailableReason: SecurityDisposition.UnavailableReason =
+            if transportFailures > 0, retryCount == 0 {
+                .backendUnreachable(failedCalls: transportFailures)
+            } else if transportFailures > 0 {
+                .mixed(unparseable: retryCount, failedCalls: transportFailures)
+            } else {
+                .unparseableVerdict(attempts: retryCount)
+            }
+        // Only a TRANSPORT failure means the backend is down. An unparseable verdict means it
+        // answered — wrong shape, but reachable — so it must not open the breaker.
+        if transportFailures > 0 {
+            await backendHealth?.recordUnreachable()
+        }
         let fallback = SecurityDisposition(
-            approved: false,
+            outcome: .reviewerUnavailable(unavailableReason),
             message: fallbackMessage
         )
         let recordedResponse = lastErrorDescription ?? "(parse failure)"
         recordEvaluation(toolName: toolName, toolParams: toolParams, taskTitle: taskTitle, prompt: evalPrompt, response: recordedResponse, disposition: fallback, startTime: startTime, toolCallID: toolCallID ?? "")
-        appendSummary(toolName: toolName, toolParams: toolParams, verdict: "UNSAFE (evaluation failed)", toolCallID: toolCallID)
+        // NOT "UNSAFE". `recentToolRequests` is rendered into every SUBSEQUENT evaluation prompt,
+        // so recording an outage as a verdict fed the Security Agent its own failure as evidence
+        // and biased the retry of an identical call toward a genuine refusal.
+        appendSummary(toolName: toolName, toolParams: toolParams,
+                      verdict: "NOT REVIEWED (no verdict reached — reviewer unavailable)", toolCallID: toolCallID)
         return fallback
     }
 
@@ -946,7 +1071,7 @@ actor SecurityEvaluator {
                 // one, an unreachable backend (connection refused) burned every retry in under
                 // a second — ~270 ms per full scoping pass during the 2026-07-08 outage.
                 transportFailures += 1
-                guard case .transient(let retryAfter) = LLMRetryPolicy.classify(error),
+                guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
                       transportFailures < LLMRetryPolicy.maxAttempts,
                       await LLMRetryPolicy.sleep(attempt: transportFailures, retryAfter: retryAfter),
                       !Task.isCancelled else {
@@ -1227,7 +1352,7 @@ actor SecurityEvaluator {
         startTime: Date
     ) {
         let disposition = SecurityDisposition(
-            approved: !approvedNames.isEmpty,
+            outcome: approvedNames.isEmpty ? .refused(.unsafe) : .approved,
             message: "Approved \(approvedNames.count)/\(candidateCount) tools: \(approvedNames.sorted().joined(separator: ", "))"
         )
         recordEvaluation(
@@ -1630,7 +1755,7 @@ actor SecurityEvaluator {
 
         switch keywordUpper {
         case "SAFE":
-            return SecurityDisposition(approved: true, message: explanatoryText)
+            return SecurityDisposition(outcome: .approved, message: explanatoryText)
         case "WARN":
             pendingWarnRetries.append(WarnedRequest(toolName: toolName, toolParams: parsedParams))
             // Cap the pending retries to prevent unbounded growth.
@@ -1638,11 +1763,14 @@ actor SecurityEvaluator {
                 pendingWarnRetries.removeFirst()
             }
             let warnText = (explanatoryText ?? "") + "\nYour tool was not allowed to execute. Carefully consider the security response text above, in the context of the user's original intent (as given in the task description) and other actions taken and interactions and decide if you really want to call this tool. If you do, send *exactly* the same request again as your *very next* tool call, and it will be approved."
-            return SecurityDisposition(approved: false, message: warnText, isWarning: true)
+            return SecurityDisposition(outcome: .warned, message: warnText)
         case "UNSAFE":
-            return SecurityDisposition(approved: false, message: explanatoryText)
+            return SecurityDisposition(outcome: .refused(.unsafe), message: explanatoryText)
         case "ABORT":
-            return SecurityDisposition(approved: false, message: explanatoryText)
+            // The severity is carried STRUCTURALLY from here on. It used to be parsed, discarded,
+            // and then re-derived by grepping the model's prose for a leading "ABORT" — which a
+            // response like "(ABORT) rm -rf on home" failed, silently not firing the system abort.
+            return SecurityDisposition(outcome: .refused(.abort), message: explanatoryText)
         default:
             return nil
         }

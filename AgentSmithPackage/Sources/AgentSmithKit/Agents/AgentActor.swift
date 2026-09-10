@@ -172,6 +172,13 @@ public actor AgentActor {
     /// `Retry-After` is still honored uncapped, which is what actually paces a real rate limit,
     /// and everything else now uses the shared 15s ceiling.
     private var consecutiveErrors = 0
+    /// When the CURRENT streak of consecutive errors began. Nil between streaks. Paired with
+    /// `retryWindowBudget` so endurance is measured in wall clock, not attempts — once the backoff
+    /// curve flattens, an attempt count says almost nothing about how long we have been retrying.
+    private var retryWindowStartedAt: Date?
+    /// The most patient budget seen during the current streak. Widens, never narrows, so one
+    /// unrelated 5xx cannot cut short a quota wait that was going to succeed.
+    private var retryWindowBudget = LLMRetryPolicy.standardBudget
     private static let maxConsecutiveErrors = LLMRetryPolicy.maxAttempts
     /// A server-supplied `Retry-After` is always honored, but one at or above this is flagged
     /// in the transcript as unusually long so a multi-hour/day wait doesn't look like a hang
@@ -1455,6 +1462,7 @@ public actor AgentActor {
                 guard await verifyLivenessLease() else { break }
 
                 consecutiveErrors = 0
+                retryWindowStartedAt = nil
                 consecutiveContextOverflows = 0
                 consecutivePruneRebuilds = 0
                 lastUsageStale = false
@@ -1612,6 +1620,10 @@ public actor AgentActor {
                             reportedLimit
                         )
                         consecutiveErrors = 0
+                        // The window must clear with the counter at BOTH reset sites. Clearing at
+                        // only one leaks a stale start time across an unrelated recovery, so the
+                        // next streak inherits an already-expired window and stops on its first error.
+                        retryWindowStartedAt = nil
                         await toolContext.post(ChannelMessage(
                             sender: .system,
                             content: "\(configuration.role.displayName): model '\(configuration.llmConfig.model)' caps output at \(reportedLimit) tokens — clamped and retrying. Saved as a model override.",
@@ -1641,7 +1653,21 @@ public actor AgentActor {
                 // (Gemini/Google use a google.rpc.RetryInfo `"retryDelay": "34s"`).
                 let classification = LLMRetryPolicy.classify(error)
                 let serverRetryAfter: TimeInterval?
-                if case .transient(let retryAfter) = classification { serverRetryAfter = retryAfter } else { serverRetryAfter = nil }
+                if case .transient(let retryAfter, _) = classification { serverRetryAfter = retryAfter } else { serverRetryAfter = nil }
+
+                // The run loop is the ONE patient caller: nothing is blocked behind a worker's next
+                // turn. The window opens on the 0→1 transition, never at loop entry — loop entry is
+                // the agent's whole lifetime, so a window pinned there would expire on the first
+                // error. It only ever WIDENS within a streak, so a 5xx landing mid-quota-wait can't
+                // swap in the shorter budget and abort a wait that was going to succeed.
+                let errorBudget = LLMRetryPolicy.budget(for: classification, patient: true)
+                if consecutiveErrors == 1 {
+                    retryWindowStartedAt = Date()
+                    retryWindowBudget = errorBudget
+                } else if errorBudget.maxElapsedSeconds > retryWindowBudget.maxElapsedSeconds {
+                    retryWindowBudget = errorBudget
+                }
+                let retryWindowElapsed = Date().timeIntervalSince(retryWindowStartedAt ?? Date())
 
                 // Surface persistent HTTP 4xx (config/payload problems retrying won't fix — bad
                 // API key, unsupported parameter, DeepSeek's reasoning_content replay demand) and
@@ -1660,7 +1686,8 @@ public actor AgentActor {
                 // can't spin a tight retry loop, and honored with NO upper cap — a multi-hour
                 // limit means we wait multiple hours, which is the point (a suspiciously long
                 // one is flagged below). Otherwise the shared exponential backoff.
-                let backoff = LLMRetryPolicy.delay(attempt: consecutiveErrors, retryAfter: serverRetryAfter)
+                let backoff = LLMRetryPolicy.delay(
+                    attempt: consecutiveErrors, retryAfter: serverRetryAfter, budget: retryWindowBudget)
 
                 let shouldSurfaceNow = consecutiveErrors >= 5
                     || (isPersistentClientError && consecutiveErrors == 1)
@@ -1675,12 +1702,12 @@ public actor AgentActor {
                     // to know, so say it plainly.
                     var content = httpStatus == 402
                         ? Self.outOfCreditsMessage(role: configuration.role, model: configuration.llmConfig.model)
-                        : "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(Self.maxConsecutiveErrors)): \(error.localizedDescription)"
+                        : "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(retryWindowBudget.maxAttempts)): \(error.localizedDescription)"
                     // Only claim a retry when one is actually coming — the stop below fires at
                     // the cap, and immediately for a permanent error. State the wait both
                     // relatively and as a wall-clock time so a long wait reads clearly, and flag
                     // a suspiciously long server-directed delay.
-                    if !isPersistentClientError, consecutiveErrors < Self.maxConsecutiveErrors {
+                    if !isPersistentClientError, consecutiveErrors < retryWindowBudget.maxAttempts {
                         let retryAt = Date().addingTimeInterval(backoff)
                         content += " — retrying in \(Self.formatRetryDelay(backoff)) (at \(Self.formatRetryClock(retryAt)))"
                         if let serverRetryAfter {
@@ -1714,10 +1741,22 @@ public actor AgentActor {
                     break
                 }
 
-                if consecutiveErrors >= Self.maxConsecutiveErrors {
+                if consecutiveErrors >= retryWindowBudget.maxAttempts
+                    || retryWindowElapsed >= retryWindowBudget.maxElapsedSeconds {
+                    // Name which bound fired, and what it usually means. A 429 that never states a
+                    // delay and never clears is far more often an exhausted quota or an unpaid
+                    // balance than a brief throttle — and that is something only the user can fix.
+                    let stopReason: String
+                    if retryWindowElapsed >= retryWindowBudget.maxElapsedSeconds {
+                        stopReason = isRateLimited
+                            ? "stopped: the provider returned HTTP 429 for \(Self.formatRetryDelay(retryWindowElapsed)) and never said when the limit resets. That is usually an exhausted quota or an unpaid balance rather than a brief throttle — check the provider account, or switch this agent's model, then re-run the task."
+                            : "stopped after retrying for \(Self.formatRetryDelay(retryWindowElapsed)) without success."
+                    } else {
+                        stopReason = "stopped after \(consecutiveErrors) consecutive errors."
+                    }
                     await toolContext.post(ChannelMessage(
                         sender: .system,
-                        content: "Agent \(configuration.role.displayName) stopped after \(Self.maxConsecutiveErrors) consecutive errors.",
+                        content: "Agent \(configuration.role.displayName) \(stopReason)",
                         metadata: ["messageKind": .kind(.agentLifecycle), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     isRunning = false
@@ -2226,12 +2265,13 @@ public actor AgentActor {
                         )
                     } else {
                         if let taskID = currentTask?.id {
-                            let update = AgentActor.securityDenialUpdateMessage(
+                            if let update = AgentActor.securityDenialUpdateMessage(
                                 call: entry.call, disposition: disposition, isParallelBatch: true
-                            )
-                            await ctx.taskStore.addUpdate(id: taskID, message: update)
+                            ) {
+                                await ctx.taskStore.addUpdate(id: taskID, message: update)
+                            }
                         }
-                        result = "Tool execution denied: \(disposition.message ?? "No reason given")"
+                        result = AgentActor.blockedToolResultMessage(disposition)
                         // Denial is a domain-level failure outcome from Brown's perspective,
                         // even though no execution actually occurred — mark so retries are
                         // not flagged as duplicates of successful operations.
@@ -2513,7 +2553,22 @@ public actor AgentActor {
             // would be a worse outcome than a refused tool call, and an `assertionFailure` here
             // would take the process down in debug for a condition we already handle correctly.
             Self.agentLogger.error("Tool '\(call.name, privacy: .public)' denied — no SecurityEvaluator configured. Nothing runs unreviewed.")
-            return ("Tool execution denied: No security evaluator is configured. Tool cannot be executed without approval.", false)
+            // Not a verdict either: no reviewer exists to render one. Routing it through the same
+            // composer means the worker is told not to rewrite its command here too — the advice
+            // that matters most in this state, since NO command would be reviewable.
+            let unconfigured = SecurityDisposition(
+                outcome: .reviewerUnavailable(.noEvaluatorConfigured),
+                message: "No security evaluator is configured for this session."
+            )
+            // Post the row too. This path returned early without one, making it the only blocked
+            // call in the system with no trace in the transcript — the same invisibility the
+            // lifecycle-tool bypass was closed for.
+            await Self.postSecurityReviewToChannel(
+                disposition: unconfigured, callID: call.id, agentInstanceID: id,
+                roleName: configuration.role.displayName,
+                agentRoleValue: configuration.role.rawValue, post: { await toolContext.post($0) }
+            )
+            return (Self.blockedToolResultMessage(unconfigured), false)
         }
 
         let siblings = siblingCallSummaries.isEmpty ? nil : siblingCallSummaries.joined(separator: "\n")
@@ -2563,17 +2618,18 @@ public actor AgentActor {
             return (outcome.result, outcome.succeeded)
         } else {
             if let task = currentTask {
-                let update = Self.securityDenialUpdateMessage(
+                if let update = Self.securityDenialUpdateMessage(
                     call: call, disposition: disposition, isParallelBatch: parallelCount > 1
-                )
-                await toolContext.taskStore.addUpdate(id: task.id, message: update)
+                ) {
+                    await toolContext.taskStore.addUpdate(id: task.id, message: update)
+                }
             }
             // Mirror the parallel-approval path: record the denial as a failed outcome so
             // a retry of the same call is recognized as a legitimate response, not a
             // duplicate operation.
             await toolContext.setToolExecutionStatus(call.id, false)
             recordToolOutcome(name: call.name, succeeded: false)
-            return ("Tool execution denied: \(disposition.message ?? "No reason given")", false)
+            return (Self.blockedToolResultMessage(disposition), false)
         }
     }
 
@@ -2834,27 +2890,31 @@ public actor AgentActor {
         agentRoleValue: String?,
         post: @Sendable (ChannelMessage) async -> Void
     ) async {
+        // Exhaustive on purpose. The if-chain this replaced had no arm for `isCancelled`, so a
+        // review torn down mid-flight fell through to the UNSAFE `else` and printed
+        // "Security Agent → Brown: UNSAFE: Evaluation cancelled" — a verdict on a call nobody had
+        // judged. The flag existed and the Inspector read it; this renderer just forgot. A switch
+        // makes forgetting a build failure.
         let statusContent: String
-        let securityDisposition: String
-        if disposition.approved && disposition.isAutoApproval {
+        switch disposition.outcome {
+        case .autoApproved:
             statusContent = "Auto-approved\(disposition.message.map { " (\($0))" } ?? "")"
-            securityDisposition = "autoApproved"
-        } else if disposition.approved && !disposition.wasEvaluated {
-            // Approved WITHOUT review because review is disabled for this emitter. Never "SAFE" — the
-            // call was not judged; the transcript must say so.
+        case .approvedWithoutReview:
+            // Never "SAFE" — the call was allowed but not judged; the transcript must say so.
             statusContent = "Review disabled → \(roleName): approved without review\(disposition.message.map { " (\($0))" } ?? "")"
-            securityDisposition = "reviewDisabled"
-        } else if disposition.approved {
+        case .approved:
             statusContent = "Security Agent → \(roleName): SAFE\(disposition.message.map { " \($0)" } ?? "")"
-            securityDisposition = "approved"
-        } else if disposition.isWarning {
+        case .warned:
             let warnSummary = disposition.message?.components(separatedBy: "\n").first ?? ""
             statusContent = "Security Agent → \(roleName): WARN: \(warnSummary)"
-            securityDisposition = "warning"
-        } else {
+        case .refused:
             statusContent = "Security Agent → \(roleName): UNSAFE: \(disposition.message ?? "no reason given")"
-            securityDisposition = "denied"
+        case .reviewerUnavailable:
+            statusContent = "Security review UNAVAILABLE → \(roleName): call BLOCKED, not judged — \(disposition.message ?? "the Security Agent backend did not respond")"
+        case .reviewCancelled:
+            statusContent = "Security review cancelled → \(roleName): call blocked, not judged."
         }
+        let securityDisposition = disposition.channelTag
         var reviewMetadata: [String: AnyCodable] = [
             "requestID": .string(callID),
             "agentID": .string(agentInstanceID.uuidString),
@@ -3607,12 +3667,62 @@ public actor AgentActor {
     /// Maximum characters per argument value in security denial task updates.
     private static let maxArgCharsForUpdate = 50
 
+    /// The `tool_result` text handed back to the calling agent for a BLOCKED call — the only
+    /// account of the block that reaches the model in-turn (the channel verdict row is filtered
+    /// out of a worker's context).
+    ///
+    /// It must not read as a verdict when none was rendered. `BrownBehavior`'s prompt tells the
+    /// worker that UNSAFE means stop, rethink, find a new approach, and never resubmit — under
+    /// threat of termination. Applied to a backend outage that is exactly the wrong response: the
+    /// worker rewrites, weakens or splits a command that nothing objected to, and each variant is
+    /// just as unreviewed as the original.
+    static func blockedToolResultMessage(_ disposition: SecurityDisposition) -> String {
+        switch disposition.outcome {
+        case .approved, .autoApproved, .approvedWithoutReview:
+            // Not reachable: callers only compose this on the deny path. Kept exhaustive so a new
+            // outcome has to be classified rather than silently inheriting a denial message.
+            return "Tool execution blocked."
+        case .warned, .refused:
+            return "Tool execution denied: \(disposition.message ?? "No reason given")"
+        case .reviewerUnavailable:
+            return """
+                Tool call BLOCKED — this is NOT a security verdict on your command.
+                The security reviewer could not be reached, so your call was never judged and \
+                nothing about it was found unsafe. \(disposition.message ?? "")
+                Do NOT weaken, rewrite, or split the command to get past this — a different command \
+                would be just as unreviewed. The user has been told the reviewer is unreachable. \
+                Retry the IDENTICAL call once; if it is blocked again, stop and report the blockage \
+                with `task_update` rather than working around it.
+                """
+        case .reviewCancelled:
+            return "Tool call BLOCKED — the run was stopped before the security review finished. This is NOT a verdict on your command."
+        }
+    }
+
+    /// Returns nil when the block was NOT a verdict.
+    ///
+    /// This text lands in `task.updates`, which is re-rendered into "## Prior Progress" of every
+    /// future worker briefing — so a line written here is re-injected into the worker's context on
+    /// every respawn, forever. A transient backend outage recorded as "Security response: UNSAFE"
+    /// therefore pinned a judgement nobody made into the permanent record of the task. The event is
+    /// still visible in the transcript row, in the tool result the worker reads, and in the
+    /// user-facing alarm; what it must not do is become durable task history.
     static func securityDenialUpdateMessage(
         call: LLMToolCall,
         disposition: SecurityDisposition,
         isParallelBatch: Bool
-    ) -> String {
-        let label = disposition.isWarning ? "WARN" : "UNSAFE"
+    ) -> String? {
+        let label: String
+        switch disposition.outcome {
+        case .warned:
+            label = "WARN"
+        case .refused:
+            label = "UNSAFE"
+        case .reviewerUnavailable, .reviewCancelled:
+            return nil
+        case .approved, .autoApproved, .approvedWithoutReview:
+            return nil
+        }
         let reason = disposition.message ?? "no reason given"
         let batchNote = isParallelBatch ? " (part of parallel batch)" : ""
 

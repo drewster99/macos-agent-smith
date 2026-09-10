@@ -46,10 +46,75 @@ public enum LLMRetryPolicy {
     /// about. It is still honored — this only drives messaging.
     public static let ridiculousRetryAfterSeconds: TimeInterval = 3600
 
+    /// How long a caller will keep retrying, and how sparsely.
+    ///
+    /// The ceiling belongs here because endurance and request rate are one decision: reaching a
+    /// two-hour window at a 15 s ceiling would mean ~480 requests to a backend already refusing
+    /// them. Attempts alone are also a poor proxy for endurance once the curve flattens — attempts
+    /// 5 through 50 are all 15 s apart.
+    public struct RetryBudget: Sendable, Equatable {
+        public let maxAttempts: Int
+        public let maxElapsedSeconds: TimeInterval
+        public let maxBackoffSeconds: TimeInterval
+
+        public init(maxAttempts: Int, maxElapsedSeconds: TimeInterval, maxBackoffSeconds: TimeInterval) {
+            self.maxAttempts = maxAttempts
+            self.maxElapsedSeconds = maxElapsedSeconds
+            self.maxBackoffSeconds = maxBackoffSeconds
+        }
+    }
+
+    /// Today's behavior, unchanged.
+    ///
+    /// `maxElapsedSeconds` is deliberately far above what 50 attempts can take, so it is a backstop
+    /// against a pathologically slow call and NEVER the binding constraint — attempts still decide.
+    /// Sizing it to the ~690 s of *sleep* those attempts imply would have been a silent tightening:
+    /// each attempt also spends its own call latency (up to a provider timeout), so a run that
+    /// legitimately reached attempt 50 today could be cut off at 40 by a wall clock set to 780.
+    public static let standardBudget = RetryBudget(
+        maxAttempts: maxAttempts, maxElapsedSeconds: 5400, maxBackoffSeconds: maxBackoffSeconds)
+
+    /// For a 429 that states NO delay, when nothing is blocked behind the caller.
+    ///
+    /// Sized from this app's own logs rather than from taste. Two Ollama Cloud "session usage
+    /// limit" episodes RECOVERED and their workers finished the task — after 26 and 37 consecutive
+    /// failures spanning 65 and 98 minutes. Both predate the 2026-07-25 retry consolidation, which
+    /// replaced a 3 s→120 s per-agent curve with the shared 1,2,4,8,15,15… one and thereby cut
+    /// maximum 429 endurance from roughly 90 minutes to about 11.5 — so under `standardBudget`
+    /// both of those recoveries would now be deaths.
+    ///
+    /// The 300 s ceiling reaches two hours in ~33 attempts, which is the point: endure longer while
+    /// asking *less* often. Do not lower `maxElapsedSeconds` below ~6000 without new evidence —
+    /// anything under about 100 minutes discards a recovery this app has actually observed.
+    public static let patientThrottleBudget = RetryBudget(
+        maxAttempts: maxAttempts, maxElapsedSeconds: 7200, maxBackoffSeconds: 300)
+
+    /// The budget for a classification.
+    ///
+    /// `patient` is the CALLER's declaration that nothing is blocked behind it. A worker's next
+    /// turn can wait; a security verdict that a tool call is parked on cannot, and neither can a
+    /// validator holding a task. Only the agent run loop passes true.
+    ///
+    /// A throttle that STATES its own delay does not need patience — the server said when its
+    /// window reopens, so believe it and use the standard budget. That is also the only signal
+    /// available: the word "quota" is semantically inverted across providers (Gemini's recoverable
+    /// limit says "You exceeded your current quota"; Moonshot's terminal suspension is typed
+    /// `exceeded_current_quota_error`), and Ollama alone has shipped three wordings across two JSON
+    /// schemas — so nothing here reads the body's prose.
+    public static func budget(for classification: Classification, patient: Bool) -> RetryBudget {
+        guard case .transient(let retryAfter, let isThrottle) = classification,
+              isThrottle, retryAfter == nil, patient else { return standardBudget }
+        return patientThrottleBudget
+    }
+
     /// Whether an error is worth trying again, and how long the server wants us to wait.
     public enum Classification: Sendable, Equatable {
         /// Worth retrying. `retryAfter` is the server-directed delay when it supplied one.
-        case transient(retryAfter: TimeInterval?)
+        ///
+        /// `isThrottle` is read off the STATUS CODE alone — it is true for 429 and nothing else.
+        /// It exists so a caller can spend a different BUDGET on a rate limit without any part of
+        /// the system reclassifying a 429 as permanent, which no available signal can justify.
+        case transient(retryAfter: TimeInterval?, isThrottle: Bool = false)
         /// Retrying cannot help — a bad key, exhausted credits, an unknown model, a malformed
         /// request. Needs a human, not another attempt.
         case permanent
@@ -73,7 +138,12 @@ public enum LLMRetryPolicy {
                 // body as a google.rpc.RetryInfo.
                 let serverDelay = retryAfter ?? retryAfterFromErrorBody(body)
                 switch statusCode {
-                case 408, 429:
+                case 429:
+                    // Still transient — the most common 429 by far is an ordinary rate limit, and
+                    // an exhausted balance is indistinguishable from it by status code. What the
+                    // flag changes is how long we are willing to be wrong about which one this is.
+                    return .transient(retryAfter: serverDelay, isThrottle: true)
+                case 408:
                     return .transient(retryAfter: serverDelay)
                 case 500...599:
                     return .transient(retryAfter: serverDelay)
@@ -108,11 +178,15 @@ public enum LLMRetryPolicy {
     ///
     /// A server delay is floored at 1s so a `Retry-After: 0` cannot spin a tight loop, and is
     /// otherwise honored verbatim — including values far above ``maxBackoffSeconds``.
-    public static func delay(attempt: Int, retryAfter: TimeInterval?) -> TimeInterval {
+    public static func delay(
+        attempt: Int,
+        retryAfter: TimeInterval?,
+        budget: RetryBudget = standardBudget
+    ) -> TimeInterval {
         if let retryAfter { return max(retryAfter, 1) }
         // Clamp the exponent before `pow` so a large attempt count can't overflow to infinity.
         let exponent = min(max(attempt - 1, 0), 20)
-        return min(baseBackoffSeconds * pow(2, Double(exponent)), maxBackoffSeconds)
+        return min(baseBackoffSeconds * pow(2, Double(exponent)), budget.maxBackoffSeconds)
     }
 
     /// Sleeps for the computed delay. Returns false if the sleep was cancelled, so callers can

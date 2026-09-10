@@ -854,27 +854,35 @@ struct EvaluationRecordRow: View {
     private var isScoping: Bool { record.toolName == "(tool scoping)" }
 
     private var dispositionLabel: String {
-        if record.disposition.isCancelled {
-            return "CANCELLED"
-        } else if isScoping {
+        if isScoping, record.disposition.wasJudged {
             return record.disposition.approved ? "SCOPED" : "NO TOOLS"
-        } else if record.disposition.approved && record.disposition.isAutoApproval {
-            return "AUTO"
-        } else if record.disposition.approved {
-            return "SAFE"
-        } else if record.disposition.isWarning {
-            return "WARN"
-        } else {
-            return "UNSAFE"
+        }
+        switch record.disposition.outcome {
+        case .reviewCancelled:          return "CANCELLED"
+        // Orange, not grey: a reviewer that cannot answer is an operational fault the user has to
+        // act on, not a neutral outcome to be skimmed past.
+        case .reviewerUnavailable:      return "NOT REVIEWED"
+        case .autoApproved:             return "AUTO"
+        case .approvedWithoutReview:    return "NOT REVIEWED (review off)"
+        case .approved:                 return "SAFE"
+        case .warned:                   return "WARN"
+        case .refused(.abort):          return "ABORT"
+        case .refused(.unsafe):         return "UNSAFE"
         }
     }
 
     private var dispositionColor: Color {
-        if record.disposition.isCancelled { return .secondary }
-        if isScoping { return record.disposition.approved ? .blue : .red }
-        if record.disposition.approved { return .green }
-        if record.disposition.isWarning { return .orange }
-        return .red
+        if isScoping, record.disposition.wasJudged {
+            return record.disposition.approved ? .blue : .red
+        }
+        switch record.disposition.outcome {
+        case .reviewCancelled:                        return .secondary
+        case .reviewerUnavailable:                    return .orange
+        case .approved, .autoApproved:                return .green
+        case .approvedWithoutReview:                  return .orange
+        case .warned:                                 return .orange
+        case .refused:                                return .red
+        }
     }
 
     var body: some View {

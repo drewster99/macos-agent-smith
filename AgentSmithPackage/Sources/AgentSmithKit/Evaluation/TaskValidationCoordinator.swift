@@ -1610,6 +1610,9 @@ extension OrchestrationRuntime {
         guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
         // The freed slot isn't a terminal event, so `onTaskTerminated` won't fire the usual
         // auto-advance — kick it here so a pending task can take the slot.
+        // Redundant since `terminateAgent` kicks the drain itself, and kept deliberately: this
+        // call is the one that was RIGHT while the completion path was wrong, and deleting it
+        // would erase the example. Both drains are reentrancy-guarded, so the second is a no-op.
         await advanceAfterFreedWorkerSlot()
         await channel.post(ChannelMessage(
             sender: .system,

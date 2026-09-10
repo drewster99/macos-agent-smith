@@ -141,10 +141,25 @@ final class AgentInspectorStore {
     /// doesn't misleadingly inflate.
     var flaggedEvaluationCount: Int {
         evaluationRecords.reduce(0) { count, record in
-            let d = record.disposition
-            if d.isCancelled { return count }
-            if d.isAutoApproval { return count }
-            return d.approved ? count : count + 1
+            // Only a real, rendered refusal is a security flag. A cheap auto-approval isn't one,
+            // and neither is a block that happened because nobody could judge — counting an outage
+            // as a security finding is the same lie one level up from the UNSAFE label.
+            switch record.disposition.outcome {
+            case .warned, .refused:
+                return count + 1
+            case .approved, .autoApproved, .approvedWithoutReview, .reviewerUnavailable, .reviewCancelled:
+                return count
+            }
+        }
+    }
+
+    /// Calls blocked because no verdict could be reached — an operational fault, tracked apart
+    /// from `flaggedEvaluationCount` so a backend outage is visible AS an outage rather than
+    /// inflating the security-findings chip.
+    var unavailableEvaluationCount: Int {
+        evaluationRecords.reduce(0) { count, record in
+            if case .reviewerUnavailable = record.disposition.outcome { return count + 1 }
+            return count
         }
     }
 

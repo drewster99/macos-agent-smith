@@ -277,7 +277,9 @@ final class SpeechController {
             switch result {
             case "warning":
                 playSound(named: securityWarnSoundName)
-            case "denied":
+            // A block is a block for audio purposes: the user needs to hear that a call did not
+            // run, whether it was refused or simply never judged.
+            case "denied", "unavailable":
                 playSound(named: securityDenySoundName)
             case "abort":
                 playSound(named: securityAbortSoundName)

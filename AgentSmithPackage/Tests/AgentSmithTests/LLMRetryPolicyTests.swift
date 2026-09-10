@@ -21,7 +21,9 @@ struct LLMRetryPolicyTests {
 
     @Test("Rate limits, timeouts and server faults are transient", arguments: [408, 429, 500, 502, 503, 529])
     func transientStatuses(status: Int) {
-        #expect(LLMRetryPolicy.classify(httpError(status)) == .transient(retryAfter: nil))
+        // `isThrottle` is 429 and nothing else — it is read off the status code, never the body,
+        // because the body's wording is inverted across providers and drifts within one of them.
+        #expect(LLMRetryPolicy.classify(httpError(status)) == .transient(retryAfter: nil, isThrottle: status == 429))
     }
 
     /// The whole point of classifying: these never recover on their own, so retrying them is
@@ -34,14 +36,14 @@ struct LLMRetryPolicyTests {
 
     @Test("A server-supplied Retry-After rides along with the classification")
     func retryAfterIsCarried() {
-        #expect(LLMRetryPolicy.classify(httpError(429, retryAfter: 30)) == .transient(retryAfter: 30))
+        #expect(LLMRetryPolicy.classify(httpError(429, retryAfter: 30)) == .transient(retryAfter: 30, isThrottle: true))
     }
 
     @Test("A retry delay stated only in the body is recovered")
     func retryAfterFromBody() {
         // Google states it as a google.rpc.RetryInfo rather than a header.
         let gemini = httpError(429, body: #"{"error":{"details":[{"retryDelay":"34s"}]}}"#)
-        #expect(LLMRetryPolicy.classify(gemini) == .transient(retryAfter: 34))
+        #expect(LLMRetryPolicy.classify(gemini) == .transient(retryAfter: 34, isThrottle: true))
 
         let prose = httpError(503, body: "overloaded, please retry in 12s")
         #expect(LLMRetryPolicy.classify(prose) == .transient(retryAfter: 12))
