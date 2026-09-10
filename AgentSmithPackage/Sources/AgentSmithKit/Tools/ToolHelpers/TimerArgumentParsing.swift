@@ -103,7 +103,15 @@ enum TimerArgumentParsing {
             return .value(.interval(seconds: total))
         }
 
-        let hour = intValue(dict["hour"]) ?? 0
+        // A MISSING or unparseable `hour` is rejected, not defaulted to midnight. It sat two lines
+        // above a range check careful to reject everything else, and it is LLM-reachable: a daily
+        // recurrence whose hour failed to parse silently became "every day at 00:00" and fired for
+        // months at the wrong time with nothing to notice. `minute` defaults to 0 because "9am"
+        // legitimately means minute 0 — an omitted minute is a real, common intent; an omitted hour
+        // is not.
+        guard let hour = intValue(dict["hour"]) else {
+            return .invalid("\(normalizedType) recurrence requires `hour` (0-23).")
+        }
         let minute = intValue(dict["minute"]) ?? 0
         guard (0...23).contains(hour), (0...59).contains(minute) else {
             return .invalid("hour must be 0-23 and minute must be 0-59.")

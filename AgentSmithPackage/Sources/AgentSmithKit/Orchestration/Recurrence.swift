@@ -33,9 +33,13 @@ public enum Recurrence: Sendable, Codable, Equatable {
         }
         switch self {
         case .daily(let time):
+            // An invalid time can never match, so `Calendar` would return nil anyway. Saying so
+            // here makes it a documented contract rather than an accident, and matches the
+            // `monthlyOnDay` guard two cases down.
+            guard time.isValid else { return nil }
             return nextMatch(DateComponents(hour: time.hour, minute: time.minute))
         case .weekly(let time, let weekdays):
-            guard !weekdays.isEmpty else { return nil }
+            guard time.isValid, !weekdays.isEmpty else { return nil }
             let candidates = weekdays.compactMap { weekday in
                 nextMatch(DateComponents(
                     hour: time.hour,
@@ -45,7 +49,7 @@ public enum Recurrence: Sendable, Codable, Equatable {
             }
             return candidates.min()
         case .monthlyOnDay(let time, let day):
-            guard day >= 1, day <= 31 else { return nil }
+            guard time.isValid, day >= 1, day <= 31 else { return nil }
             return nextMonthlyOccurrence(day: day, time: time, after: after, calendar: calendar)
         case .interval(let seconds):
             guard seconds >= Self.minimumIntervalSeconds else { return nil }
@@ -86,17 +90,26 @@ public enum Recurrence: Sendable, Codable, Equatable {
             return result > notBefore ? result : nil
         }
 
-        // Calendar recurrences: step forward until strictly past `notBefore`. Bounded so a
-        // recurrence that can never match (defensive) can't spin forever.
-        var candidate = nextOccurrence(after: after, calendar: calendar)
-        var steps = 0
-        while let current = candidate, current <= notBefore, steps < 100_000 {
-            candidate = nextOccurrence(after: current, calendar: calendar)
-            steps += 1
-        }
-        // If the bounded loop ran out before reaching the future (absurd/degenerate recurrence), the
-        // candidate is still <= notBefore — end the series rather than reschedule a still-past wake.
-        return candidate.flatMap { $0 > notBefore ? $0 : nil }
+        // A calendar recurrence is an ABSOLUTE wall-clock pattern: its occurrence set does not
+        // depend on `after` at all — `after` is only a lower bound. So "the first occurrence
+        // strictly after BOTH bounds" is ONE lookup from the later of the two.
+        //
+        // This replaces a loop that stepped one occurrence per elapsed period, inside the
+        // `WakeScheduler` actor, bounded at 100,000 iterations. Each step is a `Calendar.nextDate`
+        // call (~5 µs for `.daily`, ~78 µs for a 7-weekday `.weekly`), so a wake left stale by a
+        // clock change blocked every other wake in the app for hundreds of milliseconds — and past
+        // the cap it returned a still-past candidate, silently ENDING the user's series.
+        //
+        // One deliberate semantic change: during a DST fall-back repeated hour, where `notBefore`
+        // sits between the two occurrences of a repeated local time, this returns the second
+        // occurrence (30–60 minutes later) where the loop skipped a whole day. The direct answer is
+        // the one plain `nextOccurrence(after:)` gives from the same instant — the semantics used
+        // everywhere else, including the on-time fire path — and it is never unsafe: the result is
+        // always strictly after both bounds, so it can neither re-fire a past instant nor duplicate
+        // the occurrence that just fired.
+        let lowerBound = max(after, notBefore)
+        return nextOccurrence(after: lowerBound, calendar: calendar)
+            .flatMap { $0 > notBefore ? $0 : nil }
     }
 
     /// Finds the next real calendar date matching the requested day/time.
@@ -180,9 +193,25 @@ public struct TimeOfDay: Sendable, Codable, Equatable, Hashable {
     public let hour: Int
     public let minute: Int
 
+    /// Whether this is a real wall-clock time.
+    ///
+    /// Out-of-range values are POSSIBLE: the synthesized decoder is total on purpose, so one
+    /// hand-edited record cannot take a whole session's wake file down with it (the file decodes as
+    /// a single array — a throwing element would disarm every timer in the session, permanently).
+    /// So validity is ASKED, never assumed.
+    public var isValid: Bool { (0...23).contains(hour) && (0...59).contains(minute) }
+
+    /// Deliberately does NOT clamp.
+    ///
+    /// It used to, and that was a silent default in the worst way: `hour: 24` became 23, a
+    /// different time than any caller could have meant, firing an hour early every day forever with
+    /// no error. It also made this init and the SYNTHESIZED decoder disagree — `Codable` assigns
+    /// stored properties directly, so a persisted `{"hour": 25}` came back unclamped while a
+    /// programmatic one did not. The only caller (`TimerArgumentParsing.parseRecurrence`) already
+    /// rejects out-of-range input at the tool boundary, so nothing needed the clamp.
     public init(hour: Int, minute: Int) {
-        self.hour = max(0, min(23, hour))
-        self.minute = max(0, min(59, minute))
+        self.hour = hour
+        self.minute = minute
     }
 
     /// `HH:mm` formatted, suitable for UI labels.

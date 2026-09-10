@@ -1406,6 +1406,10 @@ final class AppViewModel {
             case .replaced:        label = "rescheduled"
             case .taskTerminated:  label = "cancelled (task ended)"
             case .agentTerminated: label = "cancelled (agent ended)"
+            // Not a cancellation the user asked for: the repeat pattern simply has no further
+            // occurrence, so the series retired itself. Saying "cancelled" would imply someone
+            // stopped it — and until this row existed, nothing said anything at all.
+            case .recurrenceExhausted: label = "series ended (no further occurrences)"
             case .userRequest, .none: label = "cancelled"
             }
             return "⏰ \(label) — \(action)"

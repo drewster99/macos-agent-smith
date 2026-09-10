@@ -189,8 +189,16 @@ actor WakeScheduler {
         if let primary = due.first { onFired?(primary, due) }
 
         for wake in due {
-            guard let recurrence = wake.recurrence,
-                  let next = recurrence.nextOccurrence(after: wake.wakeAt, notBefore: now) else { continue }
+            guard let recurrence = wake.recurrence else { continue }
+            guard let next = recurrence.nextOccurrence(after: wake.wakeAt, notBefore: now) else {
+                // The series can produce no further occurrence — it ENDS here. Say so. This
+                // `continue` was the one path that retired a user's repeating timer permanently
+                // with no trace anywhere: not in the channel, not in the timer history, not in the
+                // log. It fires for every cause, not just an out-of-range time — an empty weekday
+                // set and a sub-minimum interval reach it too.
+                onCancelled?(wake, .recurrenceExhausted)
+                continue
+            }
             let nextWake = wake.nextOccurrence(at: next, previousFireAt: wake.wakeAt)
             wakes.append(nextWake)
             onScheduled?(nextWake)

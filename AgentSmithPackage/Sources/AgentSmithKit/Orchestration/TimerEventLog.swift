@@ -61,6 +61,35 @@ public struct TimerEvent: Identifiable, Codable, Sendable, Equatable {
         self.cancellationCause = cancellationCause
         self.action = action
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, timestamp, kind, wakeID, originalID, instructions, taskID
+        case recurrenceDescription, coalescedCount, scheduledFireAt, cancellationCause, action
+    }
+
+    /// Hand-written for ONE reason: an unrecognized `cancellationCause` must not throw.
+    ///
+    /// `timer_events.json` decodes as a single array, so one row carrying a cause a newer build
+    /// added would take the ENTIRE timer history down on an older one — and the cause is a display
+    /// label, while the history is the data. `try?` degrades that row to "cancelled" and keeps the
+    /// log. Note that a lenient `init?(rawValue:)` on the enum does NOT achieve this: the
+    /// synthesized `Decodable` for a RawRepresentable throws when `init(rawValue:)` returns nil, so
+    /// the leniency has to live here, in the container.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        timestamp = try c.decode(Date.self, forKey: .timestamp)
+        kind = try c.decode(Kind.self, forKey: .kind)
+        wakeID = try c.decode(UUID.self, forKey: .wakeID)
+        originalID = try c.decode(UUID.self, forKey: .originalID)
+        instructions = try c.decode(String.self, forKey: .instructions)
+        taskID = try c.decodeIfPresent(UUID.self, forKey: .taskID)
+        recurrenceDescription = try c.decodeIfPresent(String.self, forKey: .recurrenceDescription)
+        coalescedCount = try c.decodeIfPresent(Int.self, forKey: .coalescedCount)
+        scheduledFireAt = try c.decodeIfPresent(Date.self, forKey: .scheduledFireAt)
+        cancellationCause = try? c.decodeIfPresent(WakeCancellationCause.self, forKey: .cancellationCause)
+        action = try? c.decodeIfPresent(TaskActionKind.self, forKey: .action)
+    }
 }
 
 /// Append-only log of timer lifecycle events. Capped to keep memory bounded (oldest rows are

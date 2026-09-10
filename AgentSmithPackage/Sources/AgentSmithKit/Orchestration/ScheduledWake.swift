@@ -254,4 +254,9 @@ public enum WakeCancellationCause: String, Sendable, Codable {
     case taskTerminated
     case agentTerminated
     case replaced
+    /// The recurrence can produce no further occurrence, so the series ends here. Emitted so a
+    /// repeating timer retiring itself leaves a trace: the `continue` this replaced dropped a
+    /// user's series forever with no channel row, no timer event, and no log line — for every
+    /// cause, including an empty weekday set and a sub-minimum interval, not just a bad time.
+    case recurrenceExhausted
 }

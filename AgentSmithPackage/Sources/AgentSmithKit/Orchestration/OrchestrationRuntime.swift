@@ -1449,19 +1449,16 @@ public actor OrchestrationRuntime {
             return wake.nextOccurrence(at: fireAt, previousFireAt: fireAt.addingTimeInterval(-interval))
         }
 
-        // Calendar recurrences step at most once per day, so the cap spans ~27 years —
-        // a true runaway guard, not a reachable limit.
-        var fireAt = wake.wakeAt
-        var previousFireAt = wake.previousFireAt
-        for _ in 0..<10_000 {
-            guard let next = recurrence.nextOccurrence(after: fireAt) else { return nil }
-            previousFireAt = fireAt
-            fireAt = next
-            if fireAt > now {
-                return wake.nextOccurrence(at: fireAt, previousFireAt: previousFireAt)
-            }
-        }
-        return nil
+        // Calendar recurrences: ask the shared catch-up method rather than re-deriving it here.
+        // This was a second copy of the same step-one-occurrence-at-a-time loop — 10,000 iterations
+        // of `Calendar.nextDate` at COLD BOOT, where nothing else can proceed. It is now the same
+        // O(1) lookup `Recurrence` uses, and there is one implementation to be right about.
+        //
+        // `previousFireAt` becomes the wake's ACTUAL last fire rather than a synthesized occurrence
+        // just before the new one, which is both more honest and consistent with
+        // `WakeScheduler.fireDue`. Nothing reads the field — it exists for the timers UI's grouping.
+        guard let fireAt = recurrence.nextOccurrence(after: wake.wakeAt, notBefore: now) else { return nil }
+        return wake.nextOccurrence(at: fireAt, previousFireAt: wake.wakeAt)
     }
 
     private func rearmScheduledTaskWakes(excluding excluded: UUID?) async {
