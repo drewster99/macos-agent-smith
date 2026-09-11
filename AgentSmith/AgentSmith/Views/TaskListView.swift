@@ -319,21 +319,6 @@ private struct TaskFamilyChildRow: View {
     }
 }
 
-// MARK: - Section header
-
-private struct TaskSectionHeader: View {
-    let title: String
-
-    var body: some View {
-        Text(title.uppercased())
-            .font(.system(.caption2, design: .monospaced, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AppColors.subtleRowBackground)
-    }
-}
 
 /// Verb for the "run this task now" affordance — "Resume" reads better for a task that
 /// already started once (`paused` / `interrupted`); "Run" for one that never has.

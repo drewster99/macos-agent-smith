@@ -1391,18 +1391,25 @@ private struct TaskDetailUpdatesSection: View {
             // Newest at top. When the total count fits in the 5-item preview the section
             // is treated as fully expanded — no `(more)`/`(less)` link, since toggling
             // would not change what's visible.
-            let reversed = Array(task.updates.reversed())
-            let isExpandable = reversed.count > 5
+            //
+            // Enumerate BEFORE reversing, so `offset` is the append index rather than the display
+            // position. `task.updates` is append-only — three `append` sites in TaskStore, no
+            // assignment outside init and decode — which makes that index a permanently stable
+            // identity. Keying on the display position instead handed row 0 to a different update
+            // on every append, rebinding each visible row's `MarkdownText.cachedBlocks` at once:
+            // the same `id: \.offset` aliasing the related-context section below warns about.
+            let newestFirst = Array(task.updates.enumerated().reversed())
+            let isExpandable = newestFirst.count > 5
             let effectiveExpanded = mode == .expanded || !isExpandable
-            let visible = effectiveExpanded ? reversed : Array(reversed.prefix(5))
+            let visible = effectiveExpanded ? newestFirst : Array(newestFirst.prefix(5))
             VStack(alignment: .leading, spacing: 8) {
                 TaskDetailSectionTitleRow(
                     title: "Updates",
-                    subtitle: (!effectiveExpanded && isExpandable) ? "showing 5 of \(reversed.count)" : nil,
+                    subtitle: (!effectiveExpanded && isExpandable) ? "showing 5 of \(newestFirst.count)" : nil,
                     copyText: Self.formattedUpdates(task.updates)
                 )
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(visible.enumerated()), id: \.offset) { _, update in
+                    ForEach(visible, id: \.offset) { _, update in
                         TaskUpdateRow(update: update, attachmentURLResolver: attachmentURLResolver)
                     }
                 }
@@ -1818,7 +1825,11 @@ private struct TaskDetailWorkspaceLines: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+            // Labels are disjoint by construction — `Folder`/`Scratch`/`Evidence` against the
+            // `Parent `-prefixed trio (AppViewModel.workspaceReferences) — so they are a stable id.
+            // Paths are NOT: a task whose parentTaskID equalled its own id would emit six
+            // byte-identical paths, and a duplicate ForEach id is worse than the aliasing.
+            ForEach(rows, id: \.label) { row in
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(row.label)
                         .font(.caption)
@@ -1929,14 +1940,24 @@ private struct TaskDetailCopyButton: View {
     let text: String
 
     @State private var isCopied = false
+    /// Identifies which press a pending reset belongs to. Without it a second press inside the
+    /// flash window is cleared early by the FIRST press's still-pending timer, so the copy the
+    /// user just made is the one that goes unconfirmed.
+    @State private var copyPressCount = 0
 
     var body: some View {
         Button(action: {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+            copyPressCount += 1
+            let press = copyPressCount
             withAnimation { isCopied = true }
             Task {
+                // Only `Task.sleep` throws here, and only on cancellation. Nothing cancels this
+                // task, and clearing would still be the right outcome if anything ever did — so
+                // both paths fall through to the guard rather than leaving the checkmark stuck on.
                 try? await Task.sleep(for: .seconds(1.5))
+                guard copyPressCount == press else { return }
                 withAnimation { isCopied = false }
             }
         }, label: {
