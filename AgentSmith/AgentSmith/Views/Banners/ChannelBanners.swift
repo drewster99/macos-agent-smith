@@ -90,6 +90,20 @@ struct TaskBannerTitleLine: View {
     }
 }
 
+/// A banner's italic secondary description, under the title.
+struct TaskBannerDescriptionLine: View {
+    let description: String
+    var bottomPadding: CGFloat = 6
+
+    var body: some View {
+        MarkdownText(content: description, baseFont: AppFonts.channelBody.italic())
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.bottom, bottomPadding)
+    }
+}
+
 /// A banner's markdown body.
 struct TaskBannerBodyText: View {
     let content: String
@@ -213,6 +227,34 @@ private struct MemoryBannerHeaderButton: View {
     }
 }
 
+/// The scheduled-fire chip and retrieved-context row under a new-task banner.
+///
+/// One child rather than two conditionals in the banner: the chip sits in its own band when
+/// there is no context row, and as a complementary row above it when there is, so the two are
+/// one layout decision rather than two independent ones.
+private struct TaskCreatedBannerFooter: View {
+    let scheduledRunAt: Date?
+    let hasContext: Bool
+    let memoryCount: Int
+    let priorTaskCount: Int
+    let contextMemories: String?
+    let contextPriorTasks: String?
+    @Binding var isContextExpanded: Bool
+
+    var body: some View {
+        if let runAt = scheduledRunAt {
+            TaskCreatedBannerScheduledChip(runAt: runAt)
+        }
+        if hasContext {
+            TaskCreatedBannerContextSection(
+                memoryCount: memoryCount, priorTaskCount: priorTaskCount,
+                contextMemories: contextMemories, contextPriorTasks: contextPriorTasks,
+                isExpanded: $isContextExpanded
+            )
+        }
+    }
+}
+
 /// Visually distinct banner announcing a newly created task in the channel log.
 struct TaskCreatedBanner: View {
     let title: String
@@ -231,70 +273,30 @@ struct TaskCreatedBanner: View {
 
     private let accentColor = AppColors.taskCreatedAccent
 
+    /// Semantic context was retrieved when the task was created.
+    private var hasContext: Bool { memoryCount > 0 || priorTaskCount > 0 }
+    /// Whether anything follows the title, which decides the title's bottom inset.
+    private var hasBodyBelowTitle: Bool { description != nil || hasRowsBelowDescription }
+    /// Whether a scheduled chip or context row follows the description.
+    private var hasRowsBelowDescription: Bool { hasContext || scheduledRunAt != nil }
+
     var body: some View {
-        // Compute derived values once at body start
-        let _hasContext = memoryCount > 0 || priorTaskCount > 0
-        let _hasScheduled = scheduledRunAt != nil
-        
-        return VStack(spacing: 0) {
-            // Top rule
-            accentColor.frame(height: 1).opacity(0.4)
-
-            HStack(spacing: 8) {
-                Image(systemName: "plus.circle.fill")
-                    .font(AppFonts.bannerIcon)
-                    .foregroundStyle(accentColor)
-
-                Text("New Task")
-                    .font(AppFonts.channelSender)
-                    .foregroundStyle(accentColor)
-
-                Spacer()
-
-                ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-
-            Text(title)
-                .font(AppFonts.channelBody.bold())
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.bottom, (description != nil || _hasContext || _hasScheduled) ? 2 : 6)
-
+        TaskBannerFrame(
+            systemImage: "plus.circle.fill", headline: "New Task",
+            accentColor: accentColor, timestamp: timestamp
+        ) {
+            TaskBannerTitleLine(title: title, bottomPadding: hasBodyBelowTitle ? 2 : 6)
             if let description {
-                MarkdownText(content: description, baseFont: AppFonts.channelBody.italic())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, (_hasContext || _hasScheduled) ? 2 : 6)
+                TaskBannerDescriptionLine(description: description,
+                                          bottomPadding: hasRowsBelowDescription ? 2 : 6)
             }
-
-            // Scheduled-fire chip. Lives in its own band when there's no Context row;
-            // when there IS a Context row below, this sits as a complementary row above it.
-            if let runAt = scheduledRunAt {
-                TaskCreatedBannerScheduledChip(runAt: runAt)
-            }
-
-            // Semantic context retrieved at task creation
-            if _hasContext {
-                TaskCreatedBannerContextSection(
-                    memoryCount: memoryCount,
-                    priorTaskCount: priorTaskCount,
-                    contextMemories: contextMemories,
-                    contextPriorTasks: contextPriorTasks,
-                    isExpanded: $isContextExpanded
-                )
-            }
-
-            // Bottom rule
-            accentColor.frame(height: 1).opacity(0.4)
+            TaskCreatedBannerFooter(
+                scheduledRunAt: scheduledRunAt, hasContext: hasContext,
+                memoryCount: memoryCount, priorTaskCount: priorTaskCount,
+                contextMemories: contextMemories, contextPriorTasks: contextPriorTasks,
+                isContextExpanded: $isContextExpanded
+            )
         }
-        .background(accentColor.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .padding(.vertical, 4)
     }
 
 }
