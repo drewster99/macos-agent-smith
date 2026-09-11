@@ -378,6 +378,15 @@ private struct TaskDetailContent: View {
         return defaultMode(kind, for: task)
     }
 
+    /// Sections whose mode is not `.hidden`.
+    ///
+    /// Filtered here rather than inside each section so `TaskDetailSectionView` is pure dispatch.
+    /// A hidden section also stops emitting a scroll-offset preference, which it should never have
+    /// been doing — it could be picked as the jump bar's current section while rendering nothing.
+    private var visibleSections: [TaskDetailSectionKind] {
+        orderedSections(for: task.status).filter { currentMode($0) != .hidden }
+    }
+
     private func toggleSection(_ kind: TaskDetailSectionKind) {
         let next: TaskDetailSectionMode
         switch currentMode(kind) {
@@ -404,7 +413,7 @@ private struct TaskDetailContent: View {
                         )
                         TaskDetailMetadataGrid(task: task, viewModel: viewModel)
                         Divider()
-                        ForEach(orderedSections(for: task.status), id: \.self) { kind in
+                        ForEach(visibleSections, id: \.self) { kind in
                             TaskDetailSectionView(
                                 kind: kind,
                                 task: task,
@@ -541,27 +550,25 @@ private struct TaskDetailSectionView: View {
     let onToggle: () -> Void
 
     var body: some View {
-        if mode != .hidden {
-            switch kind {
-            case .error:
-                TaskDetailErrorSection(task: task)
-            case .summary:
-                TaskDetailSummarySection(task: task, mode: mode, onToggle: onToggle)
-            case .result:
-                TaskDetailResultSection(task: task, attachmentURLResolver: attachmentURLResolver)
-            case .acceptance:
-                TaskDetailAcceptanceSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
-            case .steps:
-                TaskDetailStepsSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
-            case .updates:
-                TaskDetailUpdatesSection(task: task, mode: mode,
+        switch kind {
+        case .error:
+            TaskDetailErrorSection(task: task)
+        case .summary:
+            TaskDetailSummarySection(task: task, mode: mode, onToggle: onToggle)
+        case .result:
+            TaskDetailResultSection(task: task, attachmentURLResolver: attachmentURLResolver)
+        case .acceptance:
+            TaskDetailAcceptanceSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
+        case .steps:
+            TaskDetailStepsSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
+        case .updates:
+            TaskDetailUpdatesSection(task: task, mode: mode,
+                                     attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
+        case .description:
+            TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel,
                                          attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
-            case .description:
-                TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel,
-                                             attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
-            case .relatedContext:
-                TaskDetailRelatedContextSection(task: task, viewModel: viewModel, sessionManager: sessionManager)
-            }
+        case .relatedContext:
+            TaskDetailRelatedContextSection(task: task, viewModel: viewModel, sessionManager: sessionManager)
         }
     }
 }
@@ -786,66 +793,40 @@ private struct TaskDetailAcceptanceSection: View {
         isEditing = true
     }
 
+    /// The intersection against the CURRENT criteria lives inside the ledger, so no caller can
+    /// forget it and resurrect "4 of 3 settled".
+    private var settledSubtitle: String? {
+        guard !task.acceptanceCriteria.isEmpty else { return nil }
+        let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
+        return "\(settled.count) of \(task.acceptanceCriteria.count) settled"
+    }
+
+    private func save(_ criteria: [AcceptanceCriterion]) {
+        Task { await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteria) }
+        isEditing = false
+    }
+
     var body: some View {
         // Shown when the task has criteria OR when the user could author some
         // (an editable empty state offers the pencil).
         if !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable {
-            let ledger = task.validation
-            // The intersection against the CURRENT criteria lives inside the ledger now, so no
-            // caller can forget it and resurrect "4 of 3 settled".
-            let settled = ledger?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Text("Acceptance")
-                        .font(.title3.bold())
-                    if !task.acceptanceCriteria.isEmpty {
-                        Text("\(settled.count) of \(task.acceptanceCriteria.count) settled")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if !task.acceptanceCriteria.isEmpty {
-                        TaskDetailCopyButton(text: Self.formattedAcceptance(task))
-                    }
-                    if task.status.isValidationContractEditable && !isEditing {
-                        Button(action: beginEditing, label: {
-                            Image(systemName: "pencil")
-                                .font(.callout)
-                        })
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Edit acceptance criteria")
-                    }
-                }
-
+                TaskDetailEditableSectionHeader(
+                    title: "Acceptance", subtitle: settledSubtitle,
+                    copyText: task.acceptanceCriteria.isEmpty ? nil : Self.formattedAcceptance(task),
+                    canEdit: task.status.isValidationContractEditable && !isEditing,
+                    editHelp: "Edit acceptance criteria", onEdit: beginEditing
+                )
                 if isEditing {
-                    TaskDetailAcceptanceEditor(
-                        rows: $editedCriteria,
-                        onCancel: { isEditing = false },
-                        onSave: { criteria in
-                            Task { await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteria) }
-                            isEditing = false
-                        }
-                    )
-                } else if task.acceptanceCriteria.isEmpty {
-                    Text("No acceptance criteria — validation will run the default whole-task check.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    TaskDetailAcceptanceEditor(rows: $editedCriteria,
+                                               onCancel: { isEditing = false },
+                                               onSave: save)
                 } else {
-                    VStack(alignment: .leading, spacing: mode == .expanded ? 12 : 6) {
-                        ForEach(Array(task.acceptanceCriteria.enumerated()), id: \.element.id) { index, criterion in
-                            TaskDetailCriterionRow(
-                                criterion: criterion,
-                                number: index + 1,
-                                task: task,
-                                expanded: mode == .expanded,
-                                expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
-                                expandedDebugRecordIDs: $expandedDebugRecordIDs
-                            )
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
+                    TaskDetailCriterionList(
+                        task: task, mode: mode, onToggle: onToggle,
+                        expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
+                        expandedDebugRecordIDs: $expandedDebugRecordIDs
+                    )
                 }
             }
             Divider()
@@ -862,6 +843,108 @@ private struct TaskDetailAcceptanceSection: View {
             }
             return line
         }.joined(separator: "\n")
+    }
+}
+
+/// The header the two editable contract sections share: title, a count subtitle, the section's
+/// copy button, and the pencil that opens its editor.
+private struct TaskDetailEditableSectionHeader: View {
+    let title: String
+    let subtitle: String?
+    let copyText: String?
+    let canEdit: Bool
+    let editHelp: String
+    let onEdit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.title3.bold())
+            if let subtitle {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let copyText {
+                TaskDetailCopyButton(text: copyText)
+            }
+            if canEdit {
+                TaskDetailEditPencilButton(help: editHelp, action: onEdit)
+            }
+        }
+    }
+}
+
+/// The pencil that opens a section's editor.
+private struct TaskDetailEditPencilButton: View {
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action, label: {
+            Image(systemName: "pencil")
+                .font(.callout)
+        })
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(help)
+    }
+}
+
+/// The criteria as judged, or the note explaining what happens when there are none.
+private struct TaskDetailCriterionList: View {
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let onToggle: () -> Void
+    @Binding var expandedValidatorPromptIDs: Set<UUID>
+    @Binding var expandedDebugRecordIDs: Set<UUID>
+
+    var body: some View {
+        if task.acceptanceCriteria.isEmpty {
+            Text("No acceptance criteria — validation will run the default whole-task check.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: mode == .expanded ? 12 : 6) {
+                ForEach(Array(task.acceptanceCriteria.enumerated()), id: \.element.id) { index, criterion in
+                    TaskDetailCriterionRow(
+                        criterion: criterion, number: index + 1, task: task,
+                        expanded: mode == .expanded,
+                        expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
+                        expandedDebugRecordIDs: $expandedDebugRecordIDs
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
+        }
+    }
+}
+
+/// The worker's plan, or the note inviting the user to seed one.
+private struct TaskDetailStepList: View {
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let onToggle: () -> Void
+
+    var body: some View {
+        if task.steps.isEmpty {
+            Text("No steps yet — the worker plans its own; seed some here if you want to steer it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(mode == .expanded ? task.steps : task.steps.filter(\.isActive)) { step in
+                    TaskDetailStepRow(step: step)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Nothing to disclose unless there are tombstoned steps hidden behind the preview.
+            if task.steps.contains(where: { !$0.isActive }) || mode == .expanded {
+                DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
+            }
+        }
     }
 }
 
@@ -1196,58 +1279,34 @@ private struct TaskDetailStepsSection: View {
         isEditing = true
     }
 
+    private var completedSubtitle: String? {
+        guard !task.steps.isEmpty else { return nil }
+        let completed = task.steps.filter { $0.status == .completed }.count
+        return "\(completed) of \(task.steps.filter(\.isActive).count) completed"
+    }
+
+    private func save(_ steps: [TaskStep]) {
+        Task { await viewModel.setTaskSteps(id: task.id, steps: steps) }
+        isEditing = false
+    }
+
     var body: some View {
         if !task.steps.isEmpty || task.status.isValidationContractEditable {
-            let visible = mode == .expanded ? task.steps : task.steps.filter(\.isActive)
-            let completedCount = task.steps.filter { $0.status == .completed }.count
-            let activeCount = task.steps.filter(\.isActive).count
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text("Steps")
-                        .font(.title3.bold())
-                    if !task.steps.isEmpty {
-                        Text("\(completedCount) of \(activeCount) completed")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if !task.steps.isEmpty {
-                        TaskDetailCopyButton(text: Self.formattedSteps(task.steps))
-                    }
-                    if task.status.isValidationContractEditable && !isEditing {
-                        Button(action: beginEditing, label: {
-                            Image(systemName: "pencil")
-                                .font(.callout)
-                        })
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Edit steps")
-                    }
-                }
-
+                TaskDetailEditableSectionHeader(
+                    title: "Steps",
+                    subtitle: completedSubtitle,
+                    copyText: task.steps.isEmpty ? nil : Self.formattedSteps(task.steps),
+                    canEdit: task.status.isValidationContractEditable && !isEditing,
+                    editHelp: "Edit steps",
+                    onEdit: beginEditing
+                )
                 if isEditing {
-                    TaskDetailStepsEditor(
-                        rows: $editedSteps,
-                        onCancel: { isEditing = false },
-                        onSave: { steps in
-                            Task { await viewModel.setTaskSteps(id: task.id, steps: steps) }
-                            isEditing = false
-                        }
-                    )
-                } else if task.steps.isEmpty {
-                    Text("No steps yet — the worker plans its own; seed some here if you want to steer it.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    TaskDetailStepsEditor(rows: $editedSteps,
+                                          onCancel: { isEditing = false },
+                                          onSave: save)
                 } else {
-                    VStack(alignment: .leading, spacing: 5) {
-                        ForEach(visible) { step in
-                            TaskDetailStepRow(step: step)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    if task.steps.contains(where: { !$0.isActive }) || mode == .expanded {
-                        DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
-                    }
+                    TaskDetailStepList(task: task, mode: mode, onToggle: onToggle)
                 }
             }
             Divider()
@@ -1660,118 +1719,162 @@ private struct TaskDetailMetadataGrid: View {
 
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-            GridRow {
-                TaskDetailMetadataLabel(text: "Status")
-                Text(task.status.displayName)
-                    .foregroundStyle(TaskStatusBadge.color(for: task.status))
-                    .fontWeight(.medium)
-            }
+            TaskDetailIdentityRows(task: task)
+            TaskDetailTimingRows(task: task, viewModel: viewModel)
+            TaskDetailSpendRows(task: task, viewModel: viewModel)
+            TaskDetailScopeRows(task: task, viewModel: viewModel)
+        }
+        .font(.callout)
+    }
+}
 
-            if let outcome = task.outcome {
-                GridRow(alignment: .firstTextBaseline) {
-                    TaskDetailMetadataLabel(text: "Result")
-                    HStack(spacing: 8) {
-                        TaskOutcomeChip(outcome: outcome)
-                        Text(outcome.detailText)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
+/// One label/value row of the metadata grid.
+///
+/// A child view emitting a `GridRow` still participates in the parent `Grid` — column widths and
+/// `gridColumnAlignment` resolve across it — verified by rendering both shapes and diffing the
+/// bitmaps. `ModelStatsPopover` already relied on that.
+private struct TaskDetailMetadataRow<Value: View>: View {
+    let label: String
+    var alignment: VerticalAlignment?
+    @ViewBuilder let value: Value
 
-            GridRow {
-                TaskDetailMetadataLabel(text: "Template")
-                TaskDetailTemplateLine(task: task)
-            }
+    var body: some View {
+        GridRow(alignment: alignment) {
+            TaskDetailMetadataLabel(text: label)
+            value
+        }
+    }
+}
 
-            if let parentTaskID = task.parentTaskID {
-                GridRow {
-                    TaskDetailMetadataLabel(text: "Parent")
-                    TaskDetailCopyablePath(text: parentTaskID.uuidString, compact: true)
-                }
-            }
+/// What the task IS: where it sits in its lifecycle and what it was cloned from.
+private struct TaskDetailIdentityRows: View {
+    let task: AgentTask
 
-            GridRow {
-                TaskDetailMetadataLabel(text: "Created")
-                Text(task.createdAt.formatted(date: .abbreviated, time: .standard))
-            }
-
-            if let startedAt = task.startedAt {
-                GridRow {
-                    TaskDetailMetadataLabel(text: "Started")
-                    Text(startedAt.formatted(date: .abbreviated, time: .standard))
-                }
-            }
-
-            if let completedAt = task.completedAt {
-                GridRow {
-                    TaskDetailMetadataLabel(text: task.status == .failed ? "Failed" : "Completed")
-                    Text(completedAt.formatted(date: .abbreviated, time: .standard))
-                }
-            }
-
-            if let elapsed = task.elapsedDisplayString {
-                GridRow {
-                    TaskDetailMetadataLabel(text: "Elapsed")
-                    Text(elapsed)
-                }
-            }
-
-            if let scheduled = task.scheduledRunAt {
-                GridRow {
-                    TaskDetailMetadataLabel(text: "Scheduled")
-                    TaskDetailScheduledLine(date: scheduled)
-                }
-            }
-
-            let wakes = viewModel.scheduledWakes(for: task.id)
-            if !wakes.isEmpty {
-                GridRow(alignment: .top) {
-                    TaskDetailMetadataLabel(text: wakes.count == 1 ? "Next Run" : "Next Runs")
-                    TaskDetailScheduledWakesLine(wakes: wakes)
-                }
-            }
-
-            if let tokens = viewModel.cachedTaskTokens(task.id), tokens.total > 0 {
-                GridRow {
-                    TaskDetailMetadataLabel(text: "Tokens")
-                    Text(tokens.formattedLine())
-                        .monospacedDigit()
-                }
-            }
-
-            if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
-                GridRow {
-                    TaskDetailMetadataLabel(text: "Cost")
-                    HStack(spacing: 6) {
-                        Text(String(format: "$%.2f", cost))
-                            .monospacedDigit()
-                            .foregroundStyle(.orange)
-                        if let ratePerHour = task.costPerHourString(cost: cost) {
-                            Text("(\(ratePerHour))")
-                                .font(.caption)
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-
-            if task.approvedTools != nil || task.status.isRunnable || task.status == .scheduled || task.isTemplate {
-                GridRow(alignment: .top) {
-                    TaskDetailMetadataLabel(text: "Tools")
-                    TaskToolOverrideEditor(task: task, viewModel: viewModel)
-                }
-            }
-
-            let workspaceRows = viewModel.workspaceReferences(for: task)
-            if !workspaceRows.isEmpty {
-                GridRow(alignment: .top) {
-                    TaskDetailMetadataLabel(text: "Folders")
-                    TaskDetailWorkspaceLines(rows: workspaceRows)
+    var body: some View {
+        TaskDetailMetadataRow(label: "Status") {
+            Text(task.status.displayName)
+                .foregroundStyle(TaskStatusBadge.color(for: task.status))
+                .fontWeight(.medium)
+        }
+        if let outcome = task.outcome {
+            TaskDetailMetadataRow(label: "Result", alignment: .firstTextBaseline) {
+                HStack(spacing: 8) {
+                    TaskOutcomeChip(outcome: outcome)
+                    Text(outcome.detailText).foregroundStyle(.secondary)
                 }
             }
         }
-        .font(.callout)
+        TaskDetailMetadataRow(label: "Template") { TaskDetailTemplateLine(task: task) }
+        if let parentTaskID = task.parentTaskID {
+            TaskDetailMetadataRow(label: "Parent") {
+                TaskDetailCopyablePath(text: parentTaskID.uuidString, compact: true)
+            }
+        }
+    }
+}
+
+/// When the task happened, and when it is due to happen again.
+///
+/// Owns the `scheduledWakes` read: it republishes whenever any wake in the session is scheduled
+/// or fires, and keeping it here means that invalidates two rows rather than the whole grid.
+private struct TaskDetailTimingRows: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        TaskDetailMetadataRow(label: "Created") {
+            Text(task.createdAt.formatted(date: .abbreviated, time: .standard))
+        }
+        if let startedAt = task.startedAt {
+            TaskDetailMetadataRow(label: "Started") {
+                Text(startedAt.formatted(date: .abbreviated, time: .standard))
+            }
+        }
+        if let completedAt = task.completedAt {
+            TaskDetailMetadataRow(label: task.status == .failed ? "Failed" : "Completed") {
+                Text(completedAt.formatted(date: .abbreviated, time: .standard))
+            }
+        }
+        if let elapsed = task.elapsedDisplayString {
+            TaskDetailMetadataRow(label: "Elapsed") { Text(elapsed) }
+        }
+        if let scheduled = task.scheduledRunAt {
+            TaskDetailMetadataRow(label: "Scheduled") { TaskDetailScheduledLine(date: scheduled) }
+        }
+        let wakes = viewModel.scheduledWakes(for: task.id)
+        if !wakes.isEmpty {
+            TaskDetailMetadataRow(label: wakes.count == 1 ? "Next Run" : "Next Runs", alignment: .top) {
+                TaskDetailScheduledWakesLine(wakes: wakes)
+            }
+        }
+    }
+}
+
+/// What the task cost.
+///
+/// Owns both `CostBoard` reads. They republish on a coalesced tick for as long as ANY task is
+/// running, so in the grid's own body they made every row a dependent of live spend.
+private struct TaskDetailSpendRows: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        if let tokens = viewModel.cachedTaskTokens(task.id), tokens.total > 0 {
+            TaskDetailMetadataRow(label: "Tokens") {
+                Text(tokens.formattedLine()).monospacedDigit()
+            }
+        }
+        if let cost = viewModel.cachedTaskCost(task.id), cost > 0 {
+            TaskDetailMetadataRow(label: "Cost") {
+                TaskDetailCostValue(task: task, cost: cost)
+            }
+        }
+    }
+}
+
+private struct TaskDetailCostValue: View {
+    let task: AgentTask
+    let cost: Double
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(format: "$%.2f", cost))
+                .monospacedDigit()
+                .foregroundStyle(.orange)
+            if let ratePerHour = task.costPerHourString(cost: cost) {
+                Text("(\(ratePerHour))")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// What the task is allowed to touch: its tool override and its working directories.
+private struct TaskDetailScopeRows: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    /// The editor is offered while the contract can still matter — before or between runs, and
+    /// always for a template.
+    private var showsToolOverride: Bool {
+        task.approvedTools != nil || task.status.isRunnable
+            || task.status == .scheduled || task.isTemplate
+    }
+
+    var body: some View {
+        if showsToolOverride {
+            TaskDetailMetadataRow(label: "Tools", alignment: .top) {
+                TaskToolOverrideEditor(task: task, viewModel: viewModel)
+            }
+        }
+        let workspaceRows = viewModel.workspaceReferences(for: task)
+        if !workspaceRows.isEmpty {
+            TaskDetailMetadataRow(label: "Folders", alignment: .top) {
+                TaskDetailWorkspaceLines(rows: workspaceRows)
+            }
+        }
     }
 }
 
@@ -1861,25 +1964,26 @@ private struct TaskDetailCopyablePath: View {
 private struct TaskDetailScheduledLine: View {
     let date: Date
 
+    private var isPastDue: Bool { date < Date() }
+
+    /// Today reads in the primary colour so it does not compete with the genuinely future ones.
+    private var dateColor: Color {
+        if isPastDue { return AppColors.scheduledPastDueAccent }
+        return Calendar.current.isDateInToday(date) ? .primary : AppColors.scheduledFutureAccent
+    }
+
+    private var timeColor: Color {
+        isPastDue ? AppColors.scheduledPastDueAccent : AppColors.scheduledFutureAccent
+    }
+
     var body: some View {
-        let now = Date()
-        let pastDue = date < now
-        let isToday = Calendar.current.isDateInToday(date)
-        let dateString = date.formatted(.dateTime.year().month(.abbreviated).day())
-        let timeString = date.formatted(date: .omitted, time: .standard)
-
-        let dateColor: Color = pastDue
-            ? AppColors.scheduledPastDueAccent
-            : (isToday ? .primary : AppColors.scheduledFutureAccent)
-        let timeColor: Color = pastDue
-            ? AppColors.scheduledPastDueAccent
-            : AppColors.scheduledFutureAccent
-
         HStack(spacing: 4) {
-            Text(dateString).foregroundStyle(dateColor)
+            Text(date.formatted(.dateTime.year().month(.abbreviated).day()))
+                .foregroundStyle(dateColor)
             Text("at").foregroundStyle(.secondary)
-            Text(timeString).foregroundStyle(timeColor)
-            if pastDue {
+            Text(date.formatted(date: .omitted, time: .standard))
+                .foregroundStyle(timeColor)
+            if isPastDue {
                 Text("(past due)")
                     .foregroundStyle(AppColors.scheduledPastDueAccent)
                     .fontWeight(.medium)
