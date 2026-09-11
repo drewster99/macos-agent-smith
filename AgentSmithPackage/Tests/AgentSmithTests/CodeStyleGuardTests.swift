@@ -466,4 +466,239 @@ struct CodeStyleGuardTests {
             }
             """) == 0)
     }
+
+    // MARK: - Multiple trailing closures
+
+    /// The package's own source roots, scanned alongside the app target.
+    ///
+    /// Deliberately `Sources/` and `Tests/` rather than the package directory:
+    /// `.build/checkouts` holds ~164 multiple-trailing-closure hits in vendored code (swift-nio
+    /// alone accounts for most of them). Today `.skipsHiddenFiles` keeps them out, but making
+    /// that option load-bearing for a ZERO-TOLERANCE guard is one config edit away from 164
+    /// lines of noise. Rooting below `.build` makes the vendored code unreachable by
+    /// construction instead.
+    static var packageSourceRoots: [URL] {
+        var url = URL(fileURLWithPath: #filePath)
+        url.deleteLastPathComponent()  // .../AgentSmithTests/
+        url.deleteLastPathComponent()  // .../Tests/
+        return [
+            url.appendingPathComponent("Sources", isDirectory: true),
+            url.appendingPathComponent("Tests", isDirectory: true)
+        ]
+    }
+
+    /// Yields every `.swift` file under `root`.
+    static func swiftFiles(under root: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        var files: [URL] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            files.append(url)
+        }
+        return files
+    }
+
+    /// Blanks `//` and `/* */` comments AND every string literal — single-line, multiline `"""`,
+    /// and raw `#"…"#` at any pound depth — replacing each consumed character with a space and
+    /// preserving newlines, so a line number computed on the result matches the original source.
+    ///
+    /// ONE pass, not `strippingComments` composed with a string stripper: either composition
+    /// order corrupts real code in this repo. Comments-first blanks a `//` that is INSIDE a
+    /// string, leaving a dangling `"` that swallows the rest of the line. Strings-first
+    /// mis-tokenizes `ChannelLogView.remainderWithoutPath`, a raw string containing an internal
+    /// `"` followed on the same line by a comment that also contains `"`.
+    ///
+    /// Raw-string awareness is required rather than defensive: that same function holds
+    /// `#"\{\s*,"#` and `#",\s*\}"#`, which a naive scanner terminates at the wrong quote.
+    static func strippingCommentsAndStringLiterals(_ source: String) -> String {
+        var out = Array(source)
+        let count = out.count
+        var index = 0
+
+        func matches(_ at: Int, _ needle: [Character]) -> Bool {
+            guard at + needle.count <= count else { return false }
+            for (offset, character) in needle.enumerated() where out[at + offset] != character {
+                return false
+            }
+            return true
+        }
+        func blank(_ from: Int, _ to: Int) {
+            for position in from..<min(to, count) where out[position] != "\n" { out[position] = " " }
+        }
+
+        while index < count {
+            let character = out[index]
+            if character == "/", matches(index, ["/", "/"]) {
+                var end = index
+                while end < count, out[end] != "\n" { end += 1 }
+                blank(index, end)
+                index = end
+                continue
+            }
+            if character == "/", matches(index, ["/", "*"]) {
+                var depth = 1
+                var end = index + 2
+                while end < count, depth > 0 {
+                    if matches(end, ["/", "*"]) { depth += 1; end += 2 }
+                    else if matches(end, ["*", "/"]) { depth -= 1; end += 2 }
+                    else { end += 1 }
+                }
+                blank(index, end)
+                index = end
+                continue
+            }
+            if character == "#" || character == "\"" {
+                var quote = index
+                while quote < count, out[quote] == "#" { quote += 1 }
+                let pounds = quote - index
+                guard quote < count, out[quote] == "\"" else {
+                    index += max(pounds, 1)
+                    continue
+                }
+                let tail = String(repeating: "#", count: pounds)
+                let isMultiline = quote + 2 < count && out[quote + 1] == "\"" && out[quote + 2] == "\""
+                let closing = Array((isMultiline ? "\"\"\"" : "\"") + tail)
+                let escape = Array("\\" + tail)
+                var end = quote + (isMultiline ? 3 : 1)
+                while end < count {
+                    if matches(end, escape) { end += escape.count + 1; continue }
+                    // An unterminated single-line literal resyncs at the newline. Running to
+                    // endIndex instead would blank the remainder of the file and silently hide
+                    // every real violation below it.
+                    if !isMultiline, out[end] == "\n" { break }
+                    if matches(end, closing) { end += closing.count; break }
+                    end += 1
+                }
+                blank(index, min(end, count))
+                index = min(end, count)
+                continue
+            }
+            index += 1
+        }
+        return String(out)
+    }
+
+    /// A `}` closing one trailing closure followed by `identifier: {` opening the next — Swift's
+    /// SE-0279 multiple-trailing-closure syntax.
+    ///
+    /// Newline-tolerant. `}\nlabel: {` is legal Swift and no instance exists today, so a
+    /// same-line pattern would read as complete while leaving a spelling that evades it forever.
+    ///
+    /// The false-positive surface is empty for a structural reason, not a lucky one: every Swift
+    /// labelled statement requires a KEYWORD between the label and the brace (`while`, `for`,
+    /// `repeat`, `if`, `switch`, `do`), and every declaration requires a TYPE between the colon
+    /// and the brace. So `} outer: while x {`, `} var x: Int { 3 }`, `} struct Foo: Bar {` and
+    /// `} where T: Foo {` cannot match, and `} else: {` / `} catch: {` are not legal Swift at all.
+    /// The correct spelling `}, label: {` cannot match either — a comma is neither whitespace nor
+    /// an identifier character.
+    private static let multipleTrailingClosurePattern =
+        #"\}\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*\{"#
+
+    /// Multiple trailing closures are forbidden by the project Swift style rule.
+    /// Write `Button(action: { … }, label: { … })`, never `Button { … } label: { … }`.
+    ///
+    /// ZERO TOLERANCE, not a ratchet — deliberately unlike `someViewFunctionRatchet` above. Every
+    /// entry in that table is a design decision (which `View` struct, what does it own), so it is
+    /// paid down over time. These are compiler-verified syntax swaps with no design content: the
+    /// whole debt was payable in one pass and was paid, so a budget would preserve it rather than
+    /// manage it. `excluded` is the escape hatch if a case ever genuinely earns one; it ships
+    /// empty, and an exemption has to be named here rather than silently absorbed by a ceiling.
+    ///
+    /// Nothing about a rewritten call changes: `label:`, `content:`, `actions:`, `message:`,
+    /// `detail:` are already `@ViewBuilder` parameters, and the result-builder transform attaches
+    /// to the parameter DECLARATION (SE-0289), not the call site.
+    @Test("No multiple trailing closures (app target + package)")
+    func noMultipleTrailingClosures() throws {
+        let excluded: [String] = []
+        let pattern = try NSRegularExpression(pattern: Self.multipleTrailingClosurePattern)
+        var hits: [String] = []
+
+        for root in [Self.appTargetRoot] + Self.packageSourceRoots {
+            let prefix = root.deletingLastPathComponent().path + "/"
+            for url in Self.swiftFiles(under: root) {
+                let relative = url.path.replacingOccurrences(of: prefix, with: "")
+                if excluded.contains(where: { relative.hasSuffix($0) }) { continue }
+
+                let source = Self.strippingCommentsAndStringLiterals(
+                    try String(contentsOf: url, encoding: .utf8)
+                )
+                let range = NSRange(source.startIndex..<source.endIndex, in: source)
+                for match in pattern.matches(in: source, options: [], range: range) {
+                    guard let found = Range(match.range, in: source) else { continue }
+                    let line = source[..<found.lowerBound].filter { $0 == "\n" }.count + 1
+                    let text = source[found].replacingOccurrences(
+                        of: #"\s+"#, with: " ", options: .regularExpression
+                    )
+                    hits.append("  \(relative):\(line) — \(text)")
+                }
+            }
+        }
+
+        if !hits.isEmpty {
+            Issue.record("""
+                Found multiple trailing closures. Move every closure but the last into parameter \
+                position — e.g. `Button(action: { … }, label: { … })`. Put the closing `)` BEFORE \
+                any trailing modifier: a `)` that lands after `.buttonStyle`/`.disabled` compiles \
+                and silently applies the modifier to the label instead of the control.
+                \(hits.sorted().joined(separator: "\n"))
+                """)
+        }
+    }
+
+    /// The stripper is the only thing standing between prose and a hard RED on a zero-tolerance
+    /// guard, so it is pinned rather than trusted.
+    ///
+    /// Not hypothetical: this file's own `noOnTapGesture` message used to contain the literal
+    /// text `Button { } label: { }`, and `someViewFunctionCount` above carries a documented
+    /// history of a counter inflated by a `// MARK:` recording that a violation had been REMOVED.
+    @Test("The multiple-trailing-closure guard reads code, not prose or string literals")
+    func multipleTrailingClosureGuardReadsCodeOnly() throws {
+        let pattern = try NSRegularExpression(pattern: Self.multipleTrailingClosurePattern)
+        func fires(_ source: String) -> Bool {
+            let stripped = Self.strippingCommentsAndStringLiterals(source)
+            #expect(
+                stripped.filter { $0 == "\n" }.count == source.filter { $0 == "\n" }.count,
+                "the stripper changed the newline count — reported line numbers would be wrong"
+            )
+            let range = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
+            return pattern.firstMatch(in: stripped, options: [], range: range) != nil
+        }
+
+        // Prose and literals are not code.
+        #expect(!fires("// Button { } label: { }"))
+        #expect(!fires("/* } label: { */"))
+        #expect(!fires("/* /* } label: { */ */"))
+        #expect(!fires("let s = \"} label: {\""))
+        #expect(!fires("let s = \"a\\\\\"\nlet t = 1"))          // escaped backslash ends it
+        #expect(!fires("let s = \"a\\\"b } label: { \""))         // escaped quote does not
+        #expect(!fires("let s = #\"} label: {\"#"))               // raw
+        #expect(!fires("let s = #\"a\"b } label: { \"#"))         // raw, internal quote
+        #expect(!fires("let s = ##\"a\"# } label: { \"##"))       // pound depth 2
+        #expect(!fires("let s = \"\"\"\n} label: {\n\"\"\""))     // multiline
+        #expect(!fires("let s = \"\"\"\n  } label: {\n  \"\"\"")) // indented close delimiter
+        #expect(!fires("let u = \"http://x } label: { y\""))      // `//` inside a string
+        #expect(!fires("// he said \"hi\" } label: { "))          // quote inside a comment
+        #expect(!fires("let s = \"\\(xs.map { $0 }.count)\""))    // braces in interpolation
+
+        // Legal Swift that merely resembles the pattern.
+        #expect(!fires("}\nouter: do {"))
+        #expect(!fires("}\nloop: while x {"))
+        #expect(!fires("} var x: Int { 3 }"))
+        #expect(!fires("} var x: Set<Int> = { [] }()"))
+        #expect(!fires("} struct Foo: Bar {"))
+        #expect(!fires("foo(a: { 1 }, b: { 2 })"))
+
+        // Violations, including the nested case a hand-rewrite is most likely to corrupt.
+        #expect(fires("Button {\n} label: {\n}"))
+        #expect(fires("Button {\n}\nlabel: {\n}"))                // newline-tolerant
+        #expect(fires("let s = #\"\\{\\s*,\"#\nButton {\n} label: {\n}"))
+        // The required spelling must never be flagged, or the fix would fail the guard.
+        #expect(!fires("Button(action: {\n    act()\n}, label: {\n    Text(\"go\")\n})"))
+    }
+
 }
