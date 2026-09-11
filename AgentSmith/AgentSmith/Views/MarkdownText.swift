@@ -54,16 +54,8 @@ struct MarkdownText: View, Equatable {
                 // Folder: open it in Finder showing its contents.
                 NSWorkspace.shared.open(url)
             } else {
-                // File: present Quick Look preview rather than opening the default app.
-                // Shells out to `/usr/bin/qlmanage -p <path>` because spinning up
-                // `QLPreviewPanel` programmatically requires a long-lived data source
-                // and panel-controller wiring; qlmanage gives the user the same Quick
-                // Look window with one Process invocation. The qlmanage process stays
-                // alive until the QL window is dismissed; we don't wait on it.
-                let task = Process()
-                task.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
-                task.arguments = ["-p", path]
-                try? task.run()
+                // File: preview it rather than launching whatever app owns the extension.
+                QuickLookPreview.present(url)
             }
             return .handled
         })

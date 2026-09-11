@@ -1320,8 +1320,8 @@ private struct MessageRow: View, Equatable {
         return !content.hasPrefix("Successfully")
     }
 
-    /// Handles a tap on a tool call's file path. If the path exists, opens files via
-    /// the default app and reveals directories in Finder. If the path doesn't exist
+    /// Handles a tap on a tool call's file path. If the path exists, previews files in
+    /// Quick Look and reveals directories in Finder. If the path doesn't exist
     /// (e.g., already deleted, or a path the tool couldn't resolve), falls through to
     /// toggling the row's expand state so the tap still does something useful.
     private func openFileOrFallback(path: String) {
@@ -1336,13 +1336,8 @@ private struct MessageRow: View, Equatable {
             // Folder: open it in Finder showing its contents.
             NSWorkspace.shared.open(url)
         } else {
-            // File: present Quick Look preview rather than opening the default app.
-            // See MarkdownText.swift for rationale on the qlmanage shell-out vs.
-            // QLPreviewPanel — same trade-off, same one-line answer.
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
-            task.arguments = ["-p", expanded]
-            try? task.run()
+            // File: preview it rather than launching whatever app owns the extension.
+            QuickLookPreview.present(url)
         }
     }
 
