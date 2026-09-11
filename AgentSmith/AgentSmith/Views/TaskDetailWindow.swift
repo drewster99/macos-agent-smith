@@ -277,73 +277,128 @@ struct TaskDetailWindow: View {
     }
 
     var body: some View {
-        Group {
-            if let task {
-                TaskDetailContent(
-                    task: task,
-                    viewModel: viewModel,
-                    sessionManager: sessionManager,
-                    attachmentURLResolver: attachmentURLResolver,
-                    onEditTask: { taskEditorPresentation = .editing(task) },
-                    onStartTask: { startRunnableTask(task) },
-                    onSavePDF: { isShowingPDFSheet = true },
-                    onDone: { dismiss() }
-                )
-            } else {
-                ContentUnavailableView(
-                    "Task Not Found",
-                    systemImage: "questionmark.circle",
-                    description: Text("This task may have been deleted.")
-                )
-                .frame(minWidth: 600, minHeight: 400)
-            }
-        }
-        .onAppear { syncTask() }
-        .onChange(of: viewModel.tasks) { _, _ in
-            // Per project rule: @State writes inside `.onChange` must be deferred to the
-            // next runloop tick to avoid "Modifying state during view update" warnings.
-            DispatchQueue.main.async { syncTask() }
-        }
-        // The archived/deleted buckets are global; re-resolve when they change so a task that
-        // moves into (or within) them while this window is open keeps rendering.
-        .onChange(of: viewModel.archivedTaskList) { _, _ in
-            DispatchQueue.main.async { syncTask() }
-        }
-        .onChange(of: viewModel.recentlyDeletedTaskList) { _, _ in
-            DispatchQueue.main.async { syncTask() }
-        }
-        .alert(
-            "Cannot Run Task",
-            isPresented: $viewModel.hasTaskActionError,
-            actions: { Button("OK") { viewModel.taskActionError = nil } },
-            message: { Text(viewModel.taskActionError ?? "") }
+        TaskDetailWindowBody(
+            task: task,
+            viewModel: viewModel,
+            sessionManager: sessionManager,
+            attachmentURLResolver: attachmentURLResolver,
+            onEditTask: { if let task { taskEditorPresentation = .editing(task) } },
+            onStartTask: { if let task { startRunnableTask(task) } },
+            onSavePDF: { isShowingPDFSheet = true },
+            onDone: { dismiss() }
         )
-        .sheet(isPresented: $isShowingPDFSheet) {
-            TaskPDFSaveSheet(
-                options: $pdfOptions,
-                onSave: {
-                    isShowingPDFSheet = false
-                    guard let task else { return }
-                    Task { await viewModel.saveTaskPDF(task, options: pdfOptions) }
-                },
-                onCancel: { isShowingPDFSheet = false }
+        // Order is load-bearing: content, then the change handlers that keep `task` fresh, then
+        // the presentations. A `.sheet` ahead of an `.onChange` can stop the handler firing.
+        .modifier(TaskDetailTaskSync(viewModel: viewModel, sync: syncTask))
+        .modifier(TaskDetailPresentations(
+            task: task,
+            viewModel: viewModel,
+            isShowingPDFSheet: $isShowingPDFSheet,
+            pdfOptions: $pdfOptions,
+            templateRunInputTask: $templateRunInputTask,
+            taskEditorPresentation: $taskEditorPresentation
+        ))
+    }
+}
+
+/// The window's content: the task, or the placeholder for one that no longer resolves.
+private struct TaskDetailWindowBody: View {
+    let task: AgentTask?
+    let viewModel: AppViewModel
+    let sessionManager: SessionManager
+    let attachmentURLResolver: (Attachment) -> URL?
+    let onEditTask: () -> Void
+    let onStartTask: () -> Void
+    let onSavePDF: () -> Void
+    let onDone: () -> Void
+
+    var body: some View {
+        if let task {
+            TaskDetailContent(
+                task: task, viewModel: viewModel, sessionManager: sessionManager,
+                attachmentURLResolver: attachmentURLResolver,
+                onEditTask: onEditTask, onStartTask: onStartTask,
+                onSavePDF: onSavePDF, onDone: onDone
             )
-        }
-        .sheet(item: $templateRunInputTask) { task in
-            TemplateRunInputSheet(
-                task: task,
-                onRun: { values in
-                    templateRunInputTask = nil
-                    Task { await viewModel.startTask(task, templateInputValues: values) }
-                },
-                onCancel: { templateRunInputTask = nil }
+        } else {
+            ContentUnavailableView(
+                "Task Not Found",
+                systemImage: "questionmark.circle",
+                description: Text("This task may have been deleted.")
             )
+            .frame(minWidth: 600, minHeight: 400)
         }
-        .sheet(item: $taskEditorPresentation) { presentation in
-            TaskEditorSheet(mode: presentation.mode, viewModel: viewModel) {
-                taskEditorPresentation = nil
+    }
+}
+
+/// Keeps the window's local task copy in step with the stores it can be resolved from.
+///
+/// The archived and recently-deleted buckets are global, so a task that moves into or within
+/// them while this window is open has to re-resolve or the window freezes on a stale copy.
+private struct TaskDetailTaskSync: ViewModifier {
+    let viewModel: AppViewModel
+    let sync: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { sync() }
+            .onChange(of: viewModel.tasks) { _, _ in
+                // Per project rule: @State writes inside `.onChange` must be deferred to the
+                // next runloop tick to avoid "Modifying state during view update" warnings.
+                DispatchQueue.main.async { sync() }
             }
-        }
+            .onChange(of: viewModel.archivedTaskList) { _, _ in
+                DispatchQueue.main.async { sync() }
+            }
+            .onChange(of: viewModel.recentlyDeletedTaskList) { _, _ in
+                DispatchQueue.main.async { sync() }
+            }
+    }
+}
+
+/// Everything this window presents over itself.
+private struct TaskDetailPresentations: ViewModifier {
+    let task: AgentTask?
+    @Bindable var viewModel: AppViewModel
+    @Binding var isShowingPDFSheet: Bool
+    @Binding var pdfOptions: TaskPDFFieldOptions
+    @Binding var templateRunInputTask: AgentTask?
+    @Binding var taskEditorPresentation: TaskEditorPresentation?
+
+    func body(content: Content) -> some View {
+        content
+            .alert(
+                "Cannot Run Task",
+                isPresented: $viewModel.hasTaskActionError,
+                actions: { Button("OK") { viewModel.taskActionError = nil } },
+                message: { Text(viewModel.taskActionError ?? "") }
+            )
+            .sheet(isPresented: $isShowingPDFSheet) {
+                TaskPDFSaveSheet(
+                    options: $pdfOptions,
+                    onSave: {
+                        isShowingPDFSheet = false
+                        guard let task else { return }
+                        Task { await viewModel.saveTaskPDF(task, options: pdfOptions) }
+                    },
+                    onCancel: { isShowingPDFSheet = false }
+                )
+            }
+            .sheet(item: $templateRunInputTask) { runTask in
+                TemplateRunInputSheet(
+                    task: runTask,
+                    onRun: { values in
+                        templateRunInputTask = nil
+                        Task { await viewModel.startTask(runTask, templateInputValues: values) }
+                    },
+                    onCancel: { templateRunInputTask = nil }
+                )
+            }
+            .sheet(item: $taskEditorPresentation) { presentation in
+                TaskEditorSheet(mode: presentation.mode, viewModel: viewModel) {
+                    taskEditorPresentation = nil
+                }
+            }
     }
 }
 
@@ -398,56 +453,27 @@ private struct TaskDetailContent: View {
 
     var body: some View {
         let sections = presentSections(task)
+        // The ScrollViewReader must enclose BOTH the jump bar and the scroll view, and
+        // `.coordinateSpace` must stay an ancestor of the per-section GeometryReaders that read
+        // it. Split those apart and the jump-bar highlight silently stops tracking.
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 TaskDetailJumpBar(sections: sections, currentSection: $currentSection, proxy: proxy)
                 Divider()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        TaskDetailHeaderRow(
-                            task: task,
-                            onEditTask: onEditTask,
-                            onStartTask: onStartTask,
-                            onSavePDF: onSavePDF,
-                            onDone: onDone
-                        )
-                        TaskDetailMetadataGrid(task: task, viewModel: viewModel)
-                        Divider()
-                        ForEach(visibleSections, id: \.self) { kind in
-                            TaskDetailSectionView(
-                                kind: kind,
-                                task: task,
-                                mode: currentMode(kind),
-                                viewModel: viewModel,
-                                sessionManager: sessionManager,
-                                attachmentURLResolver: attachmentURLResolver,
-                                onToggle: { toggleSection(kind) }
-                            )
-                            .id(TaskDetailSectionAnchorID(kind: kind))
-                            .background(
-                                GeometryReader { geo in
-                                    Color.clear.preference(
-                                        key: TaskDetailSectionOffsetKey.self,
-                                        value: [TaskDetailSectionOffset(kind: kind, minY: geo.frame(in: .named("taskScroll")).minY)]
-                                    )
-                                }
-                            )
-                        }
-                        Divider()
-                        Text("ID: \(task.id.uuidString)")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .textSelection(.enabled)
-                    }
-                    .padding(24)
+                    TaskDetailScrollBody(
+                        task: task, viewModel: viewModel, sessionManager: sessionManager,
+                        attachmentURLResolver: attachmentURLResolver,
+                        visibleSections: visibleSections, mode: currentMode,
+                        onToggle: toggleSection, onEditTask: onEditTask,
+                        onStartTask: onStartTask, onSavePDF: onSavePDF, onDone: onDone
+                    )
                 }
                 .coordinateSpace(name: "taskScroll")
                 .onPreferenceChange(TaskDetailSectionOffsetKey.self) { offsets in
-                    // The current section is the last one whose top has crossed above a small band
-                    // below the viewport top (so it counts as "current" just before it reaches the
-                    // top). Falls back to the first present section.
-                    let threshold: CGFloat = 80
-                    let crossed = offsets.filter { $0.minY <= threshold }.max { $0.minY < $1.minY }
+                    // The last section whose top has crossed above a small band below the viewport
+                    // top, so it reads as "current" just before it actually reaches the top.
+                    let crossed = offsets.filter { $0.minY <= 80 }.max { $0.minY < $1.minY }
                     let next = crossed?.kind ?? sections.first ?? .description
                     if next != currentSection { currentSection = next }
                 }
@@ -458,6 +484,76 @@ private struct TaskDetailContent: View {
         // No usage loader: cost and tokens both come from `CostBoard`'s live rollup via
         // `cachedTaskCost` / `cachedTaskTokens`, so they track a running task rather than
         // needing a fetch on appear and a re-fetch when it finishes.
+    }
+}
+
+/// Everything inside the scroll view: header, metadata, the ordered sections, and the id footer.
+private struct TaskDetailScrollBody: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+    let sessionManager: SessionManager
+    let attachmentURLResolver: (Attachment) -> URL?
+    let visibleSections: [TaskDetailSectionKind]
+    let mode: (TaskDetailSectionKind) -> TaskDetailSectionMode
+    let onToggle: (TaskDetailSectionKind) -> Void
+    let onEditTask: () -> Void
+    let onStartTask: () -> Void
+    let onSavePDF: () -> Void
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            TaskDetailHeaderRow(
+                task: task, onEditTask: onEditTask, onStartTask: onStartTask,
+                onSavePDF: onSavePDF, onDone: onDone
+            )
+            TaskDetailMetadataGrid(task: task, viewModel: viewModel)
+            Divider()
+            ForEach(visibleSections, id: \.self) { kind in
+                TaskDetailAnchoredSection(
+                    kind: kind, task: task, mode: mode(kind), viewModel: viewModel,
+                    sessionManager: sessionManager,
+                    attachmentURLResolver: attachmentURLResolver,
+                    onToggle: { onToggle(kind) }
+                )
+            }
+            Divider()
+            Text("ID: \(task.id.uuidString)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+        }
+        .padding(24)
+    }
+}
+
+/// A section plus the scroll anchor and offset report the jump bar needs from it.
+private struct TaskDetailAnchoredSection: View {
+    let kind: TaskDetailSectionKind
+    let task: AgentTask
+    let mode: TaskDetailSectionMode
+    let viewModel: AppViewModel
+    let sessionManager: SessionManager
+    let attachmentURLResolver: (Attachment) -> URL?
+    let onToggle: () -> Void
+
+    var body: some View {
+        TaskDetailSectionView(
+            kind: kind, task: task, mode: mode, viewModel: viewModel,
+            sessionManager: sessionManager,
+            attachmentURLResolver: attachmentURLResolver, onToggle: onToggle
+        )
+        .id(TaskDetailSectionAnchorID(kind: kind))
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(
+                    key: TaskDetailSectionOffsetKey.self,
+                    value: [TaskDetailSectionOffset(
+                        kind: kind, minY: geo.frame(in: .named("taskScroll")).minY
+                    )]
+                )
+            }
+        )
     }
 }
 
@@ -1508,82 +1604,123 @@ private struct TaskDetailDescriptionSection: View {
     /// `awaitingReview` are read-only.
     private var isEditable: Bool { task.status.isDescriptionEditable }
 
+    /// The composition every agent sees — `## Template inputs` above the prose.
+    ///
+    /// The EDITOR still seeds from the raw `description`: the block is derived from the stored
+    /// input values, not authored text, so it must never round-trip through an edit.
+    private var displayedDescription: String { task.renderedDescriptionWithTemplateInputs() }
+
+    private var isExpandable: Bool {
+        linePrefix(displayedDescription, lines: 3) != displayedDescription
+    }
+
+    private func beginEditing() {
+        editedDescription = task.description
+        isEditing = true
+    }
+
+    private func save() {
+        Task {
+            await viewModel.updateTaskDescription(
+                id: task.id,
+                description: editedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        isEditing = false
+    }
+
     var body: some View {
-        // Display (and copy) the same composition every agent sees — `## Template inputs` above
-        // the prose. The EDITOR below still seeds from the raw `description`: the block is
-        // derived from the stored input values, not authored text, so it must never round-trip
-        // through an edit.
-        let displayedDescription = task.renderedDescriptionWithTemplateInputs()
-        let isExpandable = (linePrefix(displayedDescription, lines: 3) != displayedDescription)
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Description")
-                    .font(.title3.bold())
-                if let editedAt = task.lastEditedAt {
-                    EditedBadge(editedAt: editedAt)
-                }
-                Spacer()
-                TaskDetailCopyButton(text: displayedDescription)
-                if isEditable && !isEditing {
-                    Button(action: {
-                        editedDescription = task.description
-                        isEditing = true
-                    }, label: {
-                        Image(systemName: "pencil")
-                            .font(.callout)
-                    })
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help("Edit description")
-                }
-            }
-
+            TaskDetailDescriptionHeader(
+                editedAt: task.lastEditedAt,
+                copyText: displayedDescription,
+                canEdit: isEditable && !isEditing,
+                onEdit: beginEditing
+            )
             if isEditing {
-                TextEditor(text: $editedDescription)
-                    .font(.body)
-                    .frame(minHeight: 80, maxHeight: 200)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                HStack {
-                    Spacer()
-                    Button("Cancel", action: { isEditing = false })
-                    Button("Save", action: {
-                        Task {
-                            await viewModel.updateTaskDescription(
-                                id: task.id,
-                                description: editedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                            )
-                        }
-                        isEditing = false
-                    })
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!isEditable || editedDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
+                TaskDetailDescriptionEditor(
+                    text: $editedDescription, isEditable: isEditable,
+                    onCancel: { isEditing = false }, onSave: save
+                )
             } else {
-                let body = (mode == .expanded || !isExpandable)
-                    ? displayedDescription
-                    : linePrefix(displayedDescription, lines: 3)
-                MarkdownText(content: body, baseFont: .body)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                TaskDetailDescriptionBody(
+                    description: displayedDescription,
+                    isPreview: mode != .expanded && isExpandable
+                )
             }
-
             if !task.descriptionAttachments.isEmpty && mode == .expanded {
                 TaskDetailSectionTitleRow(title: "Attachments",
                                           copyText: formattedAttachments(task.descriptionAttachments))
-                TaskAttachmentList(
-                    attachments: task.descriptionAttachments,
-                    urlResolver: attachmentURLResolver
-                )
+                TaskAttachmentList(attachments: task.descriptionAttachments,
+                                   urlResolver: attachmentURLResolver)
             }
-
             if isExpandable && !isEditing {
                 DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
             }
         }
         Divider()
+    }
+}
+
+private struct TaskDetailDescriptionHeader: View {
+    let editedAt: Date?
+    let copyText: String
+    let canEdit: Bool
+    let onEdit: () -> Void
+
+    var body: some View {
+        HStack {
+            Text("Description")
+                .font(.title3.bold())
+            if let editedAt {
+                EditedBadge(editedAt: editedAt)
+            }
+            Spacer()
+            TaskDetailCopyButton(text: copyText)
+            if canEdit {
+                TaskDetailEditPencilButton(help: "Edit description", action: onEdit)
+            }
+        }
+    }
+}
+
+private struct TaskDetailDescriptionEditor: View {
+    @Binding var text: String
+    let isEditable: Bool
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    private var isEmpty: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.body)
+            .frame(minHeight: 80, maxHeight: 200)
+            .scrollContentBackground(.hidden)
+            .padding(8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        HStack {
+            Spacer()
+            Button("Cancel", action: onCancel)
+            Button("Save", action: onSave)
+                .buttonStyle(.borderedProminent)
+                .disabled(!isEditable || isEmpty)
+        }
+    }
+}
+
+private struct TaskDetailDescriptionBody: View {
+    let description: String
+    let isPreview: Bool
+
+    var body: some View {
+        MarkdownText(content: isPreview ? linePrefix(description, lines: 3) : description,
+                     baseFont: .body)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
