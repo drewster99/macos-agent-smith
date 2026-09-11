@@ -1,6 +1,218 @@
 import SwiftUI
 import AgentSmithKit
 
+// MARK: - Shared banner chrome
+
+/// The frame every task-lifecycle banner draws: accent hairlines above and below, a tinted
+/// ground, rounded corners, and a header line of icon + headline + optional routing + timestamp.
+///
+/// Eight banners repeated this same twenty lines verbatim around a one- to six-line body — both
+/// hairlines, all three header paddings, the corner radius and the outer vertical padding. What
+/// actually differed between them is the parameter list below.
+///
+/// It deliberately applies NO padding to `content`. The banners do not agree on their body's
+/// bottom inset (a title above a markdown block uses 2, a lone body uses 6), so imposing one here
+/// would silently reflow half of them.
+struct TaskBannerFrame<Content: View>: View {
+    let systemImage: String
+    var iconFont: Font = AppFonts.bannerIcon
+    let headline: String
+    let accentColor: Color
+    /// "sender → recipient", shown when the banner names who acted on whom.
+    var routing: String?
+    var groundOpacity: Double = 0.08
+    let timestamp: Date
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            accentColor.frame(height: 1).opacity(0.4)
+            TaskBannerHeader(
+                systemImage: systemImage,
+                iconFont: iconFont,
+                headline: headline,
+                accentColor: accentColor,
+                routing: routing,
+                timestamp: timestamp
+            )
+            content
+            accentColor.frame(height: 1).opacity(0.4)
+        }
+        .background(accentColor.opacity(groundOpacity))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .padding(.vertical, 4)
+    }
+}
+
+struct TaskBannerHeader: View {
+    let systemImage: String
+    let iconFont: Font
+    let headline: String
+    let accentColor: Color
+    let routing: String?
+    let timestamp: Date
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(iconFont)
+                .foregroundStyle(accentColor)
+            Text(headline)
+                .font(AppFonts.channelSender)
+                .foregroundStyle(accentColor)
+            if let routing {
+                Text(routing)
+                    .font(AppFonts.channelTimestamp)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+    }
+}
+
+/// The bolded task title a banner leads its body with.
+struct TaskBannerTitleLine: View {
+    let title: String
+    /// 2 when a body follows, 6 when the title IS the body.
+    var bottomPadding: CGFloat = 6
+
+    var body: some View {
+        Text(title)
+            .font(AppFonts.channelBody.bold())
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.bottom, bottomPadding)
+    }
+}
+
+/// A banner's markdown body.
+struct TaskBannerBodyText: View {
+    let content: String
+
+    var body: some View {
+        MarkdownText(content: content, baseFont: AppFonts.channelBody)
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
+    }
+}
+
+/// The quieter frame — fainter hairlines, a lighter ground and a tighter radius than
+/// `TaskBannerFrame`. Used by the banners that report background activity rather than a task
+/// lifecycle event, so they recede in a busy transcript.
+struct QuietBannerFrame<Content: View>: View {
+    let accentColor: Color
+    var openingHairlineOpacity: Double = 0.3
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            accentColor.frame(height: 1).opacity(openingHairlineOpacity)
+            content
+            accentColor.frame(height: 1).opacity(0.3)
+        }
+        .background(accentColor.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .padding(.vertical, 1)
+    }
+}
+
+/// The expansion affordance, shown only when there is something to expand.
+private struct MemoryBannerChevron: View {
+    let isExpandable: Bool
+    let isExpanded: Bool
+
+    var body: some View {
+        if isExpandable {
+            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                .font(AppFonts.microIcon)
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+private struct MemoryBannerHeaderRow: View {
+    let iconName: String
+    let headerText: String
+    let summaryPreview: String
+    let accentColor: Color
+    let timestamp: Date
+    let isExpandable: Bool
+    let isExpanded: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: iconName)
+                .font(AppFonts.metaIconSmall)
+                .foregroundStyle(accentColor)
+            Text(headerText)
+                .font(AppFonts.channelTimestamp)
+                .foregroundStyle(accentColor)
+            Text(summaryPreview)
+                .font(AppFonts.channelTimestamp)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+            MemoryBannerChevron(isExpandable: isExpandable, isExpanded: isExpanded)
+            ChannelTimestamp(timestamp: timestamp, bucket: .systemMessage, foregroundStyle: .tertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+}
+
+/// The "Fires <time>" line under a scheduled-action banner's title.
+struct ScheduledFiresLine: View {
+    let accentColor: Color
+    let scheduledRunAt: Date
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "clock")
+                .font(AppFonts.bannerIconSmall)
+                .foregroundStyle(accentColor)
+            Text("Fires \(formatScheduledTime(scheduledRunAt))")
+                .font(AppFonts.channelBody)
+                .foregroundStyle(accentColor)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+    }
+}
+
+/// A memory banner's clickable header. Owns nothing — the expansion flag stays with the banner,
+/// which is what decides whether the expanded body renders.
+private struct MemoryBannerHeaderButton: View {
+    let iconName: String
+    let headerText: String
+    let summaryPreview: String
+    let accentColor: Color
+    let timestamp: Date
+    let isExpandable: Bool
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button(action: {
+            guard isExpandable else { return }
+            withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+        }, label: {
+            MemoryBannerHeaderRow(
+                iconName: iconName, headerText: headerText, summaryPreview: summaryPreview,
+                accentColor: accentColor, timestamp: timestamp,
+                isExpandable: isExpandable, isExpanded: isExpanded
+            )
+        })
+        .buttonStyle(.plain)
+    }
+}
+
 /// Visually distinct banner announcing a newly created task in the channel log.
 struct TaskCreatedBanner: View {
     let title: String
@@ -148,53 +360,19 @@ struct TaskActionScheduledBanner: View {
     let timestamp: Date
 
     var body: some View {
-        // Inline computed properties directly
+        // Quieter chrome than the lifecycle banners — a fainter closing hairline, a lighter
+        // ground and a tighter radius — so this reuses the header and title line rather than
+        // `TaskBannerFrame`, which would need four more parameters to express the difference.
         let accentColor = TaskStatusBadge.color(for: .scheduled)
-        
-        return VStack(spacing: 0) {
-            accentColor.frame(height: 1).opacity(0.4)
-
-            HStack(spacing: 8) {
-                Image(systemName: symbolName)
-                    .font(AppFonts.bannerIcon)
-                    .foregroundStyle(accentColor)
-
-                Text("Scheduled \(actionLabel)")
-                    .font(AppFonts.channelSender)
-                    .foregroundStyle(accentColor)
-
-                Spacer()
-
-                ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-
-            Text(taskTitle)
-                .font(AppFonts.channelBody.bold())
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 2)
-
-            HStack(spacing: 4) {
-                Image(systemName: "clock")
-                    .font(AppFonts.bannerIconSmall)
-                    .foregroundStyle(accentColor)
-                Text("Fires \(formatScheduledTime(scheduledRunAt))")
-                    .font(AppFonts.channelBody)
-                    .foregroundStyle(accentColor)
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 6)
-
-            accentColor.frame(height: 1).opacity(0.3)
+        return QuietBannerFrame(accentColor: accentColor, openingHairlineOpacity: 0.4) {
+            TaskBannerHeader(
+                systemImage: symbolName, iconFont: AppFonts.bannerIcon,
+                headline: "Scheduled \(actionLabel)", accentColor: accentColor,
+                routing: nil, timestamp: timestamp
+            )
+            TaskBannerTitleLine(title: taskTitle, bottomPadding: 2)
+            ScheduledFiresLine(accentColor: accentColor, scheduledRunAt: scheduledRunAt)
         }
-        .background(accentColor.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 3))
-        .padding(.vertical, 1)
     }
 }
 
@@ -293,38 +471,14 @@ struct TaskAcknowledgedBanner: View {
     private let accentColor = AppColors.taskAcknowledgedAccent
 
     var body: some View {
-        VStack(spacing: 0) {
-            accentColor.frame(height: 1).opacity(0.4)
-
-            HStack(spacing: 8) {
-                Image(systemName: "play.circle.fill")
-                    .font(AppFonts.bannerIcon)
-                    .foregroundStyle(accentColor)
-
-                Text("Task Acknowledged")
-                    .font(AppFonts.channelSender)
-                    .foregroundStyle(accentColor)
-
-                Spacer()
-
-                ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-
-            Text(title)
-                .font(AppFonts.channelBody.bold())
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 6)
-
-            accentColor.frame(height: 1).opacity(0.4)
+        TaskBannerFrame(
+            systemImage: "play.circle.fill",
+            headline: "Task Acknowledged",
+            accentColor: accentColor,
+            timestamp: timestamp
+        ) {
+            TaskBannerTitleLine(title: title)
         }
-        .background(accentColor.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .padding(.vertical, 4)
     }
 }
 
@@ -337,38 +491,14 @@ struct TaskContinuingBanner: View {
     private let accentColor = AppColors.taskAcknowledgedAccent
 
     var body: some View {
-        VStack(spacing: 0) {
-            accentColor.frame(height: 1).opacity(0.4)
-
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.counterclockwise.circle.fill")
-                    .font(AppFonts.bannerIcon)
-                    .foregroundStyle(accentColor)
-
-                Text("Continuing Task")
-                    .font(AppFonts.channelSender)
-                    .foregroundStyle(accentColor)
-
-                Spacer()
-
-                ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-
-            Text(title)
-                .font(AppFonts.channelBody.bold())
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 6)
-
-            accentColor.frame(height: 1).opacity(0.4)
+        TaskBannerFrame(
+            systemImage: "arrow.counterclockwise.circle.fill",
+            headline: "Continuing Task",
+            accentColor: accentColor,
+            timestamp: timestamp
+        ) {
+            TaskBannerTitleLine(title: title)
         }
-        .background(accentColor.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .padding(.vertical, 4)
     }
 }
 
@@ -489,52 +619,20 @@ struct ChangesRequestedBanner: View {
     private let accentColor = AppColors.changesRequestedAccent
 
     var body: some View {
-        VStack(spacing: 0) {
-            accentColor.frame(height: 1).opacity(0.4)
-
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.uturn.backward.circle.fill")
-                    .font(AppFonts.bannerIconMedium)
-                    .foregroundStyle(accentColor)
-
-                Text("Changes Requested")
-                    .font(AppFonts.channelSender)
-                    .foregroundStyle(accentColor)
-
-                if let recipientName {
-                    Text("\(senderName) \u{2192} \(recipientName)")
-                        .font(AppFonts.channelTimestamp)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-
+        TaskBannerFrame(
+            systemImage: "arrow.uturn.backward.circle.fill",
+            iconFont: AppFonts.bannerIconMedium,
+            headline: "Changes Requested",
+            accentColor: accentColor,
+            routing: recipientName.map { "\(senderName) \u{2192} \($0)" },
+            groundOpacity: 0.06,
+            timestamp: timestamp
+        ) {
             if !taskTitle.isEmpty {
-                Text(taskTitle)
-                    .font(AppFonts.channelBody.bold())
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 2)
+                TaskBannerTitleLine(title: taskTitle, bottomPadding: 2)
             }
-
-            MarkdownText(content: content, baseFont: AppFonts.channelBody)
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 6)
-
-            accentColor.frame(height: 1).opacity(0.4)
+            TaskBannerBodyText(content: content)
         }
-        .background(accentColor.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .padding(.vertical, 4)
     }
 }
 
@@ -609,43 +707,17 @@ struct TaskUpdateBanner: View {
     private let accentColor = AppColors.taskUpdateAccent
 
     var body: some View {
-        VStack(spacing: 0) {
-            accentColor.frame(height: 1).opacity(0.4)
-
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(AppFonts.bannerIconMedium)
-                    .foregroundStyle(accentColor)
-
-                Text("Task Update")
-                    .font(AppFonts.channelSender)
-                    .foregroundStyle(accentColor)
-
-                if let recipientName {
-                    Text("\(senderName) \u{2192} \(recipientName)")
-                        .font(AppFonts.channelTimestamp)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                ChannelTimestamp(timestamp: timestamp, bucket: .taskBanner)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-
-            MarkdownText(content: content, baseFont: AppFonts.channelBody)
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 6)
-
-            accentColor.frame(height: 1).opacity(0.4)
+        TaskBannerFrame(
+            systemImage: "arrow.triangle.2.circlepath",
+            iconFont: AppFonts.bannerIconMedium,
+            headline: "Task Update",
+            accentColor: accentColor,
+            routing: recipientName.map { "\(senderName) \u{2192} \($0)" },
+            groundOpacity: 0.06,
+            timestamp: timestamp
+        ) {
+            TaskBannerBodyText(content: content)
         }
-        .background(accentColor.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .padding(.vertical, 4)
     }
 }
 
@@ -670,95 +742,50 @@ struct MemoryBanner: View {
 
     private let accentColor: Color = .green
 
-    var body: some View {
-        // Inline all computed properties
-        let headerText: String = {
-            switch kind {
-            case .saved: return "Memory Saved"
-            case .consolidated: return "Memory Consolidated"
-            case .searched:
-                if memoryCount == 0 && taskCount == 0 {
-                    return "Memory Search — no results"
-                }
-                var parts: [String] = []
-                if memoryCount > 0 { parts.append("\(memoryCount) memor\(memoryCount == 1 ? "y" : "ies")") }
-                if taskCount > 0 { parts.append("\(taskCount) task\(taskCount == 1 ? "" : "s")") }
-                return "Memory Search — \(parts.joined(separator: ", "))"
-            }
-        }()
-        let iconName: String = {
-            switch kind {
-            case .saved: return "brain.head.profile"
-            case .consolidated: return "arrow.triangle.merge"
-            case .searched: return "magnifyingglass"
-            }
-        }()
-        let summaryPreview = summary
-        let hasExpandableContent: Bool = {
-            switch kind {
-            case .saved, .consolidated:
-                return detail != nil && !(detail ?? "").isEmpty
-            case .searched:
-                let hasMemories = !(memoryResults?.isEmpty ?? true)
-                let hasTasks = !(taskResults?.isEmpty ?? true)
-                return hasMemories || hasTasks
-            }
-        }()
-        
-        return VStack(alignment: .leading, spacing: 0) {
-            accentColor.frame(height: 1).opacity(0.3)
-
-            Button(action: {
-                guard hasExpandableContent else { return }
-                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
-            }, label: {
-                HStack(spacing: 6) {
-                    Image(systemName: iconName)
-                        .font(AppFonts.metaIconSmall)
-                        .foregroundStyle(accentColor)
-
-                    Text(headerText)
-                        .font(AppFonts.channelTimestamp)
-                        .foregroundStyle(accentColor)
-
-                    Text(summaryPreview)
-                        .font(AppFonts.channelTimestamp)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    if hasExpandableContent {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(AppFonts.microIcon)
-                            .foregroundStyle(.tertiary)
-                    }
-
-                    ChannelTimestamp(timestamp: timestamp, bucket: .systemMessage, foregroundStyle: .tertiary)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-            })
-            .buttonStyle(.plain)
-
-            if isExpanded {
-                ExpandedBody(
-                    kind: kind,
-                    detail: detail,
-                    tags: tags,
-                    source: source,
-                    memoryResults: memoryResults,
-                    taskResults: taskResults
-                )
-                .padding(.horizontal, 8)
-                .padding(.bottom, 4)
-            }
-
-            accentColor.frame(height: 1).opacity(0.3)
+    private var headerText: String {
+        switch kind {
+        case .saved: return "Memory Saved"
+        case .consolidated: return "Memory Consolidated"
+        case .searched:
+            if memoryCount == 0 && taskCount == 0 { return "Memory Search — no results" }
+            var parts: [String] = []
+            if memoryCount > 0 { parts.append("\(memoryCount) memor\(memoryCount == 1 ? "y" : "ies")") }
+            if taskCount > 0 { parts.append("\(taskCount) task\(taskCount == 1 ? "" : "s")") }
+            return "Memory Search — \(parts.joined(separator: ", "))"
         }
-        .background(accentColor.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 3))
-        .padding(.vertical, 1)
+    }
+
+    private var iconName: String {
+        switch kind {
+        case .saved: return "brain.head.profile"
+        case .consolidated: return "arrow.triangle.merge"
+        case .searched: return "magnifyingglass"
+        }
+    }
+
+    private var hasExpandableContent: Bool {
+        switch kind {
+        case .saved, .consolidated:
+            return detail != nil && !(detail ?? "").isEmpty
+        case .searched:
+            return !(memoryResults?.isEmpty ?? true) || !(taskResults?.isEmpty ?? true)
+        }
+    }
+
+    var body: some View {
+        QuietBannerFrame(accentColor: accentColor) {
+            MemoryBannerHeaderButton(
+                iconName: iconName, headerText: headerText, summaryPreview: summary,
+                accentColor: accentColor, timestamp: timestamp,
+                isExpandable: hasExpandableContent, isExpanded: $isExpanded
+            )
+            if isExpanded {
+                ExpandedBody(kind: kind, detail: detail, tags: tags,
+                             source: source, memoryResults: memoryResults, taskResults: taskResults)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 4)
+            }
+        }
     }
 
     private struct ExpandedBody: View {
