@@ -726,37 +726,9 @@ private struct TaskDetailResultSection: View {
     let attachmentURLResolver: (Attachment) -> URL?
 
     var body: some View {
-        let result = task.result ?? ""
-        let commentary = task.commentary ?? ""
-        let hasResult = !result.isEmpty
-        let hasCommentary = !commentary.isEmpty
-
-        // For failed tasks the error section already surfaced `result` — skip the duplicate.
-        let suppressDueToError = (task.status == .failed)
-
-        if (hasResult && !suppressDueToError) || hasCommentary {
-            VStack(alignment: .leading, spacing: 10) {
-                TaskDetailSectionTitleRow(
-                    title: "Result",
-                    copyText: result.isEmpty ? commentary : result
-                )
-
-                if hasCommentary {
-                    TaskDetailAICommentaryInset(commentary: commentary)
-                }
-
-                if hasResult && !suppressDueToError {
-                    MarkdownText(content: result, baseFont: .body)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            Divider()
-        }
-
-        // Structured deliverables (when the worker submitted them): the tagged text/attachment
-        // items. Files are shown by name here (the clickable cards live in Result Attachments
-        // below); the value of this section is the inline text answers and the per-requirement
-        // tags. Skipped for tasks that never produced structured items.
+        TaskDetailResultProse(task: task)
+        // Structured deliverables, when the worker submitted them: the inline text answers and the
+        // per-requirement tags. Files appear here by name only — the clickable cards are below.
         if !task.resultItems.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 TaskDetailSectionTitleRow(title: "Deliverables",
@@ -765,19 +737,14 @@ private struct TaskDetailResultSection: View {
             }
             Divider()
         }
-
-        // Render result attachments whenever they exist on a completed/failed task,
-        // even when the Result section was suppressed (e.g. failed task with attachments
-        // but no commentary). The status check is implicit — this view is only reached
-        // for statuses that include `.result` in `orderedSections`.
+        // Shown whenever they exist, even when the prose block above was suppressed — a failed
+        // task with attachments but no commentary still has files worth reaching.
         if !task.resultAttachments.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 TaskDetailSectionTitleRow(title: "Result Attachments",
                                           copyText: formattedAttachments(task.resultAttachments))
-                TaskAttachmentList(
-                    attachments: task.resultAttachments,
-                    urlResolver: attachmentURLResolver
-                )
+                TaskAttachmentList(attachments: task.resultAttachments,
+                                   urlResolver: attachmentURLResolver)
             }
             Divider()
         }
@@ -1052,45 +1019,17 @@ private struct TaskDetailAcceptanceEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach($rows) { $row in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        TextField("Display name", text: $row.name)
-                            .textFieldStyle(.roundedBorder)
-                        Button(action: { rows.removeAll { $0.id == row.id } }, label: {
-                            Image(systemName: "minus.circle")
-                        })
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Remove criterion")
-                    }
-                    TextField("Validation prompt — required LLM instructions", text: $row.validationPrompt, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Input enumerator prompt (optional; must return an array of strings)", text: $row.inputEnumeratorPrompt, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                    HStack(spacing: 12) {
-                        Toggle("Waivable", isOn: $row.waivable)
-                            .toggleStyle(.checkbox)
-                            .font(.caption)
-                        Spacer()
-                    }
-                }
+                TaskDetailCriterionEditorRow(row: $row, onDelete: { rows.removeAll { $0.id == row.id } })
             }
-            Button(action: { rows.append(EditableCriterion()) }, label: {
-                Label("Add criterion", systemImage: "plus.circle")
-                    .font(.callout)
-            })
-            .buttonStyle(.plain)
-            .foregroundStyle(AppColors.disclosureToggle)
-
-            HStack {
-                Text("Removing all criteria reverts to the default whole-task check. Edited criteria are re-judged; unchanged ones keep their verdicts.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Cancel", action: onCancel)
-                Button("Save", action: { onSave(rows.compactMap { $0.built() }) })
-                    .buttonStyle(.borderedProminent)
-            }
+            TaskDetailEditorAddButton(title: "Add criterion") { rows.append(EditableCriterion()) }
+            TaskDetailEditorFooter(
+                note: """
+                    Removing all criteria reverts to the default whole-task check. Edited criteria \
+                    are re-judged; unchanged ones keep their verdicts.
+                    """,
+                onCancel: onCancel, saveDisabled: false,
+                onSave: { onSave(rows.compactMap { $0.built() }) }
+            )
         }
     }
 }
@@ -1104,7 +1043,6 @@ private struct TaskDetailCriterionRow: View {
     @Binding var expandedDebugRecordIDs: Set<UUID>
 
     var body: some View {
-        let latest = task.validation?.latestVerdict(for: criterion.id)
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 // Stable criterion number — matches the number in Brown's briefing, in
@@ -1112,46 +1050,269 @@ private struct TaskDetailCriterionRow: View {
                 Text("\(number).")
                     .font(.body.monospacedDigit())
                     .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 4) {
-                    // Verdict as a LABELED chip on its own line above the body — icon + the
-                    // verdict WORD, always shown (an accepted criterion previously showed only a
-                    // bare icon). Separating it from the body means the criterion's own in-text
-                    // "…this criterion FAILS" can never be read as the verdict.
-                    Label(latest?.verdict.displayLabel ?? "Pending", systemImage: verdictSymbol(latest?.verdict))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(verdictColor(latest?.verdict))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(verdictColor(latest?.verdict).opacity(0.15)))
-                    Text(criterion.name)
-                        .font(.body)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                    if let qualifiers = criterionQualifiers(criterion) {
-                        Text(qualifiers)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if let latest, let detail = latest.verdict.detailText {
-                        Text(detail)
-                            .font(.callout)
-                            .foregroundStyle(verdictColor(latest.verdict))
-                            .lineLimit(expanded ? nil : 2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                    }
-                }
+                TaskDetailCriterionSummary(
+                    criterion: criterion,
+                    latest: task.validation?.latestVerdict(for: criterion.id),
+                    expanded: expanded
+                )
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if expanded {
                 TaskDetailCriterionExpandedDetail(
-                    criterion: criterion,
-                    task: task,
+                    criterion: criterion, task: task,
                     expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
                     expandedDebugRecordIDs: $expandedDebugRecordIDs
                 )
                 .padding(.leading, 24)
+            }
+        }
+    }
+}
+
+/// A verdict record's one-line summary, with the control that reveals its transcripts.
+private struct TaskDetailVerdictHeaderLine: View {
+    let record: CriterionVerdictRecord
+    let isDebugOpen: Bool
+    let onToggleDebug: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: verdictSymbol(record.verdict))
+                .foregroundStyle(verdictColor(record.verdict))
+                .font(.caption)
+            Text("Round \(record.round) · \(record.verdict.displayLabel) · \(record.validatorName)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(record.recordedAt, style: .time)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            if record.renderedInput != nil || record.responseLog != nil {
+                Button(action: onToggleDebug, label: {
+                    Text(isDebugOpen ? "hide debug" : "debug")
+                        .font(.caption)
+                })
+                .buttonStyle(.plain)
+                .foregroundStyle(AppColors.disclosureToggle)
+            }
+        }
+    }
+}
+
+/// Exactly what the validator was sent and what it said back — the assessment-debugging surface.
+private struct TaskDetailVerdictTranscripts: View {
+    let record: CriterionVerdictRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let systemPrompt = record.renderedSystemPrompt, !systemPrompt.isEmpty {
+                TaskDetailDebugTextBox(
+                    title: "System prompt (exactly as sent — includes the criterion & response format)",
+                    text: systemPrompt
+                )
+            }
+            if let input = record.renderedInput, !input.isEmpty {
+                TaskDetailDebugTextBox(
+                    title: "User message (the results/evidence the validator judged)",
+                    text: input
+                )
+            }
+            if let log = record.responseLog, !log.isEmpty {
+                TaskDetailDebugTextBox(title: "Validator output (turn by turn)", text: log)
+            }
+        }
+    }
+}
+
+/// One row of the steps editor: status, text, delete, and the note skipped/removed steps owe.
+private struct TaskDetailStepEditorRow: View {
+    @Binding var row: EditableStep
+    let onDelete: () -> Void
+
+    private var requiresNote: Bool {
+        row.status == .skipped || row.status == .removed || !row.note.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Picker("", selection: $row.status) {
+                    Text("Pending").tag(TaskStep.Status.pending)
+                    Text("In progress").tag(TaskStep.Status.inProgress)
+                    Text("Completed").tag(TaskStep.Status.completed)
+                    Text("Skipped").tag(TaskStep.Status.skipped)
+                    Text("Removed").tag(TaskStep.Status.removed)
+                }
+                .labelsHidden()
+                .frame(width: 110)
+                TextField("Step", text: $row.text, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                TaskDetailEditorDeleteButton(help: "Delete step", action: onDelete)
+            }
+            if requiresNote {
+                TextField("Note — why was this skipped/removed?", text: $row.note)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .padding(.leading, 118)
+            }
+        }
+    }
+}
+
+/// One row of the acceptance editor.
+private struct TaskDetailCriterionEditorRow: View {
+    @Binding var row: EditableCriterion
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                TextField("Display name", text: $row.name)
+                    .textFieldStyle(.roundedBorder)
+                TaskDetailEditorDeleteButton(help: "Remove criterion", action: onDelete)
+            }
+            TextField("Validation prompt — required LLM instructions",
+                      text: $row.validationPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+            TextField("Input enumerator prompt (optional; must return an array of strings)",
+                      text: $row.inputEnumeratorPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 12) {
+                Toggle("Waivable", isOn: $row.waivable)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                Spacer()
+            }
+        }
+    }
+}
+
+private struct TaskDetailEditorDeleteButton: View {
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action, label: { Image(systemName: "minus.circle") })
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(help)
+    }
+}
+
+private struct TaskDetailEditorAddButton: View {
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action, label: {
+            Label(title, systemImage: "plus.circle")
+                .font(.callout)
+        })
+        .buttonStyle(.plain)
+        .foregroundStyle(AppColors.disclosureToggle)
+    }
+}
+
+/// The Cancel/Save pair both contract editors end with, with an optional explanatory note.
+private struct TaskDetailEditorFooter: View {
+    let note: String?
+    let onCancel: () -> Void
+    let saveDisabled: Bool
+    let onSave: () -> Void
+
+    var body: some View {
+        HStack {
+            if let note {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Cancel", action: onCancel)
+            Button("Save", action: onSave)
+                .buttonStyle(.borderedProminent)
+                .disabled(saveDisabled)
+        }
+    }
+}
+
+/// The task's own prose result and the model's commentary on it.
+private struct TaskDetailResultProse: View {
+    let task: AgentTask
+
+    private var result: String { task.result ?? "" }
+    private var commentary: String { task.commentary ?? "" }
+    /// A failed task's error section already surfaced `result` — don't print it twice.
+    private var showsResult: Bool { !result.isEmpty && task.status != .failed }
+
+    var body: some View {
+        if showsResult || !commentary.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                TaskDetailSectionTitleRow(title: "Result",
+                                          copyText: result.isEmpty ? commentary : result)
+                if !commentary.isEmpty {
+                    TaskDetailAICommentaryInset(commentary: commentary)
+                }
+                if showsResult {
+                    MarkdownText(content: result, baseFont: .body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            Divider()
+        }
+    }
+}
+
+/// A headed group of related-context rows.
+private struct TaskDetailContextGroup<Content: View>: View {
+    let heading: String
+    let spacing: CGFloat
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        Text(heading)
+            .font(.headline)
+            .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: spacing) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A criterion's verdict chip, its text, and whatever the judge said about it.
+private struct TaskDetailCriterionSummary: View {
+    let criterion: AcceptanceCriterion
+    let latest: CriterionVerdictRecord?
+    let expanded: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // The verdict is a LABELED chip on its own line above the body — icon plus the verdict
+            // WORD, always shown. Separating it from the body means the criterion's own in-text
+            // "…this criterion FAILS" can never be read as the verdict.
+            Label(latest?.verdict.displayLabel ?? "Pending", systemImage: verdictSymbol(latest?.verdict))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(verdictColor(latest?.verdict))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(verdictColor(latest?.verdict).opacity(0.15)))
+            Text(criterion.name)
+                .font(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            if let qualifiers = criterionQualifiers(criterion) {
+                Text(qualifiers)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let latest, let detail = latest.verdict.detailText {
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(verdictColor(latest.verdict))
+                    .lineLimit(expanded ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
     }
@@ -1236,31 +1397,8 @@ private struct TaskDetailVerdictRecordRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Image(systemName: verdictSymbol(record.verdict))
-                    .foregroundStyle(verdictColor(record.verdict))
-                    .font(.caption)
-                Text("Round \(record.round) · \(record.verdict.displayLabel) · \(record.validatorName)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(record.recordedAt, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                if record.renderedInput != nil || record.responseLog != nil {
-                    Button(action: {
-                        if isDebugOpen {
-                            expandedDebugRecordIDs.remove(record.id)
-                        } else {
-                            expandedDebugRecordIDs.insert(record.id)
-                        }
-                    }, label: {
-                        Text(isDebugOpen ? "hide debug" : "debug")
-                            .font(.caption)
-                    })
-                    .buttonStyle(.plain)
-                    .foregroundStyle(AppColors.disclosureToggle)
-                }
-            }
+            TaskDetailVerdictHeaderLine(record: record, isDebugOpen: isDebugOpen,
+                                        onToggleDebug: toggleDebug)
             if let detail = record.verdict.detailText {
                 Text(detail)
                     .font(.caption)
@@ -1269,25 +1407,17 @@ private struct TaskDetailVerdictRecordRow: View {
                     .padding(.leading, 18)
             }
             if isDebugOpen {
-                VStack(alignment: .leading, spacing: 6) {
-                    if let sys = record.renderedSystemPrompt, !sys.isEmpty {
-                        TaskDetailDebugTextBox(
-                            title: "System prompt (exactly as sent — includes the criterion & response format)",
-                            text: sys
-                        )
-                    }
-                    if let input = record.renderedInput, !input.isEmpty {
-                        TaskDetailDebugTextBox(
-                            title: "User message (the results/evidence the validator judged)",
-                            text: input
-                        )
-                    }
-                    if let log = record.responseLog, !log.isEmpty {
-                        TaskDetailDebugTextBox(title: "Validator output (turn by turn)", text: log)
-                    }
-                }
-                .padding(.leading, 18)
+                TaskDetailVerdictTranscripts(record: record)
+                    .padding(.leading, 18)
             }
+        }
+    }
+
+    private func toggleDebug() {
+        if isDebugOpen {
+            expandedDebugRecordIDs.remove(record.id)
+        } else {
+            expandedDebugRecordIDs.insert(record.id)
         }
     }
 }
@@ -1436,54 +1566,18 @@ private struct TaskDetailStepsEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach($rows) { $row in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Picker("", selection: $row.status) {
-                            Text("Pending").tag(TaskStep.Status.pending)
-                            Text("In progress").tag(TaskStep.Status.inProgress)
-                            Text("Completed").tag(TaskStep.Status.completed)
-                            Text("Skipped").tag(TaskStep.Status.skipped)
-                            Text("Removed").tag(TaskStep.Status.removed)
-                        }
-                        .labelsHidden()
-                        .frame(width: 110)
-                        TextField("Step", text: $row.text, axis: .vertical)
-                            .textFieldStyle(.roundedBorder)
-                        Button(action: { rows.removeAll { $0.id == row.id } }, label: {
-                            Image(systemName: "minus.circle")
-                        })
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Delete step")
-                    }
-                    if row.status == .skipped || row.status == .removed || !row.note.isEmpty {
-                        TextField("Note — why was this skipped/removed?", text: $row.note)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.caption)
-                            .padding(.leading, 118)
-                    }
-                }
+                TaskDetailStepEditorRow(row: $row, onDelete: { rows.removeAll { $0.id == row.id } })
             }
-            Button(action: { rows.append(EditableStep()) }, label: {
-                Label("Add step", systemImage: "plus.circle")
-                    .font(.callout)
-            })
-            .buttonStyle(.plain)
-            .foregroundStyle(AppColors.disclosureToggle)
-
+            TaskDetailEditorAddButton(title: "Add step") { rows.append(EditableStep()) }
             if missingRequiredNotes {
                 Text("Skipped and removed steps need a note — validators read it.")
                     .font(.caption)
                     .foregroundStyle(AppColors.verdictError)
             }
-
-            HStack {
-                Spacer()
-                Button("Cancel", action: onCancel)
-                Button("Save", action: { onSave(rows.compactMap { $0.built() }) })
-                    .buttonStyle(.borderedProminent)
-                    .disabled(missingRequiredNotes)
-            }
+            TaskDetailEditorFooter(
+                note: nil, onCancel: onCancel, saveDisabled: missingRequiredNotes,
+                onSave: { onSave(rows.compactMap { $0.built() }) }
+            )
         }
     }
 }
@@ -1740,19 +1834,12 @@ private struct TaskDetailRelatedContextSection: View {
     var body: some View {
         if Self.hasRelevantContext(task) {
             VStack(alignment: .leading, spacing: 8) {
-                TaskDetailSectionTitleRow(
-                    title: "Related context",
-                    copyText: Self.formattedContext(task)
-                )
-
+                TaskDetailSectionTitleRow(title: "Related context",
+                                          copyText: Self.formattedContext(task))
                 if let memories = task.relevantMemories, !memories.isEmpty {
-                    Text("Memories")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        // `id: \.content` keeps expansion state pinned to the memory itself
-                        // even if the array is re-ordered. Two memories with identical content
-                        // would tie arbitrarily; in practice memories are unique by content.
+                    TaskDetailContextGroup(heading: "Memories", spacing: 4) {
+                        // `id: \.content` pins expansion state to the memory itself, so a
+                        // re-ordered array cannot move a disclosure onto a different entry.
                         ForEach(memories, id: \.content) { memory in
                             TaskRelevantMemoryRow(
                                 memory: memory,
@@ -1760,14 +1847,9 @@ private struct TaskDetailRelatedContextSection: View {
                             )
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
                 if let priorTasks = task.relevantPriorTasks, !priorTasks.isEmpty {
-                    Text("Prior Tasks")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 6) {
+                    TaskDetailContextGroup(heading: "Prior Tasks", spacing: 6) {
                         ForEach(priorTasks, id: \.taskID) { prior in
                             TaskRelevantPriorTaskRow(
                                 priorTask: prior,
@@ -1776,7 +1858,6 @@ private struct TaskDetailRelatedContextSection: View {
                             )
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             Divider()
