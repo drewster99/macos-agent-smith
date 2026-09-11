@@ -28,6 +28,8 @@ struct MetadataCoverageView: View {
     @State private var isLoading = true
     /// "providerID/modelID" briefly highlighted after a deep-link, so the eye lands on the row.
     @State private var highlightedModelKey: String?
+    /// Identifies which focus a pending highlight reset belongs to; see `focusCount` use below.
+    @State private var focusCount = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -225,8 +227,13 @@ struct MetadataCoverageView: View {
                 scrollProxy?.scrollTo(providerID, anchor: .top)
             }
         }
+        focusCount += 1
+        let focus = focusCount
         Task {
             try? await Task.sleep(for: .seconds(3))
+            // A second deep-link focus inside the highlight window must not have its highlight
+            // cleared by the first one's timer — a three-second window makes that easy to hit.
+            guard focusCount == focus else { return }
             highlightedModelKey = nil
         }
     }

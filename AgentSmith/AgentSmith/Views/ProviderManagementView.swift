@@ -209,6 +209,9 @@ private struct BuiltInProviderRow: View {
     @State private var draftKey: String = ""
     @State private var saveError: String?
     @State private var justSaved = false
+    /// Identifies which save a pending badge reset belongs to, so a second save inside the
+    /// flash window is not un-confirmed by the first save's still-pending timer.
+    @State private var savePressCount = 0
     @State private var isRefreshing = false
     @State private var hasLoaded = false
 
@@ -312,9 +315,15 @@ private struct BuiltInProviderRow: View {
             // persisted value as "unsaved changes" on its counter notification).
             draftKey = newKey
             saveError = nil
+            savePressCount += 1
+            let press = savePressCount
             withAnimation { justSaved = true }
-            Task { @MainActor in
+            Task {
                 try? await Task.sleep(for: .seconds(1.5))
+                // Two saves inside the flash window: the first press's timer must not clear the
+                // second one's badge. `Task` inherits this view's MainActor isolation, so no
+                // annotation is needed to read the counter back.
+                guard savePressCount == press else { return }
                 withAnimation { justSaved = false }
             }
 
