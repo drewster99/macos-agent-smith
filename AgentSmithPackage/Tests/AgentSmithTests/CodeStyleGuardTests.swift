@@ -201,7 +201,7 @@ struct CodeStyleGuardTests {
         let hits = try Self.scan(regex: #"\.onTapGesture\b"#)
         if !hits.isEmpty {
             let formatted = hits.map { "  \($0.path):\($0.line) — \($0.text)" }.joined(separator: "\n")
-            Issue.record("Found .onTapGesture (use Button { } label: { }.buttonStyle(.plain) instead):\n\(formatted)")
+            Issue.record("Found .onTapGesture (use Button(action:label:) + .buttonStyle(.plain) instead):\n\(formatted)")
         }
     }
 
