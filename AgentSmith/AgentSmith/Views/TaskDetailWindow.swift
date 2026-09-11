@@ -473,8 +473,10 @@ private struct TaskDetailContent: View {
                 .onPreferenceChange(TaskDetailSectionOffsetKey.self) { offsets in
                     // The last section whose top has crossed above a small band below the viewport
                     // top, so it reads as "current" just before it actually reaches the top.
-                    let next = offsets.filter { $0.minY <= 80 }.max { $0.minY < $1.minY }?.kind
-                    currentSection = next ?? sections.first ?? .description
+                    let crossed = offsets.filter { $0.minY <= 80 }.max { $0.minY < $1.minY }
+                    let next = crossed?.kind ?? sections.first ?? .description
+                    // Guarded: an unconditional write fires on every scroll callback.
+                    if next != currentSection { currentSection = next }
                 }
             }
         }
