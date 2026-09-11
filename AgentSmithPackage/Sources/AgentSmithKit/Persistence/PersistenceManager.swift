@@ -271,8 +271,15 @@ public actor PersistenceManager {
     ) -> (messages: [ChannelMessage], totalCount: Int) {
         let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
         let lineCount = lines.count
-        let decodingAll = (limit == nil) || (limit! >= lineCount)
-        let slice = decodingAll ? lines[...] : lines.suffix(limit!)
+        let slice: ArraySlice<Data>
+        let decodingAll: Bool
+        if let tailLineCount = limit, tailLineCount < lineCount {
+            slice = lines.suffix(tailLineCount)
+            decodingAll = false
+        } else {
+            slice = lines[...]
+            decodingAll = true
+        }
         let decoder = JSONDecoder()
         var messages: [ChannelMessage] = []
         messages.reserveCapacity(slice.count)

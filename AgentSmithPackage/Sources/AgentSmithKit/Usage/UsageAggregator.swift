@@ -91,10 +91,14 @@ public struct UsageAggregator: Sendable {
 
             // Timestamps
             let ts = record.timestamp
-            if firstTimestamp == nil || ts < firstTimestamp! {
+            if let earliest = firstTimestamp {
+                if ts < earliest { firstTimestamp = ts }
+            } else {
                 firstTimestamp = ts
             }
-            if lastTimestamp == nil || ts > lastTimestamp! {
+            if let latest = lastTimestamp {
+                if ts > latest { lastTimestamp = ts }
+            } else {
                 lastTimestamp = ts
             }
         }
