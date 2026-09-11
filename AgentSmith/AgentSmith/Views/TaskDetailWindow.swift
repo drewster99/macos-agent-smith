@@ -473,9 +473,8 @@ private struct TaskDetailContent: View {
                 .onPreferenceChange(TaskDetailSectionOffsetKey.self) { offsets in
                     // The last section whose top has crossed above a small band below the viewport
                     // top, so it reads as "current" just before it actually reaches the top.
-                    let crossed = offsets.filter { $0.minY <= 80 }.max { $0.minY < $1.minY }
-                    let next = crossed?.kind ?? sections.first ?? .description
-                    if next != currentSection { currentSection = next }
+                    let next = offsets.filter { $0.minY <= 80 }.max { $0.minY < $1.minY }?.kind
+                    currentSection = next ?? sections.first ?? .description
                 }
             }
         }
@@ -503,19 +502,15 @@ private struct TaskDetailScrollBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            TaskDetailHeaderRow(
-                task: task, onEditTask: onEditTask, onStartTask: onStartTask,
-                onSavePDF: onSavePDF, onDone: onDone
-            )
+            TaskDetailHeaderRow(task: task, onEditTask: onEditTask, onStartTask: onStartTask,
+                                onSavePDF: onSavePDF, onDone: onDone)
             TaskDetailMetadataGrid(task: task, viewModel: viewModel)
             Divider()
             ForEach(visibleSections, id: \.self) { kind in
-                TaskDetailAnchoredSection(
-                    kind: kind, task: task, mode: mode(kind), viewModel: viewModel,
-                    sessionManager: sessionManager,
-                    attachmentURLResolver: attachmentURLResolver,
-                    onToggle: { onToggle(kind) }
-                )
+                TaskDetailAnchoredSection(kind: kind, task: task, mode: mode(kind),
+                                          viewModel: viewModel, sessionManager: sessionManager,
+                                          attachmentURLResolver: attachmentURLResolver,
+                                          onToggle: { onToggle(kind) })
             }
             Divider()
             Text("ID: \(task.id.uuidString)")
@@ -569,27 +564,12 @@ private struct TaskDetailJumpBar: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(sections, id: \.self) { kind in
-                    let isCurrent = kind == currentSection
-                    Button(action: {
+                    TaskDetailJumpChip(kind: kind, isCurrent: kind == currentSection) {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             proxy.scrollTo(TaskDetailSectionAnchorID(kind: kind), anchor: .top)
                         }
                         currentSection = kind
-                    }, label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: kind.icon)
-                                .font(.caption2)
-                            Text(kind.label)
-                                .font(.caption.weight(isCurrent ? .semibold : .regular))
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule().fill(isCurrent ? AppColors.disclosureToggle.opacity(0.18) : Color.secondary.opacity(0.08))
-                        )
-                        .foregroundStyle(isCurrent ? AppColors.disclosureToggle : Color.secondary)
-                    })
-                    .buttonStyle(.plain)
+                    }
                 }
             }
             .padding(.horizontal, 12)
@@ -615,21 +595,10 @@ private struct TaskDetailHeaderRow: View {
                 .font(.title.bold())
                 .textSelection(.enabled)
             Spacer()
-            if task.status.isDescriptionEditable {
-                Button(action: onEditTask, label: { Label("Edit", systemImage: "pencil") })
-                    .help("Edit this task")
-            }
-            if task.status.isRunnable {
-                Button(action: onStartTask, label: {
-                    Label(runActionTitle(for: task.status), systemImage: "play.fill")
-                })
-                .buttonStyle(.borderedProminent)
-                .help("Start this task now")
-            }
-            Button(action: onSavePDF, label: { Label("Save as PDF…", systemImage: "doc.richtext") })
-                .help("Save this task as a PDF")
-            Button("Done", action: onDone)
-                .keyboardShortcut(.cancelAction)
+            TaskDetailHeaderActions(
+                status: task.status, onEditTask: onEditTask, onStartTask: onStartTask,
+                onSavePDF: onSavePDF, onDone: onDone
+            )
         }
     }
 }
@@ -882,14 +851,11 @@ private struct TaskDetailAcceptanceSection: View {
                 )
                 if isEditing {
                     TaskDetailAcceptanceEditor(rows: $editedCriteria,
-                                               onCancel: { isEditing = false },
-                                               onSave: save)
+                                               onCancel: { isEditing = false }, onSave: save)
                 } else {
-                    TaskDetailCriterionList(
-                        task: task, mode: mode, onToggle: onToggle,
-                        expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
-                        expandedDebugRecordIDs: $expandedDebugRecordIDs
-                    )
+                    TaskDetailCriterionList(task: task, mode: mode, onToggle: onToggle,
+                                            expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
+                                            expandedDebugRecordIDs: $expandedDebugRecordIDs)
                 }
             }
             Divider()
@@ -1050,20 +1016,15 @@ private struct TaskDetailCriterionRow: View {
                 Text("\(number).")
                     .font(.body.monospacedDigit())
                     .foregroundStyle(.secondary)
-                TaskDetailCriterionSummary(
-                    criterion: criterion,
-                    latest: task.validation?.latestVerdict(for: criterion.id),
-                    expanded: expanded
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
+                TaskDetailCriterionSummary(criterion: criterion, expanded: expanded,
+                                           latest: task.validation?.latestVerdict(for: criterion.id))
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             if expanded {
-                TaskDetailCriterionExpandedDetail(
-                    criterion: criterion, task: task,
-                    expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
-                    expandedDebugRecordIDs: $expandedDebugRecordIDs
-                )
-                .padding(.leading, 24)
+                TaskDetailCriterionExpandedDetail(criterion: criterion, task: task,
+                                                  expandedValidatorPromptIDs: $expandedValidatorPromptIDs,
+                                                  expandedDebugRecordIDs: $expandedDebugRecordIDs)
+                    .padding(.leading, 24)
             }
         }
     }
@@ -1123,6 +1084,116 @@ private struct TaskDetailVerdictTranscripts: View {
     }
 }
 
+/// A section's attachment list, headed and copyable. Renders nothing when there are none.
+private struct TaskDetailAttachmentsBlock: View {
+    let attachments: [Attachment]
+    let urlResolver: (Attachment) -> URL?
+
+    var body: some View {
+        if !attachments.isEmpty {
+            TaskDetailSectionTitleRow(title: "Attachments",
+                                      copyText: formattedAttachments(attachments))
+            TaskAttachmentList(attachments: attachments, urlResolver: urlResolver)
+        }
+    }
+}
+
+/// A criterion's verdict as a labelled chip — icon plus the verdict WORD, always shown.
+///
+/// Separating it from the criterion's body means the criterion's own in-text "…this criterion
+/// FAILS" can never be read as the verdict.
+private struct TaskDetailVerdictChip: View {
+    let verdict: CriterionVerdictRecord.Verdict?
+
+    var body: some View {
+        Label(verdict?.displayLabel ?? "Pending", systemImage: verdictSymbol(verdict))
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(verdictColor(verdict))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(verdictColor(verdict).opacity(0.15)))
+    }
+}
+
+/// One jump-bar chip.
+private struct TaskDetailJumpChip: View {
+    let kind: TaskDetailSectionKind
+    let isCurrent: Bool
+    let onJump: () -> Void
+
+    var body: some View {
+        Button(action: onJump, label: {
+            HStack(spacing: 4) {
+                Image(systemName: kind.icon)
+                    .font(.caption2)
+                Text(kind.label)
+                    .font(.caption.weight(isCurrent ? .semibold : .regular))
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(
+                isCurrent ? AppColors.disclosureToggle.opacity(0.18) : Color.secondary.opacity(0.08)
+            ))
+            .foregroundStyle(isCurrent ? AppColors.disclosureToggle : Color.secondary)
+        })
+        .buttonStyle(.plain)
+    }
+}
+
+/// The window's action cluster. Takes the status rather than the task: which buttons are offered
+/// depends on nothing else.
+private struct TaskDetailHeaderActions: View {
+    let status: AgentTask.Status
+    let onEditTask: () -> Void
+    let onStartTask: () -> Void
+    let onSavePDF: () -> Void
+    let onDone: () -> Void
+
+    var body: some View {
+        if status.isDescriptionEditable {
+            Button(action: onEditTask, label: { Label("Edit", systemImage: "pencil") })
+                .help("Edit this task")
+        }
+        if status.isRunnable {
+            Button(action: onStartTask, label: {
+                Label(runActionTitle(for: status), systemImage: "play.fill")
+            })
+            .buttonStyle(.borderedProminent)
+            .help("Start this task now")
+        }
+        Button(action: onSavePDF, label: { Label("Save as PDF…", systemImage: "doc.richtext") })
+            .help("Save this task as a PDF")
+        Button("Done", action: onDone)
+            .keyboardShortcut(.cancelAction)
+    }
+}
+
+/// The disclosure that reveals the validator definition a criterion resolves to.
+private struct TaskDetailValidatorPromptDisclosure: View {
+    let definition: EvaluatorDefinition
+    let isOpen: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle, label: {
+            Label(
+                isOpen ? "Hide validator prompt (\(definition.name))"
+                       : "Validator prompt (\(definition.name))",
+                systemImage: "text.alignleft"
+            )
+            .font(.caption)
+        })
+        .buttonStyle(.plain)
+        .foregroundStyle(AppColors.disclosureToggle)
+        if isOpen {
+            TaskDetailDebugTextBox(
+                title: "Validator definition — base prompt (the criterion & response format are appended at judge time; see a round's debug for the full sent prompt)",
+                text: definition.systemPrompt
+            )
+        }
+    }
+}
+
 /// One row of the steps editor: status, text, delete, and the note skipped/removed steps owe.
 private struct TaskDetailStepEditorRow: View {
     @Binding var row: EditableStep
@@ -1135,15 +1206,7 @@ private struct TaskDetailStepEditorRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Picker("", selection: $row.status) {
-                    Text("Pending").tag(TaskStep.Status.pending)
-                    Text("In progress").tag(TaskStep.Status.inProgress)
-                    Text("Completed").tag(TaskStep.Status.completed)
-                    Text("Skipped").tag(TaskStep.Status.skipped)
-                    Text("Removed").tag(TaskStep.Status.removed)
-                }
-                .labelsHidden()
-                .frame(width: 110)
+                TaskDetailStepStatusPicker(status: $row.status)
                 TextField("Step", text: $row.text, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                 TaskDetailEditorDeleteButton(help: "Delete step", action: onDelete)
@@ -1155,6 +1218,22 @@ private struct TaskDetailStepEditorRow: View {
                     .padding(.leading, 118)
             }
         }
+    }
+}
+
+private struct TaskDetailStepStatusPicker: View {
+    @Binding var status: TaskStep.Status
+
+    var body: some View {
+        Picker("", selection: $status) {
+            Text("Pending").tag(TaskStep.Status.pending)
+            Text("In progress").tag(TaskStep.Status.inProgress)
+            Text("Completed").tag(TaskStep.Status.completed)
+            Text("Skipped").tag(TaskStep.Status.skipped)
+            Text("Removed").tag(TaskStep.Status.removed)
+        }
+        .labelsHidden()
+        .frame(width: 110)
     }
 }
 
@@ -1282,20 +1361,12 @@ private struct TaskDetailContextGroup<Content: View>: View {
 /// A criterion's verdict chip, its text, and whatever the judge said about it.
 private struct TaskDetailCriterionSummary: View {
     let criterion: AcceptanceCriterion
-    let latest: CriterionVerdictRecord?
     let expanded: Bool
+    let latest: CriterionVerdictRecord?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // The verdict is a LABELED chip on its own line above the body — icon plus the verdict
-            // WORD, always shown. Separating it from the body means the criterion's own in-text
-            // "…this criterion FAILS" can never be read as the verdict.
-            Label(latest?.verdict.displayLabel ?? "Pending", systemImage: verdictSymbol(latest?.verdict))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(verdictColor(latest?.verdict))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(verdictColor(latest?.verdict).opacity(0.15)))
+            TaskDetailVerdictChip(verdict: latest?.verdict)
             Text(criterion.name)
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1329,7 +1400,6 @@ private struct TaskDetailCriterionExpandedDetail: View {
     private var isValidatorPromptOpen: Bool { expandedValidatorPromptIDs.contains(criterion.id) }
 
     var body: some View {
-        let records = (task.validation?.verdictRecords ?? []).filter { $0.criterionID == criterion.id }
         VStack(alignment: .leading, spacing: 6) {
             // A default-validated criterion has no authored prompt (it's empty); its stance is
             // the shipped default, shown by the "Validator prompt" disclosure below.
@@ -1340,33 +1410,26 @@ private struct TaskDetailCriterionExpandedDetail: View {
                 TaskDetailDebugTextBox(title: "Input enumerator prompt", text: inputEnumeratorPrompt)
             }
             if let pinned = Self.resolvedValidator(for: criterion) {
-                Button(action: {
-                    if isValidatorPromptOpen {
-                        expandedValidatorPromptIDs.remove(criterion.id)
-                    } else {
-                        expandedValidatorPromptIDs.insert(criterion.id)
-                    }
-                }, label: {
-                    Label(
-                        isValidatorPromptOpen
-                            ? "Hide validator prompt (\(pinned.name))"
-                            : "Validator prompt (\(pinned.name))",
-                        systemImage: "text.alignleft"
-                    )
-                    .font(.caption)
-                })
-                .buttonStyle(.plain)
-                .foregroundStyle(AppColors.disclosureToggle)
-                if isValidatorPromptOpen {
-                    TaskDetailDebugTextBox(
-                        title: "Validator definition — base prompt (the criterion & response format are appended at judge time; see a round's debug for the full sent prompt)",
-                        text: pinned.systemPrompt
-                    )
-                }
+                TaskDetailValidatorPromptDisclosure(
+                    definition: pinned, isOpen: isValidatorPromptOpen,
+                    onToggle: toggleValidatorPrompt
+                )
             }
-            ForEach(records.reversed()) { record in
+            ForEach(verdictRecords.reversed()) { record in
                 TaskDetailVerdictRecordRow(record: record, expandedDebugRecordIDs: $expandedDebugRecordIDs)
             }
+        }
+    }
+
+    private var verdictRecords: [CriterionVerdictRecord] {
+        (task.validation?.verdictRecords ?? []).filter { $0.criterionID == criterion.id }
+    }
+
+    private func toggleValidatorPrompt() {
+        if isValidatorPromptOpen {
+            expandedValidatorPromptIDs.remove(criterion.id)
+        } else {
+            expandedValidatorPromptIDs.insert(criterion.id)
         }
     }
 
@@ -1637,24 +1700,10 @@ private struct TaskDetailUpdatesSection: View {
 
     var body: some View {
         if !task.updates.isEmpty {
-            // Newest at top. When the total count fits in the 5-item preview the section
-            // is treated as fully expanded — no `(more)`/`(less)` link, since toggling
-            // would not change what's visible.
-            //
-            // Enumerate BEFORE reversing, so `offset` is the append index rather than the display
-            // position. `task.updates` is append-only — three `append` sites in TaskStore, no
-            // assignment outside init and decode — which makes that index a permanently stable
-            // identity. Keying on the display position instead handed row 0 to a different update
-            // on every append, rebinding each visible row's `MarkdownText.cachedBlocks` at once:
-            // the same `id: \.offset` aliasing the related-context section below warns about.
-            let newestFirst = Array(task.updates.enumerated().reversed())
-            let isExpandable = newestFirst.count > 5
-            let effectiveExpanded = mode == .expanded || !isExpandable
-            let visible = effectiveExpanded ? newestFirst : Array(newestFirst.prefix(5))
             VStack(alignment: .leading, spacing: 8) {
                 TaskDetailSectionTitleRow(
                     title: "Updates",
-                    subtitle: (!effectiveExpanded && isExpandable) ? "showing 5 of \(newestFirst.count)" : nil,
+                    subtitle: isPreviewing ? "showing \(Self.previewCount) of \(task.updates.count)" : nil,
                     copyText: Self.formattedUpdates(task.updates)
                 )
                 VStack(alignment: .leading, spacing: 6) {
@@ -1669,6 +1718,23 @@ private struct TaskDetailUpdatesSection: View {
             }
             Divider()
         }
+    }
+
+    private static let previewCount = 5
+
+    /// Newest first. Enumerated BEFORE reversing, so `offset` is the append index rather than the
+    /// display position — `task.updates` is append-only, which makes that index a permanently
+    /// stable identity. Keying on display position handed row 0 to a different update on every
+    /// append, rebinding each visible row's `MarkdownText.cachedBlocks` at once.
+    private var newestFirst: [(offset: Int, element: AgentTask.TaskUpdate)] {
+        Array(task.updates.enumerated().reversed())
+    }
+
+    /// No `(more)`/`(less)` link when everything already fits — toggling would change nothing.
+    private var isExpandable: Bool { task.updates.count > Self.previewCount }
+    private var isPreviewing: Bool { isExpandable && mode != .expanded }
+    private var visible: [(offset: Int, element: AgentTask.TaskUpdate)] {
+        isPreviewing ? Array(newestFirst.prefix(Self.previewCount)) : newestFirst
     }
 
     private static func formattedUpdates(_ updates: [AgentTask.TaskUpdate]) -> String {
@@ -1725,28 +1791,18 @@ private struct TaskDetailDescriptionSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TaskDetailDescriptionHeader(
-                editedAt: task.lastEditedAt,
-                copyText: displayedDescription,
-                canEdit: isEditable && !isEditing,
-                onEdit: beginEditing
-            )
+            TaskDetailDescriptionHeader(editedAt: task.lastEditedAt, copyText: displayedDescription,
+                                        canEdit: isEditable && !isEditing, onEdit: beginEditing)
             if isEditing {
-                TaskDetailDescriptionEditor(
-                    text: $editedDescription, isEditable: isEditable,
-                    onCancel: { isEditing = false }, onSave: save
-                )
+                TaskDetailDescriptionEditor(text: $editedDescription, isEditable: isEditable,
+                                            onCancel: { isEditing = false }, onSave: save)
             } else {
-                TaskDetailDescriptionBody(
-                    description: displayedDescription,
-                    isPreview: mode != .expanded && isExpandable
-                )
+                TaskDetailDescriptionBody(description: displayedDescription,
+                                          isPreview: mode != .expanded && isExpandable)
             }
-            if !task.descriptionAttachments.isEmpty && mode == .expanded {
-                TaskDetailSectionTitleRow(title: "Attachments",
-                                          copyText: formattedAttachments(task.descriptionAttachments))
-                TaskAttachmentList(attachments: task.descriptionAttachments,
-                                   urlResolver: attachmentURLResolver)
+            if mode == .expanded {
+                TaskDetailAttachmentsBlock(attachments: task.descriptionAttachments,
+                                           urlResolver: attachmentURLResolver)
             }
             if isExpandable && !isEditing {
                 DisclosureMoreLessLink(isExpanded: mode == .expanded, action: onToggle)
@@ -1841,21 +1897,17 @@ private struct TaskDetailRelatedContextSection: View {
                         // `id: \.content` pins expansion state to the memory itself, so a
                         // re-ordered array cannot move a disclosure onto a different entry.
                         ForEach(memories, id: \.content) { memory in
-                            TaskRelevantMemoryRow(
-                                memory: memory,
-                                isExpanded: memoryExpansionBinding(content: memory.content)
-                            )
+                            TaskRelevantMemoryRow(memory: memory,
+                                                  isExpanded: memoryExpansionBinding(content: memory.content))
                         }
                     }
                 }
                 if let priorTasks = task.relevantPriorTasks, !priorTasks.isEmpty {
                     TaskDetailContextGroup(heading: "Prior Tasks", spacing: 6) {
                         ForEach(priorTasks, id: \.taskID) { prior in
-                            TaskRelevantPriorTaskRow(
-                                priorTask: prior,
-                                isExpanded: priorTaskExpansionBinding(taskID: prior.taskID),
-                                onOpenTask: openPriorTask
-                            )
+                            TaskRelevantPriorTaskRow(priorTask: prior,
+                                                     isExpanded: priorTaskExpansionBinding(taskID: prior.taskID),
+                                                     onOpenTask: openPriorTask)
                         }
                     }
                 }
@@ -2019,6 +2071,19 @@ private struct TaskDetailTimingRows: View {
         if let scheduled = task.scheduledRunAt {
             TaskDetailMetadataRow(label: "Scheduled") { TaskDetailScheduledLine(date: scheduled) }
         }
+        TaskDetailNextRunRows(task: task, viewModel: viewModel)
+    }
+}
+
+/// When the task is due to run next.
+///
+/// Separate because `scheduledWakes` republishes whenever ANY wake in the session is scheduled or
+/// fires, and the rows above it are immutable history that should not redraw for that.
+private struct TaskDetailNextRunRows: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
         let wakes = viewModel.scheduledWakes(for: task.id)
         if !wakes.isEmpty {
             TaskDetailMetadataRow(label: wakes.count == 1 ? "Next Run" : "Next Runs", alignment: .top) {
