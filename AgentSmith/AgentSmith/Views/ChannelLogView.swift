@@ -404,12 +404,12 @@ struct ChannelLogView: View, Equatable {
                 }
                 .background(AppColors.channelBackground)
                 .environment(\.timestampPreferences, displayPrefs)
-                .onScrollGeometryChange(for: Bool.self) { geometry in
+                .onScrollGeometryChange(for: Bool.self, of: { geometry in
                     let distanceFromBottom = geometry.contentSize.height
                         - geometry.contentOffset.y
                         - geometry.containerSize.height
                     return distanceFromBottom <= geometry.containerSize.height * 0.2
-                } action: { _, nearBottom in
+                }, action: { _, nearBottom in
                     // Project rule: defer @State mutation out of scroll-geometry actions
                     // via DispatchQueue.main.async. The action callback fires rapidly during
                     // ScrollView animation/inertia; mutating @State synchronously triggers
@@ -434,7 +434,7 @@ struct ChannelLogView: View, Equatable {
                             }
                         }
                     }
-                }
+                })
                 .onScrollPhaseChange { _, newPhase in
                     userInteracting = newPhase == .interacting
                         || newPhase == .decelerating
@@ -1679,12 +1679,12 @@ private struct MessageRow: View, Equatable {
         @Binding var isExpanded: Bool
         
         var body: some View {
-            DisclosureGroup(isExpanded: $isExpanded) {
+            DisclosureGroup(isExpanded: $isExpanded, content: {
                 Text(message.content)
                     .font(AppFonts.channelBody.monospaced())
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
-            } label: {
+            }, label: {
                 if case .string(let toolName) = message.metadata?["tool"] {
                     Text("Output: \(toolName)")
                         .font(AppFonts.channelBody)
@@ -1694,7 +1694,7 @@ private struct MessageRow: View, Equatable {
                         .font(AppFonts.channelBody)
                         .foregroundStyle(.secondary)
                 }
-            }
+            })
         }
     }
     

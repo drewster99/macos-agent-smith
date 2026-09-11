@@ -520,15 +520,15 @@ struct SessionScene: View {
                     // session-restored attachments via @Environment(\.attachmentBytesLoader).
                     .environment(\.attachmentBytesLoader, vm.attachmentBytesLoader)
             } else {
-                ContentUnavailableView {
+                ContentUnavailableView(label: {
                     Label("No Session", systemImage: "rectangle.stack.badge.plus")
-                } description: {
+                }, description: {
                     Text("This window has no session bound to it yet. Open one from the Session menu, or create a new one.")
-                } actions: {
+                }, actions: {
                     Button("New Session") {
                         Task { await createAndAdoptSession() }
                     }
-                }
+                })
             }
         }
         .overlay {
@@ -580,14 +580,13 @@ struct SessionScene: View {
         .confirmationDialog(
             deleteConfirmTitle,
             isPresented: $showDeleteConfirm,
-            titleVisibility: .visible
-        ) {
+            titleVisibility: .visible, actions: {
             Button("Archive its tasks & delete") { performSessionDelete(archiving: true) }
             Button("Delete its tasks & delete", role: .destructive) { performSessionDelete(archiving: false) }
             Button("Cancel", role: .cancel) { }
-        } message: {
+        }, message: {
             Text("The session's transcript, evidence, and schedules are removed. Its tasks move to Archived or Recently Deleted (recoverable). This can't be undone.")
-        }
+        })
     }
 
     /// Title for the delete-session confirmation, naming the session.

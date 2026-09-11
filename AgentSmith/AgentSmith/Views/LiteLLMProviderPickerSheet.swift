@@ -109,15 +109,15 @@ struct LiteLLMProviderPickerSheet: View {
                 candidatesForModel = await shared.llmKit.liteLLMProviderNames(matchingModelID: modelID)
             }
         }
-        .alert("Restart Required", isPresented: $showRestartNotice) {
+        .alert("Restart Required", isPresented: $showRestartNotice, actions: {
             Button("OK") { onSaved(); dismiss() }
-        } message: {
+        }, message: {
             // Deliberately does NOT offer "Refresh Models" as an alternative: that rebuilds the
             // model catalog but not `SharedAppState.pricingSnapshot`, which is only built at
             // startup — so costs would keep using the old prices while limits showed the new
             // ones. Restart is the only action that applies a remapping consistently.
             Text("The mapping was saved. The check marks below update right away, but limits, pricing, and capability flags are rebuilt at launch — restart Agent Smith to apply them.")
-        }
+        })
     }
 
     private var filteredNames: [(name: String, modelCount: Int)] {

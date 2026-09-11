@@ -79,7 +79,7 @@ struct TaskToolOverrideEditor: View {
     }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
+        DisclosureGroup(isExpanded: $expanded, content: {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(groups) { group in
                     if let title = group.title {
@@ -98,7 +98,7 @@ struct TaskToolOverrideEditor: View {
                     .padding(.top, 2)
             }
             .padding(.top, 4)
-        } label: {
+        }, label: {
             // Count only tools that actually appear as rows. Forced lifecycle tools are approved
             // by scoping but deliberately not listed, so counting raw `approvedTools` made the
             // header disagree with the visible list.
@@ -107,7 +107,7 @@ struct TaskToolOverrideEditor: View {
             let approvalText = task.approvedTools == nil ? "Not scoped yet" : "\(n) approved"
             Text(o > 0 ? "\(approvalText) · \(o) override\(o == 1 ? "" : "s")" : approvalText)
                 .foregroundStyle(.secondary)
-        }
+        })
     }
 
     private func groupHeader(title: String, group: ToolGroup) -> some View {

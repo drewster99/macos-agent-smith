@@ -67,19 +67,18 @@ struct MemoryEditorView: View {
         .alert("Error", isPresented: Binding(
             get: { editError != nil },
             set: { if !$0 { editError = nil } }
-        )) {
+        ), actions: {
             Button("OK") { editError = nil }
-        } message: {
+        }, message: {
             Text(editError ?? "")
-        }
+        })
         .confirmationDialog(
             "Delete this memory?",
             isPresented: Binding(
                 get: { memoryPendingDeletionID != nil },
                 set: { if !$0 { memoryPendingDeletionID = nil } }
             ),
-            titleVisibility: .visible
-        ) {
+            titleVisibility: .visible, actions: {
             Button("Delete", role: .destructive) {
                 if let id = memoryPendingDeletionID {
                     Task { await shared.deleteMemory(id: id) }
@@ -89,9 +88,9 @@ struct MemoryEditorView: View {
             Button("Cancel", role: .cancel) {
                 memoryPendingDeletionID = nil
             }
-        } message: {
+        }, message: {
             Text("This cannot be undone.")
-        }
+        })
     }
 
     // MARK: - Search debounce
@@ -282,11 +281,11 @@ struct MemoryEditorView: View {
             .disabled(showTaskSummaries)
 
             if !showTaskSummaries {
-                Button {
+                Button(action: {
                     beginAddingMemory()
-                } label: {
+                }, label: {
                     Label("Add Memory", systemImage: "plus")
-                }
+                })
                 .controlSize(.small)
                 .disabled(isAddingMemory || shared.memoryStore == nil)
             }

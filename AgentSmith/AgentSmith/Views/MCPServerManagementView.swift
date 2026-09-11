@@ -154,7 +154,7 @@ private struct MCPServerRow: View {
                 }
 
                 if let error = status?.error, !error.isEmpty {
-                    DisclosureGroup(isExpanded: $errorExpanded) {
+                    DisclosureGroup(isExpanded: $errorExpanded, content: {
                         ScrollView {
                             Text(fullErrorText(error: error, stderr: status?.stderrTail))
                                 .font(.system(.caption2, design: .monospaced))
@@ -164,17 +164,17 @@ private struct MCPServerRow: View {
                                 .padding(.vertical, 2)
                         }
                         .frame(maxHeight: 220)
-                    } label: {
+                    }, label: {
                         Text(error)
                             .font(.caption)
                             .foregroundStyle(.red)
                             .lineLimit(2)
-                    }
+                    })
                     .font(.caption)
                 }
 
                 if let tools = status?.advertisedToolNames, !tools.isEmpty {
-                    DisclosureGroup(isExpanded: $expanded) {
+                    DisclosureGroup(isExpanded: $expanded, content: {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(tools.sorted(), id: \.self) { tool in
                                 VStack(alignment: .leading, spacing: 1) {
@@ -197,11 +197,11 @@ private struct MCPServerRow: View {
                         }
                         .padding(.leading, 8)
                         .padding(.top, 4)
-                    } label: {
+                    }, label: {
                         Text("\(tools.count) tool\(tools.count == 1 ? "" : "s") — \(status?.toolCount ?? 0) enabled")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    }
+                    })
                 }
 
                 if status?.error == nil, let stderr = status?.stderrTail, !stderr.isEmpty {

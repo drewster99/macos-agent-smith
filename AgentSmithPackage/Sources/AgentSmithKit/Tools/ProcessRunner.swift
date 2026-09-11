@@ -78,7 +78,7 @@ enum ProcessRunner {
             }
         }
 
-        return try await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Result, Error>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     // Raw pipe (fds only; no non-Sendable FileHandle) for stdout+stderr.
@@ -328,7 +328,7 @@ enum ProcessRunner {
                     ))
                 }
             }
-        } onCancel: {
+        }, onCancel: {
             let pidToKill: pid_t? = stateBox.withLock { state in
                 switch state {
                 case .pending:
@@ -342,7 +342,7 @@ enum ProcessRunner {
                 }
             }
             if let pid = pidToKill { terminate(pid) }
-        }
+        })
     }
 
     /// Maps a `waitpid` status to a shell-style exit code: the exit status for a normal exit,

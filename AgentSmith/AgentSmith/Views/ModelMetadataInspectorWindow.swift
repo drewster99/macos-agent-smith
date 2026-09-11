@@ -119,11 +119,11 @@ struct ModelMetadataInspectorWindow: View {
 
     private func probeControls() -> some View {
         HStack {
-            Button {
+            Button(action: {
                 startProbe(modelIDs: Array(selectedModelIDs))
-            } label: {
+            }, label: {
                 Label("Probe Selected (\(selectedModelIDs.count))", systemImage: "bolt.badge.checkmark")
-            }
+            })
             .disabled(selectedModelIDs.isEmpty || probeRunner.isRunning || selectedProvider == nil)
 
             if probeRunner.isRunning {
@@ -191,17 +191,17 @@ struct ModelCompositionDetailView: View {
                     disagreementsSection(composition)
                     fieldsSection(composition)
                 } else {
-                    ContentUnavailableView {
+                    ContentUnavailableView(label: {
                         Label("Composition Not Computed", systemImage: "arrow.triangle.2.circlepath")
-                    } description: {
+                    }, description: {
                         Text("Refresh this provider's models to compute the layered merge for this model.")
-                    } actions: {
+                    }, actions: {
                         Button("Refresh Provider Models") {
                             guard let provider = kit.providers.first(where: { $0.id == providerID }) else { return }
                             Task { await kit.refreshModels(provider: provider) }
                         }
                         .disabled(kit.isRefreshing)
-                    }
+                    })
                 }
             }
             .padding(14)
@@ -321,7 +321,7 @@ struct ModelCompositionDetailView: View {
     @ViewBuilder
     private func disagreementsSection(_ composition: MergedModelComposition) -> some View {
         if !composition.disagreements.isEmpty {
-            GroupBox {
+            GroupBox(content: {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(composition.disagreements.enumerated()), id: \.offset) { _, disagreement in
                         HStack(spacing: 6) {
@@ -339,10 +339,10 @@ struct ModelCompositionDetailView: View {
                     }
                 }
                 .padding(4)
-            } label: {
+            }, label: {
                 Label("Disagreements", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
-            }
+            })
         }
     }
 
@@ -513,13 +513,13 @@ private struct EvidenceInfoButton: View {
     @State private var isShowing = false
 
     var body: some View {
-        Button {
+        Button(action: {
             isShowing.toggle()
-        } label: {
+        }, label: {
             Image(systemName: "info.circle")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-        }
+        })
         .buttonStyle(.plain)
         .help(evidence)
         .popover(isPresented: $isShowing, arrowEdge: .bottom) {

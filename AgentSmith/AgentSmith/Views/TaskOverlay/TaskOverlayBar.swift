@@ -88,37 +88,37 @@ struct TaskOverlayBar: View {
 
     @ViewBuilder
     private func drawerMenu() -> some View {
-        Menu {
+        Menu(content: {
             Text("More tasks")
             ForEach(drawerEntries) { entry in
                 if let task = viewModel.tasks.first(where: { $0.id == entry.id }) {
-                    Button {
+                    Button(action: {
                         openWindow(value: TaskOverlayPanelTarget(sessionID: viewModel.session.id, taskID: task.id))
-                    } label: {
+                    }, label: {
                         Label(task.title, systemImage: task.status.overlaySymbolName)
-                    }
+                    })
                 }
             }
-        } label: {
+        }, label: {
             Text("+\(drawerEntries.count)")
                 .font(.caption2.bold())
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(AppColors.background))
-        }
+        })
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("Tasks beyond the visible columns — opens in a separate window")
     }
 
     private func collapseButton(collapsed: Bool) -> some View {
-        Button {
+        Button(action: {
             shared.taskOverlayCollapsed = !collapsed
-        } label: {
+        }, label: {
             Image(systemName: collapsed ? "chevron.down" : "chevron.up")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-        }
+        })
         .buttonStyle(.plain)
         .help(collapsed ? "Expand task overlay" : "Collapse to strip")
     }

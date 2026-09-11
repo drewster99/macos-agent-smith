@@ -719,16 +719,16 @@ private struct FlowingAttachmentChips: View {
     var body: some View {
         HStack(spacing: 6) {
             ForEach(attachments) { attachment in
-                Button {
+                Button(action: {
                     open(attachment, reveal: NSEvent.modifierFlags.contains(.command))
-                } label: {
+                }, label: {
                     Label(attachment.filename, systemImage: "paperclip")
                         .font(.caption2)
                         .lineLimit(1)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(AppColors.secondaryBackground))
-                }
+                })
                 .buttonStyle(.plain)
                 .help("Click to preview · ⌘-click to reveal in Finder")
             }

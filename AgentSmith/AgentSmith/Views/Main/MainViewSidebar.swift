@@ -16,12 +16,12 @@ struct MainViewSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Button {
+                Button(action: {
                     if orchestrationGearCommandHeld { onOpenGlobalOrchestration() }
                     else { onOpenSessionOrchestration() }
-                } label: {
+                }, label: {
                     Image(systemName: "gearshape")
-                }
+                })
                 .buttonStyle(.plain)
                 .onModifierKeysChanged(mask: .command) { _, newKeys in
                     orchestrationGearCommandHeld = newKeys.contains(.command)

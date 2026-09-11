@@ -32,7 +32,7 @@ struct MainView: View {
     private var shared: SharedAppState { viewModel.shared }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(sidebar: {
             MainViewSidebar(
                 viewModel: viewModel,
                 onCreateTask: { taskCreatorPresentation = .creating() },
@@ -42,7 +42,7 @@ struct MainView: View {
                     openSettings()
                 }
             )
-        } detail: {
+        }, detail: {
             MainViewDetailColumn(
                 viewModel: viewModel,
                 shared: shared,
@@ -52,7 +52,7 @@ struct MainView: View {
                 onAbortReset: handleAbortReset,
                 onDrop: handleDrop
             )
-        }
+        })
         .onKeyPress(characters: .init(charactersIn: "l"), phases: .down) { keyPress in
             guard keyPress.modifiers == .control else { return .ignored }
             viewModel.clearLog()

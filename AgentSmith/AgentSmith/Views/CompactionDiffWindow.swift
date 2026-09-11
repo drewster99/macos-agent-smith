@@ -51,14 +51,14 @@ struct CompactionDiffWindow: View {
                         .padding(12)
                 } else {
                     ForEach(captures) { capture in
-                        Button {
+                        Button(action: {
                             selectedCaptureID = capture.id
-                        } label: {
+                        }, label: {
                             CaptureRow(
                                 capture: capture,
                                 isSelected: capture.id == (selectedCapture?.id)
                             )
-                        }
+                        })
                         .buttonStyle(.plain)
                         Divider()
                     }
@@ -158,17 +158,17 @@ private struct CompactionDiffDetailView: View {
                     Text("\(min(currentChangeIndex + 1, changeRowIDs.count)) / \(changeRowIDs.count)")
                         .font(AppFonts.channelTimestamp.monospacedDigit())
                         .foregroundStyle(.secondary)
-                    Button {
+                    Button(action: {
                         currentChangeIndex = max(0, currentChangeIndex - 1)
-                    } label: {
+                    }, label: {
                         Image(systemName: "chevron.up")
-                    }
+                    })
                     .disabled(currentChangeIndex <= 0)
-                    Button {
+                    Button(action: {
                         currentChangeIndex = min(changeRowIDs.count - 1, currentChangeIndex + 1)
-                    } label: {
+                    }, label: {
                         Image(systemName: "chevron.down")
-                    }
+                    })
                     .disabled(currentChangeIndex >= changeRowIDs.count - 1)
                 }
                 .buttonStyle(.bordered)

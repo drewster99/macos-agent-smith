@@ -45,7 +45,7 @@ struct LLMTurnDisclosureRow: View, Equatable {
         // The `set:` closure forwards rather than passing `onExpandedChange` directly: handing the
         // stored closure straight to `Binding`'s generic `set:` makes SILGen emit a reabstraction
         // thunk that crashes IRGen in Swift 6.3.3 (assertion in SyncCallEmission::setArgs).
-        DisclosureGroup(isExpanded: Binding(get: { isExpanded }, set: { onExpandedChange($0) })) {
+        DisclosureGroup(isExpanded: Binding(get: { isExpanded }, set: { onExpandedChange($0) }), content: {
             VStack(alignment: .leading, spacing: 8) {
                 // --- Outgoing ---
                 if !turn.inputDelta.isEmpty {
@@ -107,9 +107,9 @@ struct LLMTurnDisclosureRow: View, Equatable {
             }
             .padding(.top, 4)
             .padding(.leading, 4)
-        } label: {
+        }, label: {
             turnHeaderLabel()
-        }
+        })
         .padding(.vertical, 2)
         .padding(.horizontal, 4)
         .background(AppColors.subtleRowBackgroundDim)

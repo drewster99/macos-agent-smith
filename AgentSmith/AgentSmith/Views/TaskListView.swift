@@ -426,9 +426,9 @@ struct TaskRowButton: View {
     @State private var sendBackTask: AgentTask?
 
     var body: some View {
-        Button {
+        Button(action: {
             viewModel.selectedTaskID = task.id
-        } label: {
+        }, label: {
             TaskRow(
                 task: task,
                 style: style,
@@ -439,7 +439,7 @@ struct TaskRowButton: View {
                 onStartRunnableTask: startRunnableTask
             )
             .contentShape(Rectangle())
-        }
+        })
         .buttonStyle(.plain)
         .background(task.id == viewModel.selectedTaskID
             ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.25)
@@ -535,15 +535,15 @@ struct TaskRowButton: View {
         Button(action: { startRunnableTask(task) }, label: {
             Label("Run", systemImage: "play")
         })
-        Menu {
+        Menu(content: {
             ForEach(viewModel.libraryGroups) { group in
                 Button(group.name) {
                     Task { await viewModel.moveLibraryTemplate(task.id, toGroup: group.id) }
                 }
             }
-        } label: {
+        }, label: {
             Label("Move to Group", systemImage: "folder")
-        }
+        })
         Divider()
         // Recoverable: soft-delete routes the template to the global inactive store (Deleted Templates),
         // where it can be undeleted back to the Library — NOT a bare permanent removal, so a mis-click is

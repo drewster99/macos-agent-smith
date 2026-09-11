@@ -13,13 +13,13 @@ struct TranscriptFilterBar: View {
 
     var body: some View {
         TranscriptPaneHeader(title: "Session transcript") {
-            Button {
+            Button(action: {
                 showPopover = true
-            } label: {
+            }, label: {
                 Image(systemName: isFiltering
                     ? "line.3.horizontal.decrease.circle.fill"
                     : "line.3.horizontal.decrease.circle")
-            }
+            })
             .buttonStyle(.borderless)
             .help("Choose which messages this pane shows")
             .popover(isPresented: $showPopover, arrowEdge: .top) {
@@ -299,7 +299,7 @@ private struct TranscriptKindGroupRow: View {
     }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
+        DisclosureGroup(isExpanded: $isExpanded, content: {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(orderedKinds, id: \.self) { kind in
                     Toggle(isOn: kindBinding(kind)) {
@@ -311,7 +311,7 @@ private struct TranscriptKindGroupRow: View {
             }
             .padding(.top, 4)
             .padding(.leading, 4)
-        } label: {
+        }, label: {
             HStack(spacing: 6) {
                 GroupTriStateCheckbox(state: selection.groupVisibility(of: group)) { makeAllVisible in
                     selection.setGroup(group, visible: makeAllVisible)
@@ -323,7 +323,7 @@ private struct TranscriptKindGroupRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
-        }
+        })
     }
 
     /// A mixed group says WHICH FRACTION shows — the group's stock description would misread as
@@ -349,12 +349,12 @@ private struct GroupTriStateCheckbox: View {
     let onSetAll: (Bool) -> Void
 
     var body: some View {
-        Button {
+        Button(action: {
             onSetAll(state != .all)
-        } label: {
+        }, label: {
             Image(systemName: symbolName)
                 .foregroundStyle(state == .none ? Color.secondary : Color.accentColor)
-        }
+        })
         .buttonStyle(.plain)
         .accessibilityLabel(state == .all ? "Hide all" : "Show all")
     }

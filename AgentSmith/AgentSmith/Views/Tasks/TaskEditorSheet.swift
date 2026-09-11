@@ -213,11 +213,11 @@ struct TaskEditorSheet: View {
                 HStack {
                     Text("Inputs").font(.headline)
                     Spacer()
-                    Button {
+                    Button(action: {
                         inputs.append(InputRow())
-                    } label: {
+                    }, label: {
                         Label("Add Input", systemImage: "plus.circle")
-                    }
+                    })
                     .buttonStyle(.plain)
                 }
                 ForEach($inputs) { $row in
@@ -229,11 +229,11 @@ struct TaskEditorSheet: View {
                             .textFieldStyle(.roundedBorder)
                         Toggle("Required", isOn: $row.required)
                             .toggleStyle(.checkbox)
-                        Button {
+                        Button(action: {
                             inputs.removeAll { $0.id == row.id }
-                        } label: {
+                        }, label: {
                             Image(systemName: "minus.circle")
-                        }
+                        })
                         .buttonStyle(.plain)
                     }
                 }
@@ -260,11 +260,11 @@ struct TaskEditorSheet: View {
             HStack {
                 Text("Acceptance").font(.headline)
                 Spacer()
-                Button {
+                Button(action: {
                     criteria.append(CriterionRow())
-                } label: {
+                }, label: {
                     Label("Add Criterion", systemImage: "plus.circle")
-                }
+                })
                 .buttonStyle(.plain)
                 .disabled(!canEditValidationContract)
             }
@@ -288,11 +288,11 @@ struct TaskEditorSheet: View {
                     .textFieldStyle(.roundedBorder)
                 Toggle("Waivable", isOn: row.waivable)
                     .toggleStyle(.checkbox)
-                Button {
+                Button(action: {
                     criteria.removeAll { $0.id == row.wrappedValue.id }
-                } label: {
+                }, label: {
                     Image(systemName: "minus.circle")
-                }
+                })
                 .buttonStyle(.plain)
             }
             VStack(alignment: .leading, spacing: 4) {
@@ -339,11 +339,11 @@ struct TaskEditorSheet: View {
             HStack {
                 Text("Seed Steps").font(.headline)
                 Spacer()
-                Button {
+                Button(action: {
                     steps.append(StepRow())
-                } label: {
+                }, label: {
                     Label("Add Step", systemImage: "plus.circle")
-                }
+                })
                 .buttonStyle(.plain)
                 .disabled(!canEditValidationContract)
             }
@@ -356,11 +356,11 @@ struct TaskEditorSheet: View {
                 HStack {
                     TextField("Step", text: $row.text)
                         .textFieldStyle(.roundedBorder)
-                    Button {
+                    Button(action: {
                         steps.removeAll { $0.id == row.id }
-                    } label: {
+                    }, label: {
                         Image(systemName: "minus.circle")
-                    }
+                    })
                     .buttonStyle(.plain)
                 }
                 .disabled(!canEditValidationContract)

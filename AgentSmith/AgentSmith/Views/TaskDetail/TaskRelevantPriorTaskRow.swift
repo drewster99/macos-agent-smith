@@ -48,13 +48,13 @@ struct TaskRelevantPriorTaskRow: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            Button {
+            Button(action: {
                 onOpenTask(priorTask.taskID)
-            } label: {
+            }, label: {
                 Text(priorTask.title)
                     .font(.callout.bold())
                     .foregroundStyle(.primary)
-            }
+            })
             .buttonStyle(.plain)
             .pointerStyle(.link)
             .help("Open this task in a new detail window")
