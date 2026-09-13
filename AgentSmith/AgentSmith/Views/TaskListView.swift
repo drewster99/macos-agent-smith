@@ -31,14 +31,21 @@ struct TaskListView: View {
         viewModel.recentlyDeletedTaskList.count { $0.isTemplate }
     }
 
-    private var isEmpty: Bool {
-        viewModel.recentActiveTasks.isEmpty && viewModel.libraryTemplates.isEmpty
+    /// Nothing in any bucket — the one state that replaces the whole sidebar with a placeholder.
+    /// Takes the active slice rather than reading it, so the body computes it only once.
+    private func isEmpty(activeTasks: [AgentTask]) -> Bool {
+        activeTasks.isEmpty && viewModel.libraryTemplates.isEmpty
             && viewModel.archivedTaskList.isEmpty && viewModel.recentlyDeletedTaskList.isEmpty
     }
 
     var body: some View {
+        // `recentActiveTasks` filters the active list twice, sorts it, then filters again through a
+        // per-template dictionary. It is not cached across property accesses, so it is computed ONCE
+        // here and handed down — reading it in both the empty check and the Recent section ran the
+        // whole thing twice per render.
+        let activeTasks = viewModel.recentActiveTasks
         Group {
-            if isEmpty {
+            if isEmpty(activeTasks: activeTasks) {
                 ContentUnavailableView(
                     "No Tasks",
                     systemImage: "checklist",
@@ -46,7 +53,7 @@ struct TaskListView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    TaskListRecentSection(viewModel: viewModel)
+                    TaskListRecentSection(activeTasks: activeTasks, viewModel: viewModel)
                     LibrarySectionView(viewModel: viewModel)
                     TaskBucketButtons(activeCount: viewModel.activeTaskList.count,
                                       archivedCount: viewModel.archivedTaskList.count,
@@ -125,10 +132,11 @@ private struct TaskBucketButton: View {
 /// Named, like the Library below it. An unlabelled list above a labelled one read as "all tasks"
 /// with a Library appended, which is not what this is.
 private struct TaskListRecentSection: View {
+    /// Supplied by the parent, which already computed it for the empty check.
+    let activeTasks: [AgentTask]
     let viewModel: AppViewModel
 
     var body: some View {
-        let activeTasks = viewModel.recentActiveTasks
         if !activeTasks.isEmpty {
             Text("Recent")
                 .font(.subheadline.weight(.semibold))
@@ -256,49 +264,77 @@ private struct TaskFamilyRows: View {
     /// care about. Lineage is carried by the template glyph on the row, not by shrinking it.
     private static let density: TaskRowDensity = .standard
 
-    /// Live runs — pending, starting, running, validating, paused, interrupted, scheduled, awaiting
-    /// review. Pinned above the history and NEVER hidden by collapsing: a run you can no longer see
-    /// is exactly the one you would have wanted to notice.
-    private var liveChildren: [AgentTask] { family.children.filter { !$0.status.isTerminal } }
-    /// Finished runs — the history the disclosure toggles.
-    private var finishedChildren: [AgentTask] { family.children.filter(\.status.isTerminal) }
-
-    private var disclosure: TaskRunListDisclosure? {
-        guard !finishedChildren.isEmpty else { return nil }
-        return TaskRunListDisclosure(isCollapsed: isCollapsed,
-                                     hiddenRunCount: finishedChildren.count,
-                                     toggle: { isCollapsed.toggle() })
-    }
-
     var body: some View {
+        // Partition ONCE per body pass, as LOCALS. `filter` is not cached across property
+        // accesses, so computed properties here re-filter on every read — five passes over a
+        // template's run list per render instead of two, and a template can have hundreds.
+        let runs = TaskFamilyRuns(children: family.children)
         VStack(alignment: .leading, spacing: 0) {
             TaskListRow(
                 task: family.parent,
                 style: style,
                 density: Self.density,
-                disclosure: disclosure,
+                disclosure: runs.disclosure(isCollapsed: isCollapsed) { isCollapsed.toggle() },
                 viewModel: viewModel
             )
-
             if !family.children.isEmpty {
-                // Live runs first and unconditionally; history below, only when expanded.
-                ForEach(liveChildren) { child in
-                    TaskFamilyChildRow(task: child, style: style, viewModel: viewModel)
-                }
-                if !isCollapsed {
-                    ForEach(finishedChildren) { child in
-                        TaskFamilyChildRow(task: child, style: style, viewModel: viewModel)
-                    }
-                }
-                // The child block carries no internal rules, so this is what closes it off
-                // from the next top-level task.
-                if !liveChildren.isEmpty || !isCollapsed {
-                    Divider()
-                }
+                TaskFamilyChildRows(runs: runs, isCollapsed: isCollapsed,
+                                    style: style, viewModel: viewModel)
             }
         }
     }
 
+}
+
+/// A family's runs, split once into the two groups the sidebar treats differently.
+///
+/// A value rather than two computed properties on the view: `filter` is not cached across property
+/// accesses, so properties would re-run the partition on every read.
+private struct TaskFamilyRuns {
+    /// Pending, starting, running, validating, paused, interrupted, scheduled, awaiting review.
+    /// Pinned above the history and NEVER hidden by collapsing — a run you can no longer see is
+    /// exactly the one you would have wanted to notice.
+    let live: [AgentTask]
+    /// `.completed` / `.failed` — the history the disclosure toggles.
+    let finished: [AgentTask]
+
+    init(children: [AgentTask]) {
+        live = children.filter { !$0.status.isTerminal }
+        finished = children.filter(\.status.isTerminal)
+    }
+
+    /// Nil when there is no history to hide — a chevron that toggles nothing is worse than none.
+    func disclosure(isCollapsed: Bool, toggle: @escaping () -> Void) -> TaskRunListDisclosure? {
+        guard !finished.isEmpty else { return nil }
+        return TaskRunListDisclosure(isCollapsed: isCollapsed,
+                                     hiddenRunCount: finished.count,
+                                     toggle: toggle)
+    }
+}
+
+/// A family's runs, indented under their parent.
+private struct TaskFamilyChildRows: View {
+    let runs: TaskFamilyRuns
+    let isCollapsed: Bool
+    let style: TaskRowStyle
+    let viewModel: AppViewModel
+
+    var body: some View {
+        // Live runs first and unconditionally; history below, only when expanded.
+        ForEach(runs.live) { child in
+            TaskFamilyChildRow(task: child, style: style, viewModel: viewModel)
+        }
+        if !isCollapsed {
+            ForEach(runs.finished) { child in
+                TaskFamilyChildRow(task: child, style: style, viewModel: viewModel)
+            }
+        }
+        // The child block carries no internal rules, so this is what closes it off from the next
+        // top-level task.
+        if !runs.live.isEmpty || !isCollapsed {
+            Divider()
+        }
+    }
 }
 
 /// Child runs are indented and tinted as a block. There's deliberately no connector rail:
