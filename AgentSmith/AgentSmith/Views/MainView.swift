@@ -8,17 +8,64 @@ import os
 nonisolated private let dropLogger = Logger(subsystem: "com.agentsmith", category: "Drop")
 nonisolated private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
 
+/// The window's two columns.
+private struct MainViewSplit: View {
+    let viewModel: AppViewModel
+    let shared: SharedAppState
+    @Binding var isDropTargeted: Bool
+    @Binding var selectedImageAttachment: Attachment?
+    @FocusState.Binding var isLightboxFocused: Bool
+    @Binding var sheets: MainViewSheetState
+    let onOpenSettings: () -> Void
+    let onAbortReset: () -> Void
+    let onDrop: ([NSItemProvider]) -> Bool
+
+    var body: some View {
+        NavigationSplitView(sidebar: {
+            MainViewSidebar(
+                viewModel: viewModel,
+                onCreateTask: { sheets.taskCreator = .creating() },
+                onOpenSessionOrchestration: { sheets.showOrchestrationOverrides = true },
+                onOpenGlobalOrchestration: {
+                    shared.settingsSelectedTab = .orchestration
+                    onOpenSettings()
+                }
+            )
+        }, detail: {
+            MainViewDetailColumn(
+                viewModel: viewModel, shared: shared,
+                isDropTargeted: $isDropTargeted,
+                selectedImageAttachment: $selectedImageAttachment,
+                isLightboxFocused: $isLightboxFocused,
+                onAbortReset: onAbortReset, onDrop: onDrop
+            )
+        })
+    }
+}
+
+/// What a `MainView` window is presenting over itself.
+///
+/// One value rather than five `@State` flags: the startup gate sequences between onboarding, the
+/// welcome sheet and config validation, and that sequence is only legible when the states it moves
+/// between sit together.
+private struct MainViewSheetState {
+    var showOnboarding = false
+    var showWelcome = false
+    var showValidation = false
+    var showOrchestrationOverrides = false
+    var taskCreator: TaskEditorPresentation?
+}
+
 /// Primary app view: sidebar with tasks, detail with channel log and input.
 struct MainView: View {
     @Bindable var viewModel: AppViewModel
     @Bindable var sessionManager: SessionManager
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
-    @State private var showValidationSheet = false
-    @State private var showWelcomeSheet = false
-    @State private var showOnboarding = false
-    @State private var taskCreatorPresentation: TaskEditorPresentation?
-    @State private var showingOrchestrationOverrides = false
+    /// What this window is presenting over itself. One value rather than five independent flags:
+    /// they are mutually exclusive in practice and the startup gate sequences between them, so
+    /// keeping them together is what lets that sequencing be read in one place.
+    @State private var sheets = MainViewSheetState()
     @State private var isDropTargeted = false
     /// The attachment currently shown in the full-screen image viewer.
     @State private var selectedImageAttachment: Attachment?
@@ -32,124 +79,40 @@ struct MainView: View {
     private var shared: SharedAppState { viewModel.shared }
 
     var body: some View {
-        NavigationSplitView(sidebar: {
-            MainViewSidebar(
-                viewModel: viewModel,
-                onCreateTask: { taskCreatorPresentation = .creating() },
-                onOpenSessionOrchestration: { showingOrchestrationOverrides = true },
-                onOpenGlobalOrchestration: {
-                    shared.settingsSelectedTab = .orchestration
-                    openSettings()
-                }
-            )
-        }, detail: {
-            MainViewDetailColumn(
-                viewModel: viewModel,
-                shared: shared,
-                isDropTargeted: $isDropTargeted,
-                selectedImageAttachment: $selectedImageAttachment,
-                isLightboxFocused: $isLightboxFocused,
-                onAbortReset: handleAbortReset,
-                onDrop: handleDrop
-            )
-        })
+        MainViewSplit(
+            viewModel: viewModel, shared: shared,
+            isDropTargeted: $isDropTargeted,
+            selectedImageAttachment: $selectedImageAttachment,
+            isLightboxFocused: $isLightboxFocused,
+            sheets: $sheets,
+            onOpenSettings: { openSettings() },
+            onAbortReset: handleAbortReset,
+            onDrop: handleDrop
+        )
+        // `.onKeyPress` is scoped to the view it is attached to, so it stays out here on the split
+        // rather than moving into a child, which would narrow Control-L to that child's subtree.
         .onKeyPress(characters: .init(charactersIn: "l"), phases: .down) { keyPress in
             guard keyPress.modifiers == .control else { return .ignored }
             viewModel.clearLog()
             return .handled
         }
-        .inspector(isPresented: $viewModel.showInspector) {
-            InspectorView(viewModel: viewModel)
-        }
-        .toolbar {
-            MainViewToolbar(
-                viewModel: viewModel,
-                shared: shared,
-                onStart: handleStart,
-                onResetAndRestart: handleAbortReset,
-                onOpenMemoryBrowser: { openWindow(id: "memory-browser") },
-                onNewTask: { taskCreatorPresentation = .creating() },
-                onOpenOrchestrationOverrides: { showingOrchestrationOverrides = true }
-            )
-        }
-        .navigationTitle(viewModel.session.name)
-        .onChange(of: viewModel.hasLoadedPersistedState) { _, _ in
-            evaluateStartupGate()
-        }
-        .onChange(of: shared.hasLoadedPersistedState) { _, _ in
-            evaluateStartupGate()
-        }
-        .onChange(of: shared.createTaskRequestID) { _, newValue in
-            guard newValue == viewModel.session.id else { return }
-            // Project rule: defer @State / @Observable mutations out of `.onChange`.
-            DispatchQueue.main.async {
-                shared.createTaskRequestID = nil
-                taskCreatorPresentation = .creating()
-            }
-        }
-        .onChange(of: shared.sessionOverridesRequestID) { _, newValue in
-            guard newValue == viewModel.session.id else { return }
-            // Project rule: defer @State / @Observable mutations out of `.onChange`.
-            DispatchQueue.main.async {
-                shared.sessionOverridesRequestID = nil
-                showingOrchestrationOverrides = true
-            }
-        }
-        .onAppear {
-            // Project rule: defer @State mutations out of lifecycle closures.
-            DispatchQueue.main.async { installEscapeMonitor() }
-        }
-        .onDisappear {
-            DispatchQueue.main.async { removeEscapeMonitor() }
-        }
-        .sheet(isPresented: $showOnboarding) {
-            OnboardingView(
-                viewModel: viewModel,
-                shared: shared,
-                onComplete: {
-                    showOnboarding = false
-                    Task { await viewModel.start() }
-                },
-                onManualSetup: {
-                    showOnboarding = false
-                    openSettings()
-                }
-            )
-            // First-run setup must be finished or explicitly skipped ("Configure everything
-            // manually") — not casually dismissed, which would leave the app unconfigured.
-            .interactiveDismissDisabled()
-        }
-        .sheet(isPresented: $showWelcomeSheet, onDismiss: {
-            if !viewModel.allAgentConfigsValid {
-                showValidationSheet = true
-            }
-        }) {
-            WelcomeSheet(shared: shared, onDismiss: {
-                showWelcomeSheet = false
-            })
-        }
-        .sheet(isPresented: $showValidationSheet) {
-            ConfigValidationView(
-                viewModel: viewModel,
-                onStart: {
-                    showValidationSheet = false
-                    Task { await viewModel.start() }
-                },
-                onDismiss: {
-                    showValidationSheet = false
-                }
-            )
-        }
-        .sheet(item: $taskCreatorPresentation) { presentation in
-            TaskEditorSheet(mode: presentation.mode, viewModel: viewModel) {
-                taskCreatorPresentation = nil
-            }
-        }
-        .sheet(isPresented: $showingOrchestrationOverrides) {
-            SessionOrchestrationOverridesView(viewModel: viewModel) {
-                showingOrchestrationOverrides = false
-            }
-        }
+        .modifier(MainViewChrome(viewModel: viewModel, shared: shared,
+                                 onStart: handleStart, onResetAndRestart: handleAbortReset,
+                                 onOpenMemoryBrowser: { openWindow(id: "memory-browser") },
+                                 onNewTask: { sheets.taskCreator = .creating() },
+                                 onOpenOrchestrationOverrides: { sheets.showOrchestrationOverrides = true }))
+        // Order is load-bearing: chrome, then the handlers that react to state, then the sheets
+        // they raise. A `.sheet` ahead of an `.onChange` can stop the handler firing.
+        .modifier(MainViewLifecycle(
+            viewModel: viewModel, shared: shared,
+            onEvaluateStartupGate: evaluateStartupGate,
+            onCreateTask: { sheets.taskCreator = .creating() },
+            onShowSessionOverrides: { sheets.showOrchestrationOverrides = true },
+            onInstallEscapeMonitor: installEscapeMonitor,
+            onRemoveEscapeMonitor: removeEscapeMonitor
+        ))
+        .modifier(MainViewSheets(viewModel: viewModel, shared: shared,
+                                 sheets: $sheets, onOpenSettings: { openSettings() }))
     }
 
     /// Installs a window-local keyDown monitor for Escape so it stops the running task
@@ -203,11 +166,11 @@ struct MainView: View {
     private func evaluateStartupGate() {
         guard viewModel.hasLoadedPersistedState, shared.hasLoadedPersistedState else { return }
         if !shared.didCompleteOnboarding {
-            DispatchQueue.main.async { showOnboarding = true }
+            DispatchQueue.main.async { sheets.showOnboarding = true }
         } else if shared.nickname.isEmpty {
-            DispatchQueue.main.async { showWelcomeSheet = true }
+            DispatchQueue.main.async { sheets.showWelcome = true }
         } else if !viewModel.allAgentConfigsValid {
-            DispatchQueue.main.async { showValidationSheet = true }
+            DispatchQueue.main.async { sheets.showValidation = true }
         } else if shared.autoStartEnabled && !viewModel.isRunning && !CapabilityEvalRunner.isRequested {
             // A capability-eval launch must not also spin up real agents: they'd make their own
             // LLM calls, spending money and interleaving with the probe's logs. Gated here rather
@@ -224,7 +187,7 @@ struct MainView: View {
         if viewModel.allAgentConfigsValid {
             Task { await viewModel.start() }
         } else {
-            showValidationSheet = true
+            sheets.showValidation = true
         }
     }
 
@@ -398,5 +361,122 @@ private struct WelcomeSheet: View {
         shared.nickname = trimmed
         shared.persistNickname()
         onDismiss()
+    }
+}
+
+
+/// The window's inspector, toolbar and title.
+private struct MainViewChrome: ViewModifier {
+    @Bindable var viewModel: AppViewModel
+    let shared: SharedAppState
+    let onStart: () -> Void
+    let onResetAndRestart: () -> Void
+    let onOpenMemoryBrowser: () -> Void
+    let onNewTask: () -> Void
+    let onOpenOrchestrationOverrides: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .inspector(isPresented: $viewModel.showInspector) {
+                InspectorView(viewModel: viewModel)
+            }
+            .toolbar {
+                MainViewToolbar(
+                    viewModel: viewModel, shared: shared,
+                    onStart: onStart, onResetAndRestart: onResetAndRestart,
+                    onOpenMemoryBrowser: onOpenMemoryBrowser, onNewTask: onNewTask,
+                    onOpenOrchestrationOverrides: onOpenOrchestrationOverrides
+                )
+            }
+            .navigationTitle(viewModel.session.name)
+    }
+}
+
+/// The window's reactions to state it does not own: the startup gate, the cross-window request
+/// IDs other sessions raise, and the Escape monitor's lifetime.
+private struct MainViewLifecycle: ViewModifier {
+    let viewModel: AppViewModel
+    let shared: SharedAppState
+    let onEvaluateStartupGate: () -> Void
+    let onCreateTask: () -> Void
+    let onShowSessionOverrides: () -> Void
+    let onInstallEscapeMonitor: () -> Void
+    let onRemoveEscapeMonitor: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: viewModel.hasLoadedPersistedState) { _, _ in onEvaluateStartupGate() }
+            .onChange(of: shared.hasLoadedPersistedState) { _, _ in onEvaluateStartupGate() }
+            .onChange(of: shared.createTaskRequestID) { _, newValue in
+                guard newValue == viewModel.session.id else { return }
+                // Project rule: defer @State / @Observable mutations out of `.onChange`.
+                DispatchQueue.main.async {
+                    shared.createTaskRequestID = nil
+                    onCreateTask()
+                }
+            }
+            .onChange(of: shared.sessionOverridesRequestID) { _, newValue in
+                guard newValue == viewModel.session.id else { return }
+                DispatchQueue.main.async {
+                    shared.sessionOverridesRequestID = nil
+                    onShowSessionOverrides()
+                }
+            }
+            // Project rule: defer @State mutations out of lifecycle closures.
+            .onAppear { DispatchQueue.main.async { onInstallEscapeMonitor() } }
+            .onDisappear { DispatchQueue.main.async { onRemoveEscapeMonitor() } }
+    }
+}
+
+/// Everything this window presents over itself, in the order it can present them.
+private struct MainViewSheets: ViewModifier {
+    let viewModel: AppViewModel
+    let shared: SharedAppState
+    @Binding var sheets: MainViewSheetState
+    let onOpenSettings: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $sheets.showOnboarding) {
+                OnboardingView(
+                    viewModel: viewModel, shared: shared,
+                    onComplete: {
+                        sheets.showOnboarding = false
+                        Task { await viewModel.start() }
+                    },
+                    onManualSetup: {
+                        sheets.showOnboarding = false
+                        onOpenSettings()
+                    }
+                )
+                // First-run setup must be finished or explicitly skipped ("Configure everything
+                // manually") — not casually dismissed, which would leave the app unconfigured.
+                .interactiveDismissDisabled()
+            }
+            .sheet(isPresented: $sheets.showWelcome, onDismiss: {
+                if !viewModel.allAgentConfigsValid { sheets.showValidation = true }
+            }) {
+                WelcomeSheet(shared: shared, onDismiss: { sheets.showWelcome = false })
+            }
+            .sheet(isPresented: $sheets.showValidation) {
+                ConfigValidationView(
+                    viewModel: viewModel,
+                    onStart: {
+                        sheets.showValidation = false
+                        Task { await viewModel.start() }
+                    },
+                    onDismiss: { sheets.showValidation = false }
+                )
+            }
+            .sheet(item: $sheets.taskCreator) { presentation in
+                TaskEditorSheet(mode: presentation.mode, viewModel: viewModel) {
+                    sheets.taskCreator = nil
+                }
+            }
+            .sheet(isPresented: $sheets.showOrchestrationOverrides) {
+                SessionOrchestrationOverridesView(viewModel: viewModel) {
+                    sheets.showOrchestrationOverrides = false
+                }
+            }
     }
 }

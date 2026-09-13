@@ -67,115 +67,144 @@ struct MainViewDetailColumn: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if shared.taskOverlayVisible {
-                TaskOverlayBar(viewModel: viewModel, shared: shared)
-            }
+            MainViewDetailBanners(viewModel: viewModel, shared: shared, onAbortReset: onAbortReset)
+            MainViewTranscripts(
+                viewModel: viewModel,
+                displayPrefs: cachedDisplayPrefs,
+                onExportTaskPDF: exportTaskPDFAction,
+                onOpenMCPSettings: openMCPSettingsAction,
+                selectedImageAttachment: $selectedImageAttachment
+            )
+            .modifier(TranscriptDisplayPreferenceSync(shared: shared, cache: $cachedDisplayPrefs))
+            Divider()
+            MainViewSessionInput(viewModel: viewModel)
+        }
+        // Order is load-bearing: content, then the drop target, then the overlays it can raise.
+        .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted, perform: onDrop)
+        .modifier(DropTargetHighlight(isTargeted: isDropTargeted))
+        .modifier(ImageLightboxOverlay(attachment: $selectedImageAttachment,
+                                       isFocused: $isLightboxFocused))
+    }
+}
 
-            if viewModel.isAborted {
-                AbortBanner(
-                    reason: viewModel.abortReason,
-                    onReset: onAbortReset
+/// The column's banner stack: the task overlay bar, then whatever the session needs to announce.
+private struct MainViewDetailBanners: View {
+    let viewModel: AppViewModel
+    let shared: SharedAppState
+    let onAbortReset: () -> Void
+
+    var body: some View {
+        if shared.taskOverlayVisible {
+            TaskOverlayBar(viewModel: viewModel, shared: shared)
+        }
+        if viewModel.isAborted {
+            AbortBanner(reason: viewModel.abortReason, onReset: onAbortReset)
+        }
+        if let reviewTask = viewModel.taskAwaitingReview {
+            ReviewBanner(taskTitle: reviewTask.title,
+                         isHelpRequest: reviewTask.status == .awaitingHelp)
+        }
+    }
+}
+
+/// The two stacked transcripts: the selected task's above, the full session's below.
+///
+/// NOT a VSplitView — that is AppKit's NSSplitView, and nesting one here made this column rigid at
+/// the window level: with the sidebar and the inspector both open, the window pushed the SIDEBAR
+/// off-screen rather than compress this column. `TranscriptVerticalSplit`'s doc comment carries the
+/// full mechanism; it also owns the pane floors, the divider's resting position, and the greedy
+/// cross-axis frames its panes need. (The greedy frame inside `ChannelLogView` is still
+/// load-bearing — a vertical ScrollView otherwise reports its CONTENT's width; measured: an 11pt
+/// ribbon at a 300pt proposal.)
+private struct MainViewTranscripts: View {
+    let viewModel: AppViewModel
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        TranscriptVerticalSplit(
+            top: {
+                TaskTranscriptTopPane(
+                    viewModel: viewModel, displayPrefs: displayPrefs,
+                    onExportTaskPDF: onExportTaskPDF, onOpenMCPSettings: onOpenMCPSettings,
+                    selectedImageAttachment: $selectedImageAttachment
+                )
+            },
+            bottom: {
+                // Its own provider — the inspector still reads the unfiltered firehose.
+                BottomTranscriptPane(
+                    viewModel: viewModel, displayPrefs: displayPrefs,
+                    onExportTaskPDF: onExportTaskPDF, onOpenMCPSettings: onOpenMCPSettings,
+                    selectedImageAttachment: $selectedImageAttachment
                 )
             }
+        )
+    }
+}
 
-            if let reviewTask = viewModel.taskAwaitingReview {
-                ReviewBanner(taskTitle: reviewTask.title, isHelpRequest: reviewTask.status == .awaitingHelp)
-            }
+/// Keeps `cachedDisplayPrefs` in step with the six shared preferences it mirrors.
+///
+/// Six observers rather than one over a composed value, deliberately: building the composite inside
+/// `onChange(of:)` would construct a `TimestampPreferences` on every body pass, which is the exact
+/// cost the cache exists to avoid. Collapsing them is a real option — `TimestampPreferences` is
+/// Equatable — but it overturns that documented decision, so it stays a separate question.
+///
+/// Each write is deferred a runloop tick per the project rule on @State mutation inside `.onChange`.
+private struct TranscriptDisplayPreferenceSync: ViewModifier {
+    let shared: SharedAppState
+    @Binding var cache: TimestampPreferences
 
-            // NOT a VSplitView — that is AppKit's NSSplitView, and nesting one here made this
-            // column rigid at the window level: with the sidebar and the inspector both open,
-            // the window pushed the SIDEBAR off-screen rather than compress this column.
-            // TranscriptVerticalSplit's doc comment carries the full mechanism; it also owns
-            // the pane floors and the divider's resting position, and applies the greedy
-            // cross-axis frames its panes need. (The greedy frame inside ChannelLogView is
-            // still load-bearing — a vertical ScrollView otherwise reports its CONTENT's
-            // width; measured: an 11pt ribbon at a 300pt proposal.)
-            TranscriptVerticalSplit(
-                top: {
-                    // Top: the selected task's transcript (or a "Select a task" prompt).
-                    TaskTranscriptTopPane(
-                        viewModel: viewModel,
-                        displayPrefs: cachedDisplayPrefs,
-                        onExportTaskPDF: exportTaskPDFAction,
-                        onOpenMCPSettings: openMCPSettingsAction,
-                        selectedImageAttachment: $selectedImageAttachment
-                    )
-                },
-                bottom: {
-                    // Bottom: the full session transcript, filtered by the user's per-session
-                    // config (its own provider — the inspector still reads the unfiltered
-                    // firehose).
-                    BottomTranscriptPane(
-                        viewModel: viewModel,
-                        displayPrefs: cachedDisplayPrefs,
-                        onExportTaskPDF: exportTaskPDFAction,
-                        onOpenMCPSettings: openMCPSettingsAction,
-                        selectedImageAttachment: $selectedImageAttachment
-                    )
-                }
-            )
-            // Update cached display preferences when any of the underlying shared preferences change.
-            // This avoids creating a new TimestampPreferences instance on every body pass.
+    func body(content: Content) -> some View {
+        content
             .onChange(of: shared.showTimestampsOnTaskBanners) { _, newValue in
-                DispatchQueue.main.async {
-                    cachedDisplayPrefs.taskBanners = newValue
-                }
+                DispatchQueue.main.async { cache.taskBanners = newValue }
             }
             .onChange(of: shared.showTimestampsOnToolCalls) { _, newValue in
-                DispatchQueue.main.async {
-                    cachedDisplayPrefs.toolCalls = newValue
-                }
+                DispatchQueue.main.async { cache.toolCalls = newValue }
             }
             .onChange(of: shared.showTimestampsOnMessaging) { _, newValue in
-                DispatchQueue.main.async {
-                    cachedDisplayPrefs.messaging = newValue
-                }
+                DispatchQueue.main.async { cache.messaging = newValue }
             }
             .onChange(of: shared.showTimestampsOnSystemMessages) { _, newValue in
-                DispatchQueue.main.async {
-                    cachedDisplayPrefs.systemMessages = newValue
-                }
+                DispatchQueue.main.async { cache.systemMessages = newValue }
             }
             .onChange(of: shared.showElapsedTimeOnToolCalls) { _, newValue in
-                DispatchQueue.main.async {
-                    cachedDisplayPrefs.elapsedTimeOnToolCalls = newValue
-                }
+                DispatchQueue.main.async { cache.elapsedTimeOnToolCalls = newValue }
             }
             .onChange(of: shared.showRestartChrome) { _, newValue in
-                DispatchQueue.main.async {
-                    cachedDisplayPrefs.showRestartChrome = newValue
-                }
+                DispatchQueue.main.async { cache.showRestartChrome = newValue }
             }
+    }
+}
 
-            Divider()
+/// The composer, with every action it can take on the session.
+private struct MainViewSessionInput: View {
+    @Bindable var viewModel: AppViewModel
 
-            UserInputView(
-                text: $viewModel.inputText,
-                pendingAttachments: viewModel.pendingAttachments,
-                isRunning: viewModel.isRunning,
-                onSend: {
-                    Task { await viewModel.sendMessage() }
-                },
-                onAttach: { urls in
-                    viewModel.addAttachments(from: urls)
-                },
-                onRemoveAttachment: { id in
-                    viewModel.removePendingAttachment(id: id)
-                },
-                onHistoryUp: {
-                    viewModel.navigateHistory(.up)
-                },
-                onHistoryDown: {
-                    viewModel.navigateHistory(.down)
-                },
-                onPaste: {
-                    viewModel.pasteFromClipboard()
-                }
-            )
-        }
-        .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted, perform: onDrop)
-        .overlay {
-            if isDropTargeted {
+    var body: some View {
+        UserInputView(
+            text: $viewModel.inputText,
+            pendingAttachments: viewModel.pendingAttachments,
+            isRunning: viewModel.isRunning,
+            onSend: { Task { await viewModel.sendMessage() } },
+            onAttach: { urls in viewModel.addAttachments(from: urls) },
+            onRemoveAttachment: { id in viewModel.removePendingAttachment(id: id) },
+            onHistoryUp: { viewModel.navigateHistory(.up) },
+            onHistoryDown: { viewModel.navigateHistory(.down) },
+            onPaste: { viewModel.pasteFromClipboard() }
+        )
+    }
+}
+
+/// The blue rule that shows the column will accept a drop.
+private struct DropTargetHighlight: ViewModifier {
+    let isTargeted: Bool
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if isTargeted {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(.blue, lineWidth: 3)
                     .background(AppColors.dropTargetTint)
@@ -183,29 +212,36 @@ struct MainViewDetailColumn: View {
                     .allowsHitTesting(false)
             }
         }
-        .overlay {
-            if let attachment = selectedImageAttachment {
-                ImageLightbox(attachment: attachment, onDismiss: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        selectedImageAttachment = nil
-                    }
-                })
-                .focusable()
-                .focusEffectDisabled()
-                .focused($isLightboxFocused)
-                .onAppear {
+    }
+}
+
+/// The full-size image viewer raised over the column.
+///
+/// `isFocused` crosses as a `FocusState<Bool>.Binding`, not a plain `Binding<Bool>`: focus state is
+/// a distinct wrapper and a plain binding here compiles but never actually focuses, so the Escape
+/// key stops dismissing the lightbox.
+private struct ImageLightboxOverlay: ViewModifier {
+    @Binding var attachment: Attachment?
+    @FocusState.Binding var isFocused: Bool
+
+    private func dismiss() {
+        withAnimation(.easeInOut(duration: 0.2)) { attachment = nil }
+    }
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if let attachment {
+                ImageLightbox(attachment: attachment, onDismiss: dismiss)
+                    .focusable()
+                    .focusEffectDisabled()
+                    .focused($isFocused)
                     // Project rule: defer @FocusState mutations out of lifecycle closures.
-                    DispatchQueue.main.async { isLightboxFocused = true }
-                }
-                .onDisappear {
-                    DispatchQueue.main.async { isLightboxFocused = false }
-                }
-                .onKeyPress(.escape) {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        selectedImageAttachment = nil
+                    .onAppear { DispatchQueue.main.async { isFocused = true } }
+                    .onDisappear { DispatchQueue.main.async { isFocused = false } }
+                    .onKeyPress(.escape) {
+                        dismiss()
+                        return .handled
                     }
-                    return .handled
-                }
             }
         }
     }
@@ -273,17 +309,16 @@ private struct TaskTranscriptTopPane: View {
     var body: some View {
         Group {
             if let selected {
+                // A template with no run drilled into shows its run history instead of a transcript.
                 if selected.isTemplate && viewModel.selectedTemplateRunID == nil {
                     TemplateRunHistoryPane(template: selected, viewModel: viewModel)
                 } else {
                     TaskTranscriptContent(
-                        viewModel: viewModel,
-                        effectiveTask: effectiveTask,
-                        showBackToRuns: selected.isTemplate,
-                        displayPrefs: displayPrefs,
-                        onExportTaskPDF: onExportTaskPDF,
-                        onOpenMCPSettings: onOpenMCPSettings,
-                        selectedImageAttachment: $selectedImageAttachment)
+                        viewModel: viewModel, effectiveTask: effectiveTask,
+                        showBackToRuns: selected.isTemplate, displayPrefs: displayPrefs,
+                        onExportTaskPDF: onExportTaskPDF, onOpenMCPSettings: onOpenMCPSettings,
+                        selectedImageAttachment: $selectedImageAttachment
+                    )
                 }
             } else {
                 ContentUnavailableView(
@@ -329,35 +364,50 @@ private struct TaskTranscriptContent: View {
             // Names the TASK, in the sidebar's chip and the transcript's own orange — the two
             // transcripts are visually identical otherwise, so this is what distinguishes them.
             TaskTranscriptHeader(task: effectiveTask)
-            // Vend a read-only transcript from the origin session's log when the live provider can't be
-            // trusted to have it: a task NOT resident in this session (archived/deleted or cross-session
-            // and not restored), or a finished drilled run (trimmed from the tail). Otherwise the live
-            // streaming provider — a resident, still-running task, including a live drilled run.
-            if let effectiveTask, let origin = effectiveTask.sessionID, !residentHere || finishedDrilledRun {
+            // Read the origin session's LOG when the live provider can't be trusted to have the
+            // messages: a task not resident here (archived/deleted, or cross-session and not
+            // restored), or a finished drilled run (trimmed from the bounded tail). Otherwise the
+            // live streaming provider — a resident, still-running task, drilled runs included.
+            if let effectiveTask, let origin = effectiveTask.sessionID,
+               !residentHere || finishedDrilledRun {
                 CrossSessionTranscriptView(
-                    originSessionID: origin,
-                    taskID: effectiveTask.id,
-                    viewModel: viewModel,
-                    displayPrefs: displayPrefs,
-                    onExportTaskPDF: onExportTaskPDF,
+                    originSessionID: origin, taskID: effectiveTask.id, viewModel: viewModel,
+                    displayPrefs: displayPrefs, onExportTaskPDF: onExportTaskPDF,
                     onOpenMCPSettings: onOpenMCPSettings,
                     selectedImageAttachment: $selectedImageAttachment
                 )
             } else {
-                ChannelLogView(
-                    messages: viewModel.topTranscriptProvider.messages,
-                    toolRequestIDs: viewModel.topTranscriptProvider.toolRequestIDs,
-                    persistedHistoryCount: 0,      // task-scoped pane: no full-log "Restore" affordance
-                    hasRestoredHistory: true,
-                    onRestoreHistory: {},
-                    onExportTaskPDF: onExportTaskPDF,
-                    onOpenMCPSettings: onOpenMCPSettings,
-                    displayPrefs: displayPrefs,
+                LiveTaskTranscript(
+                    viewModel: viewModel, displayPrefs: displayPrefs,
+                    onExportTaskPDF: onExportTaskPDF, onOpenMCPSettings: onOpenMCPSettings,
                     selectedImageAttachment: $selectedImageAttachment
                 )
-                .equatable()
             }
         }
+    }
+}
+
+/// The live streaming transcript for a task resident in this session.
+private struct LiveTaskTranscript: View {
+    let viewModel: AppViewModel
+    let displayPrefs: TimestampPreferences
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        ChannelLogView(
+            messages: viewModel.topTranscriptProvider.messages,
+            toolRequestIDs: viewModel.topTranscriptProvider.toolRequestIDs,
+            persistedHistoryCount: 0,      // task-scoped pane: no full-log "Restore" affordance
+            hasRestoredHistory: true,
+            onRestoreHistory: {},
+            onExportTaskPDF: onExportTaskPDF,
+            onOpenMCPSettings: onOpenMCPSettings,
+            displayPrefs: displayPrefs,
+            selectedImageAttachment: $selectedImageAttachment
+        )
+        .equatable()
     }
 }
 
