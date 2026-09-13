@@ -21,20 +21,24 @@ struct TaskListView: View {
     /// closed. Replaces the old inline-expand toggles — buckets now open their own selection pane.
     @State private var browserScope: TaskBrowserScope?
 
-    var body: some View {
-        // Active shows only running + recent (capped); templates now live in their own Library section.
-        let activeTasks = viewModel.recentActiveTasks
-        let templates = viewModel.libraryTemplates
-        let archivedTasks = viewModel.archivedTaskList
-        let deletedTasks = viewModel.recentlyDeletedTaskList
-        // Deleted TEMPLATES get their own bucket ("like archived and deleted") so they aren't lost among
-        // deleted tasks and can be undeleted back to the Library. Both are recentlyDeleted in the global
-        // inactive store; `isTemplate` separates them.
-        let deletedTaskCount = deletedTasks.filter { !$0.isTemplate }.count
-        let deletedTemplateCount = deletedTasks.filter { $0.isTemplate }.count
+    /// Deleted TEMPLATES get their own bucket ("like archived and deleted") so they aren't lost
+    /// among deleted tasks and can be undeleted back to the Library. Both are `.recentlyDeleted` in
+    /// the global inactive store; `isTemplate` is what separates them.
+    private var deletedTaskCount: Int {
+        viewModel.recentlyDeletedTaskList.count { !$0.isTemplate }
+    }
+    private var deletedTemplateCount: Int {
+        viewModel.recentlyDeletedTaskList.count { $0.isTemplate }
+    }
 
+    private var isEmpty: Bool {
+        viewModel.recentActiveTasks.isEmpty && viewModel.libraryTemplates.isEmpty
+            && viewModel.archivedTaskList.isEmpty && viewModel.recentlyDeletedTaskList.isEmpty
+    }
+
+    var body: some View {
         Group {
-            if activeTasks.isEmpty && templates.isEmpty && archivedTasks.isEmpty && deletedTasks.isEmpty {
+            if isEmpty {
                 ContentUnavailableView(
                     "No Tasks",
                     systemImage: "checklist",
@@ -42,25 +46,10 @@ struct TaskListView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    // Named, like Library below it. It is a capped, recency-ordered slice — not
-                    // "all tasks" — and an unlabelled list above a labelled one read as the whole
-                    // set with a Library appended.
-                    if !activeTasks.isEmpty {
-                        Text("Recent")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 12)
-                            .padding(.top, 8)
-                            .padding(.bottom, 4)
-                    }
-                    ForEach(taskFamilies(for: activeTasks)) { family in
-                        TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
-                    }
-
+                    TaskListRecentSection(viewModel: viewModel)
                     LibrarySectionView(viewModel: viewModel)
-
                     TaskBucketButtons(activeCount: viewModel.activeTaskList.count,
-                                      archivedCount: archivedTasks.count,
+                                      archivedCount: viewModel.archivedTaskList.count,
                                       deletedTaskCount: deletedTaskCount,
                                       deletedTemplateCount: deletedTemplateCount,
                                       onSelect: { browserScope = $0 })
@@ -128,6 +117,29 @@ private struct TaskBucketButton: View {
                 .foregroundStyle(.secondary)
         })
         .buttonStyle(.plain)
+    }
+}
+
+/// The Recent list: a capped, recency-ordered slice of active tasks, grouped into template families.
+///
+/// Named, like the Library below it. An unlabelled list above a labelled one read as "all tasks"
+/// with a Library appended, which is not what this is.
+private struct TaskListRecentSection: View {
+    let viewModel: AppViewModel
+
+    var body: some View {
+        let activeTasks = viewModel.recentActiveTasks
+        if !activeTasks.isEmpty {
+            Text("Recent")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+        }
+        ForEach(taskFamilies(for: activeTasks)) { family in
+            TaskFamilyRows(family: family, style: .active, viewModel: viewModel)
+        }
     }
 }
 
@@ -238,47 +250,37 @@ private struct TaskFamilyRows: View {
     /// family view keeps a stable identity (`family.id`).
     @State private var isCollapsed = false
 
+    /// STANDARD for every sidebar row. A template run used to render compact, which made a
+    /// completed run look like a footnote of the template that spawned it — and once the Library
+    /// stopped expanding, Recent became the only place runs appear, so a run there IS the task you
+    /// care about. Lineage is carried by the template glyph on the row, not by shrinking it.
+    private static let density: TaskRowDensity = .standard
+
+    /// Live runs — pending, starting, running, validating, paused, interrupted, scheduled, awaiting
+    /// review. Pinned above the history and NEVER hidden by collapsing: a run you can no longer see
+    /// is exactly the one you would have wanted to notice.
+    private var liveChildren: [AgentTask] { family.children.filter { !$0.status.isTerminal } }
+    /// Finished runs — the history the disclosure toggles.
+    private var finishedChildren: [AgentTask] { family.children.filter(\.status.isTerminal) }
+
+    private var disclosure: TaskRunListDisclosure? {
+        guard !finishedChildren.isEmpty else { return nil }
+        return TaskRunListDisclosure(isCollapsed: isCollapsed,
+                                     hiddenRunCount: finishedChildren.count,
+                                     toggle: { isCollapsed.toggle() })
+    }
+
     var body: some View {
-        // Partition the children ONCE per body pass. `filter` isn't cached across property accesses,
-        // so pulling live/finished out as locals avoids re-filtering the (possibly large, for a
-        // template with many runs) child list several times per render.
-        let children = family.children
-        // Live runs — pending, starting, running, validating, paused, interrupted, scheduled,
-        // awaiting review. Pinned above the history and NEVER hidden by collapsing: a run you can no
-        // longer see is exactly the one you'd want to have noticed.
-        let liveChildren = children.filter { !$0.status.isTerminal }
-        // Finished runs (`.completed` / `.failed`) — the history the disclosure toggles.
-        let finishedChildren = children.filter { $0.status.isTerminal }
-        let hasChildren = !children.isEmpty
-
-        let disclosure: TaskRunListDisclosure? = finishedChildren.isEmpty ? nil : TaskRunListDisclosure(
-            isCollapsed: isCollapsed,
-            hiddenRunCount: finishedChildren.count,
-            toggle: { isCollapsed.toggle() }
-        )
-
-        // A row heading its own runs must be a standard card regardless of parentage: the summary
-        // line and its expand/collapse control only exist in that layout, so a compact row here
-        // would render children with no way to collapse them. A childless template run stays compact
-        // unless it's a true top-level task — keying on `parentTaskID`, not nesting, keeps a run's
-        // presentation stable no matter which bucket it lands in.
-        // STANDARD for everything in the sidebar now. A template run used to render compact, which
-        // made a completed run look like a footnote of the template that spawned it — and once the
-        // Library stopped expanding, Recent became the only place runs appear, so a run there IS the
-        // task you care about. Lineage is carried by the template glyph on the row instead of by
-        // making the row smaller.
-        let density: TaskRowDensity = .standard
-
         VStack(alignment: .leading, spacing: 0) {
             TaskListRow(
                 task: family.parent,
                 style: style,
-                density: density,
+                density: Self.density,
                 disclosure: disclosure,
                 viewModel: viewModel
             )
 
-            if hasChildren {
+            if !family.children.isEmpty {
                 // Live runs first and unconditionally; history below, only when expanded.
                 ForEach(liveChildren) { child in
                     TaskFamilyChildRow(task: child, style: style, viewModel: viewModel)
@@ -449,31 +451,8 @@ struct TaskRowButton: View {
         // "Open Details" is also on the context menu.
         .simultaneousGesture(TapGesture(count: 2).onEnded { openTaskDetail() })
         .contextMenu { contextMenu(task: task, style: style, viewModel: viewModel) }
-        .sheet(item: $templateRunInputTask) { task in
-            TemplateRunInputSheet(
-                task: task,
-                onRun: { values in
-                    templateRunInputTask = nil
-                    Task { await viewModel.startTask(task, templateInputValues: values) }
-                },
-                onCancel: { templateRunInputTask = nil }
-            )
-        }
-        .sheet(item: $taskEditorTask) { task in
-            TaskEditorSheet(mode: .edit(task), viewModel: viewModel) {
-                taskEditorTask = nil
-            }
-        }
-        .sheet(item: $sendBackTask) { task in
-            SendBackToBrownSheet(
-                task: task,
-                onSend: { feedback in
-                    sendBackTask = nil
-                    Task { await viewModel.sendEscalatedTaskBackToBrown(id: task.id, feedback: feedback) }
-                },
-                onCancel: { sendBackTask = nil }
-            )
-        }
+        .modifier(TaskRowSheets(viewModel: viewModel, templateRunInputTask: $templateRunInputTask,
+                                taskEditorTask: $taskEditorTask, sendBackTask: $sendBackTask))
     }
 
     /// Opens the standalone Task Detail window for this row's task (single-click now selects instead).
@@ -672,6 +651,43 @@ struct TaskRowButton: View {
             return
         }
         Task { await viewModel.startTask(task) }
+    }
+}
+
+/// The three sheets a task row can raise from its context menu.
+private struct TaskRowSheets: ViewModifier {
+    let viewModel: AppViewModel
+    @Binding var templateRunInputTask: AgentTask?
+    @Binding var taskEditorTask: AgentTask?
+    @Binding var sendBackTask: AgentTask?
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: $templateRunInputTask) { task in
+                TemplateRunInputSheet(
+                    task: task,
+                    onRun: { values in
+                        templateRunInputTask = nil
+                        Task { await viewModel.startTask(task, templateInputValues: values) }
+                    },
+                    onCancel: { templateRunInputTask = nil }
+                )
+            }
+            .sheet(item: $taskEditorTask) { task in
+                TaskEditorSheet(mode: .edit(task), viewModel: viewModel) {
+                    taskEditorTask = nil
+                }
+            }
+            .sheet(item: $sendBackTask) { task in
+                SendBackToBrownSheet(
+                    task: task,
+                    onSend: { feedback in
+                        sendBackTask = nil
+                        Task { await viewModel.sendEscalatedTaskBackToBrown(id: task.id, feedback: feedback) }
+                    },
+                    onCancel: { sendBackTask = nil }
+                )
+            }
     }
 }
 
@@ -1240,38 +1256,44 @@ private struct TaskRunningInlineControls: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Button(action: {
-                let slug = taskID.uuidString.prefix(8)
-                stopLogger.notice("UI.taskCard inline Pause clicked task=\(slug, privacy: .public)")
-                Task {
-                    stopLogger.notice("UI.taskCard inline Pause Task body running task=\(slug, privacy: .public)")
-                    await viewModel.pauseTask(id: taskID)
-                    stopLogger.notice("UI.taskCard inline Pause Task body returned task=\(slug, privacy: .public)")
-                }
-            }, label: {
-                Image(systemName: "pause.fill")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-            })
-            .buttonStyle(.plain)
-            .help("Pause")
-
-            Button(action: {
-                let slug = taskID.uuidString.prefix(8)
-                stopLogger.notice("UI.taskCard inline Stop clicked task=\(slug, privacy: .public)")
-                Task {
-                    stopLogger.notice("UI.taskCard inline Stop Task body running task=\(slug, privacy: .public)")
-                    await viewModel.stopTask(id: taskID)
-                    stopLogger.notice("UI.taskCard inline Stop Task body returned task=\(slug, privacy: .public)")
-                }
-            }, label: {
-                Image(systemName: "stop.fill")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-            })
-            .buttonStyle(.plain)
-            .help("Stop")
+            TaskRunControlButton(taskID: taskID, action: "Pause", symbol: "pause.fill") {
+                await viewModel.pauseTask(id: taskID)
+            }
+            TaskRunControlButton(taskID: taskID, action: "Stop", symbol: "stop.fill") {
+                await viewModel.stopTask(id: taskID)
+            }
         }
+    }
+}
+
+/// One inline run control — Pause or Stop.
+///
+/// The two were the same fourteen lines twice, including three log lines each that bracket the
+/// await. Those brackets are the point: they are how a stop that never returned was diagnosed, so
+/// they stay, stated once.
+private struct TaskRunControlButton: View {
+    let taskID: UUID
+    /// Names this control in the log line and the tooltip.
+    let action: String
+    let symbol: String
+    let perform: () async -> Void
+
+    var body: some View {
+        Button(action: {
+            let slug = taskID.uuidString.prefix(8)
+            stopLogger.notice("UI.taskCard inline \(action, privacy: .public) clicked task=\(slug, privacy: .public)")
+            Task {
+                stopLogger.notice("UI.taskCard inline \(action, privacy: .public) Task body running task=\(slug, privacy: .public)")
+                await perform()
+                stopLogger.notice("UI.taskCard inline \(action, privacy: .public) Task body returned task=\(slug, privacy: .public)")
+            }
+        }, label: {
+            Image(systemName: symbol)
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+        })
+        .buttonStyle(.plain)
+        .help(action)
     }
 }
 
@@ -1538,23 +1560,12 @@ private struct ScheduledRunsIndicator: View {
 
         if let nextWake = pendingWakes.first {
             Button(action: { showingPopover.toggle() }, label: {
-                HStack(spacing: 3) {
-                    Image(systemName: nextWake.recurrence == nil ? "clock" : "arrow.triangle.2.circlepath")
-                        .imageScale(.small)
-                    Text("Next: \(formatScheduledTime(nextWake.wakeAt))")
-                    if pendingWakes.count > 1 {
-                        Text("+\(pendingWakes.count - 1)")
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(TaskStatusBadge.color(for: .scheduled).opacity(0.25)))
-                    }
-                }
-                .font(.caption2)
-                .foregroundStyle(TaskStatusBadge.color(for: .scheduled))
-                .fixedSize()
+                ScheduledRunsChip(nextWake: nextWake, additionalCount: pendingWakes.count - 1)
             })
             .buttonStyle(.plain)
             .help(pendingWakes.count == 1 ? "Show scheduled run" : "Show \(pendingWakes.count) scheduled runs")
+            // The popover anchors to its attachment point, so the flag and the popover must stay
+            // together on the button they belong to.
             .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
                 ScheduledRunsPopover(task: task, wakes: pendingWakes, viewModel: viewModel)
             }
@@ -1575,6 +1586,29 @@ private struct ScheduledRunsIndicator: View {
 /// fire time, a relative "in N min/h" countdown, the recurrence pattern (if any), and a
 /// cancel button — clicking cancel removes the wake via `AppViewModel.cancelTimer(id:)`,
 /// which also refreshes `activeTimers` so the popover (and parent row) update in place.
+/// "Next: <time>", with a count pill when more runs are queued behind it.
+private struct ScheduledRunsChip: View {
+    let nextWake: ScheduledWake
+    let additionalCount: Int
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: nextWake.recurrence == nil ? "clock" : "arrow.triangle.2.circlepath")
+                .imageScale(.small)
+            Text("Next: \(formatScheduledTime(nextWake.wakeAt))")
+            if additionalCount > 0 {
+                Text("+\(additionalCount)")
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(TaskStatusBadge.color(for: .scheduled).opacity(0.25)))
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(TaskStatusBadge.color(for: .scheduled))
+        .fixedSize()
+    }
+}
+
 private struct ScheduledRunsPopover: View {
     let task: AgentTask
     let wakes: [ScheduledWake]
