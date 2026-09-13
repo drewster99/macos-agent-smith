@@ -106,6 +106,26 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         toolsByGroup.first { $0.value.contains(name) }?.key
     }
 
+    /// The tools in one group, in the order a reader would scan them.
+    ///
+    /// Sorted rather than left as a `Set`'s arbitrary order: this drives a checklist in the
+    /// transcript filter, and a list that reshuffles between launches is unusable.
+    public static func toolNames(in group: BuiltInToolGroup) -> Set<String> {
+        toolsByGroup[group] ?? []
+    }
+
+    /// The same, ordered for display.
+    public static func orderedToolNames(in group: BuiltInToolGroup) -> [String] {
+        toolNames(in: group).sorted()
+    }
+
+    /// Every built-in tool name. The transcript filter's per-tool checklist is built from this, so a
+    /// tool missing from the table below is a tool the user cannot filter — which is what
+    /// `BuiltInToolGroupCoverageTests` fails the build over.
+    public static var allToolNames: Set<String> {
+        toolsByGroup.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+    }
+
     /// The membership table. Kept as one literal so a tool's group is greppable from its name.
     private static let toolsByGroup: [BuiltInToolGroup: Set<String>] = [
         .taskManagement: [

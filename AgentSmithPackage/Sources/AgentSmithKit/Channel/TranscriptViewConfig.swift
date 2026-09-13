@@ -93,10 +93,28 @@ public struct TranscriptKindSelection: Codable, Sendable, Equatable {
     /// are shown. The per-kind set cannot express this (there is no kind to hide), so it is its
     /// own switch; the popover presents it as the "Chat" row.
     public var showsChat: Bool
+    /// Tool names hidden within this scope. Empty = every tool shows.
+    ///
+    /// Narrows the `toolCalls` group rather than replacing it: the group switch still turns every
+    /// tool row off at once, and this says which tools are hidden while the group is on. Hidden
+    /// rather than shown, for the same reason `hiddenKinds` is — a tool this build has never seen,
+    /// including any MCP tool, must be VISIBLE in a config saved before it existed.
+    public var hiddenToolNames: Set<String>
 
-    public init(hiddenKinds: Set<ChannelMessageKind> = [], showsChat: Bool = true) {
+    public init(hiddenKinds: Set<ChannelMessageKind> = [], showsChat: Bool = true,
+                hiddenToolNames: Set<String> = []) {
         self.hiddenKinds = hiddenKinds
         self.showsChat = showsChat
+        self.hiddenToolNames = hiddenToolNames
+    }
+
+    /// Decoded leniently: a config written before per-tool filtering existed has no such key, and
+    /// its absence means "nothing hidden", not a decode failure that would lose the whole config.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hiddenKinds = try container.decodeIfPresent(Set<ChannelMessageKind>.self, forKey: .hiddenKinds) ?? []
+        showsChat = try container.decodeIfPresent(Bool.self, forKey: .showsChat) ?? true
+        hiddenToolNames = try container.decodeIfPresent(Set<String>.self, forKey: .hiddenToolNames) ?? []
     }
 
     /// The everything-shows selection — the default scope's starting state, and the base a
@@ -131,11 +149,39 @@ public struct TranscriptKindSelection: Codable, Sendable, Equatable {
         !hiddenKinds.contains(kind)
     }
 
+    public func isToolVisible(_ toolName: String) -> Bool {
+        !hiddenToolNames.contains(toolName)
+    }
+
+    public mutating func setTool(_ toolName: String, visible: Bool) {
+        if visible { hiddenToolNames.remove(toolName) } else { hiddenToolNames.insert(toolName) }
+    }
+
+    /// Where a built-in tool group's tools stand in the hidden set — the group checkbox's state.
+    public func toolGroupVisibility(of group: BuiltInToolGroup) -> GroupVisibility {
+        let names = BuiltInToolGroup.toolNames(in: group)
+        let hidden = names.intersection(hiddenToolNames).count
+        if hidden == 0 { return .all }
+        return hidden == names.count ? .none : .mixed
+    }
+
+    /// Shows or hides every tool in a built-in group at once.
+    public mutating func setToolGroup(_ group: BuiltInToolGroup, visible: Bool) {
+        let names = BuiltInToolGroup.toolNames(in: group)
+        if visible { hiddenToolNames.subtract(names) } else { hiddenToolNames.formUnion(names) }
+    }
+
     public mutating func setKind(_ kind: ChannelMessageKind, visible: Bool) {
         if visible { hiddenKinds.remove(kind) } else { hiddenKinds.insert(kind) }
     }
 
     /// This selection as a filter kind rule. Collapses to `.all` when nothing is hidden (cheapest).
+    /// Tool-call rows are governed by the group switch first: with `toolCalls` off there are no tool
+    /// rows to narrow, so the per-tool set is irrelevant and reporting it would be noise.
+    public var effectiveHiddenToolNames: Set<String> {
+        groupVisibility(of: .toolCalls) == .none ? [] : hiddenToolNames
+    }
+
     public var kindRule: TranscriptFilter.KindRule {
         if hiddenKinds.isEmpty && showsChat { return .all }
         return .only(Set(ChannelMessageKind.allCases).subtracting(hiddenKinds),
@@ -431,7 +477,9 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
             kindsBySender: senderKindOverrides.mapValues(\.kindRule),
             taskScope: taskScope ?? (hideTaskScoped ? .orchestration : .any),
             visibility: visibility,
-            hideErrors: !showErrors
+            hideErrors: !showErrors,
+            hiddenToolNames: defaultKinds.effectiveHiddenToolNames,
+            hiddenToolNamesBySender: senderKindOverrides.mapValues(\.effectiveHiddenToolNames)
         )
     }
 }

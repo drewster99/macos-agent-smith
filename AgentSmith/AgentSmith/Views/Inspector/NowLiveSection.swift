@@ -131,7 +131,7 @@ struct NowLiveSection: View {
             case .toolRequest:
                 guard message.timestamp >= cutoff else { break scan }
                 guard let taskID = message.taskID,
-                      case .string(let tool)? = message.metadata?["tool"] else { continue }
+                      let tool = message.toolName else { continue }
                 requests.append((message, taskID, tool, key))
             default:
                 continue

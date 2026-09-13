@@ -119,6 +119,18 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// (the compiler enforces that), and `ChannelMessageKindLiteralGuardTests` fails the build
     /// on any hand-written `messageKind` string that could sneak past it. It fires for data
     /// written by a build whose enum knew a kind this one doesn't, or hand-edited JSON.
+    /// The tool a `.toolRequest` / `.toolOutput` row is about, or `nil` for every other message.
+    ///
+    /// The single accessor for the `tool` metadata slot, for the same reason `kind` is the single
+    /// accessor for `messageKind`: eight read sites were unwrapping `metadata?["tool"]` by hand,
+    /// which is eight places to get the key wrong and no place to fix it once. Unlike `kind` this
+    /// does NOT trap on a non-string — any tool name is a valid name, including one from an MCP
+    /// server this build has never heard of, so there is nothing to validate it against.
+    public var toolName: String? {
+        guard case .string(let name)? = metadata?["tool"] else { return nil }
+        return name
+    }
+
     public var kind: ChannelMessageKind? {
         guard let stored = metadata?["messageKind"] else {
             // Legacy security-review rows (posted before the kind existed) are recognizable by

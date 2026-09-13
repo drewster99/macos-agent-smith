@@ -2277,7 +2277,7 @@ public actor OrchestrationRuntime {
                 return false
             }
             // Drop tool execution trace messages.
-            if message.metadata?["tool"] != nil {
+            if message.toolName != nil {
                 return false
             }
             // For system messages, only pass through diagnostics directly relevant to Smith:
@@ -4404,10 +4404,10 @@ Message:
             if case .agent(let role) = msg.sender, role == .brown {
                 if msg.kind == .toolRequest {
                     toolCallCount += 1
-                    if case .string(let name) = msg.metadata?["tool"] {
+                    if let name = msg.toolName {
                         toolBuckets[name, default: 0] += 1
                     }
-                } else if msg.metadata?["tool"] != nil {
+                } else if msg.toolName != nil {
                     // tool_output — already accounted for via tool_request, skip.
                 } else if let kind = msg.kind {
                     if kind == .taskUpdate {

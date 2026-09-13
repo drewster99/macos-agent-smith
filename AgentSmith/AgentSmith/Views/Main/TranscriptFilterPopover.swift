@@ -308,6 +308,12 @@ private struct TranscriptKindGroupRow: View {
                     // The wire string, for when "which kind is this exactly?" matters.
                     .help(kind.rawValue)
                 }
+                // Tool calls get a second axis the other groups have no use for: WHICH tool. The
+                // kinds above can only say "requests and/or output", and both carry the same two
+                // kinds whichever tool produced them.
+                if group == .toolCalls {
+                    TranscriptToolFilterSection(selection: $selection)
+                }
             }
             .padding(.top, 4)
             .padding(.leading, 4)
@@ -338,6 +344,91 @@ private struct TranscriptKindGroupRow: View {
         Binding(
             get: { selection.isKindVisible(kind) },
             set: { isOn in selection.setKind(kind, visible: isOn) }
+        )
+    }
+}
+
+/// The per-tool checklist under the Tool calls group.
+///
+/// Built from `BuiltInToolGroup`'s membership table rather than a second list, so a tool that gains
+/// a group automatically becomes filterable and `BuiltInToolGroupCoverageTests` is the one place
+/// that can fail when a new tool is forgotten.
+///
+/// MCP tools are deliberately absent: their names come from whichever servers are configured, so
+/// there is no static list to render. They follow the Tool calls group switch, which is the honest
+/// behaviour — nothing here silently hides them.
+private struct TranscriptToolFilterSection: View {
+    @Binding var selection: TranscriptKindSelection
+
+    @State private var isExpanded = false
+
+    private var hiddenCount: Int { selection.hiddenToolNames.count }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded, content: {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(BuiltInToolGroup.allCases, id: \.self) { group in
+                    TranscriptToolGroupRow(group: group, selection: $selection)
+                }
+            }
+            .padding(.top, 4)
+            .padding(.leading, 4)
+        }, label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Specific tools")
+                Text(hiddenCount == 0
+                     ? "Every tool shown"
+                     : "\(hiddenCount) tool\(hiddenCount == 1 ? "" : "s") hidden")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        })
+        .padding(.top, 2)
+    }
+}
+
+/// One built-in tool family, with a tri-state checkbox over its tools.
+private struct TranscriptToolGroupRow: View {
+    let group: BuiltInToolGroup
+    @Binding var selection: TranscriptKindSelection
+
+    @State private var isExpanded = false
+
+    /// Stored at init: a computed collection handed to ForEach re-sorts on every body evaluation.
+    private let orderedTools: [String]
+
+    init(group: BuiltInToolGroup, selection: Binding<TranscriptKindSelection>) {
+        self.group = group
+        self._selection = selection
+        self.orderedTools = BuiltInToolGroup.orderedToolNames(in: group)
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded, content: {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(orderedTools, id: \.self) { toolName in
+                    Toggle(isOn: toolBinding(toolName)) {
+                        Text(toolName)
+                            .font(.callout.monospaced())
+                    }
+                }
+            }
+            .padding(.top, 4)
+            .padding(.leading, 4)
+        }, label: {
+            HStack(spacing: 6) {
+                GroupTriStateCheckbox(state: selection.toolGroupVisibility(of: group)) { makeAllVisible in
+                    selection.setToolGroup(group, visible: makeAllVisible)
+                }
+                Text(group.displayName)
+            }
+        })
+    }
+
+    private func toolBinding(_ toolName: String) -> Binding<Bool> {
+        Binding(
+            get: { selection.isToolVisible(toolName) },
+            set: { isOn in selection.setTool(toolName, visible: isOn) }
         )
     }
 }

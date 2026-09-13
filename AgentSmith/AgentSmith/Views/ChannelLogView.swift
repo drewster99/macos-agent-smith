@@ -1685,7 +1685,7 @@ private struct MessageRow: View, Equatable {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
             }, label: {
-                if case .string(let toolName) = message.metadata?["tool"] {
+                if let toolName = message.toolName {
                     Text("Output: \(toolName)")
                         .font(AppFonts.channelBody)
                         .foregroundStyle(.secondary)

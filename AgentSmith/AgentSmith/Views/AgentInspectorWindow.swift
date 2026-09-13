@@ -50,7 +50,7 @@ struct AgentInspectorWindow: View {
         let roleMessages = InspectorView.bucketMessagesByRole(viewModel.messages)[role] ?? []
         let hasActivity = !roleMessages.isEmpty || viewModel.hasAgentActivity(role)
         let recentMessages = Array(roleMessages.suffix(10).reversed())
-        let recentToolUses = Array(roleMessages.filter { $0.metadata?["tool"] != nil }.suffix(5).reversed())
+        let recentToolUses = Array(roleMessages.filter { $0.toolName != nil }.suffix(5).reversed())
 
         return VStack(spacing: 0) {
             AgentInspectorWindowHeader(

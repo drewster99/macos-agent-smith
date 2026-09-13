@@ -66,6 +66,20 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// When true, messages flagged as errors (`metadata["isError"] == true`) are hidden. Errors are a
     /// cross-cutting FLAG, not a kind, so they get their own axis. Default false — errors show.
     public var hideErrors: Bool
+    /// Tool names whose request and output rows are hidden. Empty = every tool shows.
+    ///
+    /// Its own axis rather than part of the kind rule: the kind axis can only say "all tool calls or
+    /// none", and `.toolRequest` / `.toolOutput` are the same two kinds whichever tool produced them.
+    ///
+    /// Stored as the HIDDEN set, like `TranscriptKindSelection.hiddenKinds`, so a tool that does not
+    /// exist yet — a new built-in, or any MCP tool — is visible in every already-saved config rather
+    /// than silently filtered out. Matching is by name because that is what a tool HAS; an MCP tool's
+    /// name is defined by its server and no enum here could enumerate it.
+    public var hiddenToolNames: Set<String>
+    /// Per-sender hidden tool names, mirroring `kindsBySender`. A sender with an entry uses ITS set
+    /// instead of the default, so "hide bash from Brown but not from Smith" is expressible — which
+    /// is the same shape the kind axis already has, and the reason this is not a single global set.
+    public var hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>]
 
     public init(
         allowedSenders: Set<ChannelMessage.Sender>? = nil,
@@ -74,7 +88,9 @@ public struct TranscriptFilter: Sendable, Equatable {
         kindsBySender: [ChannelMessage.Sender: KindRule] = [:],
         taskScope: TaskScope = .any,
         visibility: Visibility = .all,
-        hideErrors: Bool = false
+        hideErrors: Bool = false,
+        hiddenToolNames: Set<String> = [],
+        hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>] = [:]
     ) {
         self.allowedSenders = allowedSenders
         self.allowedRecipients = allowedRecipients
@@ -83,6 +99,8 @@ public struct TranscriptFilter: Sendable, Equatable {
         self.taskScope = taskScope
         self.visibility = visibility
         self.hideErrors = hideErrors
+        self.hiddenToolNames = hiddenToolNames
+        self.hiddenToolNamesBySender = hiddenToolNamesBySender
     }
 
     /// The pass-everything filter — the single-pane / firehose default.
@@ -97,6 +115,13 @@ public struct TranscriptFilter: Sendable, Equatable {
             return false
         }
         if hideErrors, case .bool(true)? = message.metadata?["isError"] { return false }
+        // Covers BOTH the request and the output row: each carries the same `tool` name, so hiding
+        // a tool hides the whole exchange rather than leaving an orphaned output under a request
+        // that is no longer shown.
+        let hiddenTools = hiddenToolNamesBySender[message.sender] ?? hiddenToolNames
+        if !hiddenTools.isEmpty, let toolName = message.toolName, hiddenTools.contains(toolName) {
+            return false
+        }
 
         switch kindsBySender[message.sender] ?? kinds {
         case .all:

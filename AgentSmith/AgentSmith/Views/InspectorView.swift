@@ -288,7 +288,7 @@ private struct RoleAgentCard: View {
             role: role,
             roleMessages: roleMessages,
             recentMessages: Array(roleMessages.suffix(5).reversed()),
-            recentToolUses: Array(roleMessages.filter { $0.metadata?["tool"] != nil }.suffix(3).reversed()),
+            recentToolUses: Array(roleMessages.filter { $0.toolName != nil }.suffix(3).reversed()),
             contextMessages: store.contextMessages(for: role),
             llmTurns: store.turnsByRole[role] ?? [],
             pollInterval: viewModel.agentPollIntervals[role] ?? 5,
@@ -684,7 +684,7 @@ struct InspectorToolRow: View {
     let message: ChannelMessage
 
     private var toolName: String {
-        if case .string(let name) = message.metadata?["tool"] { return name }
+        if let name = message.toolName { return name }
         return "unknown"
     }
 
