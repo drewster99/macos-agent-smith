@@ -197,53 +197,21 @@ private struct RoleAgentCard: View {
         // with no observable read left to re-register, and nothing can ever wake it again. The
         // heartbeat recomputes from live state regardless of observation; `recompute()` skips
         // the assignment when nothing changed, so a quiet tick costs one struct compare.
-        .task {
-            scheduleRecompute()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: Self.reconcileHeartbeat)
-                guard !Task.isCancelled else { return }
-                scheduleRecompute()
-            }
-        }
-        .onChange(of: roleMessages)                                                  { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.inspectorStore.turnsByRole[role])                    { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.inspectorStore.liveContexts[role])                   { _, _ in scheduleRecompute() }
-        .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationRecords.count : 0)
-                                                                                     { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.processingRoles.contains(role))                      { _, _ in scheduleRecompute() }
-        // The Security Agent's busy state also comes from the evaluation registry, so that has to
-        // wake the recompute too or its card stays dark through every per-call review.
-        .onChange(of: role == .securityAgent ? viewModel.shared.liveActivitySnapshot.securityEvaluations : 0)
-                                                                                     { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.toolExecutingByRole[role])                           { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.agentPollIntervals[role])                            { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.agentMaxToolCalls[role])                             { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.agentToolNames[role])                                { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.resolvedAgentConfigs[role])                          { _, _ in scheduleRecompute() }
+        .modifier(RoleAgentCardWatchers(viewModel: viewModel, role: role,
+                                        roleMessages: roleMessages,
+                                        onRecompute: scheduleRecompute))
     }
 
     /// Helper extracted to keep the AgentCard call out of the body's `@ViewBuilder`
-    /// type-checking context. With 17 parameters and four trailing closures, inlining the
-    /// call inside `body` blew the type-checker's exponential overload-resolution budget.
+    /// type-checking context. It was seventeen parameters and four trailing closures that blew the
+    /// type-checker's exponential overload-resolution budget when inlined; the fifteen data fields
+    /// are now one `AgentRoleData`, but the four handler closures remain, so this stays.
     @ViewBuilder
     private func cardView(for cached: AgentRoleData) -> some View {
         let speechController = viewModel.shared.speechController
         AgentCard(
             viewModel: viewModel,
-            role: cached.role,
-            isProcessing: cached.isProcessing,
-            executingTools: cached.executingTools,
-            hasActivity: cached.hasActivity,
-            availableTools: cached.availableTools,
-            recentMessages: cached.recentMessages,
-            recentToolUses: cached.recentToolUses,
-            contextMessages: cached.contextMessages,
-            llmTurns: cached.llmTurns,
-            modelConfig: cached.modelConfig,
-            evaluationRecords: cached.evaluationRecords,
-            currentSystemPrompt: cached.currentSystemPrompt,
-            pollInterval: cached.pollInterval,
-            maxToolCalls: cached.maxToolCalls,
+            data: cached,
             speechController: speechController,
             onSendDirectMessage: makeSendMessageHandler(role: cached.role),
             onUpdateSystemPrompt: makeUpdateSystemPromptHandler(role: cached.role),
@@ -403,20 +371,12 @@ private struct SummarizerAgentCard: View {
 
 private struct AgentCard: View {
     @Bindable var viewModel: AppViewModel
-    let role: AgentRole
-    let isProcessing: Bool
-    let executingTools: [String]
-    let hasActivity: Bool
-    let availableTools: [String]
-    let recentMessages: [ChannelMessage]
-    let recentToolUses: [ChannelMessage]
-    let contextMessages: [LLMMessage]
-    let llmTurns: [LLMTurnRecord]
-    let modelConfig: ModelConfiguration?
-    let evaluationRecords: [EvaluationRecord]
-    let currentSystemPrompt: String
-    let pollInterval: TimeInterval
-    let maxToolCalls: Int
+    /// The whole pre-computed slice for this role.
+    ///
+    /// One value rather than the fifteen fields it holds, restated. The comment on the call site
+    /// records what listing them cost: seventeen parameters and four trailing closures blew the
+    /// type-checker's overload-resolution budget when the call sat inside a `@ViewBuilder`.
+    let data: AgentRoleData
     let speechController: SpeechController
     let onSendDirectMessage: (String) -> Void
     let onUpdateSystemPrompt: (String) -> Void
@@ -432,6 +392,23 @@ private struct AgentCard: View {
     @State private var toolExecutingStartDate: Date?
     @State private var showingConfig = false
     @State private var expandedTurnIDs: Set<UUID> = []
+
+
+    // Read through to the slice, so the body and its helpers read exactly as before.
+    private var role: AgentRole { data.role }
+    private var isProcessing: Bool { data.isProcessing }
+    private var executingTools: [String] { data.executingTools }
+    private var hasActivity: Bool { data.hasActivity }
+    private var availableTools: [String] { data.availableTools }
+    private var recentMessages: [ChannelMessage] { data.recentMessages }
+    private var recentToolUses: [ChannelMessage] { data.recentToolUses }
+    private var contextMessages: [LLMMessage] { data.contextMessages }
+    private var llmTurns: [LLMTurnRecord] { data.llmTurns }
+    private var modelConfig: ModelConfiguration? { data.modelConfig }
+    private var evaluationRecords: [EvaluationRecord] { data.evaluationRecords }
+    private var currentSystemPrompt: String { data.currentSystemPrompt }
+    private var pollInterval: TimeInterval { data.pollInterval }
+    private var maxToolCalls: Int { data.maxToolCalls }
 
     /// Smith and Brown open in a separate window; Security Agent expands inline.
     private var opensInWindow: Bool { role == .smith || role == .brown }
@@ -471,157 +448,270 @@ private struct AgentCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header row
-            HStack(spacing: 8) {
-                Button(action: {
-                    if opensInWindow {
-                        openWindow(value: AgentInspectorTarget(sessionID: viewModel.session.id, role: role))
-                    } else {
-                        withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-                    }
-                }, label: {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(hasActivity ? roleColor : AppColors.inactiveDot)
-                            .frame(width: 8, height: 8)
-
-                        Text(inspectorDisplayName)
-                            .font(.headline)
-                            .foregroundStyle(hasActivity ? roleColor : .secondary)
-                            .lineLimit(1)
-
-                        Spacer()
-
-                        if opensInWindow {
-                            Image(systemName: "arrow.up.forward.square")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        } else {
-                            Image(systemName: "chevron.right")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                                .rotationEffect(.degrees(expanded ? 90 : 0))
-                        }
-                    }
-                    .contentShape(Rectangle())
-                })
-                .buttonStyle(.plain)
-
-                Button(action: {
-                    speechController.setEnabled(!isSpeechEnabled, for: role)
-                }, label: {
-                    Image(systemName: isSpeechEnabled ? "speaker.wave.1" : "speaker.slash")
-                        .font(.caption)
-                        .foregroundStyle(isSpeechEnabled ? .green : AppColors.inactiveDot)
-                })
-                .buttonStyle(.plain)
-                .help(isSpeechEnabled ? "Mute \(role.displayName)" : "Unmute \(role.displayName)")
-
-                Button(action: { showingConfig = true }, label: {
-                    Image(systemName: "gearshape")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                })
-                .buttonStyle(.plain)
-                .padding(.leading, 4)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 2)
-
-            // Status on its own line under the name (indented past the dot) so a long
-            // "Working — <tool> MM:SS" never squeezes the name into a vertical stack of letters.
+            AgentCardHeaderRow(
+                role: role, roleColor: roleColor, displayName: inspectorDisplayName,
+                hasActivity: hasActivity, opensInWindow: opensInWindow,
+                isSpeechEnabled: isSpeechEnabled, expanded: $expanded,
+                onOpenWindow: openOwnWindow, onToggleSpeech: toggleSpeech,
+                onOpenConfig: { showingConfig = true }
+            )
+            // Its own line under the name (indented past the dot) so a long
+            // "Working — <tool> MM:SS" never squeezes the name into a column of letters.
             AgentCardStatusBadge(
-                isProcessing: isProcessing,
-                hasActivity: hasActivity,
+                isProcessing: isProcessing, hasActivity: hasActivity,
                 isSecurityAgent: role == .securityAgent,
                 isTerminated: role != .securityAgent && isTerminated,
-                executingTools: executingTools,
-                processingStartDate: processingStartDate,
+                executingTools: executingTools, processingStartDate: processingStartDate,
                 toolExecutingStartDate: toolExecutingStartDate
             )
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 28)
-            .padding(.trailing, 12)
-            .padding(.bottom, 6)
+            .padding(.leading, 28).padding(.trailing, 12).padding(.bottom, 6)
 
-            // Model info subtitle — aligned with agent name text (past the dot)
+            // 28 = 12 (container) + 8 (dot) + 8 (spacing), so this aligns with the agent's name.
             if let config = modelConfig {
-                AgentCardModelInfoLine(modelConfig: config, llmTurns: llmTurns, role: role, shared: viewModel.shared)
-                    .padding(.leading, 28) // 12 (container) + 8 (dot) + 8 (spacing)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 2)
+                AgentCardModelInfoLine(modelConfig: config, llmTurns: llmTurns,
+                                       role: role, shared: viewModel.shared)
+                    .padding(.leading, 28).padding(.trailing, 12).padding(.bottom, 2)
             }
-
-            // Estimated cost spent by this agent in the current session. Recomputed
-            // when `inspectorStore.turnsByRole[role]` changes — SwiftUI's per-card
-            // narrowing already gates body re-eval to this role's slice changing.
-            HStack(spacing: 6) {
-                Text("Session")
-                Spacer()
-                Text(String(format: "$%.2f", viewModel.sessionCost(for: role)))
-                    .monospacedDigit()
-            }
-            .font(AppFonts.inspectorLabel)
-            .foregroundStyle(.tertiary)
-            .padding(.leading, 28)
-            .padding(.trailing, 12)
-            .padding(.bottom, 6)
+            AgentCardSessionCostLine(cost: viewModel.sessionCost(for: role))
 
             if expanded && !opensInWindow {
                 AgentCardExpandedSections(
-                    role: role,
-                    availableTools: availableTools,
-                    evaluationRecords: evaluationRecords,
-                    recentToolUses: recentToolUses,
-                    recentMessages: recentMessages,
-                    contextMessages: contextMessages,
-                    llmTurns: llmTurns,
-                    expandedTurnIDs: $expandedTurnIDs,
-                    onSendDirectMessage: onSendDirectMessage
-                )
+                    role: role, availableTools: availableTools,
+                    evaluationRecords: evaluationRecords, recentToolUses: recentToolUses,
+                    recentMessages: recentMessages, contextMessages: contextMessages,
+                    llmTurns: llmTurns, expandedTurnIDs: $expandedTurnIDs,
+                    onSendDirectMessage: onSendDirectMessage)
             }
-
             Divider()
         }
-        .onAppear {
-            // Project rule: defer @State mutations out of lifecycle closures.
-            if isProcessing {
-                DispatchQueue.main.async { processingStartDate = Date() }
-            }
-            if !executingTools.isEmpty {
-                DispatchQueue.main.async { toolExecutingStartDate = Date() }
-            }
-        }
-        .onChange(of: isProcessing) { _, newValue in
-            DispatchQueue.main.async {
-                processingStartDate = newValue ? Date() : nil
-            }
-        }
-        .onChange(of: executingTools.isEmpty) { _, isEmpty in
-            DispatchQueue.main.async {
-                toolExecutingStartDate = isEmpty ? nil : Date()
-            }
-        }
+        .modifier(AgentCardActivityTimers(
+            isProcessing: isProcessing, executingTools: executingTools,
+            processingStartDate: $processingStartDate,
+            toolExecutingStartDate: $toolExecutingStartDate
+        ))
         // The sheet sits BELOW the lifecycle/change handlers deliberately (project SwiftUI
         // rule): placed above them, the handlers can silently stop firing — which is how a
         // card rendered "Thinking" with a never-seeded elapsed timer (2026-08-07).
         .sheet(isPresented: $showingConfig) {
             AgentConfigSheet(
-                viewModel: viewModel,
-                role: role,
-                roleColor: roleColor,
-                initialSystemPrompt: currentSystemPrompt,
-                initialPollInterval: pollInterval,
-                initialMaxToolCalls: maxToolCalls,
-                speechController: speechController,
-                onSave: { prompt, interval, maxCalls in
-                    onUpdateSystemPrompt(prompt)
-                    onUpdatePollInterval(interval)
-                    onUpdateMaxToolCalls(maxCalls)
-                }
+                viewModel: viewModel, role: role, roleColor: roleColor,
+                initialSystemPrompt: currentSystemPrompt, initialPollInterval: pollInterval,
+                initialMaxToolCalls: maxToolCalls, speechController: speechController,
+                onSave: onSaveConfig
             )
         }
+    }
+
+    private func openOwnWindow() {
+        openWindow(value: AgentInspectorTarget(sessionID: viewModel.session.id, role: role))
+    }
+
+    private func toggleSpeech() {
+        speechController.setEnabled(!isSpeechEnabled, for: role)
+    }
+
+    private func onSaveConfig(_ prompt: String, _ interval: TimeInterval, _ maxCalls: Int) {
+        onUpdateSystemPrompt(prompt)
+        onUpdatePollInterval(interval)
+        onUpdateMaxToolCalls(maxCalls)
+    }
+}
+
+/// An agent card's title line: the activity dot and name (which either expands the card or opens
+/// its own window), plus the mute and settings controls.
+private struct AgentCardHeaderRow: View {
+    let role: AgentRole
+    let roleColor: Color
+    let displayName: String
+    let hasActivity: Bool
+    let opensInWindow: Bool
+    let isSpeechEnabled: Bool
+    @Binding var expanded: Bool
+    let onOpenWindow: () -> Void
+    let onToggleSpeech: () -> Void
+    let onOpenConfig: () -> Void
+
+    /// The name either expands the card in place or opens the agent its own window — never both,
+    /// which is why the chevron and the open-in-window glyph are alternatives in the label.
+    private func activateTitle() {
+        if opensInWindow {
+            onOpenWindow()
+        } else {
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: activateTitle, label: {
+                AgentCardTitleLabel(roleColor: roleColor, displayName: displayName,
+                                    hasActivity: hasActivity, opensInWindow: opensInWindow,
+                                    expanded: expanded)
+            })
+            .buttonStyle(.plain)
+
+            AgentCardMuteButton(role: role, isSpeechEnabled: isSpeechEnabled,
+                                onToggle: onToggleSpeech)
+            Button(action: onOpenConfig, label: {
+                Image(systemName: "gearshape")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            })
+            .buttonStyle(.plain)
+            .padding(.leading, 4)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
+    }
+}
+
+/// The dot, the name, and the affordance that says what clicking does.
+private struct AgentCardTitleLabel: View {
+    let roleColor: Color
+    let displayName: String
+    let hasActivity: Bool
+    let opensInWindow: Bool
+    let expanded: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(hasActivity ? roleColor : AppColors.inactiveDot)
+                .frame(width: 8, height: 8)
+            Text(displayName)
+                .font(.headline)
+                .foregroundStyle(hasActivity ? roleColor : .secondary)
+                .lineLimit(1)
+            Spacer()
+            if opensInWindow {
+                Image(systemName: "arrow.up.forward.square")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+/// What this agent has spent in the current session.
+private struct AgentCardSessionCostLine: View {
+    let cost: Double
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Session")
+            Spacer()
+            Text(String(format: "$%.2f", cost))
+                .monospacedDigit()
+        }
+        .font(AppFonts.inspectorLabel)
+        .foregroundStyle(.tertiary)
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
+        .padding(.bottom, 6)
+    }
+}
+
+/// Seeds and clears the two "how long has this been going" start dates the status badge reads.
+///
+/// `executingTools.isEmpty` is what is watched, NOT the array: the badge only needs to know
+/// whether a tool is running, and watching the array restarts the timer every time the SET of
+/// tools changes while one is still executing.
+private struct AgentCardActivityTimers: ViewModifier {
+    let isProcessing: Bool
+    let executingTools: [String]
+    @Binding var processingStartDate: Date?
+    @Binding var toolExecutingStartDate: Date?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                // Project rule: defer @State mutations out of lifecycle closures.
+                if isProcessing {
+                    DispatchQueue.main.async { processingStartDate = Date() }
+                }
+                if !executingTools.isEmpty {
+                    DispatchQueue.main.async { toolExecutingStartDate = Date() }
+                }
+            }
+            .onChange(of: isProcessing) { _, newValue in
+                DispatchQueue.main.async { processingStartDate = newValue ? Date() : nil }
+            }
+            .onChange(of: executingTools.isEmpty) { _, isEmpty in
+                DispatchQueue.main.async { toolExecutingStartDate = isEmpty ? nil : Date() }
+            }
+    }
+}
+
+/// Everything that can wake a role card.
+///
+/// The card's body reads ONLY its @State cache, so these watchers are its entire link to live
+/// state — and observation registrations are one-shot. A dropped dirty-mark (observed 2026-08-06:
+/// every agent card froze mid-evening and rendered 20-hour-old "Thinking" badges while the engine
+/// ran on) leaves the card with no observable read left to re-register, and nothing can wake it
+/// again. The `.task` is the reconciliation heartbeat against exactly that; `recompute()` skips the
+/// assignment when nothing changed, so a quiet tick costs one struct compare.
+///
+/// Initial population is the `.task`, NOT `.onChange(initial: true)`: two synchronous initial
+/// fires per modifier on first body eval was contributing to SwiftUI's "tried to update multiple
+/// times per frame" warnings on the `[ChannelMessage]`-typed watchers.
+///
+/// Each watcher narrows to a per-role key where it can. Cross-role dictionaries still re-evaluate
+/// every card's outer body when any role changes (Observation propagates whole-property changes),
+/// but the `[role]` subscript narrows the CALLBACK.
+private struct RoleAgentCardWatchers: ViewModifier {
+    let viewModel: AppViewModel
+    let role: AgentRole
+    let roleMessages: [ChannelMessage]
+    let onRecompute: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .task {
+                onRecompute()
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: RoleAgentCard.reconcileHeartbeat)
+                    guard !Task.isCancelled else { return }
+                    onRecompute()
+                }
+            }
+            .onChange(of: roleMessages) { _, _ in onRecompute() }
+            .onChange(of: viewModel.inspectorStore.turnsByRole[role]) { _, _ in onRecompute() }
+            .onChange(of: viewModel.inspectorStore.liveContexts[role]) { _, _ in onRecompute() }
+            .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationRecords.count : 0) { _, _ in onRecompute() }
+            .onChange(of: viewModel.processingRoles.contains(role)) { _, _ in onRecompute() }
+            // The Security Agent's busy state also comes from the evaluation registry, so that has
+            // to wake the recompute too or its card stays dark through every per-call review.
+            .onChange(of: role == .securityAgent ? viewModel.shared.liveActivitySnapshot.securityEvaluations : 0) { _, _ in onRecompute() }
+            .onChange(of: viewModel.toolExecutingByRole[role]) { _, _ in onRecompute() }
+            .onChange(of: viewModel.agentPollIntervals[role]) { _, _ in onRecompute() }
+            .onChange(of: viewModel.agentMaxToolCalls[role]) { _, _ in onRecompute() }
+            .onChange(of: viewModel.agentToolNames[role]) { _, _ in onRecompute() }
+            .onChange(of: viewModel.resolvedAgentConfigs[role]) { _, _ in onRecompute() }
+    }
+}
+
+/// Mutes or unmutes one agent's speech.
+private struct AgentCardMuteButton: View {
+    let role: AgentRole
+    let isSpeechEnabled: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle, label: {
+            Image(systemName: isSpeechEnabled ? "speaker.wave.1" : "speaker.slash")
+                .font(.caption)
+                .foregroundStyle(isSpeechEnabled ? .green : AppColors.inactiveDot)
+        })
+        .buttonStyle(.plain)
+        .help(isSpeechEnabled ? "Mute \(role.displayName)" : "Unmute \(role.displayName)")
     }
 }
 
