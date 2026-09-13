@@ -348,121 +348,79 @@ struct ChannelLogView: View, Equatable {
         && lhs.displayPrefs == rhs.displayPrefs
     }
 
+
+    /// The id of the row currently at the window's top — what the frozen window pins to when the
+    /// user scrolls away, so streaming cannot drag the viewport back down.
+    private func anchorIDAtWindowStart() -> ChannelMessage.ID? {
+        let start = windowStartIndex()
+        return start < messages.count ? messages[start].id : nil
+    }
+
+    /// Grows the visible window, pinned so the rows the user is reading do not move.
+    ///
+    /// Growing inserts older rows ABOVE the current top, which would otherwise shove the content
+    /// downward. Re-anchors to the previously-first visible row once the new rows exist.
+    private func loadEarlier(using proxy: ScrollViewProxy) {
+        let anchorID = cachedVisibleMessages.first?.id
+        maxVisibleCount = min(messages.count, maxVisibleCount + Self.windowGrowStep)
+        guard let anchorID else { return }
+        DispatchQueue.main.async { proxy.scrollTo(anchorID, anchor: .top) }
+    }
+
+    /// Scrolls to the last RENDERED message. A suppressed last message has no view, so targeting
+    /// the raw last id made both auto-scroll and the scroll-to-bottom button no-ops in exactly the
+    /// cases they exist for.
+    private func scrollToLatest(using proxy: ScrollViewProxy) {
+        guard let target = lastRenderedMessageID else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo(target, anchor: .bottom)
+        }
+    }
+
     var body: some View {
-        // Use cached values that are updated via .onChange to avoid recalculating on every body pass.
-        let hiddenEarlierCount = cachedWindowStart
-        let index = cachedGroupingIndex
-        
-        return ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if persistedHistoryCount > 0 && !hasRestoredHistory {
-                            ChannelLogRestoreHistoryButton(
-                                persistedHistoryCount: persistedHistoryCount,
-                                onRestoreHistory: onRestoreHistory
-                            )
-                        }
-
-                        if hiddenEarlierCount > 0 {
-                            ChannelLogLoadEarlierButton(
-                                hiddenEarlierCount: hiddenEarlierCount,
-                                onLoadEarlier: {
-                                    // Pin the reader's position: growing the window inserts
-                                    // older rows above the current top, which would otherwise
-                                    // shove the content the user is reading downward. Re-anchor
-                                    // to the previously-first visible row after the new rows
-                                    // exist (next runloop tick).
-                                    let anchorID = cachedVisibleMessages.first?.id
-                                    maxVisibleCount = min(messages.count, maxVisibleCount + Self.windowGrowStep)
-                                    if let anchorID {
-                                        DispatchQueue.main.async {
-                                            proxy.scrollTo(anchorID, anchor: .top)
-                                        }
-                                    }
-                                }
-                            )
-                        }
-
-                        ForEach(cachedVisibleMessages) { message in
-                            if !shouldSuppress(message, toolRequestIDs: toolRequestIDs) {
-                                ChannelMessageBanner(
-                                    message: message,
-                                    reviewLookup: index.securityReviewByRequestID,
-                                    outputLookup: index.toolOutputByRequestID,
-                                    scheduledTaskBannerIDs: index.taskIDsWithSchedulingBanner,
-                                    displayPrefs: displayPrefs,
-                                    onExportTaskPDF: onExportTaskPDF,
-                                    onOpenMCPSettings: onOpenMCPSettings,
-                                    selectedImageAttachment: $selectedImageAttachment
-                                )
-                                .id(message.id)
-                            }
-                        }
-                    }
-                    .padding(8)
+                    // The three cached values are updated by the single cacheSignature watcher
+                    // below, never recomputed on a body pass.
+                    ChannelLogMessageList(
+                        messages: cachedVisibleMessages, index: cachedGroupingIndex,
+                        hiddenEarlierCount: cachedWindowStart,
+                        persistedHistoryCount: persistedHistoryCount,
+                        hasRestoredHistory: hasRestoredHistory, displayPrefs: displayPrefs,
+                        isSuppressed: { shouldSuppress($0, toolRequestIDs: toolRequestIDs) },
+                        onRestoreHistory: onRestoreHistory,
+                        onLoadEarlier: { loadEarlier(using: proxy) },
+                        onExportTaskPDF: onExportTaskPDF, onOpenMCPSettings: onOpenMCPSettings,
+                        selectedImageAttachment: $selectedImageAttachment
+                    )
                 }
                 .background(AppColors.channelBackground)
                 .environment(\.timestampPreferences, displayPrefs)
-                .onScrollGeometryChange(for: Bool.self, of: { geometry in
-                    let distanceFromBottom = geometry.contentSize.height
-                        - geometry.contentOffset.y
-                        - geometry.containerSize.height
-                    return distanceFromBottom <= geometry.containerSize.height * 0.2
-                }, action: { _, nearBottom in
-                    // Project rule: defer @State mutation out of scroll-geometry actions
-                    // via DispatchQueue.main.async. The action callback fires rapidly during
-                    // ScrollView animation/inertia; mutating @State synchronously triggers
-                    // SwiftUI's "OnScrollGeometryChange tried to update multiple times per
-                    // frame" warning when the resulting body re-evaluation re-attaches the
-                    // modifier mid-frame.
-                    DispatchQueue.main.async {
-                        isAtBottom = nearBottom
-                        if nearBottom {
-                            // Back at the bottom → resume tail-following and unfreeze the window.
-                            autoScrollEnabled = true
-                            frozenAnchorID = nil
-                        } else if userInteracting {
-                            // The USER scrolled away (not content growth, which leaves
-                            // `userInteracting` false) → stop following and freeze the window's
-                            // top on the id of the current top row so streaming can't drag the
-                            // viewport back down.
-                            autoScrollEnabled = false
-                            if frozenAnchorID == nil {
-                                let start = windowStartIndex()
-                                frozenAnchorID = start < messages.count ? messages[start].id : nil
-                            }
-                        }
-                    }
-                })
-                .onScrollPhaseChange { _, newPhase in
-                    userInteracting = newPhase == .interacting
-                        || newPhase == .decelerating
-                        || newPhase == .tracking
-                }
+                .modifier(ChannelLogScrollTracking(
+                    isAtBottom: $isAtBottom, autoScrollEnabled: $autoScrollEnabled,
+                    frozenAnchorID: $frozenAnchorID, userInteracting: $userInteracting,
+                    anchorIDAtWindowStart: anchorIDAtWindowStart
+                ))
                 // Follow the tail on the id of the newest message, NOT messages.count: once a
                 // session reaches the resident-message cap, every append trims one off the front,
                 // so count is pinned and an `.onChange(of: messages.count)` would stop firing —
                 // silently killing auto-scroll. last.id changes on every appended message.
-                .onChange(of: messages.last?.id) {
-                    // Watches the raw last id — that is the append signal, and it changes even when
-                    // the new message is folded into an existing row (which still grows that row).
-                    // But it SCROLLS to the last rendered id, the only one with a view to reach.
-                    guard autoScrollEnabled, let target = lastRenderedMessageID else { return }
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(target, anchor: .bottom)
-                    }
-                }
-                // Cache expensive computations: window start, visible messages array, and grouping
-                // index. Updated only when dependencies change, not on every body pass.
                 //
+                // It watches the raw last id — the append signal, which changes even when the new
+                // message folds into an existing row — but SCROLLS to the last RENDERED id, the
+                // only one with a view to reach.
+                .onChange(of: messages.last?.id) {
+                    guard autoScrollEnabled else { return }
+                    scrollToLatest(using: proxy)
+                }
                 // ONE watcher over the whole dependency set, not one per input. Three separate
                 // watchers ran this rebuild (an array copy plus a grouping-index build over the
                 // visible window) twice per appended message, because `messages.count` and
                 // `messages.last?.id` change together on every one — and a fourth input,
                 // `frozenAnchorID`, had no watcher at all.
                 //
-                // Watching the signature is what keeps those in step: an input that is not in
+                // Watching the signature is what keeps those in step: an input not in
                 // `CacheSignature` cannot be watched, and one that is added is watched by
                 // construction. A per-input watcher plus a separate signature could disagree — and
                 // did: adding `.onChange(of: frozenAnchorID)` to the old shape would have compiled,
@@ -476,23 +434,17 @@ struct ChannelLogView: View, Equatable {
                 }
 
                 if !isAtBottom {
-                    ChannelLogScrollToBottomButton(onTap: {
-                        // Same target as auto-scroll: a suppressed last message has no view, so the
-                        // button was a no-op in exactly the cases the user reaches for it.
-                        guard let target = lastRenderedMessageID else { return }
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(target, anchor: .bottom)
-                        }
-                    })
+                    ChannelLogScrollToBottomButton(onTap: { scrollToLatest(using: proxy) })
                 }
             }
-            // GREEDY, and load-bearing in both directions. A vertical `ScrollView` takes its WIDTH
-            // from its content, so without this the pane is sized by whatever it happens to be
-            // showing: a short transcript rendered as a ~100pt ribbon floating in the middle of the
-            // pane, and one containing a long URL or file path demanded that width from the whole
-            // window — which is what stopped the middle column from shrinking and squeezed the
-            // sidebar and inspector instead. Filling the offered width lets the text wrap to the
-            // pane rather than the pane size itself to the text.
+            // GREEDY, and load-bearing in both directions, and applied to the ZSTACK rather than
+            // the reader — a vertical `ScrollView` takes its WIDTH from its content, so without
+            // this the pane is sized by whatever it happens to be showing: a short transcript
+            // rendered as a ~100pt ribbon floating in the middle of the pane, and one containing a
+            // long URL or file path demanded that width from the whole window — which is what
+            // stopped the middle column from shrinking and squeezed the sidebar and inspector
+            // instead. Filling the offered width lets the text wrap to the pane rather than the
+            // pane size itself to the text.
             //
             // Same defect, same fix as `ModelMetadataInspectorWindow`'s split (see its comment):
             // a split view's child that is not greedy on the cross axis collapses to its intrinsic
@@ -1818,5 +1770,133 @@ private struct LifecycleChromeBanner: View {
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity)
+    }
+}
+
+
+/// The transcript's rows, plus the two affordances that reach further back than the live window.
+///
+/// Split out of `ChannelLogView` because that body is the app's hot path — it re-runs on every
+/// appended message, and `MessageRow`'s hand-written `==` exists specifically to stop that fanning
+/// out into per-row work. The fewer things that body does, the less there is to re-run.
+///
+/// Lives in this file because `ChannelGroupingIndex` and `ChannelMessageBanner` are private to it.
+private struct ChannelLogMessageList: View {
+    let messages: [ChannelMessage]
+    let index: ChannelGroupingIndex
+    let hiddenEarlierCount: Int
+    let persistedHistoryCount: Int
+    let hasRestoredHistory: Bool
+    let displayPrefs: TimestampPreferences
+    /// Whether a row is folded into a parent `tool_request` above it. A closure rather than a copy
+    /// of the rule: it depends on `ChannelLogView`'s own suppression logic, and a second
+    /// implementation here is a second thing to keep in step.
+    let isSuppressed: (ChannelMessage) -> Bool
+    let onRestoreHistory: () -> Void
+    let onLoadEarlier: () -> Void
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ChannelLogHistoryAffordances(
+                hiddenEarlierCount: hiddenEarlierCount,
+                persistedHistoryCount: persistedHistoryCount,
+                hasRestoredHistory: hasRestoredHistory,
+                onRestoreHistory: onRestoreHistory, onLoadEarlier: onLoadEarlier
+            )
+            ForEach(messages) { message in
+                if !isSuppressed(message) {
+                    ChannelMessageBanner(
+                        message: message,
+                        reviewLookup: index.securityReviewByRequestID,
+                        outputLookup: index.toolOutputByRequestID,
+                        scheduledTaskBannerIDs: index.taskIDsWithSchedulingBanner,
+                        displayPrefs: displayPrefs,
+                        onExportTaskPDF: onExportTaskPDF,
+                        onOpenMCPSettings: onOpenMCPSettings,
+                        selectedImageAttachment: $selectedImageAttachment
+                    )
+                    .id(message.id)
+                }
+            }
+        }
+        .padding(8)
+    }
+}
+
+/// Tracks where the user is in the transcript, and whether streaming may move them.
+///
+/// Two facts, deliberately separate: whether the viewport is AT the bottom (which re-enables
+/// tail-following), and whether the USER put it where it is. Content growth leaves
+/// `userInteracting` false, which is what distinguishes "the user scrolled away, freeze the
+/// window" from "new messages arrived, keep following the tail".
+private struct ChannelLogScrollTracking: ViewModifier {
+    @Binding var isAtBottom: Bool
+    @Binding var autoScrollEnabled: Bool
+    @Binding var frozenAnchorID: ChannelMessage.ID?
+    @Binding var userInteracting: Bool
+    /// The row at the window's top, captured when the window freezes.
+    let anchorIDAtWindowStart: () -> ChannelMessage.ID?
+
+    /// Within this fraction of a viewport height of the end still counts as "at the bottom", so
+    /// tail-following survives the small drift an animated scroll leaves behind.
+    private static let bottomProximity: CGFloat = 0.2
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: Bool.self, of: { geometry in
+                let distanceFromBottom = geometry.contentSize.height
+                    - geometry.contentOffset.y
+                    - geometry.containerSize.height
+                return distanceFromBottom <= geometry.containerSize.height * Self.bottomProximity
+            }, action: { _, nearBottom in
+                // Project rule: defer @State mutation out of scroll-geometry actions via
+                // DispatchQueue.main.async. The action fires rapidly during ScrollView
+                // animation/inertia; mutating @State synchronously triggers SwiftUI's
+                // "OnScrollGeometryChange tried to update multiple times per frame" warning when
+                // the resulting body re-evaluation re-attaches the modifier mid-frame.
+                DispatchQueue.main.async { settle(nearBottom: nearBottom) }
+            })
+            .onScrollPhaseChange { _, newPhase in
+                userInteracting = newPhase == .interacting
+                    || newPhase == .decelerating
+                    || newPhase == .tracking
+            }
+    }
+
+    private func settle(nearBottom: Bool) {
+        isAtBottom = nearBottom
+        if nearBottom {
+            // Back at the bottom → resume tail-following and unfreeze the window.
+            autoScrollEnabled = true
+            frozenAnchorID = nil
+        } else if userInteracting {
+            // The USER scrolled away — content growth leaves `userInteracting` false — so stop
+            // following and freeze the window's top so streaming can't drag the viewport back down.
+            autoScrollEnabled = false
+            if frozenAnchorID == nil { frozenAnchorID = anchorIDAtWindowStart() }
+        }
+    }
+}
+
+/// The two ways back past the live window: restoring the persisted log, and widening the window.
+private struct ChannelLogHistoryAffordances: View {
+    let hiddenEarlierCount: Int
+    let persistedHistoryCount: Int
+    let hasRestoredHistory: Bool
+    let onRestoreHistory: () -> Void
+    let onLoadEarlier: () -> Void
+
+    var body: some View {
+        if persistedHistoryCount > 0 && !hasRestoredHistory {
+            ChannelLogRestoreHistoryButton(persistedHistoryCount: persistedHistoryCount,
+                                           onRestoreHistory: onRestoreHistory)
+        }
+        if hiddenEarlierCount > 0 {
+            ChannelLogLoadEarlierButton(hiddenEarlierCount: hiddenEarlierCount,
+                                        onLoadEarlier: onLoadEarlier)
+        }
     }
 }
