@@ -95,6 +95,12 @@ public struct TranscriptKindSelection: Codable, Sendable, Equatable {
     public var showsChat: Bool
     /// Tool names hidden within this scope. Empty = every tool shows.
     ///
+    /// NOTE: this type's `Codable` conformance is not how it reaches disk. `TranscriptViewConfig`
+    /// hand-writes its own Codable and FLATTENS each selection into its keys (and, for overrides,
+    /// into `SenderKindOverrideRow`). A property added here is silently never persisted until it is
+    /// added THERE too — `TranscriptToolFilterTests.configRoundTripKeepsEverySelectionProperty`
+    /// is the guard that fails when it isn't.
+    ///
     /// Narrows the `toolCalls` group rather than replacing it: the group switch still turns every
     /// tool row off at once, and this says which tools are hidden while the group is on. Hidden
     /// rather than shown, for the same reason `hiddenKinds` is — a tool this build has never seen,
@@ -108,14 +114,6 @@ public struct TranscriptKindSelection: Codable, Sendable, Equatable {
         self.hiddenToolNames = hiddenToolNames
     }
 
-    /// Decoded leniently: a config written before per-tool filtering existed has no such key, and
-    /// its absence means "nothing hidden", not a decode failure that would lose the whole config.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        hiddenKinds = try container.decodeIfPresent(Set<ChannelMessageKind>.self, forKey: .hiddenKinds) ?? []
-        showsChat = try container.decodeIfPresent(Bool.self, forKey: .showsChat) ?? true
-        hiddenToolNames = try container.decodeIfPresent(Set<String>.self, forKey: .hiddenToolNames) ?? []
-    }
 
     /// The everything-shows selection — the default scope's starting state, and the base a
     /// per-sender override is copied from when none exists yet.
@@ -264,8 +262,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case hiddenKinds, showsChat, senderKindOverrides, visibleGroups, hiddenGroups,
-             allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
+        case hiddenKinds, showsChat, hiddenToolNames, senderKindOverrides, visibleGroups,
+             hiddenGroups, allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
     }
 
     /// One persisted per-sender override row. An ARRAY of these (sorted by sender description)
@@ -275,6 +273,9 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         let sender: ChannelMessage.Sender
         let hiddenKinds: [String]
         let showsChat: Bool
+        /// Optional: rows written before per-tool filtering have no such key, and its absence
+        /// means "nothing hidden" rather than a decode failure that would drop the whole row.
+        var hiddenToolNames: [String]?
     }
 
     /// Custom decode, for two reasons. (1) A config persisted BEFORE the recipient / task-scope / error
@@ -288,6 +289,9 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     /// with no overrides.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Read once and applied after the branch: only the current generation can carry tool
+        // names, and the two legacy group generations predate the feature entirely.
+        let hiddenTools = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenToolNames) ?? []
         if let hiddenNames = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenKinds) {
             // Decoded as raw strings, not `Set<ChannelMessageKind>`, so a kind written by a NEWER
             // build doesn't throw here. Ignoring an unknown hidden name fails open — that kind's
@@ -318,6 +322,7 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         } else {
             defaultKinds = .allVisible
         }
+        defaultKinds.hiddenToolNames = hiddenTools
         // Per-row lenient: a row whose sender was written by a NEWER build fails ITS decode and is
         // dropped (that sender follows the default — fails open), instead of failing the config.
         if var rows = try? c.nestedUnkeyedContainer(forKey: .senderKindOverrides) {
@@ -331,7 +336,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
                 }
                 overrides[row.sender] = TranscriptKindSelection(
                     hiddenKinds: Set(row.hiddenKinds.compactMap(ChannelMessageKind.init(rawValue:))),
-                    showsChat: row.showsChat)
+                    showsChat: row.showsChat,
+                    hiddenToolNames: Set(row.hiddenToolNames ?? []))
             }
             senderKindOverrides = overrides
         } else {
@@ -398,12 +404,21 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(defaultKinds.hiddenKinds.map(\.rawValue).sorted(), forKey: .hiddenKinds)
         try c.encode(defaultKinds.showsChat, forKey: .showsChat)
+        // Sorted, like the kind names above: an unordered Set encodes in nondeterministic order and
+        // would churn the JSON on every save.
+        if !defaultKinds.hiddenToolNames.isEmpty {
+            try c.encode(defaultKinds.hiddenToolNames.sorted(), forKey: .hiddenToolNames)
+        }
         if !senderKindOverrides.isEmpty {
             let rows = senderKindOverrides
                 .map { sender, selection in
-                    SenderKindOverrideRow(sender: sender,
-                                          hiddenKinds: selection.hiddenKinds.map(\.rawValue).sorted(),
-                                          showsChat: selection.showsChat)
+                    SenderKindOverrideRow(
+                        sender: sender,
+                        hiddenKinds: selection.hiddenKinds.map(\.rawValue).sorted(),
+                        showsChat: selection.showsChat,
+                        hiddenToolNames: selection.hiddenToolNames.isEmpty
+                            ? nil : selection.hiddenToolNames.sorted()
+                    )
                 }
                 .sorted { String(describing: $0.sender) < String(describing: $1.sender) }
             try c.encode(rows, forKey: .senderKindOverrides)

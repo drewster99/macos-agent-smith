@@ -91,52 +91,84 @@ struct TranscriptToolFilterTests {
 
     // MARK: - Compatibility
 
-    /// A config written before per-tool filtering existed has no such key. Decoding must treat that
-    /// as "nothing hidden" rather than throwing, which would lose the user's whole filter config.
-    @Test("A config saved before this feature decodes with every tool visible")
-    func legacyConfigDecodes() throws {
-        let legacy = #"{"hiddenKinds":["tool_output"],"showsChat":true}"#
-        let selection = try JSONDecoder().decode(TranscriptKindSelection.self, from: Data(legacy.utf8))
-        #expect(selection.hiddenToolNames.isEmpty)
-        #expect(selection.hiddenKinds == [.toolOutput])
-        #expect(selection.showsChat)
-    }
 
-    @Test("Hidden tools survive a round trip")
-    func roundTrip() throws {
-        var selection = TranscriptKindSelection()
-        selection.setToolGroup(.web, visible: false)
-        selection.setTool("bash", visible: false)
-        let decoded = try JSONDecoder().decode(
-            TranscriptKindSelection.self, from: JSONEncoder().encode(selection)
-        )
-        #expect(decoded == selection)
-        #expect(decoded.hiddenToolNames.contains("bash"))
-    }
 
-    /// Every stored property of `TranscriptKindSelection` must be written AND read back.
+
+    /// Round-trips the WHOLE config, not just the selection.
     ///
-    /// It has a hand-written `init(from:)` for the lenient decode above, which costs the type its
-    /// synthesized decoder — so a property added later is silently never restored, and a round-trip
-    /// test comparing two defaulted values stays green. Reflection is what catches that.
-    @Test("Every TranscriptKindSelection property is encoded and decoded")
-    func codingCoverage() throws {
-        // Every field non-default, or an absent key is indistinguishable from an unread one.
+    /// `TranscriptViewConfig` hand-writes its Codable and FLATTENS each `TranscriptKindSelection`
+    /// into its own keys, so a selection is never persisted via its own encoder. A round-trip test
+    /// on the selection alone therefore passes while the feature is dropped on every save — which
+    /// is exactly what happened: this test is the one that could fail, and did.
+    @Test("Hidden tools survive a round trip through the persisted config")
+    func configRoundTripKeepsHiddenTools() throws {
+        var config = TranscriptViewConfig()
+        config.defaultKinds.setTool("bash", visible: false)
+        var brown = config.defaultKinds
+        brown.setTool("file_read", visible: false)
+        config.setKindSelection(brown, forSender: .agent(.brown))
+
+        let decoded = try JSONDecoder().decode(
+            TranscriptViewConfig.self, from: JSONEncoder().encode(config)
+        )
+        #expect(decoded.defaultKinds.hiddenToolNames == ["bash"],
+                "the default scope's hidden tools were dropped by the persisted encoding")
+        #expect(decoded.senderKindOverrides[.agent(.brown)]?.hiddenToolNames == ["bash", "file_read"],
+                "a per-sender override's hidden tools were dropped by the persisted encoding")
+        #expect(decoded == config)
+    }
+
+    /// A config written before per-tool filtering has no tool keys anywhere — neither on the
+    /// default scope nor on an override row — and must decode with every tool visible.
+    @Test("A persisted config from before this feature decodes with every tool visible")
+    func legacyConfigRoundTrip() throws {
+        let legacy = """
+            {"hiddenKinds":["tool_output"],"showsChat":true,"visibility":"all",
+             "hideTaskScoped":false,"showErrors":true,
+             "senderKindOverrides":[{"sender":{"agent":{"_0":"brown"}},
+                                     "hiddenKinds":["tool_request"],"showsChat":false}]}
+            """
+        let config = try JSONDecoder().decode(TranscriptViewConfig.self, from: Data(legacy.utf8))
+        #expect(config.defaultKinds.hiddenToolNames.isEmpty)
+        #expect(config.defaultKinds.hiddenKinds == [.toolOutput])
+        #expect(config.senderKindOverrides[.agent(.brown)]?.hiddenToolNames.isEmpty == true)
+        #expect(config.senderKindOverrides[.agent(.brown)]?.hiddenKinds == [.toolRequest])
+    }
+
+    /// Every stored property of `TranscriptKindSelection` must survive the PERSISTED encoding.
+    ///
+    /// Reflection, and through `TranscriptViewConfig` rather than the selection's own Codable,
+    /// because the selection is never encoded by its own encoder — the config flattens it into its
+    /// own keys and into `SenderKindOverrideRow`. A property added to the selection and forgotten
+    /// there is silently dropped on every save, and a round trip of the SELECTION stays green while
+    /// it happens. That is not hypothetical: it is exactly how `hiddenToolNames` shipped broken.
+    @Test("Every selection property survives the persisted config encoding")
+    func configRoundTripKeepsEverySelectionProperty() throws {
+        // Every field non-default, on BOTH scopes — a default value is indistinguishable from a
+        // dropped one, and the default scope and an override row are encoded by different code.
         var selection = TranscriptKindSelection()
         selection.setKind(.toolOutput, visible: false)
         selection.showsChat = false
         selection.setTool("bash", visible: false)
 
-        let encoded = try JSONEncoder().encode(selection)
-        let object = try #require(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        let expected = Set(Mirror(reflecting: selection).children.compactMap(\.label))
-        let missing = expected.subtracting(object.keys).sorted()
-        #expect(missing.isEmpty, """
-            \(missing.joined(separator: ", ")) is a stored property with no encoded key, so it is \
-            never persisted. Add it to CodingKeys AND to init(from:).
+        var config = TranscriptViewConfig()
+        config.defaultKinds = selection
+        config.setKindSelection(selection, forSender: .agent(.brown))
+
+        let decoded = try JSONDecoder().decode(
+            TranscriptViewConfig.self, from: JSONEncoder().encode(config)
+        )
+        let properties = Set(Mirror(reflecting: selection).children.compactMap(\.label))
+        #expect(!properties.isEmpty)
+        #expect(decoded.defaultKinds == selection, """
+            a stored property of TranscriptKindSelection (\(properties.sorted().joined(separator: ", "))) \
+            did not survive TranscriptViewConfig's encoder. Add it to CodingKeys, encode(to:) and \
+            init(from:) there.
             """)
-        #expect(try JSONDecoder().decode(TranscriptKindSelection.self, from: encoded) == selection,
-                "a property is encoded but not read back by the hand-written init(from:)")
+        #expect(decoded.senderKindOverrides[.agent(.brown)] == selection, """
+            a stored property did not survive SenderKindOverrideRow. Add it to that struct, to the \
+            row it encodes, and to the row it decodes.
+            """)
     }
 
     // MARK: - The roster the UI is built from
