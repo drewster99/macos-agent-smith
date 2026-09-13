@@ -467,6 +467,360 @@ struct CodeStyleGuardTests {
             """) == 0)
     }
 
+    // MARK: - `body` length ratchet
+
+    /// The project rule (`CLAUDE.md`): a SwiftUI `body` is at most this many lines of
+    /// normally-formatted code.
+    static let maximumBodyLines = 20
+
+    /// Files holding a `body` longer than `maximumBodyLines`, and how many such bodies.
+    ///
+    /// **A BACKLOG, not an allowance** — the same contract as `someViewFunctionBudget`, and it
+    /// exists for a reason that table could not cover alone: the two debts are ANTI-CORRELATED.
+    /// Inlining a `-> some View` helper moves its lines INTO the body that called it; splitting an
+    /// oversized body moves helpers back out. Pinning one number alone lets the other absorb the
+    /// debt silently, and that is not hypothetical — while only the `-> some View` count was
+    /// watched it fell from 184 to 130, and bodies over 20 lines rose from 129 to 154 underneath
+    /// it. Neither ratchet may be re-pinned without the other, in the same commit.
+    ///
+    /// `ViewModifier.body(content:)` is counted here even though `someViewFunctionBudget` exempts
+    /// it. That exemption is about which SPELLING a helper should have — a protocol requirement has
+    /// no `View`-struct form — and says nothing about how long the thing is allowed to be. A
+    /// modifier that does too much is the same defect as a view that does too much.
+    private static let oversizedBodyBudget: [String: Int] = [
+        "Views/TaskListView.swift": 13,
+        "Views/ChannelLogView.swift": 10,
+        "Views/InspectorView.swift": 8,
+        "Views/Main/MainViewDetailColumn.swift": 7,
+        "Views/TaskCostDetailSheet.swift": 6,
+        "Views/Banners/ChannelBanners.swift": 4,
+        "Views/TaskDetailWindow.swift": 4,
+        "Views/ModelsSettingsTab.swift": 3,
+        "Views/TimersWindow.swift": 3,
+        "Views/UserInputView.swift": 3,
+        "Views/AttachmentViews.swift": 2,
+        "Views/CapabilitiesEditorSheet.swift": 2,
+        "Views/DiffView.swift": 2,
+        "Views/Inspector/NowLiveSection.swift": 2,
+        "Views/Inspector/ValidatorAgentCard.swift": 2,
+        "Views/LLMTurnViews.swift": 2,
+        "Views/MCPServerEditorSheet.swift": 2,
+        "Views/MCPServerManagementView.swift": 2,
+        "Views/Main/TranscriptFilterPopover.swift": 2,
+        "Views/MainView.swift": 2,
+        "Views/MarkdownText.swift": 2,
+        "Views/OrchestrationSettingsView.swift": 2,
+        "Views/PricingEditorSheet.swift": 2,
+        "Views/ProviderManagementView.swift": 2,
+        "Views/SpendingDashboardView.swift": 2,
+        "Views/SummarizerCard.swift": 2,
+        "AgentSmithApp.swift": 1,
+        "Views/AgentInspectorWindow.swift": 1,
+        "Views/AgentModelSettingsSection.swift": 1,
+        "Views/Banners/TaskCreatedBannerContextSection.swift": 1,
+        "Views/BehaviorFlagsEditorSheet.swift": 1,
+        "Views/ChannelLog/MessageRowSenderHeader.swift": 1,
+        "Views/CompactionDiffWindow.swift": 1,
+        "Views/ConfigValidationView.swift": 1,
+        "Views/Input/UserInputTextField.swift": 1,
+        "Views/Inspector/AgentCardExpandedSections.swift": 1,
+        "Views/Inspector/AgentCardModelInfoLine.swift": 1,
+        "Views/Inspector/AgentCardStatusBadge.swift": 1,
+        "Views/Inspector/AgentConfigResponsivenessSection.swift": 1,
+        "Views/Inspector/AgentConfigSpeechSection.swift": 1,
+        "Views/Inspector/AgentInspectorWindowHeader.swift": 1,
+        "Views/Inspector/AgentInspectorWindowSections.swift": 1,
+        "Views/Inspector/CostEstimateSection.swift": 1,
+        "Views/Inspector/SummarizerCardExpandedSections.swift": 1,
+        "Views/Inspector/SummarizerCardHeader.swift": 1,
+        "Views/LaunchSplashView.swift": 1,
+        "Views/LiteLLMProviderPickerSheet.swift": 1,
+        "Views/Main/MainViewSidebar.swift": 1,
+        "Views/Memory/MemoryTaskSummaryRow.swift": 1,
+        "Views/MemoryEditorView.swift": 1,
+        "Views/MetadataCoverageView.swift": 1,
+        "Views/ModelMetadataInspectorWindow.swift": 1,
+        "Views/ModelOverrideEditorComponents.swift": 1,
+        "Views/ModelStatsPopover.swift": 1,
+        "Views/RoleModelConfigOverrideEditor.swift": 1,
+        "Views/SettingsView.swift": 1,
+        "Views/TaskCost/TaskCostDetailWindow.swift": 1,
+        "Views/TaskCost/TaskCostTurnRow.swift": 1,
+        "Views/TaskDetail/TaskAttachmentList.swift": 1,
+        "Views/TaskOverlay/TaskOverlayBar.swift": 1,
+        "Views/TaskPDF/TaskPDFSaveSheet.swift": 1,
+        "Views/TaskToolOverrideEditor.swift": 1,
+        "Views/Tasks/TaskEditorSheet.swift": 1,
+        "Views/Tasks/TemplateRunInputSheet.swift": 1,
+        "Views/ToolsSettingsView.swift": 1
+    ]
+
+    /// The sum of the ceilings, pinned separately and checked in BOTH directions so a cleanup has
+    /// to edit this number and unused headroom cannot quietly accumulate. See `someViewFunctionTotal`.
+    private static let oversizedBodyTotal = 132
+
+    /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
+    /// delimiters themselves.
+    ///
+    /// The body counter brace-matches, so a brace inside a string literal would run the match past
+    /// the real end of the body and swallow every declaration after it. That is not a theoretical
+    /// hazard here: this app renders `{{placeholder}}` template syntax, and regex literals in
+    /// `#"…"#` form carry unbalanced braces by design. Handles nested block comments, escapes,
+    /// multi-line strings, and raw strings of any pound count — in a raw string a backslash is not
+    /// an escape, which is precisely why the naive version mis-terminated on `#"\\"#`.
+    static func blankingCommentsAndStringContents(_ source: String) -> String {
+        var out = Array(source)
+        var index = 0
+        let count = out.count
+
+        func char(_ offset: Int) -> Character { offset < count ? out[offset] : "\0" }
+        /// Blanks a character unless it is a newline, so line numbering and blank-line detection survive.
+        func blank(_ offset: Int) { if out[offset] != "\n" { out[offset] = " " } }
+
+        while index < count {
+            let c = out[index]
+
+            // Line comment.
+            if c == "/", char(index + 1) == "/" {
+                while index < count, out[index] != "\n" { out[index] = " "; index += 1 }
+                continue
+            }
+            // Block comment — Swift's nest.
+            if c == "/", char(index + 1) == "*" {
+                var depth = 0
+                while index < count {
+                    if out[index] == "/", char(index + 1) == "*" { depth += 1; blank(index); blank(index + 1); index += 2; continue }
+                    if out[index] == "*", char(index + 1) == "/" {
+                        depth -= 1; blank(index); blank(index + 1); index += 2
+                        if depth == 0 { break }
+                        continue
+                    }
+                    blank(index); index += 1
+                }
+                continue
+            }
+            // Raw string: one or more `#` then a quote. The same pound count closes it.
+            if c == "#" {
+                var pounds = 0
+                var probe = index
+                while probe < count, out[probe] == "#" { pounds += 1; probe += 1 }
+                if char(probe) == "\"" {
+                    let isMultiline = char(probe + 1) == "\"" && char(probe + 2) == "\""
+                    let openLength = isMultiline ? 3 : 1
+                    index = probe + openLength
+                    while index < count {
+                        // Closing delimiter: quote(s) followed by exactly the opening pound count.
+                        if out[index] == "\"" {
+                            let quotesNeeded = isMultiline ? 3 : 1
+                            var quotes = 0
+                            while quotes < quotesNeeded, char(index + quotes) == "\"" { quotes += 1 }
+                            if quotes == quotesNeeded {
+                                var closing = 0
+                                while closing < pounds, char(index + quotesNeeded + closing) == "#" { closing += 1 }
+                                if closing == pounds { index += quotesNeeded + pounds; break }
+                            }
+                        }
+                        // A single-line raw string still cannot span a newline.
+                        if !isMultiline, out[index] == "\n" { break }
+                        blank(index); index += 1
+                    }
+                    continue
+                }
+            }
+            // Multi-line string.
+            if c == "\"", char(index + 1) == "\"", char(index + 2) == "\"" {
+                index += 3
+                while index < count {
+                    if out[index] == "\\" { blank(index); blank(index + 1); index += 2; continue }
+                    if out[index] == "\"", char(index + 1) == "\"", char(index + 2) == "\"" { index += 3; break }
+                    blank(index); index += 1
+                }
+                continue
+            }
+            // Ordinary string.
+            if c == "\"" {
+                index += 1
+                while index < count {
+                    if out[index] == "\\" { blank(index); blank(index + 1); index += 2; continue }
+                    if out[index] == "\"" { index += 1; break }
+                    if out[index] == "\n" { break }
+                    blank(index); index += 1
+                }
+                continue
+            }
+            index += 1
+        }
+        return String(out)
+    }
+
+    /// Every SwiftUI `body` in `source` longer than `maximumBodyLines`, as `(owner, lineCount)`.
+    ///
+    /// A "line" is a line between the braces carrying anything other than whitespace once comments
+    /// are blanked — so documentation and blank lines are free, matching what the rule means by
+    /// "normally-formatted code". `owner` is the nearest enclosing `struct`/`extension` name, which
+    /// is what a reader needs to find the thing.
+    static func oversizedBodies(in source: String) -> [(owner: String, lines: Int)] {
+        let blanked = Self.blankingCommentsAndStringContents(source)
+        let patterns = [
+            #"\bvar\s+body\s*:\s*some\s+View\s*\{"#,
+            #"\bfunc\s+body\s*\(\s*content\s*:[^)]*\)\s*->\s*some\s+View\s*\{"#
+        ]
+        var found: [(String, Int)] = []
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { continue }
+            let full = NSRange(blanked.startIndex..<blanked.endIndex, in: blanked)
+            for match in regex.matches(in: blanked, options: [], range: full) {
+                guard let matched = Range(match.range, in: blanked) else { continue }
+                // Brace-match from the `{` that ends the declaration.
+                var depth = 1
+                var cursor = matched.upperBound
+                while cursor < blanked.endIndex, depth > 0 {
+                    if blanked[cursor] == "{" { depth += 1 }
+                    else if blanked[cursor] == "}" { depth -= 1 }
+                    if depth == 0 { break }
+                    cursor = blanked.index(after: cursor)
+                }
+                // An unbalanced body means the scanner lost track; count nothing rather than
+                // report a bogus number that someone would then "fix" by editing real code.
+                guard depth == 0 else { continue }
+                let lines = blanked[matched.upperBound..<cursor]
+                    .split(separator: "\n", omittingEmptySubsequences: false)
+                    .count { !$0.allSatisfy(\.isWhitespace) }
+                guard lines > Self.maximumBodyLines else { continue }
+                found.append((Self.enclosingTypeName(in: blanked, before: matched.lowerBound), lines))
+            }
+        }
+        return found.map { (owner: $0.0, lines: $0.1) }
+    }
+
+    /// The nearest `struct` / `extension` / `enum` / `class` name declared before `position`.
+    private static func enclosingTypeName(in source: String, before position: String.Index) -> String {
+        let head = source[source.startIndex..<position]
+        guard let regex = try? NSRegularExpression(pattern: #"\b(?:struct|extension|enum|class)\s+(\w+)"#) else { return "?" }
+        let full = NSRange(head.startIndex..<head.endIndex, in: head)
+        guard let last = regex.matches(in: String(head), options: [], range: full).last,
+              let name = Range(last.range(at: 1), in: head) else { return "?" }
+        return String(head[name])
+    }
+
+    @Test("SwiftUI bodies do not grow beyond their frozen per-file budget")
+    func oversizedBodyRatchet() throws {
+        let rootPath = Self.appTargetRoot.path
+        var actual: [String: Int] = [:]
+        var detail: [String: [(owner: String, lines: Int)]] = [:]
+        for url in Self.swiftFiles() {
+            let relative = url.path.replacingOccurrences(of: rootPath + "/", with: "")
+            let bodies = Self.oversizedBodies(in: try String(contentsOf: url, encoding: .utf8))
+            if !bodies.isEmpty {
+                actual[relative] = bodies.count
+                detail[relative] = bodies
+            }
+        }
+
+        var problems: [String] = []
+        for (path, count) in actual.sorted(by: { $0.key < $1.key }) {
+            let budget = Self.oversizedBodyBudget[path] ?? 0
+            if count > budget {
+                let worst = (detail[path] ?? []).sorted { $0.lines > $1.lines }
+                    .map { "\($0.owner) (\($0.lines))" }.joined(separator: ", ")
+                problems.append("  \(path): \(count) > budget \(budget) — split into `View` structs. Bodies: \(worst)")
+            }
+        }
+        let total = actual.values.reduce(0, +)
+        if total != Self.oversizedBodyTotal {
+            let table = actual.sorted { ($0.value, $1.key) > ($1.value, $0.key) }
+                .map { "        \"\($0.key)\": \($0.value)," }
+                .joined(separator: "\n")
+            let direction = total < Self.oversizedBodyTotal
+                ? "Debt was paid down — lower the ceiling AND the total in the same commit, and re-check `someViewFunctionTotal` in the same pass."
+                : "New violations — split the body into `View` structs rather than raising the budget."
+            problems.append("  TOTAL is \(total), budget says \(Self.oversizedBodyTotal). \(direction)\n  Current table:\n\(table)")
+        }
+
+        if !problems.isEmpty {
+            Issue.record("`body` length budget violated:\n\(problems.joined(separator: "\n"))")
+        }
+    }
+
+    @Test("The body-length counter reads code, not prose, string literals or raw strings")
+    func bodyLengthCounterIsStructural() {
+        // A short body is not reported, however much documentation surrounds it.
+        #expect(CodeStyleGuardTests.oversizedBodies(in: """
+            struct Row: View {
+                /// Doc.
+                // Another.
+                var body: some View {
+                    Text("hi")
+                }
+            }
+            """).isEmpty)
+        // Comments and blank lines do not count toward the limit.
+        let padded = (1...40).map { _ in "        // filler" }.joined(separator: "\n")
+        #expect(CodeStyleGuardTests.oversizedBodies(in: """
+            struct Row: View {
+                var body: some View {
+            \(padded)
+                    Text("hi")
+                }
+            }
+            """).isEmpty)
+        // Real code does.
+        let code = (1...25).map { "        Text(\"line \($0)\")" }.joined(separator: "\n")
+        let hits = CodeStyleGuardTests.oversizedBodies(in: """
+            struct Row: View {
+                var body: some View {
+            \(code)
+                }
+            }
+            """)
+        #expect(hits.count == 1)
+        #expect(hits.first?.owner == "Row")
+        #expect(hits.first?.lines == 25)
+        // A brace inside a string literal must not run the match past the end of the body.
+        // `Text("{{name}}")` is real here — this app renders template placeholders.
+        let afterString = CodeStyleGuardTests.oversizedBodies(in: """
+            struct Small: View {
+                var body: some View {
+                    Text("{{unclosed brace {")
+                }
+            }
+            struct Big: View {
+                var body: some View {
+            \(code)
+                }
+            }
+            """)
+        #expect(afterString.count == 1)
+        #expect(afterString.first?.owner == "Big")
+        // Raw strings carry unbalanced braces by design, and a backslash is not an escape in one.
+        let afterRaw = CodeStyleGuardTests.oversizedBodies(in: #"""
+            struct Small: View {
+                var body: some View {
+                    Text(verbatim: #"\bextension\s+View\s*\{"#)
+                }
+            }
+            struct Big: View {
+                var body: some View {
+                    Text("a")
+                    Text("b")
+                }
+            }
+            """#)
+        #expect(afterRaw.isEmpty)
+        // A ViewModifier's body is measured too — the `-> some View` exemption is about spelling.
+        let modifierCode = (1...25).map { "        _ = \($0)" }.joined(separator: "\n")
+        let modifierHits = CodeStyleGuardTests.oversizedBodies(in: """
+            struct Tip: ViewModifier {
+                func body(content: Content) -> some View {
+            \(modifierCode)
+                    return content
+                }
+            }
+            """)
+        #expect(modifierHits.count == 1)
+        #expect(modifierHits.first?.owner == "Tip")
+    }
+
     // MARK: - Multiple trailing closures
 
     /// The package's own source roots, scanned alongside the app target.
