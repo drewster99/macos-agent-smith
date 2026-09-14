@@ -498,6 +498,7 @@ struct CodeStyleGuardTests {
         "Views/ModelsSettingsTab.swift": 3,
         "Views/TimersWindow.swift": 3,
         "Views/UserInputView.swift": 3,
+        "AgentSmithApp.swift": 2,
         "Views/AttachmentViews.swift": 2,
         "Views/CapabilitiesEditorSheet.swift": 2,
         "Views/DiffView.swift": 2,
@@ -514,7 +515,6 @@ struct CodeStyleGuardTests {
         "Views/ProviderManagementView.swift": 2,
         "Views/SpendingDashboardView.swift": 2,
         "Views/SummarizerCard.swift": 2,
-        "AgentSmithApp.swift": 1,
         "Views/AgentInspectorWindow.swift": 1,
         "Views/AgentModelSettingsSection.swift": 1,
         "Views/Banners/TaskCreatedBannerContextSection.swift": 1,
@@ -536,6 +536,7 @@ struct CodeStyleGuardTests {
         "Views/LaunchSplashView.swift": 1,
         "Views/LiteLLMProviderPickerSheet.swift": 1,
         "Views/Main/MainViewSidebar.swift": 1,
+        "Views/Main/MainViewToolbar.swift": 1,
         "Views/Memory/MemoryTaskSummaryRow.swift": 1,
         "Views/MemoryEditorView.swift": 1,
         "Views/MetadataCoverageView.swift": 1,
@@ -557,7 +558,7 @@ struct CodeStyleGuardTests {
 
     /// The sum of the ceilings, pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number and unused headroom cannot quietly accumulate. See `someViewFunctionTotal`.
-    private static let oversizedBodyTotal = 132
+    private static let oversizedBodyTotal = 134
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.
@@ -661,9 +662,15 @@ struct CodeStyleGuardTests {
     /// is what a reader needs to find the thing.
     static func oversizedBodies(in source: String) -> [(owner: String, lines: Int)] {
         let blanked = Self.blankingCommentsAndStringContents(source)
+        // `some <Anything>`, not a list of known body types. Enumerating fails LOSSY, and it
+        // already did: pinned against `some View` alone, this missed `AgentSmithApp.body`
+        // (`some Scene`, 227 lines — the largest body in the target) and `MainViewToolbar.body`
+        // (`some ToolbarContent`, 66). Both sat over the limit, unprotected, while the ratchet
+        // reported itself green. Matching the shape catches `some Commands`, `some Widget` and
+        // anything else SwiftUI adds, by construction rather than by someone remembering.
         let patterns = [
-            #"\bvar\s+body\s*:\s*some\s+View\s*\{"#,
-            #"\bfunc\s+body\s*\(\s*content\s*:[^)]*\)\s*->\s*some\s+View\s*\{"#
+            #"\bvar\s+body\s*:\s*some\s+\w+\s*\{"#,
+            #"\bfunc\s+body\s*\(\s*content\s*:[^)]*\)\s*->\s*some\s+\w+\s*\{"#
         ]
         var found: [(String, Int)] = []
         for pattern in patterns {
@@ -819,6 +826,23 @@ struct CodeStyleGuardTests {
             """)
         #expect(modifierHits.count == 1)
         #expect(modifierHits.first?.owner == "Tip")
+        // A body is a body whatever it returns. `some Scene` and `some ToolbarContent` were both
+        // invisible while this matched `some View` alone.
+        let sceneCode = (1...25).map { "        Text(\"row \($0)\")" }.joined(separator: "\n")
+        let sceneHits = CodeStyleGuardTests.oversizedBodies(in: """
+            struct App: Scene {
+                var body: some Scene {
+            \(sceneCode)
+                }
+            }
+            struct Bar: ToolbarContent {
+                var body: some ToolbarContent {
+            \(sceneCode)
+                }
+            }
+            """)
+        #expect(sceneHits.count == 2)
+        #expect(sceneHits.map(\.owner).sorted() == ["App", "Bar"])
     }
 
     // MARK: - Multiple trailing closures
