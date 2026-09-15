@@ -7,24 +7,38 @@ import AgentSmithKit
 /// to the default it was copied from) fills it too: the icon tracks configuration, not message counts.
 struct TranscriptFilterBar: View {
     @Binding var config: TranscriptViewConfig
+
+    var body: some View {
+        TranscriptPaneHeader(title: "Session transcript") {
+            TranscriptFilterButton(config: $config)
+        }
+    }
+}
+
+/// The funnel button and its popover, with no opinion about which pane it sits in.
+///
+/// Extracted so the task pane and the session pane carry the SAME control over their OWN configs.
+/// The task pane briefly got this by reusing `TranscriptFilterBar` wholesale, which also dragged
+/// along that bar's hardcoded "Session transcript" title and stacked a second header under the
+/// task's own — two bars, one of them lying about which pane it belonged to.
+struct TranscriptFilterButton: View {
+    @Binding var config: TranscriptViewConfig
     @State private var showPopover = false
 
     private var isFiltering: Bool { config != .everything }
 
     var body: some View {
-        TranscriptPaneHeader(title: "Session transcript") {
-            Button(action: {
-                showPopover = true
-            }, label: {
-                Image(systemName: isFiltering
-                    ? "line.3.horizontal.decrease.circle.fill"
-                    : "line.3.horizontal.decrease.circle")
-            })
-            .buttonStyle(.borderless)
-            .help("Choose which messages this pane shows")
-            .popover(isPresented: $showPopover, arrowEdge: .top) {
-                TranscriptFilterPopover(config: $config)
-            }
+        Button(action: {
+            showPopover = true
+        }, label: {
+            Image(systemName: isFiltering
+                ? "line.3.horizontal.decrease.circle.fill"
+                : "line.3.horizontal.decrease.circle")
+        })
+        .buttonStyle(.borderless)
+        .help("Choose which messages this pane shows")
+        .popover(isPresented: $showPopover, arrowEdge: .top) {
+            TranscriptFilterPopover(config: $config)
         }
     }
 }
@@ -99,31 +113,46 @@ struct TranscriptPaneChrome<Content: View>: View {
 struct TaskTranscriptHeader: View {
     /// nil when the pane has no resolved task — the run-history and empty states.
     let task: AgentTask?
+    /// THIS pane's filter config — `taskTranscriptViewConfig`, never the session pane's.
+    @Binding var config: TranscriptViewConfig
 
     var body: some View {
         TranscriptPaneChrome(topRule: true) {
-            if let task {
-                // The chip the sidebar row shows: the outcome once there is one, the lifecycle
-                // status until then.
-                if let outcome = task.outcome {
-                    TaskOutcomeChip(outcome: outcome)
-                } else {
-                    TaskStatusChip(status: task.status)
-                }
-                Text(task.title)
-                    // AppFonts.channelSender + the Brown/task orange: verbatim what the transcript
-                    // below uses for this exact string in its sender slot.
-                    .font(AppFonts.channelSender)
-                    .foregroundStyle(AppColors.brownAgent)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(task.title)
-            } else {
-                Text("Task transcript")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
+            TaskTranscriptHeaderLabel(task: task)
             Spacer()
+            TranscriptFilterButton(config: $config)
+        }
+    }
+}
+
+/// Names the pane: the task's status chip and title, or a plain caption when nothing is resolved.
+///
+/// Its own `View` struct rather than a branch inside the header's body — adding the filter button
+/// pushed that body past the 20-line limit, and the label is the part with an identity of its own.
+private struct TaskTranscriptHeaderLabel: View {
+    let task: AgentTask?
+
+    var body: some View {
+        if let task {
+            // The chip the sidebar row shows: the outcome once there is one, the lifecycle
+            // status until then.
+            if let outcome = task.outcome {
+                TaskOutcomeChip(outcome: outcome)
+            } else {
+                TaskStatusChip(status: task.status)
+            }
+            Text(task.title)
+                // AppFonts.channelSender + the Brown/task orange: verbatim what the transcript
+                // below uses for this exact string in its sender slot.
+                .font(AppFonts.channelSender)
+                .foregroundStyle(AppColors.brownAgent)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(task.title)
+        } else {
+            Text("Task transcript")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
         }
     }
 }

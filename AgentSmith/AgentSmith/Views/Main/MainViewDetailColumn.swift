@@ -363,9 +363,10 @@ private struct TaskTranscriptContent: View {
             }
             // Names the TASK, in the sidebar's chip and the transcript's own orange — the two
             // transcripts are visually identical otherwise, so this is what distinguishes them.
-            TaskTranscriptHeader(task: effectiveTask)
-            // This pane's OWN filter, not the bottom pane's — see `taskTranscriptViewConfig`.
-            TranscriptFilterBar(config: $viewModel.taskTranscriptViewConfig)
+            // Its funnel edits THIS pane's own config, not the session pane's — see
+            // `taskTranscriptViewConfig`. One header per pane, each with its own control.
+            TaskTranscriptHeader(task: effectiveTask,
+                                 config: $viewModel.taskTranscriptViewConfig)
             // Read the origin session's LOG when the live provider can't be trusted to have the
             // messages: a task not resident here (archived/deleted, or cross-session and not
             // restored), or a finished drilled run (trimmed from the bounded tail). Otherwise the
