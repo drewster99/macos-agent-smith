@@ -63,8 +63,23 @@ final class AppViewModel {
         } else {
             transcriptTaskID = selectedTaskID
         }
-        topTranscriptProvider.filter = TranscriptFilter(
+        // The scope is passed EXPLICITLY, which `makeFilter` treats as overriding the config's own
+        // `hideTaskScoped` switch — this pane is always scoped to one task, and that is not the
+        // user's to turn off from its popover.
+        topTranscriptProvider.filter = taskTranscriptViewConfig.makeFilter(
             taskScope: transcriptTaskID.map { TranscriptFilter.TaskScope.task($0) } ?? .matchNone)
+    }
+
+    /// The TOP (task) pane's filter configuration — its own, deliberately not shared with
+    /// `transcriptViewConfig` below. The panes answer different questions, so they open on different
+    /// defaults: this one on `.everything` (a task pane showing all of its task's work), the bottom
+    /// one on `.conversation`. Edited from the top pane's own filter popover; persisted per session.
+    var taskTranscriptViewConfig: TranscriptViewConfig {
+        didSet {
+            guard taskTranscriptViewConfig != oldValue else { return }
+            refreshTopTranscriptFilter()
+            persistSessionStateAsync()
+        }
     }
 
     /// The bottom (full-session) pane's filter configuration — which kind groups, senders, and
@@ -449,6 +464,9 @@ final class AppViewModel {
             try await pm.saveSessionState(snapshot)
         }
         self.transcriptViewConfig = .conversation
+        // `.everything.makeFilter(taskScope:)` reproduces the bare `TranscriptFilter(taskScope:)`
+        // this pane used before it had a config, so an upgrading session's top pane is unchanged.
+        self.taskTranscriptViewConfig = .everything
         self.transcriptStore = TranscriptStore(residentCap: Self.residentMessageCap)
         self.primaryTranscriptProvider = FilteredTranscriptProvider(filter: .all, cap: Self.residentMessageCap)
         self.topTranscriptProvider = FilteredTranscriptProvider(
@@ -523,6 +541,8 @@ final class AppViewModel {
                 // Restore the bottom-pane filter config (nil on old files → the shipped conversation
                 // default). The didSet repoints the bottom provider's filter; persist is suppressed.
                 transcriptViewConfig = state.transcriptViewConfig ?? .conversation
+                // nil on old files → `.everything`, this pane's default (NOT `.conversation`).
+                taskTranscriptViewConfig = state.taskTranscriptViewConfig ?? .everything
             } else {
                 logger.notice("loadPersistedState: session=\(self.session.name, privacy: .public) no state on disk — using defaults autoRunNextTask=true autoRunInterruptedTasks=true")
                 // No per-session state — fall back to the shared default assignments (from bundled
@@ -2369,7 +2389,8 @@ final class AppViewModel {
             autoRunInterruptedTasks: autoRunInterruptedTasks,
             orchestrationOverride: orchestrationOverride,
             selectedTaskID: selectedTaskID,
-            transcriptViewConfig: transcriptViewConfig
+            transcriptViewConfig: transcriptViewConfig,
+            taskTranscriptViewConfig: taskTranscriptViewConfig
         )
         logger.notice("flushPersistence: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(finalState.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(finalState.autoRunInterruptedTasks, privacy: .public)")
         await sessionStateWriter.enqueue(finalState)
@@ -2713,7 +2734,8 @@ final class AppViewModel {
             autoRunInterruptedTasks: autoRunInterruptedTasks,
             orchestrationOverride: orchestrationOverride,
             selectedTaskID: selectedTaskID,
-            transcriptViewConfig: transcriptViewConfig
+            transcriptViewConfig: transcriptViewConfig,
+            taskTranscriptViewConfig: taskTranscriptViewConfig
         )
         logger.notice("persistSessionStateAsync: session=\(self.session.name, privacy: .public) writing autoRunNextTask=\(state.autoRunNextTask, privacy: .public) autoRunInterruptedTasks=\(state.autoRunInterruptedTasks, privacy: .public) caller=\(callerFunction, privacy: .public)@\(callerFile, privacy: .public):\(callerLine, privacy: .public)")
         let writer = sessionStateWriter

@@ -341,7 +341,7 @@ private struct TaskTranscriptTopPane: View {
 /// The top pane's transcript mode — back-to-runs chrome, the task header, and the right transcript
 /// source. A `View` struct (not a `-> some View` helper) per the project's SwiftUI rules.
 private struct TaskTranscriptContent: View {
-    let viewModel: AppViewModel
+    @Bindable var viewModel: AppViewModel
     let effectiveTask: AgentTask?
     let showBackToRuns: Bool
     let displayPrefs: TimestampPreferences
@@ -364,6 +364,8 @@ private struct TaskTranscriptContent: View {
             // Names the TASK, in the sidebar's chip and the transcript's own orange — the two
             // transcripts are visually identical otherwise, so this is what distinguishes them.
             TaskTranscriptHeader(task: effectiveTask)
+            // This pane's OWN filter, not the bottom pane's — see `taskTranscriptViewConfig`.
+            TranscriptFilterBar(config: $viewModel.taskTranscriptViewConfig)
             // Read the origin session's LOG when the live provider can't be trusted to have the
             // messages: a task not resident here (archived/deleted, or cross-session and not
             // restored), or a finished drilled run (trimmed from the bounded tail). Otherwise the
@@ -372,6 +374,9 @@ private struct TaskTranscriptContent: View {
                !residentHere || finishedDrilledRun {
                 CrossSessionTranscriptView(
                     originSessionID: origin, taskID: effectiveTask.id, viewModel: viewModel,
+                    // The log-reading branch filters CLIENT-SIDE: it bypasses `topTranscriptProvider`
+                    // entirely, so without this the bar above it would be an inert control.
+                    filterConfig: viewModel.taskTranscriptViewConfig,
                     displayPrefs: displayPrefs, onExportTaskPDF: onExportTaskPDF,
                     onOpenMCPSettings: onOpenMCPSettings,
                     selectedImageAttachment: $selectedImageAttachment
@@ -418,6 +423,7 @@ private struct CrossSessionTranscriptView: View {
     let originSessionID: UUID
     let taskID: UUID
     let viewModel: AppViewModel
+    let filterConfig: TranscriptViewConfig
     let displayPrefs: TimestampPreferences
     let onExportTaskPDF: (UUID, String, String?, Date) -> Void
     let onOpenMCPSettings: () -> Void
@@ -427,12 +433,15 @@ private struct CrossSessionTranscriptView: View {
     /// the render (here) on `taskID` makes a superseded load structurally unable to display under the
     /// current selection — a slow load for task A can't paint over task B once B is selected.
     @State private var loaded: LoadedCrossSessionTranscript?
+    /// The loaded transcript with this pane's filter applied, derived ONLY when the load or the
+    /// filter changes. Filtering in `body` would re-scan the whole transcript on every render pass.
+    @State private var visible: LoadedCrossSessionTranscript.Outcome?
 
     var body: some View {
         Group {
-            if let loaded, loaded.taskID == taskID {
+            if let loaded, loaded.taskID == taskID, let visible {
                 CrossSessionTranscriptOutcomeView(
-                    outcome: loaded.outcome,
+                    outcome: visible,
                     displayPrefs: displayPrefs,
                     onExportTaskPDF: onExportTaskPDF,
                     onOpenMCPSettings: onOpenMCPSettings,
@@ -445,14 +454,41 @@ private struct CrossSessionTranscriptView: View {
         }
         .task(id: taskID) {
             loaded = nil
+            visible = nil
             let result = await viewModel.loadCrossSessionTaskTranscript(
                 originSessionID: originSessionID, taskID: taskID)
             // Don't let a superseded (cancelled) load assign at all — the render guard above also rejects
             // a mismatched taskID, but not assigning keeps a slow, stale load from clobbering a newer one.
             guard !Task.isCancelled else { return }
-            loaded = LoadedCrossSessionTranscript(
+            let landed = LoadedCrossSessionTranscript(
                 taskID: taskID,
                 outcome: result.map { .loaded(messages: $0.messages, toolRequestIDs: $0.toolRequestIDs) } ?? .failed)
+            loaded = landed
+            visible = Self.applying(filterConfig, to: landed.outcome)
+        }
+        .onChange(of: filterConfig) {
+            guard let loaded, loaded.taskID == taskID else { return }
+            let outcome = loaded.outcome
+            let config = filterConfig
+            DispatchQueue.main.async { visible = Self.applying(config, to: outcome) }
+        }
+    }
+
+    /// Applies a pane filter to an already-loaded cross-session transcript.
+    ///
+    /// The scope is forced to `.any`: the loader already returned exactly this task's messages, and
+    /// re-deriving task scope here would depend on metadata a rotated log may not carry — which would
+    /// empty the pane rather than filter it.
+    private static func applying(
+        _ config: TranscriptViewConfig,
+        to outcome: LoadedCrossSessionTranscript.Outcome
+    ) -> LoadedCrossSessionTranscript.Outcome {
+        switch outcome {
+        case .failed:
+            return .failed
+        case .loaded(let messages, let toolRequestIDs):
+            let filter = config.makeFilter(taskScope: .any)
+            return .loaded(messages: messages.filter(filter.matches), toolRequestIDs: toolRequestIDs)
         }
     }
 }
