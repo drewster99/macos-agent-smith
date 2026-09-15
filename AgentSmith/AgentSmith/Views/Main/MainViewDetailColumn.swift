@@ -435,13 +435,18 @@ private struct CrossSessionTranscriptView: View {
     @State private var loaded: LoadedCrossSessionTranscript?
     /// The loaded transcript with this pane's filter applied, derived ONLY when the load or the
     /// filter changes. Filtering in `body` would re-scan the whole transcript on every render pass.
-    @State private var visible: LoadedCrossSessionTranscript.Outcome?
+    ///
+    /// TAGGED with its task for the same reason `loaded` is, and it is not redundant with it: the
+    /// re-filter below hops through `DispatchQueue.main.async`, so a filter change on task A can land
+    /// AFTER a switch to task B has already loaded. Gating the render on this tag makes that stale
+    /// assignment structurally unable to paint A's messages under B's header.
+    @State private var visible: LoadedCrossSessionTranscript?
 
     var body: some View {
         Group {
-            if let loaded, loaded.taskID == taskID, let visible {
+            if let visible, visible.taskID == taskID {
                 CrossSessionTranscriptOutcomeView(
-                    outcome: visible,
+                    outcome: visible.outcome,
                     displayPrefs: displayPrefs,
                     onExportTaskPDF: onExportTaskPDF,
                     onOpenMCPSettings: onOpenMCPSettings,
@@ -464,13 +469,19 @@ private struct CrossSessionTranscriptView: View {
                 taskID: taskID,
                 outcome: result.map { .loaded(messages: $0.messages, toolRequestIDs: $0.toolRequestIDs) } ?? .failed)
             loaded = landed
-            visible = Self.applying(filterConfig, to: landed.outcome)
+            visible = LoadedCrossSessionTranscript(
+                taskID: landed.taskID, outcome: Self.applying(filterConfig, to: landed.outcome))
         }
         .onChange(of: filterConfig) {
             guard let loaded, loaded.taskID == taskID else { return }
-            let outcome = loaded.outcome
+            // Carry the task id through the hop; the render gate above rejects it if the selection
+            // moved on while this was queued.
+            let source = loaded
             let config = filterConfig
-            DispatchQueue.main.async { visible = Self.applying(config, to: outcome) }
+            DispatchQueue.main.async {
+                visible = LoadedCrossSessionTranscript(
+                    taskID: source.taskID, outcome: Self.applying(config, to: source.outcome))
+            }
         }
     }
 
