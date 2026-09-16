@@ -2890,6 +2890,128 @@ The test resolves workers with `runtime.agentIDForRole(.brown)` — "the" Brown 
 
 `ToolPathText` was changed so the filename claims layout width first and both halves truncate in the middle; previously both truncated at the tail, so a long `attachments/` name lost the part that identifies it. Build-clean and pure layout modifiers, but never verified visually — it shipped while a live session was running and launching the app would have disturbed it. Confirmed visually by the user on 2026-07-27: the directory collapses and the filename survives. Checked against ordinary transcript paths rather than an exhaustive sweep of widths and window sizes, so a pathological case (a very narrow inspector, or a filename longer than the row) is unproven — reopen if one turns up.
 
+### ChatGPT-subscription auth for OpenAI models (Codex OAuth) (designed 2026-09-16)
+
+**Status:** designed 2026-09-16; **Phase 0 (empirical probe) COMPLETE ✅** — every assumption below was
+verified against the live endpoint with the user's own credential, not inferred from docs. Phases 1–7
+not started. This entry is the authoritative record of WHAT and WHY.
+
+Goal: let a role's model run on the user's **ChatGPT subscription** (Plus/Pro/Business/Edu/Enterprise)
+instead of API-key billing, the way the `codex` CLI does.
+
+#### The hard constraint (measured, not assumed)
+
+A ChatGPT OAuth access token **cannot reach the OpenAI platform API at all.** It is gated by SCOPES,
+not by URL convention, so no endpoint or header fiddling gets around it:
+
+| Endpoint | Result (real model names, `gpt-5.5` / `gpt-5.6-sol`) |
+|---|---|
+| `api.openai.com/v1/chat/completions` | **401** `Missing scopes: model.request` |
+| `api.openai.com/v1/responses` | **401** `Missing scopes: api.responses.write` |
+| `chatgpt.com/backend-api/codex/responses` | **200** (400 only on an unavailable model) |
+
+Consequence: **a Responses-API client is mandatory.** SwiftLLMKit has zero Responses support today
+(all 12 `ProviderAPIType` cases are chat/completions or vendor-native), so that client is the bulk of
+the work — not the OAuth, which is comparatively small.
+
+#### Phase 0 findings (2026-09-16)
+
+- **The "You are Codex, based on GPT-5…" identity prompt is NOT required.** Widely reported as a hard
+  OAuth gate (and implemented as one in AgentiLoop Agent!); both a with- and without-identity request
+  returned 200. **Nothing is prepended to our role prompts** — this removes the whole risk of a Codex
+  identity fighting Smith's "never do the work yourself" and Brown's worker framing.
+- **Token lifetime is ~3 days, not ~1 hour** (`exp` claim), so a provider built at task start does not
+  routinely die mid-task. Refresh-at-5-min-to-expiry is still correct, just rarely exercised.
+- **Usage is fully reported** on `response.completed`: `input_tokens`, `output_tokens`,
+  `input_tokens_details.{cached_tokens,cache_write_tokens}`,
+  `output_tokens_details.reasoning_tokens`, plus a per-item `attribution` breakdown. Maps onto
+  `TokenUsage` completely, including the cache fields `CostBoard.costOf` reads.
+- **Rate-limit state arrives on ORDINARY successful responses**, not only on failure:
+  `x-codex-active-limit`, `x-codex-primary-over-secondary-limit-percent`, `x-codex-credits-unlimited`,
+  `x-codex-bengalfox-limit-name`. The window can be shown filling before it is hit.
+- **Tool calling works**: `response.output_item.added` (item `function_call`, carrying `name` +
+  `call_id`) → `response.function_call_arguments.delta` → `.done`.
+- **Two DISTINCT typed limit errors** (from the CLI's own error taxonomy — a typed discriminator, not
+  prose): `rate_limit_exceeded` (sending too fast) vs `usage_limit_reached` / `usage_limit_exceeded`
+  (quota gone, carries `resets_at` / `resetsAt` / `limitId`). Window payloads carry `used_percent`,
+  `window_duration_mins`, `resets_at`, `plan_type`, `rate_limit_reached_type`.
+- Models available to a `prolite` account: `gpt-6-astra`, `gpt-reserve`, `gpt-5.6-sol`,
+  `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `codex-auto-review`. Note `gpt-5` is NOT among them.
+
+#### Settled decisions (user, 2026-09-16 — do not relitigate without consent)
+
+- **Cost: tokens only, zero cost.** Subscription tokens are free at the margin. BUT `CostBoard.costOf`
+  returns `0` when `pricingLookup` returns nil, so a free model would be indistinguishable from one
+  whose pricing failed to load — a silent default. Therefore ship **explicit zero `ModelPricing`**
+  (never nil) and have the UI key on *pricing presence*, not on the computed number.
+- **Rate limits: wait and resume, don't park for a human.** Nobody has anything to decide, so this is
+  not a `validationBlockedReason`-style park. Split by error type:
+  - `rate_limit_exceeded` → **nothing new.** `LLMRetryPolicy` already honors `Retry-After` uncapped;
+    only ensure the provider populates `LLMProviderError.httpError(retryAfter:)`.
+  - `usage_limit_reached` → release the worker (never hold a `maxConcurrentWorkers` slot for hours),
+    schedule a task-associated wake **on Smith** (long-lived, owns `RunTaskTool`) at `resets_at`,
+    post a channel message, auto-resume. Wake auto-cancels on terminal status via
+    `installTaskTerminationCleanup`.
+  - Wake time is floored: `max(resetsAt, now + 60s)`. A `resets_at` already in the past would
+    otherwise fire immediately and spin call→limit→reschedule. The floor is the whole mitigation —
+    deliberately NO backoff ladder, counters, or special-casing (user: "ignore this edge case").
+  - It must NOT count as a validation round or touch `consecutiveValidationsWithoutNewApprovals`
+    (nothing was judged), and must NOT be retried by `LLMRetryPolicy` (permanent for hours).
+- **Roles: no restriction.** Codex models may be assigned to any role. The shared-window behaviour
+  (a worker can exhaust the window and starve Smith) is surfaced in Settings copy, not enforced.
+
+#### Phases (each builds, /rechecks, and commits before the next)
+
+0. ✅ **Probe the unknowns.** Identity prompt, usage payload, rate-limit headers, tool-call events.
+1. **Auth (swift-llm-kit).** Port `CodexAuth` from AgentiLoop Agent! — `CodexAuthFile` (read/write
+   `~/.codex/auth.json`), `CodexJWT` (claims / `chatgpt_account_id` / `exp`), `CodexAuthRefresher`
+   (refresh at 5-min-to-expiry, write tokens back so the CLI stays in sync). **No library-wide change:**
+   `LLMProvider.send` is already `async throws`, so the provider awaits `validAuth()` internally and the
+   shared `readAPIKey: @Sendable () -> String` is untouched. Tests: malformed/opaque JWT, expiry
+   boundary either side, missing file, corrupt JSON, refresh preserving `refresh_token` when omitted.
+2. **`CodexResponsesProvider` (swift-llm-kit).** New `ProviderAPIType`. Outbound `[LLMMessage]` →
+   `input` items (`message`/`function_call`/`function_call_output`, `input_text`/`output_text`;
+   system+developer folded into `instructions`). Inbound SSE → `LLMResponse` (text, toolCalls,
+   reasoning, usage, finishReason). `finishReason` needs a deliberate mapping — the capability prober
+   relies on `"length"` to tell a truncated generation from a declined tool call. Error classification
+   feeds `LLMRetryPolicy`. Tests run off recorded SSE fixtures, no network.
+3. **Catalog + pricing (swift-llm-kit).** `ModelFetchService` branch for `/models?client_version=`;
+   capabilities (tools, reasoning efforts `low|medium|high|xhigh`); explicit zero pricing per above.
+4. **App integration.** Provider registration, Settings sign-in (launch `codex login` in Terminal —
+   no PKCE implementation of our own), status (plan, expiry, signed-out), and suppressing the
+   `readAPIKey` "API key missing" error path for a provider that legitimately has no key.
+5. **Limits UX.** Proactive window display from the response headers; the `usage_limit_reached`
+   wait-and-resume flow above.
+6. **Security.** Never copy tokens into our own storage — read/refresh `~/.codex/auth.json` only.
+   (`LLMRequestLogger` needs NO change: it records body + model, never headers, so the
+   account-linked `chatgpt-account-id` is not at risk of being written to `$TMPDIR`.)
+7. **Release dance.** swift-llm-kit: change → build → commit → push → tag → push tag → bump the
+   `from:` version in `AgentSmithPackage/Package.swift`.
+
+#### Known staleness risks (all undocumented surface)
+
+- **`client_id`.** AgentiLoop uses `app_EMoamEEZ73f0CkXaXp7hrann`; `codex` 0.154.0 contains that AND
+  `app_69a1d78e929881919bba0dbda1f6436d` (4 occurrences vs 2). Used only for REFRESH, so the failure
+  is quiet: refresh starts 4xx-ing and the user sees mystery auth failures until `codex login` is
+  re-run. Worth determining which the token endpoint actually accepts.
+- **`client_version`.** `1.0.0` still works today despite the installed CLI being 0.154.0, but
+  `/models` 400s without the parameter, so it is load-bearing and hand-maintained.
+- **Endpoint + wire format.** `chatgpt.com/backend-api/codex/responses` is not a documented API. The
+  *mechanism* (sign in with ChatGPT for personal dev use) is sanctioned and documented; the plumbing
+  is reverse-engineered and can change without notice.
+- **A third exhaustion state may exist.** `resets_at` appears alongside `credits` and
+  `spend_control_reached`, and responses carry `x-codex-credits-unlimited: False`. Credit exhaustion
+  would NOT self-heal by waiting, so the wait-and-resume flow must not assume every limit has a reset.
+  Unconfirmed — do not build the Phase 5 flow as if `resets_at` is always present.
+
+#### Prior art
+
+`~/checkouts/Bruss,Todd/Agent` (github.com/AgentiLoop/Agent, open source) ships a working
+implementation: `Agent/Services/CodexAuth.swift` (223 lines), `CodexService.swift` (568), and
+`docs/CODEX_OAUTH_RESEARCH.md` — a research memo comparing it to that project's Claude OAuth path.
+Copy the auth verbatim and adapt; treat its identity-prompt requirement as superseded by Phase 0.
+
+
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved
