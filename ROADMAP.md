@@ -2892,9 +2892,10 @@ The test resolves workers with `runtime.agentIDForRole(.brown)` — "the" Brown 
 
 ### ChatGPT-subscription auth for OpenAI models (Codex OAuth) (designed 2026-09-16)
 
-**Status:** designed 2026-09-16; **Phase 0 (empirical probe) COMPLETE ✅** — every assumption below was
-verified against the live endpoint with the user's own credential, not inferred from docs. Phases 1–7
-not started. This entry is the authoritative record of WHAT and WHY.
+**Status:** designed 2026-09-16. **Phase 0 (empirical probe) ✅** — every assumption below was verified
+against the live endpoint with the user's own credential, not inferred from docs. **Phase 1 (auth) ✅**
+— shipped in SwiftLLMKit 0.0.184, corrected in 0.0.185. Phases 2–7 not started; nothing consumes the
+auth layer yet, so the FEATURE is not usable. This entry is the authoritative record of WHAT and WHY.
 
 Goal: let a role's model run on the user's **ChatGPT subscription** (Plus/Pro/Business/Edu/Enterprise)
 instead of API-key billing, the way the `codex` CLI does.
@@ -2959,16 +2960,30 @@ the work — not the OAuth, which is comparatively small.
     (nothing was judged), and must NOT be retried by `LLMRetryPolicy` (permanent for hours).
 - **Roles: no restriction.** Codex models may be assigned to any role. The shared-window behaviour
   (a worker can exhaust the window and starve Smith) is surfaced in Settings copy, not enforced.
+- **Credits depleted: park + slow re-check.** Unlike the time window, this IS user-resolvable (top up,
+  or ask the workspace owner), so it parks with the reason and the balance rather than inventing a
+  reset. It re-checks credit status on a slow cadence so it self-resumes if the user tops up. Cadence
+  is `LLMRetryPolicy.ridiculousRetryAfterSeconds` (3600s) — bound to a NAMED constant rather than
+  referenced inline, so tuning the retry threshold cannot silently change the poll rate.
+- **Low balance: warn in the UI only, never block.** Surface `has_credits` / `balance` /
+  `approx_*_messages` in the provider row and a banner when low. Tasks still start; a stale balance
+  reading must not refuse work.
 
 #### Phases (each builds, /rechecks, and commits before the next)
 
 0. ✅ **Probe the unknowns.** Identity prompt, usage payload, rate-limit headers, tool-call events.
-1. **Auth (swift-llm-kit).** Port `CodexAuth` from AgentiLoop Agent! — `CodexAuthFile` (read/write
-   `~/.codex/auth.json`), `CodexJWT` (claims / `chatgpt_account_id` / `exp`), `CodexAuthRefresher`
-   (refresh at 5-min-to-expiry, write tokens back so the CLI stays in sync). **No library-wide change:**
-   `LLMProvider.send` is already `async throws`, so the provider awaits `validAuth()` internally and the
-   shared `readAPIKey: @Sendable () -> String` is untouched. Tests: malformed/opaque JWT, expiry
-   boundary either side, missing file, corrupt JSON, refresh preserving `refresh_token` when omitted.
+1. ✅ **Auth (swift-llm-kit 0.0.184, fixed 0.0.185).** `Sources/SwiftLLMKit/Auth/CodexAuth.swift`:
+   `CodexAuthStore` (read/write `~/.codex/auth.json`, honouring `$CODEX_HOME`), `CodexJWT`
+   (claims / `chatgpt_account_id` / `chatgpt_plan_type` / `exp`), `CodexAuthCoordinator`
+   (refresh at 5-min-to-expiry, writes tokens back so the CLI stays in sync). 13 tests, no network.
+   **No library-wide change was needed:** `LLMProvider.send` is already `async throws`, so the provider
+   awaits `validTokens()` internally and the shared `readAPIKey: @Sendable () -> String` is untouched —
+   the earlier idea of making that closure async and editing every adapter was wrong.
+   Two deliberate departures from the AgentiLoop original: the auth.json path is INJECTED (a test that
+   forgets to redirect must find nothing, not rewrite the developer's live credential), and refresh is
+   SINGLE-FLIGHTED behind an actor (five concurrent roles noticing expiry together would otherwise fire
+   five refreshes and race on the file; the loser persists a rotated-away refresh token, signing the
+   user out — verified by removing the guard and watching the test report five calls).
 2. **`CodexResponsesProvider` (swift-llm-kit).** New `ProviderAPIType`. Outbound `[LLMMessage]` →
    `input` items (`message`/`function_call`/`function_call_output`, `input_text`/`output_text`;
    system+developer folded into `instructions`). Inbound SSE → `LLMResponse` (text, toolCalls,
@@ -2982,27 +2997,40 @@ the work — not the OAuth, which is comparatively small.
    `readAPIKey` "API key missing" error path for a provider that legitimately has no key.
 5. **Limits UX.** Proactive window display from the response headers; the `usage_limit_reached`
    wait-and-resume flow above.
-6. **Security.** Never copy tokens into our own storage — read/refresh `~/.codex/auth.json` only.
-   (`LLMRequestLogger` needs NO change: it records body + model, never headers, so the
-   account-linked `chatgpt-account-id` is not at risk of being written to `$TMPDIR`.)
+6. **Security — mostly dissolved on inspection.** Never copy tokens into our own storage; read and
+   refresh `~/.codex/auth.json` only (already how Phase 1 works). `LLMRequestLogger` needs NO change:
+   `logRequest(label:url:model:body:rawData:)` takes no headers at all, so the account-linked
+   `chatgpt-account-id` cannot reach `$TMPDIR`. What remains is not logging it ourselves anywhere else.
 7. **Release dance.** swift-llm-kit: change → build → commit → push → tag → push tag → bump the
    `from:` version in `AgentSmithPackage/Package.swift`.
 
 #### Known staleness risks (all undocumented surface)
 
-- **`client_id`.** AgentiLoop uses `app_EMoamEEZ73f0CkXaXp7hrann`; `codex` 0.154.0 contains that AND
-  `app_69a1d78e929881919bba0dbda1f6436d` (4 occurrences vs 2). Used only for REFRESH, so the failure
-  is quiet: refresh starts 4xx-ing and the user sees mystery auth failures until `codex login` is
-  re-run. Worth determining which the token endpoint actually accepts.
+- **`client_id` — smaller than first recorded.** There is exactly ONE, and it is the one we use:
+  `codex` 0.154.0 binds `CODEX_APP_SERVER_LOGIN_CLIENT_ID` = `app_EMoamEEZ73f0CkXaXp7hrann`, in its
+  auth internals (`login/src/auth/manager.rs`). An earlier draft of this entry claimed a second id
+  (`app_69a1d78e…`) — that was a grep artifact: the string is the tail of
+  `asdk_app_69a1d78e…`, a Slack `connector_id` under `server_name: codex_apps`, unrelated to auth.
+  It is needed ONLY for our own refresh POST. Mitigation available: codex reads it, the issuer, the
+  ChatGPT base URL and the refresh URL from environment overrides
+  (`CODEX_APP_SERVER_LOGIN_CLIENT_ID`, `CODEX_APP_SERVER_LOGIN_ISSUER`,
+  `CODEX_APP_SERVER_CHATGPT_BASE_URL`, `CODEX_REFRESH_TOKEN_URL_OVERRIDE`), so honouring the same
+  names makes a rotation a config change rather than a release.
 - **`client_version`.** `1.0.0` still works today despite the installed CLI being 0.154.0, but
   `/models` 400s without the parameter, so it is load-bearing and hand-maintained.
 - **Endpoint + wire format.** `chatgpt.com/backend-api/codex/responses` is not a documented API. The
   *mechanism* (sign in with ChatGPT for personal dev use) is sanctioned and documented; the plumbing
   is reverse-engineered and can change without notice.
-- **A third exhaustion state may exist.** `resets_at` appears alongside `credits` and
-  `spend_control_reached`, and responses carry `x-codex-credits-unlimited: False`. Credit exhaustion
-  would NOT self-heal by waiting, so the wait-and-resume flow must not assume every limit has a reset.
-  Unconfirmed — do not build the Phase 5 flow as if `resets_at` is always present.
+- **A third exhaustion state EXISTS (vocabulary confirmed, wire shape not).** `rate_limit_reached_type`
+  is an enum separating time-window exhaustion from credit depletion, and owner from member:
+  `rate_limit_reached`, `workspace_owner_usage_limit_reached`, `workspace_member_usage_limit_reached`,
+  `workspace_owner_credits_depleted`, `workspace_member_credits_depleted`. Credit status is readable
+  as `CreditStatusDetails { has_credits, unlimited, balance, approx_local_messages,
+  approx_cloud_messages }`; `spend_control_reached` is a third thing again. **Credit depletion has a
+  BALANCE, not a reset**, so waiting may never help — scheduling a wake for a nonexistent `resets_at`
+  would sleep a task forever, silently. Phase 5 must branch on the type, not assume a reset. The
+  owner/member split decides whether the user can fix it or must ask an admin, so it changes the
+  MESSAGE too. Not yet observed on the wire (would require actually exhausting the account).
 
 #### Prior art
 
