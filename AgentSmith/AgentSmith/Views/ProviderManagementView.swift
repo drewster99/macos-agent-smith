@@ -239,10 +239,17 @@ private struct BuiltInProviderRow: View {
         draftKey != savedKey
     }
 
+    /// Cached sign-in state for a keyless provider, updated by the controls below.
+    ///
+    /// NOT computed in `body`: answering it opens and JSON-parses `~/.codex/auth.json`, and a
+    /// SwiftUI body may be evaluated many times per display pass. Reading a file per render is the
+    /// same defect as re-running a filter per render, just with a syscall attached.
+    @State private var codexSignedIn = false
+
     private var hasAPIKey: Bool {
         // For the keyless provider, "configured" means a credential exists — an empty Keychain
         // entry is the normal, correct state there and must not read as unconfigured.
-        if preset.apiType == .codexChatGPT { return CodexSignIn.status().isSignedIn }
+        if preset.apiType == .codexChatGPT { return codexSignedIn }
         return !savedKey.isEmpty
     }
 
@@ -268,7 +275,9 @@ private struct BuiltInProviderRow: View {
                 if preset.apiType == .codexChatGPT {
                     // No key to type: this provider is authenticated by the `codex` CLI's own
                     // ChatGPT session, so the row offers sign-in and status instead of a field.
-                    CodexSignInControls(isRefreshing: isRefreshing, onRefreshModels: {
+                    CodexSignInControls(isRefreshing: isRefreshing,
+                                        onStatusChange: { codexSignedIn = $0 },
+                                        onRefreshModels: {
                         isRefreshing = true
                         let kit = llmKit
                         let providerID = preset.id
@@ -554,6 +563,8 @@ private struct ProviderEditorSheet: View {
 /// project's 20-line body limit, and this has state of its own.
 private struct CodexSignInControls: View {
     let isRefreshing: Bool
+    /// Reports the signed-in flag up, so the row's badge and this control cannot disagree.
+    let onStatusChange: (Bool) -> Void
     let onRefreshModels: () -> Void
 
     /// Re-read after a sign-in attempt rather than observed: the credential is written by another
@@ -571,16 +582,18 @@ private struct CodexSignInControls: View {
             CodexSignInButtons(
                 status: status, isRefreshing: isRefreshing,
                 onSignIn: { CodexSignIn.launchLogin() },
-                onCheckAgain: {
-                    status = CodexSignIn.status()
-                    window = CodexUsageMonitor.current
-                },
+                onCheckAgain: { refreshStatus() },
                 onRefreshModels: onRefreshModels)
         }
-        .onAppear {
-            status = CodexSignIn.status()
-            window = CodexUsageMonitor.current
-        }
+        .onAppear { refreshStatus() }
+    }
+
+    /// The one place that reads the credential and the window, so every display of them agrees
+    /// and the filesystem is touched on an event rather than on a render.
+    private func refreshStatus() {
+        status = CodexSignIn.status()
+        window = CodexUsageMonitor.current
+        onStatusChange(status.isSignedIn)
     }
 }
 
