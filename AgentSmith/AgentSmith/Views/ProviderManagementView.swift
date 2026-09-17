@@ -15,12 +15,17 @@ struct ProviderManagementView: View {
     @State private var deleteError: String?
     @State private var showAllBuiltIns = false
 
-    /// Built-in presets shown by default: those flagged `popular` plus any whose API key
-    /// has already been entered. Sorted alphabetically by `displayName`.
+    /// Built-in presets shown by default: those flagged `popular`, any whose API key has already
+    /// been entered, and any that are CONFIGURED without a key. Sorted alphabetically.
+    ///
+    /// The last clause exists for the ChatGPT-subscription provider, which has no API key by
+    /// design: judged on `hasAPIKey` alone it would be permanently invisible — hidden before
+    /// sign-in because it isn't "popular", and still hidden after, because signing in writes
+    /// nothing to the Keychain.
     private var defaultVisibleBuiltIns: [BuiltInProviderPreset] {
         let popular = Set(BuiltInProviders.popular.map(\.id))
         let visible = BuiltInProviders.all.filter { preset in
-            popular.contains(preset.id) || hasAPIKey(preset.id)
+            popular.contains(preset.id) || hasAPIKey(preset.id) || isKeylessProvider(preset)
         }
         return visible.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
@@ -187,6 +192,12 @@ struct ProviderManagementView: View {
         if let key = llmKit.apiKey(for: providerID), !key.isEmpty { return true }
         return false
     }
+
+    /// Whether this provider authenticates by something other than an API key, and so must be
+    /// offered even though the Keychain holds nothing for it.
+    private func isKeylessProvider(_ preset: BuiltInProviderPreset) -> Bool {
+        preset.apiType == .codexChatGPT
+    }
 }
 
 // MARK: - Built-in row
@@ -229,7 +240,10 @@ private struct BuiltInProviderRow: View {
     }
 
     private var hasAPIKey: Bool {
-        !savedKey.isEmpty
+        // For the keyless provider, "configured" means a credential exists — an empty Keychain
+        // entry is the normal, correct state there and must not read as unconfigured.
+        if preset.apiType == .codexChatGPT { return CodexSignIn.status().isSignedIn }
+        return !savedKey.isEmpty
     }
 
     var body: some View {
@@ -251,21 +265,35 @@ private struct BuiltInProviderRow: View {
                         .lineLimit(1)
                 }
 
-                HStack(spacing: 8) {
-                    SecureField(hasAPIKey ? "••••••••" : "Paste API key", text: $draftKey)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { save() }
+                if preset.apiType == .codexChatGPT {
+                    // No key to type: this provider is authenticated by the `codex` CLI's own
+                    // ChatGPT session, so the row offers sign-in and status instead of a field.
+                    CodexSignInControls(isRefreshing: isRefreshing, onRefreshModels: {
+                        isRefreshing = true
+                        let kit = llmKit
+                        let providerID = preset.id
+                        Task { @MainActor in
+                            await kit.refreshModels(forProviderID: providerID)
+                            isRefreshing = false
+                        }
+                    })
+                } else {
+                    HStack(spacing: 8) {
+                        SecureField(hasAPIKey ? "••••••••" : "Paste API key", text: $draftKey)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { save() }
 
-                    Button("Save") { save() }
-                        .disabled(!hasUnsavedChanges)
+                        Button("Save") { save() }
+                            .disabled(!hasUnsavedChanges)
 
-                    if isRefreshing {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else if justSaved {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .transition(.opacity)
+                        if isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if justSaved {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .transition(.opacity)
+                        }
                     }
                 }
 
@@ -516,5 +544,72 @@ private struct ProviderEditorSheet: View {
         } catch {
             saveError = error.localizedDescription
         }
+    }
+}
+
+
+/// Sign-in status and actions for the ChatGPT-subscription provider.
+///
+/// Its own `View` struct rather than a branch inside the row's body: the row is already at the
+/// project's 20-line body limit, and this has state of its own.
+private struct CodexSignInControls: View {
+    let isRefreshing: Bool
+    let onRefreshModels: () -> Void
+
+    /// Re-read after a sign-in attempt rather than observed: the credential is written by another
+    /// process (the CLI), so there is nothing here to publish a change.
+    @State private var status: CodexSignIn.Status = .signedOut
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            CodexSignInStatusLine(status: status)
+            HStack(spacing: 8) {
+                Button(status.isSignedIn ? "Sign In Again…" : "Sign In with Codex…") {
+                    CodexSignIn.launchLogin()
+                }
+                .disabled(status == .cliMissing)
+                Button("Check Again") { status = CodexSignIn.status() }
+                Button("Refresh Models", action: onRefreshModels)
+                    .disabled(!status.isSignedIn || isRefreshing)
+                if isRefreshing { ProgressView().controlSize(.small) }
+            }
+        }
+        .onAppear { status = CodexSignIn.status() }
+    }
+}
+
+/// One line describing the credential, and what to do when there isn't one.
+private struct CodexSignInStatusLine: View {
+    let status: CodexSignIn.Status
+
+    var body: some View {
+        switch status {
+        case .cliMissing:
+            Text("The `codex` CLI is not installed. Install it with `brew install codex`, then sign in.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .signedOut:
+            Text("Not signed in. Sign-in opens Terminal and runs `codex login`; this app never sees your password.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .signedIn(let plan, let expiry):
+            // Tier and expiry only — never the tokens, and never the account id, which is
+            // account-linked and has no business in a screenshot.
+            Text(CodexSignInStatusLine.describe(plan: plan, expiry: expiry))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    static func describe(plan: String?, expiry: Date?) -> String {
+        var parts = ["Signed in"]
+        if let plan { parts.append("on the \(plan) plan") }
+        if let expiry {
+            // The coordinator refreshes well before this, so it is shown as reassurance rather
+            // than as something the user must act on.
+            parts.append("· credential valid until \(expiry.formatted(date: .abbreviated, time: .shortened))")
+        }
+        parts.append("· usage is billed to your ChatGPT subscription, not per token")
+        return parts.joined(separator: " ")
     }
 }

@@ -138,6 +138,18 @@ public enum LLMRetryPolicy {
                 // Prefer the header; some providers (Gemini/Google) state the delay only in the
                 // body as a google.rpc.RetryInfo.
                 let serverDelay = retryAfter ?? retryAfterFromErrorBody(body)
+
+                // The Codex backend states WHICH limit tripped, so for that provider the
+                // indistinguishability noted below does not apply. An exhausted usage window lifts
+                // at a stated time hours away, and depleted credits may never lift by waiting at
+                // all — retrying either is spending 50 attempts on something no attempt can fix.
+                // Both are handed back as permanent so the orchestration layer can schedule a
+                // resumption (or park) instead of burning a budget.
+                if let limit = CodexLimit.parse(statusCode: statusCode, body: body),
+                   limit.kind != .rateLimited {
+                    return .permanent
+                }
+
                 switch statusCode {
                 case 429:
                     // Still transient — the most common 429 by far is an ordinary rate limit, and

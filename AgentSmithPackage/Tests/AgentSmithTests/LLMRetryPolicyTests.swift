@@ -241,3 +241,52 @@ struct LLMRetryPolicyTests {
         #expect(endurance(of: leading5xx).elapsed >= 7200)
     }
 }
+
+/// The Codex backend names which limit tripped, so for that provider the "a 429 is a 429" tradeoff
+/// the main policy makes does not have to be made.
+@Suite("Retry classification for Codex limits")
+struct CodexLimitRetryClassificationTests {
+
+    private func httpError(_ status: Int, _ body: String) -> LLMProviderError {
+        .httpError(statusCode: status, body: body, url: nil, retryAfter: nil)
+    }
+
+    @Test("An exhausted usage window is permanent — it will not move for hours")
+    func usageWindowIsPermanent() {
+        let error = httpError(429, #"{"error":{"type":"usage_limit_reached","resets_in_seconds":7200}}"#)
+        // Retrying 50 times against a window that reopens in two hours spends the whole budget on
+        // something no attempt can fix. The orchestration layer schedules a resumption instead.
+        #expect(LLMRetryPolicy.classify(error) == .permanent)
+    }
+
+    @Test("Depleted credits and a spend cap are permanent — waiting may never help at all")
+    func creditsAndSpendCapArePermanent() {
+        #expect(LLMRetryPolicy.classify(
+            httpError(429, #"{"detail":{"rate_limit_reached_type":"workspace_owner_credits_depleted"}}"#))
+            == .permanent)
+        #expect(LLMRetryPolicy.classify(
+            httpError(429, #"{"detail":{"spend_control_reached":true}}"#))
+            == .permanent)
+    }
+
+    @Test("An ordinary Codex rate limit stays transient")
+    func rateLimitStaysTransient() {
+        let classification = LLMRetryPolicy.classify(
+            httpError(429, #"{"error":{"type":"rate_limit_exceeded"}}"#))
+        // This one DOES clear on its own, so the existing throttle budget is exactly right for it.
+        #expect(classification == .transient(retryAfter: nil, isThrottle: true))
+    }
+
+    @Test("Every other provider's 429 is untouched")
+    func otherProvidersUnaffected() {
+        // No Codex discriminator present, so the general rule applies — a 429 from Anthropic or
+        // OpenAI must not become permanent just because this parser ran over its body.
+        for body in [#"{"error":{"message":"Rate limit reached for gpt-4"}}"#,
+                     #"{"type":"error","error":{"type":"rate_limit_error"}}"#,
+                     "Too Many Requests"] {
+            #expect(LLMRetryPolicy.classify(httpError(429, body))
+                    == .transient(retryAfter: nil, isThrottle: true), "\(body)")
+        }
+    }
+}
+
