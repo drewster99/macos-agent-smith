@@ -140,14 +140,31 @@ public enum LLMRetryPolicy {
                 let serverDelay = retryAfter ?? retryAfterFromErrorBody(body)
 
                 // The Codex backend states WHICH limit tripped, so for that provider the
-                // indistinguishability noted below does not apply. An exhausted usage window lifts
-                // at a stated time hours away, and depleted credits may never lift by waiting at
-                // all — retrying either is spending 50 attempts on something no attempt can fix.
-                // Both are handed back as permanent so the orchestration layer can schedule a
-                // resumption (or park) instead of burning a budget.
-                if let limit = CodexLimit.parse(statusCode: statusCode, body: body),
-                   limit.kind != .rateLimited {
-                    return .permanent
+                // indistinguishability noted below does not apply — and the two kinds want
+                // opposite treatment.
+                if let limit = CodexLimit.parse(statusCode: statusCode, body: body) {
+                    switch limit.kind {
+                    case .usageWindowExhausted(let resetsAt):
+                        // A stated wait, not a guess. Handing the delay back as a server-directed
+                        // `retryAfter` puts this on the SAME path as any other Retry-After: the run
+                        // loop is the one patient caller, it honors the delay uncapped (a stated
+                        // delay selects `standardBudget`, whose elapsed ceiling is infinity), and it
+                        // surfaces the wait on first occurrence so hours of silence read as
+                        // deliberate. Waiting is what the user asked for and what actually resumes
+                        // the work; failing here would need a human to notice and re-run.
+                        //
+                        // Floored at 60s: a `resets_at` already in the past would otherwise retry
+                        // immediately and spin call→limit→retry until the window truly opened.
+                        let wait = resetsAt.map { max(60, $0.timeIntervalSinceNow) } ?? serverDelay
+                        return .transient(retryAfter: wait, isThrottle: true)
+                    case .creditsDepleted, .spendControlReached:
+                        // No reset exists. Credits are a BALANCE and a spend cap is administrative,
+                        // so waiting may never help — this genuinely needs a person, and retrying
+                        // would hide that behind an indefinite stall.
+                        return .permanent
+                    case .rateLimited:
+                        break   // ordinary throttle; the existing 429 handling is exactly right
+                    }
                 }
 
                 switch statusCode {

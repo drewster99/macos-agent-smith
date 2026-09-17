@@ -251,12 +251,31 @@ struct CodexLimitRetryClassificationTests {
         .httpError(statusCode: status, body: body, url: nil, retryAfter: nil)
     }
 
-    @Test("An exhausted usage window is permanent — it will not move for hours")
-    func usageWindowIsPermanent() {
+    @Test("An exhausted usage window becomes a stated wait, and is honored uncapped")
+    func usageWindowWaitsForItsReset() throws {
         let error = httpError(429, #"{"error":{"type":"usage_limit_reached","resets_in_seconds":7200}}"#)
-        // Retrying 50 times against a window that reopens in two hours spends the whole budget on
-        // something no attempt can fix. The orchestration layer schedules a resumption instead.
-        #expect(LLMRetryPolicy.classify(error) == .permanent)
+        let classification = LLMRetryPolicy.classify(error)
+        guard case .transient(let retryAfter, let isThrottle) = classification else {
+            Issue.record("expected a stated wait, got \(classification)")
+            return
+        }
+        #expect(isThrottle)
+        let wait = try #require(retryAfter)
+        #expect(wait > 7000 && wait <= 7200, "should wait until the window reopens, got \(wait)")
+        // A STATED delay selects the standard budget, whose elapsed ceiling is infinity — so a
+        // multi-hour window is waited out rather than abandoned partway.
+        #expect(LLMRetryPolicy.budget(for: classification, patient: true).maxElapsedSeconds == .infinity)
+    }
+
+    @Test("A reset already in the past still waits, rather than spinning")
+    func pastResetIsFloored() throws {
+        let error = httpError(429, #"{"error":{"type":"usage_limit_reached","resets_in_seconds":-600}}"#)
+        guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error) else {
+            Issue.record("expected a stated wait"); return
+        }
+        // Without the floor this retries immediately and loops call→limit→retry until the window
+        // genuinely opens.
+        #expect(try #require(retryAfter) >= 60)
     }
 
     @Test("Depleted credits and a spend cap are permanent — waiting may never help at all")

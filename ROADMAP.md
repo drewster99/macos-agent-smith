@@ -2949,13 +2949,20 @@ the work — not the OAuth, which is comparatively small.
   not a `validationBlockedReason`-style park. Split by error type:
   - `rate_limit_exceeded` → **nothing new.** `LLMRetryPolicy` already honors `Retry-After` uncapped;
     only ensure the provider populates `LLMProviderError.httpError(retryAfter:)`.
-  - `usage_limit_reached` → release the worker (never hold a `maxConcurrentWorkers` slot for hours),
-    schedule a task-associated wake **on Smith** (long-lived, owns `RunTaskTool`) at `resets_at`,
-    post a channel message, auto-resume. Wake auto-cancels on terminal status via
-    `installTaskTerminationCleanup`.
-  - Wake time is floored: `max(resetsAt, now + 60s)`. A `resets_at` already in the past would
-    otherwise fire immediately and spin call→limit→reschedule. The floor is the whole mitigation —
-    deliberately NO backoff ladder, counters, or special-casing (user: "ignore this edge case").
+  - `usage_limit_reached` → **REVISED during the build, and simplified.** The original plan was to
+    release the worker and schedule a wake on Smith at `resets_at`. Reading the run loop made that
+    unnecessary: it is already "the ONE patient caller", it honors a server-stated `Retry-After`
+    UNCAPPED (a stated delay selects `standardBudget`, whose elapsed ceiling is `.infinity`), and it
+    surfaces such a wait on FIRST occurrence so a long silence "reads as deliberate, not a silent
+    hang". So `LLMRetryPolicy.classify` hands the time-until-reset back as `retryAfter` and the
+    existing, tested machinery does the waiting and the telling. No new orchestration state, no wake
+    routing, no park.
+    **Accepted cost:** the worker holds its `maxConcurrentWorkers` slot while it waits, so a
+    multi-hour window can occupy one of four slots. That is the price of "wait rather than park",
+    which is what was asked for. Revisit if slot starvation is ever observed.
+  - The wait is floored at 60s. A `resets_at` already in the past would otherwise retry immediately
+    and spin call→limit→retry. The floor is the whole mitigation — deliberately NO backoff ladder,
+    counters, or special-casing (user: "ignore this edge case").
   - It must NOT count as a validation round or touch `consecutiveValidationsWithoutNewApprovals`
     (nothing was judged), and must NOT be retried by `LLMRetryPolicy` (permanent for hours).
 - **Roles: no restriction.** Codex models may be assigned to any role. The shared-window behaviour
