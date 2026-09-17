@@ -27,7 +27,12 @@ enum CodexSignIn {
         var isSignedIn: Bool { if case .signedIn = self { return true }; return false }
     }
 
-    /// Reads the current credential state. Cheap enough to call from a view body.
+    /// Reads the current credential state.
+    ///
+    /// NOT cheap: it opens and JSON-parses `~/.codex/auth.json`. Call it on an event — appear, a
+    /// button press — and cache the result; never from a `body`, which SwiftUI may evaluate many
+    /// times per display pass. An earlier version of this doc said the opposite and a caller
+    /// believed it, which is how a file read ended up on a render path.
     ///
     /// Deliberately returns only a tier string and an expiry date — never the tokens, and never the
     /// account id, which is account-linked and must not reach a log or a screenshot.
@@ -75,9 +80,13 @@ enum CodexSignIn {
             codexSignInLogger.error("codex CLI not found; cannot start ChatGPT sign-in")
             return
         }
-        // Quoted because the path can contain spaces, and escaped for AppleScript's own string
-        // syntax on the way in.
-        let command = "clear; echo '── codex login ──'; '\(binary.path)' login"
+        // TWO quoting layers, and both matter. The path is wrapped in shell single quotes because
+        // it can contain spaces — so any single quote inside it has to be closed, escaped and
+        // reopened first, or it escapes the quoting entirely. Then the whole command is escaped for
+        // AppleScript's own string syntax. A `$PATH` entry is user-controlled, which is the only way
+        // an odd character reaches here, and is exactly why this is not left to luck.
+        let shellSafePath = binary.path.replacingOccurrences(of: "'", with: "'\\''")
+        let command = "clear; echo '── codex login ──'; '\(shellSafePath)' login"
         let escaped = command
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
