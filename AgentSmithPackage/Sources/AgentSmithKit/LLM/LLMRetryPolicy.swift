@@ -139,9 +139,17 @@ public enum LLMRetryPolicy {
                 // body as a google.rpc.RetryInfo.
                 let serverDelay = retryAfter ?? retryAfterFromErrorBody(body)
 
-                // The Codex backend states WHICH limit tripped, so for that provider the
+                // The Codex backend states WHICH limit tripped, so where it does, the
                 // indistinguishability noted below does not apply — and the two kinds want
                 // opposite treatment.
+                //
+                // This runs for EVERY provider, deliberately un-gated: the discriminators are
+                // Codex's own typed field names (`rate_limit_reached_type`, `spend_control_reached`),
+                // which nothing else emits, and anything unrecognised reports `.rateLimited` and
+                // falls straight through to the status switch unchanged. Gating on the endpoint
+                // instead would read as safer and be worse — the endpoint is user-editable, so a
+                // proxied Codex install would silently lose the stated wait and go back to
+                // retrying a five-hour window on the throttle curve.
                 if let limit = CodexLimit.parse(statusCode: statusCode, body: body) {
                     switch limit.kind {
                     case .usageWindowExhausted(let resetsAt):
