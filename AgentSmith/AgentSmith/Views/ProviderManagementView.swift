@@ -559,22 +559,28 @@ private struct CodexSignInControls: View {
     /// Re-read after a sign-in attempt rather than observed: the credential is written by another
     /// process (the CLI), so there is nothing here to publish a change.
     @State private var status: CodexSignIn.Status = .signedOut
+    /// The last window reading any Codex call produced. Re-read on appear and on "Check Again"
+    /// rather than observed: it is written by the provider on a background call, and a settings row
+    /// nobody is looking at does not need to update live.
+    @State private var window: CodexUsageWindow?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             CodexSignInStatusLine(status: status)
-            HStack(spacing: 8) {
-                Button(status.isSignedIn ? "Sign In Again…" : "Sign In with Codex…") {
-                    CodexSignIn.launchLogin()
-                }
-                .disabled(status == .cliMissing)
-                Button("Check Again") { status = CodexSignIn.status() }
-                Button("Refresh Models", action: onRefreshModels)
-                    .disabled(!status.isSignedIn || isRefreshing)
-                if isRefreshing { ProgressView().controlSize(.small) }
-            }
+            CodexUsageWindowLine(window: window)
+            CodexSignInButtons(
+                status: status, isRefreshing: isRefreshing,
+                onSignIn: { CodexSignIn.launchLogin() },
+                onCheckAgain: {
+                    status = CodexSignIn.status()
+                    window = CodexUsageMonitor.current
+                },
+                onRefreshModels: onRefreshModels)
         }
-        .onAppear { status = CodexSignIn.status() }
+        .onAppear {
+            status = CodexSignIn.status()
+            window = CodexUsageMonitor.current
+        }
     }
 }
 
@@ -611,5 +617,58 @@ private struct CodexSignInStatusLine: View {
         }
         parts.append("· usage is billed to your ChatGPT subscription, not per token")
         return parts.joined(separator: " ")
+    }
+}
+
+
+/// How full the subscription's usage window was, the last time a call reported it.
+///
+/// Renders NOTHING when there is no reading. An empty window is not a healthy one — it means no
+/// Codex call has completed this launch — and showing "0% used" for that would be inventing
+/// reassurance out of silence.
+private struct CodexUsageWindowLine: View {
+    let window: CodexUsageWindow?
+
+    var body: some View {
+        if let window, window.hasAnyReading {
+            Text(CodexUsageWindowLine.describe(window))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    static func describe(_ window: CodexUsageWindow) -> String {
+        var parts: [String] = []
+        if let percent = window.primaryPercentUsed {
+            parts.append("Usage window \(Int(percent.rounded()))% used")
+        }
+        if let name = window.limitName { parts.append("(\(name))") }
+        if window.creditsUnlimited == false { parts.append("· credits metered") }
+        // Timestamped because it is a SNAPSHOT from the last call, not a live meter — without this
+        // an hour-old number reads as current.
+        parts.append("· as of \(window.observedAt.formatted(date: .omitted, time: .shortened))")
+        return parts.joined(separator: " ")
+    }
+}
+
+
+/// The row's three actions. Extracted because adding the usage line pushed the parent's body past
+/// the project's 20-line limit — split, per the ratchet's own instruction, rather than budgeted up.
+private struct CodexSignInButtons: View {
+    let status: CodexSignIn.Status
+    let isRefreshing: Bool
+    let onSignIn: () -> Void
+    let onCheckAgain: () -> Void
+    let onRefreshModels: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(status.isSignedIn ? "Sign In Again…" : "Sign In with Codex…", action: onSignIn)
+                .disabled(status == .cliMissing)
+            Button("Check Again", action: onCheckAgain)
+            Button("Refresh Models", action: onRefreshModels)
+                .disabled(!status.isSignedIn || isRefreshing)
+            if isRefreshing { ProgressView().controlSize(.small) }
+        }
     }
 }
