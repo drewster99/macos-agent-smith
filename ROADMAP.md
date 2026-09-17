@@ -2892,10 +2892,14 @@ The test resolves workers with `runtime.agentIDForRole(.brown)` — "the" Brown 
 
 ### ChatGPT-subscription auth for OpenAI models (Codex OAuth) (designed 2026-09-16)
 
-**Status:** designed 2026-09-16. **Phase 0 (empirical probe) ✅** — every assumption below was verified
-against the live endpoint with the user's own credential, not inferred from docs. **Phase 1 (auth) ✅**
-— shipped in SwiftLLMKit 0.0.184, corrected in 0.0.185. Phases 2–7 not started; nothing consumes the
-auth layer yet, so the FEATURE is not usable. This entry is the authoritative record of WHAT and WHY.
+**Status:** designed and BUILT 2026-09-16. All phases ✅, shipped across SwiftLLMKit 0.0.184–0.0.193
+and the corresponding Agent Smith bumps. Every assumption was verified against the live endpoint with
+the user's own credential rather than inferred from docs, and the finished provider is covered by
+live smoke tests (`CODEX_LIVE_SMOKE=1`) in addition to fixtures. This entry is the authoritative
+record of WHAT and WHY.
+
+**How to use it:** Settings ▸ Providers ▸ ChatGPT Subscription (Codex) ▸ Sign In (runs `codex login`
+in Terminal) ▸ Refresh Models, then assign any role a `gpt-*` model from that provider.
 
 Goal: let a role's model run on the user's **ChatGPT subscription** (Plus/Pro/Business/Edu/Enterprise)
 instead of API-key billing, the way the `codex` CLI does.
@@ -2991,25 +2995,26 @@ the work — not the OAuth, which is comparatively small.
    SINGLE-FLIGHTED behind an actor (five concurrent roles noticing expiry together would otherwise fire
    five refreshes and race on the file; the loser persists a rotated-away refresh token, signing the
    user out — verified by removing the guard and watching the test report five calls).
-2. **`CodexResponsesProvider` (swift-llm-kit).** New `ProviderAPIType`. Outbound `[LLMMessage]` →
+2. ✅ **`CodexResponsesProvider` (swift-llm-kit).** New `ProviderAPIType`. Outbound `[LLMMessage]` →
    `input` items (`message`/`function_call`/`function_call_output`, `input_text`/`output_text`;
    system+developer folded into `instructions`). Inbound SSE → `LLMResponse` (text, toolCalls,
    reasoning, usage, finishReason). `finishReason` needs a deliberate mapping — the capability prober
    relies on `"length"` to tell a truncated generation from a declined tool call. Error classification
    feeds `LLMRetryPolicy`. Tests run off recorded SSE fixtures, no network.
-3. **Catalog + pricing (swift-llm-kit).** `ModelFetchService` branch for `/models?client_version=`;
+3. ✅ **Catalog + pricing (swift-llm-kit).** `ModelFetchService` branch for `/models?client_version=`;
    capabilities (tools, reasoning efforts `low|medium|high|xhigh`); explicit zero pricing per above.
-4. **App integration.** Provider registration, Settings sign-in (launch `codex login` in Terminal —
+4. ✅ **App integration.** Provider registration, Settings sign-in (launch `codex login` in Terminal —
    no PKCE implementation of our own), status (plan, expiry, signed-out), and suppressing the
    `readAPIKey` "API key missing" error path for a provider that legitimately has no key.
-5. **Limits UX.** Proactive window display from the response headers; the `usage_limit_reached`
+5. ✅ **Limits UX.** Proactive window display from the response headers; the `usage_limit_reached`
    wait-and-resume flow above.
-6. **Security — mostly dissolved on inspection.** Never copy tokens into our own storage; read and
+6. ✅ **Security — mostly dissolved on inspection.** Never copy tokens into our own storage; read and
    refresh `~/.codex/auth.json` only (already how Phase 1 works). `LLMRequestLogger` needs NO change:
    `logRequest(label:url:model:body:rawData:)` takes no headers at all, so the account-linked
    `chatgpt-account-id` cannot reach `$TMPDIR`. What remains is not logging it ourselves anywhere else.
-7. **Release dance.** swift-llm-kit: change → build → commit → push → tag → push tag → bump the
-   `from:` version in `AgentSmithPackage/Package.swift`.
+7. ✅ **Release dance**, performed per change: 0.0.184 auth, 0.0.185 style fix, 0.0.186 probe seed,
+   0.0.187 provider + catalog, 0.0.188 tool-call argument joining, 0.0.189 limits + fetch auth,
+   0.0.190 limit tests, 0.0.191 live smoke, 0.0.192 usage window, 0.0.193 factory tests.
 
 #### Known staleness risks (all undocumented surface)
 
