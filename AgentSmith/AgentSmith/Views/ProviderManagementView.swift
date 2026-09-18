@@ -602,21 +602,26 @@ private struct CodexSignInStatusLine: View {
     let status: CodexSignIn.Status
 
     var body: some View {
+        Text(CodexSignInStatusLine.describe(status))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    /// The whole line, chosen from the status. A plain function rather than three branches in the
+    /// body: every case rendered the identical `Text` and differed only in its string, so switching
+    /// in the body handed SwiftUI three structurally distinct views to swap between — churning
+    /// identity to pick a string — and put the copy three indent levels deep in a view builder.
+    /// The sibling `CodexUsageWindowLine` was already shaped this way.
+    static func describe(_ status: CodexSignIn.Status) -> String {
         switch status {
         case .cliMissing:
-            Text("The `codex` CLI is not installed. Install it with `brew install codex`, then sign in.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            return "The `codex` CLI is not installed. Install it with `brew install codex`, then sign in."
         case .signedOut:
-            Text("Not signed in. Sign-in opens Terminal and runs `codex login`; this app never sees your password.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            return "Not signed in. Sign-in opens Terminal and runs `codex login`; this app never sees your password."
         case .signedIn(let plan, let expiry):
             // Tier and expiry only — never the tokens, and never the account id, which is
             // account-linked and has no business in a screenshot.
-            Text(CodexSignInStatusLine.describe(plan: plan, expiry: expiry))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            return describe(plan: plan, expiry: expiry)
         }
     }
 
