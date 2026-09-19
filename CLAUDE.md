@@ -176,6 +176,44 @@ The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch 
   - **Per-emitter tool-call review** — see the Security convention above; approves without a verdict but stays visible (`wasEvaluated == false`).
   - **Retrieval** — one entry point `retrieveContext(source: RetrievalSource, query:)` at all five points; the resolved `RetrievalToggle` maps to pool limits (0 = corpus off, both-off = cheap no-op). Exposed to agents/tools via `ToolContext.retrieveContext` and to `SecurityEvaluator` via an injected closure. `SemanticSearchResults.formattedForInjection()` renders the injected block everywhere.
 
+### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.198)
+
+A ChatGPT OAuth token reaches exactly one endpoint, `chatgpt.com/backend-api/codex/responses`, which
+speaks the **Responses** shape — so the kit routes this apiType to `CodexResponsesProvider`, not the
+chat/completions provider. Its credential is the `codex` CLI's `~/.codex/auth.json`, **never the
+Keychain**, and that has two consequences in this app:
+
+- **Anything asking "can this provider be called?" or "what bearer lists its models?" asks the
+  kit** — `providerHasCredential` / `modelListingCredential(for:)` — never the Keychain. The
+  headless sweep used to gate on a Keychain key by hostname and skipped every subscription model
+  as "no API key"; the in-app Probe Now seeded from the Keychain and silently probed everything.
+- **Endpoint facts, verified live 2026-09-19:** `temperature`, `top_p` and `max_output_tokens` are
+  rejected (`Unsupported parameter`), as is a `{role: system}` input item (`System messages are
+  not allowed`) — so every system turn, including a trailing steering turn, folds into
+  `instructions`, and `TrailingSystemTurnProbe` skips this apiType the way it skips Gemini (the
+  nonce would echo from the top and fabricate a pass). Images (`input_image`), PDFs
+  (`input_file`), `text.format` structured output, `developer` items and
+  `parallel_tool_calls: false` are all accepted. The Codex model decoder states
+  `mustNeverSendTemperatureParam` for every model as a vendor fact; the provider still SENDS
+  temperature when asked and not flagged, so a probe (which strips the flag) measures the real
+  rejection instead of recording a silently dropped parameter as "accepted".
+
+**Forced probes must speak the dialect.** Every probe that bypasses production gating by forcing
+raw body keys (`extraJSONOverrides`) asks the kit for the spelling instead of hardcoding the
+chat/completions one: `ReasoningControl.reasoningEffortOverrides(level:for:)` (`reasoning.effort`
+here, `reasoning_effort` elsewhere), `reasoningDisableOverrides(for:)`,
+`LLMResponseFormat.forcedOverrides(for:)` (`text.format` vs `response_format`),
+`LLMToolChoice.wireValue(for:)` (flat `{type, name}`), and the strict-tools probe's flat tool
+shape. The first sweep after the serializer fix recorded "refused every reasoning mechanism" for
+every model because the effort candidate forced the chat/completions key at an endpoint that
+answers `Unsupported parameter: reasoning_effort`.
+
+Before 0.0.197 the Codex serializer dropped images and documents entirely (the probe recorded
+`vision = false` with the evidence "I don't see an image attached") and ignored
+`extraJSONOverrides`, so every forced probe graded a bare request's success as support. Probe
+records for this provider written before then are wrong on vision, PDF, temperature, effort
+ladders, structured output and tool_choice; re-probe rather than trust them.
+
 ### Effort, reasoning control, and model capabilities (SwiftLLMKit 0.0.140)
 
 The library separates two things that used to share the name "effort", and Agent Smith's UI has to

@@ -49,10 +49,12 @@ final class ModelProbeRunner {
                 if let cached = vendorModelsByProvider[target.provider.id] {
                     vendorModels = cached
                 } else {
-                    let apiKey = kit.apiKey(for: target.provider.id)
+                    // The kit resolves the listing credential — the Keychain key, or the `codex`
+                    // CLI's token for the ChatGPT-subscription provider, which has no Keychain
+                    // entry by design and whose seed fetch used to fail for exactly that reason.
                     vendorModels = try await fetchService.fetchModelFacts(
                         from: target.provider,
-                        apiKey: (apiKey?.isEmpty == false) ? apiKey : nil
+                        apiKey: kit.modelListingCredential(for: target.provider)
                     )
                     vendorModelsByProvider[target.provider.id] = vendorModels
                 }
@@ -108,12 +110,14 @@ final class ModelProbeRunner {
 /// echo. Forcing the flag shapes only this probe call; the persisted finding is entirely the echo.
 ///
 /// Returns `profile` untouched when there's nothing to do: an unestablished chat, a finding already
-/// known, or Gemini — whose consumer folds a trailing turn into `systemInstruction`, which would echo
-/// the nonce from the top and fabricate a pass, so we leave the flag unknown rather than assert it.
+/// known, or a provider whose consumer folds a trailing turn into the system prompt — Gemini into
+/// `systemInstruction`, Codex into `instructions` (its endpoint rejects a `{role: system}` input
+/// item outright) — which would echo the nonce from the top and fabricate a pass, so we leave the
+/// flag unknown rather than assert it.
 enum TrailingSystemTurnProbe {
     static func probing(_ profile: ModelProfile, provider: ModelProvider, modelID: String,
                         kit: LLMKitManager) async -> ModelProfile {
-        guard provider.apiType != .gemini, profile.chat.value == true,
+        guard provider.apiType != .gemini, provider.apiType != .codexChatGPT, profile.chat.value == true,
               profile.trailingSystemMessage == nil else { return profile }
         let test = ModelProber.makeTrailingSystemTurnTest()
         // 5000 max_tokens: thinking + text share the cap on the Opus/Sonnet/Fable 5 family, and a

@@ -420,13 +420,14 @@ enum CapabilityEvalRunner {
         guard let provider = kit.providers.first(where: { $0.id == target.providerID }) else {
             return skipTarget("  SKIP: provider not configured")
         }
-        let key = kit.apiKey(for: target.providerID) ?? ""
-        // A missing key only blocks a provider that needs one. Local servers (mlx, LM Studio,
-        // Ollama on localhost) are keyless — probe them anyway; if the server isn't running the
-        // probe reports a connection failure, which is the honest answer rather than a guess.
-        if providerNeedsKey(provider) && key.isEmpty {
-            return skipTarget("  SKIP: no API key for \(provider.name)")
+        // The kit answers "can this provider be called at all" — a Keychain key, a local no-auth
+        // server (probed anyway; a stopped server reports a connection failure, the honest answer),
+        // or a signed-in `codex` CLI for the ChatGPT-subscription provider. This used to test the
+        // Keychain by hostname, which skipped every subscription model as "no API key".
+        guard kit.providerHasCredential(provider) else {
+            return skipTarget("  SKIP: no credential for \(provider.name)")
         }
+        let listingCredential = kit.modelListingCredential(for: provider)
         reportCatalogClaims(kit: kit, target: target, into: transcript.emit)
 
         // Throwaway config: unstreamed, small output cap, no temperature pinned, and — the
@@ -452,7 +453,7 @@ enum CapabilityEvalRunner {
         if !options.noSeed && options.fetchPolicy != .none {
             do {
                 let decodedModels = try await payloadCache.models(for: provider,
-                                                                  apiKey: key.isEmpty ? nil : key)
+                                                                  apiKey: listingCredential)
                 if let decoded = decodedModels.first(where: { $0.modelID == target.modelID }) {
                     seed = ModelProber.seedProfile(fromDecodedFacts: decoded, providerID: target.providerID)
                 }
@@ -590,9 +591,12 @@ enum CapabilityEvalRunner {
         // non-chat (embeddings, tts, whisper, babbage-002) across a ~1,700-model catalog.
         if profile.chat.value == true, provider.apiType != .anthropic, !target.effortLevels.isEmpty {
             for level in target.effortLevels where profile.reasoningEffortLevels[level] == nil {
+                // Spelled per dialect by the kit: `reasoning_effort` on chat/completions,
+                // `reasoning.effort` on the Responses endpoint — forcing the former there
+                // recorded every level of an accepted ladder as rejected.
                 let forcedLLM = await context.makeForcedProvider(
                     "probe:\(target.modelID):effort",
-                    ["reasoning_effort": .string(level)])
+                    ReasoningControl.reasoningEffortOverrides(level: level, for: provider.apiType))
                 profile.reasoningEffortLevels[level] = await ModelProber.probeParameterAcceptance(
                     llm: forcedLLM,
                     parameterDescription: "reasoning_effort=\(level)",
@@ -717,7 +721,7 @@ enum CapabilityEvalRunner {
             let discoveredMechanism = profile.reasoningControl?.value ?? catalogEntry?.reasoningControl
             let disablePayload = profile[.reasoningCanBeDisabled]?.value == false
                 ? nil
-                : discoveredMechanism.flatMap { $0.reasoningDisableOverrides }
+                : discoveredMechanism.flatMap { $0.reasoningDisableOverrides(for: provider.apiType) }
             for choice in toolChoices where profile[choice.requiredCapability] == nil {
                 // The probe derives this provider's own shape; nil = no such field here.
                 guard let finding = await ModelProber.probeToolChoice(
@@ -1271,36 +1275,17 @@ enum CapabilityEvalRunner {
         print("\n  \(profiles.count) models, \(calls) total API calls")
     }
 
-    /// Whether a provider needs an API key to probe. The signal is the ENDPOINT HOST, not the
-    /// apiType: a local server (mlx, LM Studio, Ollama on localhost) is keyless, but Ollama Cloud
-    /// is the SAME `.ollama` apiType pointed at ollama.com and very much needs a key. So exempting
-    /// by apiType would wrongly wave through the cloud one — check the host.
-    static func providerNeedsKey(_ provider: ModelProvider) -> Bool {
-        let host = provider.endpoint.host?.lowercased() ?? ""
-        let localHosts: Set<String> = ["localhost", "127.0.0.1", "0.0.0.0", "::1"]
-        return !(localHosts.contains(host) || host.hasSuffix(".local"))
-    }
-
     /// Prints every `providerID/modelID` that `--targets` will accept — the exact strings, one
-    /// per line, grouped by provider — then exits. A cloud provider without a key is flagged (its
-    /// models can't be probed); a keyless LOCAL provider is not — it just needs to be running.
-
+    /// per line, grouped by provider — then exits. A provider with no credential is flagged (its
+    /// models can't be probed) — the same question the probe loop asks, answered by the kit, so
+    /// the listing and the sweep can never disagree about who is probeable.
     private static func listModelsAndExit(kit: LLMKitManager) -> Never {
         print(String(repeating: "═", count: 72))
         print("AVAILABLE MODELS  (copy a providerID/modelID into --targets)")
         for provider in kit.providers.sorted(by: { $0.id < $1.id }) {
             let models = kit.models(for: provider.id)
             guard !models.isEmpty else { continue }
-            let needsKey = providerNeedsKey(provider)
-            let hasKey = (kit.apiKey(for: provider.id)?.isEmpty == false)
-            let note: String
-            if needsKey && !hasKey {
-                note = " — NO API KEY, can't probe"
-            } else if !needsKey {
-                note = " — local, no key needed (must be running)"
-            } else {
-                note = ""
-            }
+            let note = kit.providerHasCredential(provider) ? "" : " — NO CREDENTIAL, can't probe"
             print("\n\(provider.id)   (\(provider.name)\(note))  \(models.count) models")
             for model in models.sorted(by: { $0.modelID < $1.modelID }) {
                 print("  \(provider.id)/\(model.modelID)")
@@ -1358,13 +1343,12 @@ enum CapabilityEvalRunner {
         guard let provider = kit.providers.first(where: { $0.id == providerID }) else {
             print("Ollama Cloud provider (\(providerID)) not configured."); exit(1)
         }
-        let key = kit.apiKey(for: providerID) ?? ""
-
         print("=== Ollama Cloud library scrape ===")
         print("Fetching cloud model list from \(provider.endpoint.absoluteString)…")
         let models: [DecodedModelFacts]
         do {
-            models = try await ModelFetchService().fetchModelFacts(from: provider, apiKey: key.isEmpty ? nil : key)
+            models = try await ModelFetchService().fetchModelFacts(
+                from: provider, apiKey: kit.modelListingCredential(for: provider))
         } catch {
             print("Model list fetch FAILED: \(error.localizedDescription)"); exit(1)
         }
