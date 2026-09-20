@@ -63,8 +63,10 @@ struct LLMRetryPolicyTests {
     func failedResponseClassification() {
         #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
             code: "cyber_policy", message: "This content was flagged for possible cybersecurity risk.")) == .permanent)
-        #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
-            code: "content_policy_violation", message: "refused")) == .permanent)
+        for code in LLMProviderError.ContentPolicyRefusalCode.allCases {
+            #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
+                code: code.rawValue, message: "refused")) == .permanent, "\(code.rawValue)")
+        }
         #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
             code: "server_error", message: "on fire")) == .transient(retryAfter: nil))
         #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
