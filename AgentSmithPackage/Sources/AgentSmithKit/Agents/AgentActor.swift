@@ -1717,10 +1717,11 @@ public actor AgentActor {
                     if httpStatus == 402 {
                         content = Self.outOfCreditsMessage(role: configuration.role, model: configuration.llmConfig.model)
                     } else if let providerError = error as? LLMProviderError,
-                              let refusal = providerError.contentPolicyRefusal {
+                              let refusal = providerError.contentPolicyRefusal,
+                              case .responseFailed(_, let serverMessage) = providerError {
                         content = Self.contentPolicyRefusalMessage(
                             role: configuration.role, model: configuration.llmConfig.model,
-                            refusal: refusal, providerMessage: providerError.localizedDescription)
+                            refusal: refusal, providerMessage: serverMessage)
                     } else {
                         content = "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(retryWindowBudget.maxAttempts)): \(error.localizedDescription)"
                     }
