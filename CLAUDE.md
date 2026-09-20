@@ -176,7 +176,7 @@ The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch 
   - **Per-emitter tool-call review** — see the Security convention above; approves without a verdict but stays visible (`wasEvaluated == false`).
   - **Retrieval** — one entry point `retrieveContext(source: RetrievalSource, query:)` at all five points; the resolved `RetrievalToggle` maps to pool limits (0 = corpus off, both-off = cheap no-op). Exposed to agents/tools via `ToolContext.retrieveContext` and to `SecurityEvaluator` via an injected closure. `SemanticSearchResults.formattedForInjection()` renders the injected block everywhere.
 
-### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.200)
+### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.201)
 
 A ChatGPT OAuth token reaches exactly one endpoint, `chatgpt.com/backend-api/codex/responses`, which
 speaks the **Responses** shape — so the kit routes this apiType to `CodexResponsesProvider`, not the
@@ -211,10 +211,11 @@ answers `Unsupported parameter: reasoning_effort`.
 **The Codex listing's reasoning levels are a menu, not the accepted set.** The merge is gap-fill,
 provider payload first, so a decoded ladder would beat the probe's — and the listing is wrong in
 both directions: it omits `none` for gpt-5.5 (accepted) and declares `ultra` for gpt-6-astra
-(refused by name). The decoder therefore states only that the parameter exists
-(`.supportedLevelsUnknown`); the probe establishes the ladder, `ultra` is in `EffortRank.table`
-so it gets asked, and `ReasoningControl.effortOffFormPermitted` lets the probed
-`reasoningCanBeDisabled` decide whether `none` may be sent.
+(refused by name). The decoder therefore states NOTHING about the ladder — not even
+`.supportedLevelsUnknown`, which still occupies the field and blocks the gap-fill; the probe
+establishes it, `ultra` is in `EffortRank.table` so it gets asked, and
+`ReasoningControl.effortOffFormPermitted` lets the probed `reasoningCanBeDisabled` decide
+whether `none` may be sent.
 
 Before 0.0.197 the Codex serializer dropped images and documents entirely (the probe recorded
 `vision = false` with the evidence "I don't see an image attached") and ignored
