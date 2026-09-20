@@ -176,7 +176,7 @@ The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch 
   - **Per-emitter tool-call review** — see the Security convention above; approves without a verdict but stays visible (`wasEvaluated == false`).
   - **Retrieval** — one entry point `retrieveContext(source: RetrievalSource, query:)` at all five points; the resolved `RetrievalToggle` maps to pool limits (0 = corpus off, both-off = cheap no-op). Exposed to agents/tools via `ToolContext.retrieveContext` and to `SecurityEvaluator` via an injected closure. `SemanticSearchResults.formattedForInjection()` renders the injected block everywhere.
 
-### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.201)
+### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.202)
 
 A ChatGPT OAuth token reaches exactly one endpoint, `chatgpt.com/backend-api/codex/responses`, which
 speaks the **Responses** shape — so the kit routes this apiType to `CodexResponsesProvider`, not the
@@ -193,7 +193,9 @@ Keychain**, and that has two consequences in this app:
   `instructions`, and `TrailingSystemTurnProbe` skips this apiType the way it skips Gemini (the
   nonce would echo from the top and fabricate a pass). Images (`input_image`), PDFs
   (`input_file`), `text.format` structured output, `developer` items and
-  `parallel_tool_calls: false` are all accepted. The Codex model decoder states
+  `parallel_tool_calls: false` are all accepted, and so is `prompt_cache_key`, which the provider
+sends per instance (one per role per conversation) because it measurably brings the prefix-cache
+hit forward by a turn. The Codex model decoder states
   `mustNeverSendTemperatureParam` for every model as a vendor fact; the provider still SENDS
   temperature when asked and not flagged, so a probe (which strips the flag) measures the real
   rejection instead of recording a silently dropped parameter as "accepted".
