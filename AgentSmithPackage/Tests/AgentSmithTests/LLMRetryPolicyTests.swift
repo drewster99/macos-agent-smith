@@ -59,6 +59,18 @@ struct LLMRetryPolicyTests {
 
     /// Unknown errors lean transient on purpose: stranding an agent that would have recovered
     /// is worse than a bounded number of wasted retries.
+    @Test("A content-policy refusal is permanent; any other failed response is transient")
+    func failedResponseClassification() {
+        #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
+            code: "cyber_policy", message: "This content was flagged for possible cybersecurity risk.")) == .permanent)
+        #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
+            code: "content_policy_violation", message: "refused")) == .permanent)
+        #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
+            code: "server_error", message: "on fire")) == .transient(retryAfter: nil))
+        #expect(LLMRetryPolicy.classify(LLMProviderError.responseFailed(
+            code: nil, message: "unknown error")) == .transient(retryAfter: nil))
+    }
+
     @Test("An unrecognized error is treated as transient")
     func unknownIsTransient() {
         struct Mystery: Error {}

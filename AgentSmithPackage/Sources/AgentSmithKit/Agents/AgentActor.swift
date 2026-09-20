@@ -1711,9 +1711,19 @@ public actor AgentActor {
                     // A 402 is out of credits / a billing block, not a transient fault. The generic
                     // "error (n/50): HTTP 402: {raw json}" frame buries the one thing the user needs
                     // to know, so say it plainly.
-                    var content = httpStatus == 402
-                        ? Self.outOfCreditsMessage(role: configuration.role, model: configuration.llmConfig.model)
-                        : "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(retryWindowBudget.maxAttempts)): \(error.localizedDescription)"
+                    // Likewise a content-policy refusal: the provider declined the CONVERSATION, so
+                    // the fix is a different model or a rephrased task, never another attempt.
+                    var content: String
+                    if httpStatus == 402 {
+                        content = Self.outOfCreditsMessage(role: configuration.role, model: configuration.llmConfig.model)
+                    } else if let providerError = error as? LLMProviderError,
+                              let refusal = providerError.contentPolicyRefusal {
+                        content = Self.contentPolicyRefusalMessage(
+                            role: configuration.role, model: configuration.llmConfig.model,
+                            refusal: refusal, providerMessage: providerError.localizedDescription)
+                    } else {
+                        content = "Agent \(configuration.role.displayName) error (\(consecutiveErrors)/\(retryWindowBudget.maxAttempts)): \(error.localizedDescription)"
+                    }
                     // Only claim a retry when one is actually coming — the stop below fires at
                     // the cap, and immediately for a permanent error. State the wait both
                     // relatively and as a wall-clock time so a long wait reads clearly, and flag
@@ -4255,6 +4265,16 @@ public actor AgentActor {
     /// A clear, actionable transcript line for an HTTP 402 (out of credits / payment required),
     /// so the cause reads plainly instead of a raw JSON error body under a generic "error (n/50):"
     /// frame. Ends without terminal punctuation so the caller's "— retrying in …" suffix flows.
+    /// The provider refused the request on content-policy grounds. Named plainly for the same
+    /// reason as the 402 message: the generic "error (n/50): Provider failed the response …" frame
+    /// buries the one actionable fact, which is that the model — not the task — has to change.
+    static func contentPolicyRefusalMessage(
+        role: AgentRole, model: String,
+        refusal: LLMProviderError.ContentPolicyRefusalCode, providerMessage: String
+    ) -> String {
+        "Agent \(role.displayName): model '\(model)' refused this conversation on content-policy grounds (\(refusal.rawValue)). Retrying cannot help — switch this agent to a model without this restriction, or rephrase the task, then re-run it. Provider said: \(providerMessage)"
+    }
+
     static func outOfCreditsMessage(role: AgentRole, model: String) -> String {
         "Agent \(role.displayName): out of credits — the provider for model '\(model)' returned HTTP 402 (Payment Required). Add funds to your account to continue"
     }

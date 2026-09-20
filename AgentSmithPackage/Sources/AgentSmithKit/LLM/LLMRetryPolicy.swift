@@ -199,6 +199,13 @@ public enum LLMRetryPolicy {
                 return .permanent
             case .invalidResponse, .malformedResponse:
                 return .transient(retryAfter: nil)
+            case .responseFailed:
+                // The server accepted the request and then failed the response. A CONTENT-POLICY
+                // refusal is deterministic over the request — the Codex backend's `cyber_policy`
+                // was retried 42 times against the same conversation before anyone noticed
+                // (2026-09-19) — so it is permanent. Any other failure code is a backend fault,
+                // and those are exactly what retrying is for.
+                return providerError.contentPolicyRefusal != nil ? .permanent : .transient(retryAfter: nil)
             }
         }
 
