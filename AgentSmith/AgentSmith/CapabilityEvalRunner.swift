@@ -20,8 +20,14 @@ import SwiftLLMKit
 ///     --discard-non-chat            drop models the probe establishes can't chat (post-probe)
 ///     --discard-deprecated          skip models the provider marked deprecated (before probing)
 ///     --reuse-store                 seed established probed findings from the local record;
-///                                   only gaps / new / version-invalidated findings re-probe
+///                                   only gaps / new models / records older than the oldest
+///                                   reusable prober version re-probe. A reused record keeps the
+///                                   version that measured it, and is only asked the ladder
+///                                   levels that version knew.
 ///     --reuse-max-age-days <N>      with --reuse-store, records older than N days re-probe fully (default 30)
+///     --only-unprobed               drop every target that already has a reusable local record
+///                                   BEFORE probing — no calls, no gap-filling, no age check.
+///                                   "Probe what is new and nothing else."
 ///     --concurrency <N>             models probed at once across all providers (default 10; 1 = the
 ///                                   old strictly-sequential sweep)
 ///     --provider-concurrency <p=N>  cap for ONE provider's in-flight models (default 4 each;
@@ -161,7 +167,22 @@ enum CapabilityEvalRunner {
 
         // Computed after the fetch so a bare-provider `--targets builtin.alibabacloud` can expand
         // against a populated catalog.
-        let targets = parseTargets(kit: kit) ?? allCatalogTargets(kit: kit)
+        var selectedTargets = parseTargets(kit: kit) ?? allCatalogTargets(kit: kit)
+        // "New and nothing else": a target with a reusable record is dropped here, before a single
+        // call — not seeded-then-gap-filled (that is `--reuse-store`), not age-checked. A record
+        // older than the oldest reusable version counts as unprobed; its findings are suspect.
+        if CommandLine.arguments.contains("--only-unprobed") {
+            let before = selectedTargets.count
+            selectedTargets = selectedTargets.filter { target in
+                guard let provider = kit.providers.first(where: { $0.id == target.providerID }),
+                      let record = kit.probeRecords(provider: provider, modelID: target.modelID).local
+                else { return true }
+                return record.proberVersion < ModelProber.oldestReusableProberVersion
+            }
+            print("only-unprobed: \(before - selectedTargets.count) already-recorded model(s) dropped, \(selectedTargets.count) left to probe")
+        }
+        // Immutable from here: the worker task group captures it, and a `var` is not sendable.
+        let targets = selectedTargets
         print("targets: \(targets.count)\n")
         if targets.isEmpty {
             print("No targets to probe (an explicit --targets matched no catalogued models). Nothing to do.")
@@ -254,6 +275,11 @@ enum CapabilityEvalRunner {
         /// The trailing-system-turn probe reads kit state (behavior flags) and uses its factory;
         /// wrapped here so the worker never holds the kit itself.
         let probeTrailingSystemTurn: @MainActor @Sendable (ModelProfile) async -> ModelProfile
+        /// The prober version of the local record this battery was seeded from under
+        /// `--reuse-store`, or nil when nothing was reused. It bounds which ladder levels are
+        /// asked (only those that version knew) and is what the record is stamped with again on
+        /// store, so filling a v7 record's gaps never launders it to v8 and voids its ladder.
+        let reusedProberVersion: Int?
     }
 
     /// What a completed battery hands to the completion write.
@@ -467,28 +493,28 @@ enum CapabilityEvalRunner {
         // (served models drift under fixed IDs). Carried findings keep their own evidence and
         // timestamps; only gaps re-probe.
         var reusedFindingSummary = ""
+        var reusedProberVersion: Int?
         if options.reuseStore {
             let (localRecord, _) = kit.probeRecords(provider: provider, modelID: target.modelID)
             if let record = localRecord {
                 let age = Date().timeIntervalSince(record.recordedAt)
-                // ONLY the current version is reusable. There was a partial-migration branch for
-                // v3 — written when 4 was current, on the basis that v3→v4 changed only the
-                // trailing-system methodology — and it survived two version bumps that
-                // explicitly invalidated everything else. v5 declared every v4 record suspect
-                // and v6 declared every v5 budget finding fabricated, so a v3 record is at
-                // least as stale as the versions those bumps rejected, yet it was the one
-                // vintage still getting a pass.
+                // Reusable from `oldestReusableProberVersion` up — the kit's one statement of
+                // which bumps changed the MEANING of measurements (those raise it) and which
+                // merely taught the prober to ask one more thing (those don't). An exact-match
+                // rule here turned the v8 "asks for `ultra` too" bump into a full re-probe of
+                // every model. A hand-maintained partial-migration branch is NOT the answer
+                // either: one for v3 once survived two bumps that had declared v3 suspect.
                 //
-                // It also laundered: `storeProbeResult` stamps the CURRENT prober version, so
-                // carried v3 findings were re-persisted as v6, and the evidence combiner
-                // prefers a higher prober version over a newer timestamp — letting the
-                // laundered data outrank a correct measurement.
-                if record.proberVersion != ModelProber.proberVersion {
-                    reusedFindingSummary = "  reuse: SKIP — record is prober v\(record.proberVersion), current is v\(ModelProber.proberVersion); full re-probe"
+                // Laundering is prevented at the store, not by refusing reuse: the record is
+                // re-stamped with the version that measured it (see `reusedProberVersion`), so
+                // the evidence combiner's "higher version wins" cannot be gamed by a carry.
+                if record.proberVersion < ModelProber.oldestReusableProberVersion {
+                    reusedFindingSummary = "  reuse: SKIP — record is prober v\(record.proberVersion), oldest reusable is v\(ModelProber.oldestReusableProberVersion); full re-probe"
                 } else if age > options.reuseMaxAge {
                     reusedFindingSummary = "  reuse: SKIP — record is \(Int(age / 86_400))d old (> \(Int(options.reuseMaxAgeDays))d); full re-probe"
                 } else {
                     seed.seedProbedFindings(from: record.profile)
+                    reusedProberVersion = record.proberVersion
                     reusedFindingSummary = "  reuse: seeded probed findings from a \(Int(age / 86_400))d-old prober-v\(record.proberVersion) record"
                 }
             } else {
@@ -533,7 +559,8 @@ enum CapabilityEvalRunner {
             probeTrailingSystemTurn: { profile in
                 await TrailingSystemTurnProbe.probing(profile, provider: provider,
                                                       modelID: target.modelID, kit: kit)
-            }
+            },
+            reusedProberVersion: reusedProberVersion
         )
     }
 
@@ -589,8 +616,16 @@ enum CapabilityEvalRunner {
         // became the default it meant up to 7 paid calls each on every model `probe()` had
         // already abandoned: unavailable, access-denied, inconclusive-chat, or established
         // non-chat (embeddings, tts, whisper, babbage-002) across a ~1,700-model catalog.
+        // A reused record is asked only the levels the prober that wrote it knew: its ladder is
+        // complete by that version's gate, and asking every reused model about a level added
+        // since (`ultra`, v8) is one paid call per model across the whole store — the "re-probe
+        // everything" a reuse sweep exists to avoid.
+        let askableLevels = context.reusedProberVersion.map {
+            EffortRank.levelsRequiredForCompleteLadder(proberVersion: $0)
+        }
         if profile.chat.value == true, provider.apiType != .anthropic, !target.effortLevels.isEmpty {
-            for level in target.effortLevels where profile.reasoningEffortLevels[level] == nil {
+            for level in target.effortLevels where profile.reasoningEffortLevels[level] == nil
+                && askableLevels?.contains(level) != false {
                 // Spelled per dialect by the kit: `reasoning_effort` on chat/completions,
                 // `reasoning.effort` on the Responses endpoint — forcing the former there
                 // recorded every level of an accepted ladder as rejected.
@@ -916,8 +951,11 @@ enum CapabilityEvalRunner {
                 transcript.emit("  probe record unchanged (fully reused; no new measurements)")
             } else {
                 do {
-                    let storeOutcome = try kit.storeProbeResult(profile: profile, provider: context.provider,
-                                                                modelID: target.modelID)
+                    // Stamped with the version that MEASURED the record when one was reused —
+                    // the gap-fill added answers, it did not re-ask the ladder.
+                    let storeOutcome = try kit.storeProbeResult(
+                        profile: profile, provider: context.provider, modelID: target.modelID,
+                        proberVersion: context.reusedProberVersion ?? ModelProber.proberVersion)
                     switch storeOutcome {
                     case .stored:  transcript.emit("  probe record stored")
                     case .pruned:  transcript.emit("  stale probe record PRUNED (payload says non-chat; no capability measurement held)")

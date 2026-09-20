@@ -176,7 +176,7 @@ The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch 
   - **Per-emitter tool-call review** — see the Security convention above; approves without a verdict but stays visible (`wasEvaluated == false`).
   - **Retrieval** — one entry point `retrieveContext(source: RetrievalSource, query:)` at all five points; the resolved `RetrievalToggle` maps to pool limits (0 = corpus off, both-off = cheap no-op). Exposed to agents/tools via `ToolContext.retrieveContext` and to `SecurityEvaluator` via an injected closure. `SemanticSearchResults.formattedForInjection()` renders the injected block everywhere.
 
-### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.203)
+### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.204)
 
 A ChatGPT OAuth token reaches exactly one endpoint, `chatgpt.com/backend-api/codex/responses`, which
 speaks the **Responses** shape — so the kit routes this apiType to `CodexResponsesProvider`, not the
@@ -199,6 +199,17 @@ hit forward by a turn. The Codex model decoder states
   `mustNeverSendTemperatureParam` for every model as a vendor fact; the provider still SENDS
   temperature when asked and not flagged, so a probe (which strips the flag) measures the real
   rejection instead of recording a silently dropped parameter as "accepted".
+
+**Probe only what is new.** Two sweep modes exist so a prober change never forces a full
+re-probe of the ~1,600-record store: `--only-unprobed` drops every target that already has a
+reusable local record before a single call (no gap-filling, no age check — "new and nothing
+else"); `--reuse-store` seeds from the record and fills only its gaps. Reuse accepts any record
+from `ModelProber.oldestReusableProberVersion` up — a bump that changes the MEANING of
+measurements raises that constant, a bump that merely asks one more thing (v8 added `ultra`)
+does not — and a reused record is asked only the ladder levels its version knew and is stored
+again under that same version, so filling gaps never launders it and voids its ladder. The
+default reuse age window is 30 days; the store is mostly 30–60 days old, so pass
+`--reuse-max-age-days` deliberately.
 
 **Forced probes must speak the dialect.** Every probe that bypasses production gating by forcing
 raw body keys (`extraJSONOverrides`) asks the kit for the spelling instead of hardcoding the
