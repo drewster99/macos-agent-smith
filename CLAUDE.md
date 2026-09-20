@@ -176,7 +176,7 @@ The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch 
   - **Per-emitter tool-call review** — see the Security convention above; approves without a verdict but stays visible (`wasEvaluated == false`).
   - **Retrieval** — one entry point `retrieveContext(source: RetrievalSource, query:)` at all five points; the resolved `RetrievalToggle` maps to pool limits (0 = corpus off, both-off = cheap no-op). Exposed to agents/tools via `ToolContext.retrieveContext` and to `SecurityEvaluator` via an injected closure. `SemanticSearchResults.formattedForInjection()` renders the injected block everywhere.
 
-### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.202)
+### The ChatGPT-subscription provider (`builtin.codex-chatgpt`, SwiftLLMKit 0.0.203)
 
 A ChatGPT OAuth token reaches exactly one endpoint, `chatgpt.com/backend-api/codex/responses`, which
 speaks the **Responses** shape — so the kit routes this apiType to `CodexResponsesProvider`, not the
@@ -215,7 +215,8 @@ provider payload first, so a decoded ladder would beat the probe's — and the l
 both directions: it omits `none` for gpt-5.5 (accepted) and declares `ultra` for gpt-6-astra
 (refused by name). The decoder therefore states NOTHING about the ladder — not even
 `.supportedLevelsUnknown`, which still occupies the field and blocks the gap-fill; the probe
-establishes it, `ultra` is in `EffortRank.table` so it gets asked, and
+establishes it, `ultra` is in `EffortRank.table` so it gets asked (the complete-ladder gate is
+keyed on the WRITING prober's version, so older seven-level records keep projecting), and
 `ReasoningControl.effortOffFormPermitted` lets the probed `reasoningCanBeDisabled` decide
 whether `none` may be sent.
 
