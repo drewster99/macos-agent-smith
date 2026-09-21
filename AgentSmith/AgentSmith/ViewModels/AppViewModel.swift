@@ -2340,7 +2340,7 @@ final class AppViewModel {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: content,
-                        metadata: ["messageKind": .kind(.mcpStatus), "isWarning": .bool(true)]
+                        metadata: ["messageKind": .kind(.mcpStatus), "severity": .severity(.warning)]
                     ))
                 }
             } else {

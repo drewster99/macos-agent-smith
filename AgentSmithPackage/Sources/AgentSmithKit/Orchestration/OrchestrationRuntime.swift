@@ -881,7 +881,7 @@ public actor OrchestrationRuntime {
             content: "Scheduled run for \(name) did NOT start — \(reason). The timer has fired and will not retry.",
             metadata: [
                 "messageKind": .kind(.scheduledRunRefused),
-                "isError": .bool(true),
+                "severity": .severity(.error),
                 "scheduledTaskID": .string(taskID.uuidString),
                 "scheduledTaskTitle": .string(title ?? ""),
                 "refusalReason": .string(reason)
@@ -1979,7 +1979,7 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Could not start template \"\(task.title)\": \(message)",
-                metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
+                metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
             ))
             return nil
         }
@@ -2032,7 +2032,7 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Could not start task \(taskID.uuidString): it was not found in the task store.",
-                metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
+                metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
             ))
             return
         }
@@ -2297,7 +2297,7 @@ public actor OrchestrationRuntime {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "No Security Agent provider configured — cannot start. Smith's open-world tool calls must be security-reviewed, so the system will not run without a Security Agent model assigned.",
-                metadata: ["messageKind": .kind(.advisory), "isError": .bool(true)]
+                metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
             ))
             await abandonFailedStart()
             return
@@ -3654,7 +3654,7 @@ public actor OrchestrationRuntime {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: "Not starting task \"\(task.title)\": the security agent's tool-scoping has failed \(scopingFailureStreak) times in a row — the model backend looks unreachable. Waiting ~\(max(retryInSeconds, 1))s before allowing another attempt. Check the Security Agent's model configuration or backend, then retry the task.",
-                        metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
+                        metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
                     ))
                     return nil
                 }
@@ -3690,7 +3690,7 @@ public actor OrchestrationRuntime {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Security Agent's model configuration.",
-                        metadata: ["messageKind": .kind(.taskLifecycle), "isError": .bool(true)]
+                        metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
                     ))
                     return nil
                 }
@@ -3701,7 +3701,7 @@ public actor OrchestrationRuntime {
                     await channel.post(ChannelMessage(
                         sender: .system,
                         content: "The security agent did not approve any tools for task \"\(task.title)\", so it cannot be run.",
-                        metadata: ["messageKind": .kind(.taskLifecycle), "isWarning": .bool(true)]
+                        metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.warning)]
                     ))
                     return nil
                 }

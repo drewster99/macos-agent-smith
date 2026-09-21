@@ -212,8 +212,12 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     /// per-task chatter of individual workers is hidden. This is the primary knob that makes the default
     /// the conversation rather than the firehose.
     public var hideTaskScoped: Bool
-    /// When false, error messages (`metadata["isError"]`) are hidden.
+    /// When false, `.error`-severity messages are hidden.
     public var showErrors: Bool
+    /// Severity floor — messages at or above this level are shown even when another axis (a hidden
+    /// kind, sender, or tool) would hide them. `nil` turns the floor off. See
+    /// `TranscriptFilter.alwaysShowAtOrAbove` for why it exists.
+    public var alwaysShowAtOrAbove: MessageSeverity?
 
     public init(
         defaultKinds: TranscriptKindSelection = .allVisible,
@@ -222,7 +226,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         allowedRecipients: Set<MessageRecipient>? = nil,
         visibility: TranscriptFilter.Visibility = .all,
         hideTaskScoped: Bool = false,
-        showErrors: Bool = true
+        showErrors: Bool = true,
+        alwaysShowAtOrAbove: MessageSeverity? = .warning
     ) {
         self.defaultKinds = defaultKinds
         self.senderKindOverrides = senderKindOverrides
@@ -231,6 +236,7 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         self.visibility = visibility
         self.hideTaskScoped = hideTaskScoped
         self.showErrors = showErrors
+        self.alwaysShowAtOrAbove = alwaysShowAtOrAbove
     }
 
     // MARK: Scope accessors (the popover's surface)
@@ -263,7 +269,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case hiddenKinds, showsChat, hiddenToolNames, senderKindOverrides, visibleGroups,
-             hiddenGroups, allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors
+             hiddenGroups, allowedSenders, allowedRecipients, visibility, hideTaskScoped, showErrors,
+             alwaysShowAtOrAbove
     }
 
     /// One persisted per-sender override row. An ARRAY of these (sorted by sender description)
@@ -355,6 +362,17 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
             .flatMap(TranscriptFilter.Visibility.init(rawValue:)) ?? .all
         hideTaskScoped = try c.decodeIfPresent(Bool.self, forKey: .hideTaskScoped) ?? false
         showErrors = try c.decodeIfPresent(Bool.self, forKey: .showErrors) ?? true
+        // An ABSENT key and an explicit NULL mean opposite things here, so the two cannot be
+        // collapsed. Absent = a config written before the floor existed — exactly the configs that
+        // were hiding failures, so they adopt the default rather than `nil`; an upgrade must not
+        // preserve the broken behavior it is fixing. Null = the user deliberately turned the floor
+        // off, which must survive a relaunch. `decodeIfPresent` answers nil to both, so the key's
+        // presence is what separates them.
+        if c.contains(.alwaysShowAtOrAbove) {
+            alwaysShowAtOrAbove = try c.decodeIfPresent(MessageSeverity.self, forKey: .alwaysShowAtOrAbove)
+        } else {
+            alwaysShowAtOrAbove = .warning
+        }
     }
 
     /// Decodes a set one element at a time, dropping any member this build can't represent —
@@ -428,6 +446,13 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         try c.encode(visibility, forKey: .visibility)
         try c.encode(hideTaskScoped, forKey: .hideTaskScoped)
         try c.encode(showErrors, forKey: .showErrors)
+        // Explicitly, including the nil case — see the decoder: an omitted key would read back as
+        // the default and silently undo a user who turned the floor off.
+        if let alwaysShowAtOrAbove {
+            try c.encode(alwaysShowAtOrAbove, forKey: .alwaysShowAtOrAbove)
+        } else {
+            try c.encodeNil(forKey: .alwaysShowAtOrAbove)
+        }
     }
 
     /// Swallows one arbitrary JSON value — the skip vehicle for a lenient unkeyed decode.
@@ -493,6 +518,7 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
             taskScope: taskScope ?? (hideTaskScoped ? .orchestration : .any),
             visibility: visibility,
             hideErrors: !showErrors,
+            alwaysShowAtOrAbove: alwaysShowAtOrAbove,
             hiddenToolNames: defaultKinds.effectiveHiddenToolNames,
             hiddenToolNamesBySender: senderKindOverrides.mapValues(\.effectiveHiddenToolNames)
         )

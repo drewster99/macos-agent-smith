@@ -131,6 +131,36 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
         return name
     }
 
+    /// How bad this message is. See `MessageSeverity` — an axis orthogonal to `kind`.
+    ///
+    /// Never nil: a message with no severity metadata is `.info`, which is what the
+    /// overwhelming majority of traffic is. Making it optional would push an `?? .info`
+    /// onto every comparison site, and the floor in `TranscriptFilter` needs a total order
+    /// over every message, not over the ones somebody remembered to stamp.
+    ///
+    /// Two derivations live here, in the single accessor, rather than at read sites:
+    ///
+    /// - A row with no `severity` but `isError: true` answers `.error`. Every failure posted
+    ///   before this type existed is stamped that way and the persisted corpus is full of
+    ///   them; folding it in here makes historical and current rows indistinguishable to
+    ///   every consumer, exactly as `kind` does for legacy security-review rows.
+    /// - A row with neither answers `.info`.
+    ///
+    /// Unlike `kind` this does NOT trap on an unrecognized value. A kind drives control flow, so
+    /// a wrong branch there is a correctness failure worth crashing over; severity drives
+    /// display prominence and one filter floor. Trapping the app over a garbled display hint
+    /// would be the larger harm — but the value still must not read as *less* bad than it is,
+    /// so an unparseable severity resolves to `.error`: it is certainly not routine, and the
+    /// floor's whole purpose is that questionable rows surface rather than vanish.
+    public var severity: MessageSeverity {
+        if let stored = metadata?["severity"] {
+            guard case .string(let raw) = stored else { return .error }
+            return MessageSeverity(rawValue: raw) ?? .error
+        }
+        if case .bool(true)? = metadata?["isError"] { return .error }
+        return .info
+    }
+
     public var kind: ChannelMessageKind? {
         guard let stored = metadata?["messageKind"] else {
             // Legacy security-review rows (posted before the kind existed) are recognizable by

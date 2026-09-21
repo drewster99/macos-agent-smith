@@ -1154,7 +1154,7 @@ public actor AgentActor {
         // agent conversation history wastes tokens and creates a death spiral when
         // the error is a context overflow (each retry adds the error text, growing
         // the context further).
-        if case .bool(true) = message.metadata?["isError"] {
+        if message.severity >= .error {
             return false
         }
 
@@ -1509,7 +1509,7 @@ public actor AgentActor {
                     await watchdogContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(watchdogRoleName) has been in the current turn for \(stallSeconds / 60) minutes — unusually long. A legitimate long subprocess (large bash/gh) explains this; an agent stuck on a tool that doesn't honor cancellation does not. Check the agent inspector for the in-flight tool.",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "isWarning": .bool(true), "agentRole": .string(watchdogRoleRaw)]
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.warning), "agentRole": .string(watchdogRoleRaw)]
                     ))
                 }
                 defer {
@@ -1669,14 +1669,14 @@ public actor AgentActor {
                         await toolContext.post(ChannelMessage(
                             sender: .system,
                             content: "Context overflow for \(roleName) — context rebuilt (attempt \(consecutiveContextOverflows)/\(Self.maxContextOverflowRetries)).",
-                            metadata: ["messageKind": .kind(.contextManagement), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                            metadata: ["messageKind": .kind(.contextManagement), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
                         ))
                         continue  // Retry immediately with smaller context
                     } else {
                         await toolContext.post(ChannelMessage(
                             sender: .system,
                             content: "Agent \(roleName) stopped: context overflow persists after \(Self.maxContextOverflowRetries) rebuild attempts.",
-                            metadata: ["messageKind": .kind(.agentLifecycle), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                            metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
                         ))
                         isRunning = false
                         break
@@ -1823,7 +1823,7 @@ public actor AgentActor {
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: content,
-                        metadata: ["messageKind": .kind(.agentRecovery), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                        metadata: ["messageKind": .kind(.agentRecovery), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
                     ))
                 }
 
@@ -1837,7 +1837,7 @@ public actor AgentActor {
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(configuration.role.displayName) stopped — this error cannot be resolved by retrying: \(error.localizedDescription)",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     isRunning = false
                     break
@@ -1859,7 +1859,7 @@ public actor AgentActor {
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(configuration.role.displayName) \(stopReason)",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     isRunning = false
                     break
@@ -1963,7 +1963,7 @@ public actor AgentActor {
                         await toolContext.post(ChannelMessage(
                             sender: .system,
                             content: "\(roleName) returned \(consecutiveEmptyResponses) consecutive empty responses (no text, no tool calls). The model appears unable to proceed. Terminating.",
-                            metadata: ["messageKind": .kind(.agentLifecycle), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                            metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
                         ))
                         await toolContext.onSelfTerminate()
                         isRunning = false
@@ -1973,7 +1973,7 @@ public actor AgentActor {
                         await toolContext.post(ChannelMessage(
                             sender: .system,
                             content: "\(roleName) returned a second consecutive empty response. Attempting context rebuild from task state.",
-                            metadata: ["messageKind": .kind(.agentRecovery), "isWarning": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                            metadata: ["messageKind": .kind(.agentRecovery), "severity": .severity(.warning), "agentRole": .string(configuration.role.rawValue)]
                         ))
                         let rebuilt = await rebuildContextFromTask()
                         if !rebuilt {
@@ -1992,7 +1992,7 @@ public actor AgentActor {
                         await toolContext.post(ChannelMessage(
                             sender: .system,
                             content: "\(roleName) returned an empty response (no text, no tool calls). Injecting continuation prompt.",
-                            metadata: ["messageKind": .kind(.agentRecovery), "isWarning": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                            metadata: ["messageKind": .kind(.agentRecovery), "severity": .severity(.warning), "agentRole": .string(configuration.role.rawValue)]
                         ))
                         conversationHistory.append(.user("You returned an empty response with no text and no tool calls. This is not acceptable — you must make progress on the task. Use your tools to continue working."))
                         hasUnprocessedInput = true
@@ -2088,7 +2088,7 @@ public actor AgentActor {
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(configuration.role.displayName) has been nudged to continue \(continuationNudgesSinceProgress) times without making progress. Going idle — the agent will resume when new input arrives.",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "isWarning": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.warning), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     Self.agentLogger.warning(
                         "Agent \(self.configuration.role.displayName, privacy: .public) hit the continuation-nudge cap (\(self.continuationNudgesSinceProgress, privacy: .public)) without progress — idling."
@@ -2362,7 +2362,8 @@ public actor AgentActor {
                         // cancellation is also recorded as a failure.
                         await ctx.setToolExecutionStatus(entry.call.id, outcome.succeeded)
                         await AgentActor.postToolOutputToChannel(
-                            result: result, call: entry.call, role: role, context: ctx,
+                            result: result, succeeded: outcome.succeeded, call: entry.call,
+                            role: role, context: ctx,
                             taskTitle: taskTitleForChannel, executionMs: executionMs
                         )
                     } else {
@@ -2537,7 +2538,7 @@ public actor AgentActor {
                 await toolContext.post(ChannelMessage(
                     sender: .system,
                     content: "Agent \(configuration.role.displayName)'s calls to \(worst.key) have failed \(worst.value) times without a single success. Breaking loop — agent will idle until new input arrives.",
-                    metadata: ["messageKind": .kind(.agentLifecycle), "isError": .bool(true)]
+                    metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error)]
                 ))
                 toolFailureStreaks[worst.key] = nil
                 toolFailureWarnedTools.remove(worst.key)
@@ -2714,7 +2715,8 @@ public actor AgentActor {
         if disposition.approved {
             let outcome = await directExecute(call, tool: tool)
             await Self.postToolOutputToChannel(
-                result: outcome.result, call: call, role: configuration.role, context: toolContext,
+                result: outcome.result, succeeded: outcome.succeeded, call: call,
+                role: configuration.role, context: toolContext,
                 taskTitle: channelTaskTitle, executionMs: outcome.executionMs
             )
             return (outcome.result, outcome.succeeded)
@@ -3023,6 +3025,11 @@ public actor AgentActor {
             "securityDisposition": .string(securityDisposition),
             "messageKind": .kind(.securityReview)
         ]
+        // Derived from the disposition rather than restated here, so the row's prominence can
+        // never disagree with the verdict it renders.
+        if disposition.severity > .info {
+            reviewMetadata["severity"] = .severity(disposition.severity)
+        }
         if let agentRoleValue { reviewMetadata["agentRole"] = .string(agentRoleValue) }
         if let msg = disposition.message, !msg.isEmpty {
             reviewMetadata["dispositionMessage"] = .string(msg)
@@ -3038,9 +3045,10 @@ public actor AgentActor {
     ///
     /// The channel message stores only the display-truncated version of the output to avoid
     /// bloating the SwiftUI view layer with megabytes of data (e.g., binary blobs from osascript).
-    static func postToolOutputToChannel(result: String, call: LLMToolCall, role: AgentRole, context: ToolContext, taskTitle: String? = nil, executionMs: Int? = nil) async {
+    static func postToolOutputToChannel(result: String, succeeded: Bool, call: LLMToolCall, role: AgentRole, context: ToolContext, taskTitle: String? = nil, executionMs: Int? = nil) async {
         await postToolOutputToChannel(
             result: result,
+            succeeded: succeeded,
             call: call,
             sender: .agent(role),
             post: { await context.post($0) },
@@ -3058,6 +3066,7 @@ public actor AgentActor {
     /// own, and absent rather than zero — a duration nobody measured must not render as "0 ms".
     static func postToolOutputToChannel(
         result: String,
+        succeeded: Bool,
         call: LLMToolCall,
         sender: ChannelMessage.Sender,
         post: @Sendable (ChannelMessage) async -> Void,
@@ -3076,6 +3085,14 @@ public actor AgentActor {
             "agentID": .string(agentInstanceID.uuidString),
             "tool": .string(call.name)
         ]
+        // The whole reason this function takes the typed outcome rather than just its rendered
+        // text. A failed call used to be posted with the identical kind and metadata as a
+        // successful one, so `ToolExecutionResult.succeeded` died here and the only remaining
+        // trace of the failure was the prose — leaving a user who had hidden `tool_output` to
+        // quiet the transcript unable to see failures at all. The kind stays `.toolOutput` (this
+        // IS a tool's output, whatever it says); severity is the axis that says it went wrong,
+        // and `TranscriptFilter`'s floor is what surfaces it through an unrelated filter.
+        if !succeeded { outputMetadata["severity"] = .severity(.error) }
         if let executionMs {
             outputMetadata["executionMs"] = .int(executionMs)
         }
@@ -4025,7 +4042,7 @@ public actor AgentActor {
                 await toolContext.post(ChannelMessage(
                     sender: .system,
                     content: "Agent \(roleName) stopped: context still exceeds the prune threshold after \(Self.maxConsecutivePruneRebuilds) rebuild attempts. The model's context window is too small for this task envelope (system prompt + tool definitions + memories + prior tasks + progress). Switch Brown to a model with a larger context window or trim the task description.",
-                    metadata: ["messageKind": .kind(.agentLifecycle), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+                    metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
                 ))
                 isRunning = false
             }
@@ -4184,7 +4201,7 @@ public actor AgentActor {
         await toolContext.post(ChannelMessage(
             sender: .system,
             content: "Cannot rebuild \(roleName)'s context from task state: \(reason). Falling back to pruning the agent's own history — it will NOT be re-seeded from another task.",
-            metadata: ["messageKind": .kind(.contextManagement), "isError": .bool(true), "agentRole": .string(configuration.role.rawValue)]
+            metadata: ["messageKind": .kind(.contextManagement), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
         ))
     }
 

@@ -61,7 +61,7 @@ actor MonitoringTimer {
                     metadata: [
                         "messageKind": .kind(.taskUpdateGuidance),
                         "taskID": .string(task.id.uuidString),
-                        "isWarning": .bool(true)
+                        "severity": .severity(.warning)
                     ]
                 ))
             }

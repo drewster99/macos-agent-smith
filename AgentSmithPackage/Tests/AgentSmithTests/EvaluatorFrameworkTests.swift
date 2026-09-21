@@ -27,10 +27,10 @@ private func makeDefinition(
 }
 
 private actor ToolResultRecorder {
-    private(set) var records: [(callID: String, result: String)] = []
+    private(set) var records: [(callID: String, result: String, succeeded: Bool)] = []
 
-    func record(callID: String, result: String) {
-        records.append((callID, result))
+    func record(callID: String, result: String, succeeded: Bool) {
+        records.append((callID, result, succeeded))
     }
 }
 
@@ -241,8 +241,8 @@ struct EvaluationRunnerLoopTests {
             provider: provider,
             tools: [FileReadTool()],
             toolContext: TestToolContext.make(),
-            onToolResult: { call, result in
-                await recorder.record(callID: call.id, result: result)
+            onToolResult: { call, result, succeeded in
+                await recorder.record(callID: call.id, result: result, succeeded: succeeded)
             }
         ).outcome
 
@@ -251,6 +251,9 @@ struct EvaluationRunnerLoopTests {
         #expect(records.count == 1)
         #expect(records.first?.callID == "call-1")
         #expect(records.first?.result.contains("validator-visible content") == true)
+        // The observer carries the typed outcome, not just the rendered text — a failed evidence
+        // read has to be distinguishable from a successful one by the channel post downstream.
+        #expect(records.first?.succeeded == true)
     }
 
     @Test("A non-allowlisted tool call is refused but the loop continues")

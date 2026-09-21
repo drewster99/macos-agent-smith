@@ -77,6 +77,25 @@ public struct SecurityDisposition: Sendable, Equatable {
         }
     }
 
+    /// How prominently this disposition's transcript row should read. Exhaustive for the same
+    /// reason `approved` is: a new outcome must be classified here before it compiles, rather
+    /// than defaulting to routine and disappearing into a filtered pane.
+    ///
+    /// A blocked call is an `.error` — something the agent asked for did not happen. A WARN is a
+    /// `.warning`: blocked, but an identical retry is auto-approved, so it is a speed bump rather
+    /// than a wall. `approvedWithoutReview` is deliberately a `.warning` even though the call ran
+    /// — it ran UNJUDGED, which is precisely the state the transcript must not let vanish.
+    public var severity: MessageSeverity {
+        switch outcome {
+        case .approved, .autoApproved:
+            return .info
+        case .warned, .approvedWithoutReview:
+            return .warning
+        case .refused, .reviewerUnavailable, .reviewCancelled:
+            return .error
+        }
+    }
+
     /// Whether a reviewer actually ruled on THIS call. False for both not-judged outcomes, and
     /// false for `approvedWithoutReview` — which is allowed, but was never judged either.
     public var wasJudged: Bool {
@@ -913,7 +932,7 @@ actor SecurityEvaluator {
                         content: "Security Agent error (\(retryCount)/\(Self.maxRetries)): failed to parse security response",
                         metadata: [
                             "messageKind": .kind(.securityReview),
-                            "isError": .bool(true),
+                            "severity": .severity(.error),
                             "agentRole": .string(AgentRole.securityAgent.rawValue)
                         ]
                     ))

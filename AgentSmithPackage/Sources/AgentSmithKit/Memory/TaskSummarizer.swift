@@ -126,7 +126,7 @@ actor TaskSummarizer {
                 await postToChannel(ChannelMessage(
                     sender: .agent(.summarizer),
                     content: "Summarization retry \(attempt)/\(LLMRetryPolicy.maxAttempts) for '\(task.title)' in \(LLMRetryPolicy.formatDelay(delay))",
-                    metadata: ["isWarning": .bool(true)]
+                    metadata: ["severity": .severity(.warning)]
                 ))
                 guard await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
             }
@@ -138,7 +138,7 @@ actor TaskSummarizer {
             sender: .agent(.summarizer),
             content: "Task summarization failed for '\(task.title)': \(lastError?.localizedDescription ?? "unknown error")",
             metadata: [
-                "isError": .bool(true),
+                "severity": .severity(.error),
                 "latencyMs": .int(latencyMs)
             ]
         ))
@@ -228,7 +228,7 @@ actor TaskSummarizer {
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
             content: "Memory reconciliation failed: \(lastError?.localizedDescription ?? "unknown error")",
-            metadata: ["isError": .bool(true)]
+            metadata: ["severity": .severity(.error)]
         ))
         return .distinct
     }
@@ -315,7 +315,7 @@ actor TaskSummarizer {
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
             content: "Web content extraction failed: \(lastError?.localizedDescription ?? "unknown error")",
-            metadata: ["isError": .bool(true)]
+            metadata: ["severity": .severity(.error)]
         ))
         return nil
     }

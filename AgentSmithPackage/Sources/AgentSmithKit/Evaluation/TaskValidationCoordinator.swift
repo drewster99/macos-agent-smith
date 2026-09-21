@@ -460,7 +460,7 @@ extension OrchestrationRuntime {
             metadata: [
                 "messageKind": .kind(.validationFailed),
                 "taskID": .string(taskID.uuidString),
-                "isWarning": .bool(true)
+                "severity": .severity(.warning)
             ]
         ))
         if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
@@ -959,9 +959,10 @@ extension OrchestrationRuntime {
                     to: usageStore
                 )
             },
-            onToolResult: { call, result in
+            onToolResult: { call, result, succeeded in
                 await AgentActor.postToolOutputToChannel(
                     result: result,
+                    succeeded: succeeded,
                     call: call,
                     sender: .validator,
                     post: { await validationChannel.post($0) },
@@ -1455,7 +1456,7 @@ extension OrchestrationRuntime {
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Task \"\(task.title)\" was failed by the user.",
-            metadata: ["messageKind": .kind(.taskFailed), "taskID": .string(taskID.uuidString), "isWarning": .bool(true)]
+            metadata: ["messageKind": .kind(.taskFailed), "taskID": .string(taskID.uuidString), "severity": .severity(.warning)]
         ))
     }
 
@@ -1557,7 +1558,7 @@ extension OrchestrationRuntime {
             metadata: [
                 "messageKind": .kind(.validationBlocked),
                 "taskID": .string(taskID.uuidString),
-                "isWarning": .bool(true)
+                "severity": .severity(.warning)
             ]
         ))
         // Same reasoning as the escalation notice: without this the worker never learns why it
@@ -1620,7 +1621,7 @@ extension OrchestrationRuntime {
             metadata: [
                 "messageKind": .kind(.validationEscalation),
                 "taskID": .string(taskID.uuidString),
-                "isWarning": .bool(true)
+                "severity": .severity(.warning)
             ]
         ))
     }

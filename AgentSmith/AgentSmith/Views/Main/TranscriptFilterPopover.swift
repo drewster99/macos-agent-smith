@@ -199,22 +199,58 @@ private struct TranscriptScopeSection: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Scope")
                 .font(.headline)
-            Toggle(isOn: $config.hideTaskScoped) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Hide task-specific messages")
-                    Text("Only the Smith ↔ you orchestration layer — per-task work shows in the top pane")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            CaptionedToggle(
+                isOn: $config.hideTaskScoped,
+                title: "Hide task-specific messages",
+                detail: "Only the Smith ↔ you orchestration layer — per-task work shows in the top pane"
+            )
+            CaptionedToggle(
+                isOn: $config.showErrors,
+                title: "Show errors",
+                detail: "Provider failures, out-of-credits notices, and other flagged errors"
+            )
+            SeverityFloorPicker(floor: $config.alwaysShowAtOrAbove)
+        }
+    }
+}
+
+/// A toggle with a caption under its label — the shape every row in this section already had,
+/// extracted so the section's own body stays inside the 20-line limit as rows are added.
+private struct CaptionedToggle: View {
+    @Binding var isOn: Bool
+    let title: String
+    let detail: String
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Toggle(isOn: $config.showErrors) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Show errors")
-                    Text("Provider failures, out-of-credits notices, and other flagged errors")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        }
+    }
+}
+
+/// The severity FLOOR control: which messages override every other filter on this pane.
+///
+/// Its own View rather than more rows in `TranscriptScopeSection` because that body is already at
+/// the length where this codebase splits. The picker binds straight to the optional — "Nothing"
+/// IS `nil`, not a sentinel case, so there is no second representation to keep in sync.
+private struct SeverityFloorPicker: View {
+    @Binding var floor: MessageSeverity?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Picker("Always show", selection: $floor) {
+                Text("Errors and warnings").tag(MessageSeverity?.some(.warning))
+                Text("Errors only").tag(MessageSeverity?.some(.error))
+                Text("Nothing").tag(MessageSeverity?.none)
             }
+            Text("Shown even when a hidden kind, sender, or tool would filter them out")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

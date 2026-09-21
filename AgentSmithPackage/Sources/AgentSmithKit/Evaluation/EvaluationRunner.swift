@@ -77,7 +77,7 @@ public enum EvaluationRunner {
         modelSupportsDocuments: Bool = false,
         drainStagedAttachments: (@Sendable () async -> [Attachment])? = nil,
         onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil,
-        onToolResult: (@Sendable (LLMToolCall, String) async -> Void)? = nil,
+        onToolResult: (@Sendable (LLMToolCall, String, Bool) async -> Void)? = nil,
         securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)? = nil
     ) async -> (outcome: Outcome, transcript: Transcript) {
         var transcript = Transcript()
@@ -178,7 +178,7 @@ public enum EvaluationRunner {
                         result = "Tool '\(call.name)' is not permitted for this evaluation."
                         succeeded = false
                     }
-                    await onToolResult?(call, result)
+                    await onToolResult?(call, result, succeeded)
                     toolObservations.append(ToolObservation(
                         call: call,
                         parsedArguments: parsedArguments,

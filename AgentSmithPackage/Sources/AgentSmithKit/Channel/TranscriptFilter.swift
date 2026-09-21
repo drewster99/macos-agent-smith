@@ -63,9 +63,27 @@ public struct TranscriptFilter: Sendable, Equatable {
     public var kindsBySender: [ChannelMessage.Sender: KindRule]
     public var taskScope: TaskScope
     public var visibility: Visibility
-    /// When true, messages flagged as errors (`metadata["isError"] == true`) are hidden. Errors are a
-    /// cross-cutting FLAG, not a kind, so they get their own axis. Default false — errors show.
+    /// When true, messages at `.error` severity are hidden. Errors are a cross-cutting axis, not a
+    /// kind. Default false — errors show.
+    ///
+    /// Note this only ever SUBTRACTS, like every other axis here. It cannot re-admit a message that
+    /// another axis excluded, which is what `alwaysShowAtOrAbove` is for.
     public var hideErrors: Bool
+    /// The severity FLOOR: a message at or above this level is shown no matter what any other axis
+    /// says. `nil` disables the floor entirely.
+    ///
+    /// Every other property on this type is an exclusion, and `matches` is a chain of vetoes — so
+    /// before this existed there was no way to express "whatever else I've hidden, always show me
+    /// anything bad". That gap was not theoretical: hiding `tool_output` to quiet the transcript
+    /// also hid seven consecutive `create_task` FAILURES on 2026-09-20, the user saw nothing, and
+    /// the request they had made was silently dropped. A noise filter must never be a failure
+    /// filter.
+    ///
+    /// Defaults to `.warning`, so the safe behavior is what you get without asking. `hideErrors`
+    /// deliberately still wins over the floor — it is an explicit "I do not want to see errors in
+    /// THIS pane", and a user who says that outright should be obeyed; the floor exists for the
+    /// far commoner case of errors hidden as a SIDE EFFECT of filtering something else.
+    public var alwaysShowAtOrAbove: MessageSeverity?
     /// Tool names whose request and output rows are hidden. Empty = every tool shows.
     ///
     /// Its own axis rather than part of the kind rule: the kind axis can only say "all tool calls or
@@ -89,6 +107,7 @@ public struct TranscriptFilter: Sendable, Equatable {
         taskScope: TaskScope = .any,
         visibility: Visibility = .all,
         hideErrors: Bool = false,
+        alwaysShowAtOrAbove: MessageSeverity? = .warning,
         hiddenToolNames: Set<String> = [],
         hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>] = [:]
     ) {
@@ -99,6 +118,7 @@ public struct TranscriptFilter: Sendable, Equatable {
         self.taskScope = taskScope
         self.visibility = visibility
         self.hideErrors = hideErrors
+        self.alwaysShowAtOrAbove = alwaysShowAtOrAbove
         self.hiddenToolNames = hiddenToolNames
         self.hiddenToolNamesBySender = hiddenToolNamesBySender
     }
@@ -109,12 +129,20 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// Whether `message` belongs in a pane governed by this filter. Pure and side-effect-free; safe to
     /// call from any isolation domain (it reads only the message's own value).
     public func matches(_ message: ChannelMessage) -> Bool {
+        let severity = message.severity
+        // `hideErrors` is the one axis allowed to veto a message the floor would admit: it is an
+        // explicit request not to see errors here, whereas the floor exists to defeat filters that
+        // hide errors INCIDENTALLY. Checked first so the two can never disagree about a row.
+        if hideErrors, severity >= .error { return false }
+        // The floor. Every check below this line is an exclusion, so returning true here is the
+        // only way a message that some other axis hides can still reach the pane.
+        if let alwaysShowAtOrAbove, severity >= alwaysShowAtOrAbove { return true }
+
         if let allowedSenders, !allowedSenders.contains(message.sender) { return false }
         // Recipient axis filters PRIVATE messages; a public message (no recipient) always passes.
         if let allowedRecipients, let recipient = message.recipient, !allowedRecipients.contains(recipient) {
             return false
         }
-        if hideErrors, case .bool(true)? = message.metadata?["isError"] { return false }
         // Covers BOTH the request and the output row: each carries the same `tool` name, so hiding
         // a tool hides the whole exchange rather than leaving an orphaned output under a request
         // that is no longer shown.
