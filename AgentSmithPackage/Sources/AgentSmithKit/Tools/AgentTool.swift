@@ -238,14 +238,17 @@ public struct ToolContext: Sendable {
     /// This session's task store. Holds only *active* tasks; the archived + deleted buckets are
     /// global and reached through `taskStore.allInactiveTasks()` / `taskStore.taskAnyDisposition(id:)`.
     public let taskStore: TaskStore
-    /// Full snapshot of the ModelConfiguration the owning agent is using at spawn
-    /// time. Used to stamp channel messages with provider/model/config provenance.
-    /// Frozen at context construction — if the agent's config changes mid-run (rare),
-    /// a fresh ToolContext would need to be built.
-    public let currentConfiguration: ModelConfiguration?
+    /// Full snapshot of the ModelConfiguration the owning agent is using. Used to stamp channel
+    /// messages with provider/model/config provenance.
+    ///
+    /// Seeded at context construction and kept current by `AgentActor.applyPendingModelRetune`,
+    /// which rewrites it in the same breath as the agent's own configuration. Without that, an
+    /// agent retuned in place would keep labelling every message it posted for the rest of the
+    /// session with the parameters it was spawned with.
+    public var currentConfiguration: ModelConfiguration?
     /// Provider API type (e.g. "anthropic", "openAICompatible") for the owning
     /// agent's current configuration. Not derivable from ModelConfiguration alone.
-    public let currentProviderType: String?
+    public var currentProviderType: String?
     /// Callback to request spawning a new Brown+Security Agent pair. Returns the Brown agent's ID.
     public let spawnBrown: @Sendable () async -> UUID?
     /// Callback to terminate an agent by ID. Second parameter is the caller's agent ID.

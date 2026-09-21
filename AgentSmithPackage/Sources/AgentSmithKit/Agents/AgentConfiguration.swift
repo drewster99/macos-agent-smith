@@ -71,4 +71,27 @@ struct AgentConfiguration: Sendable {
         self.supportsVision = supportsVision
         self.supportsDocuments = supportsDocuments
     }
+
+    /// Re-points this configuration at a retuned build of the SAME model, leaving every field the
+    /// model does not own exactly as it was.
+    ///
+    /// Mutating in place rather than rebuilding through `init` for the reason the model-override
+    /// sheets learned the hard way: enumerating fields silently drops whatever the call site did
+    /// not know about, so preserving by default fails safe and enumerating fails lossy. A field
+    /// added here later is preserved automatically instead of being wiped by the next retune.
+    ///
+    /// `supportsVision` / `supportsDocuments` are optional and preserve the current value when nil,
+    /// because a caller that did not resolve a capability has said nothing about it — which is not
+    /// the same as saying "false", and the two defaults are deliberately asymmetric (see above).
+    mutating func applyRetunedModel(
+        llmConfig: ModelConfiguration,
+        providerAPIType: ProviderAPIType,
+        supportsVision: Bool?,
+        supportsDocuments: Bool?
+    ) {
+        self.llmConfig = llmConfig
+        self.providerAPIType = providerAPIType
+        if let supportsVision { self.supportsVision = supportsVision }
+        if let supportsDocuments { self.supportsDocuments = supportsDocuments }
+    }
 }

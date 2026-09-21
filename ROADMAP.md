@@ -1602,6 +1602,27 @@ drop-only-what's-attributable rule) if summarizer-based compaction proves lossy;
 staleness policy for past-due scheduled tasks. Smith still cold-boots across app
 relaunches by choice — no context persistence.
 
+**Live model retune (parameters only) ✅ (2026-09-20).** A temperature / effort / thinking /
+token-cap edit in Settings now reaches a LIVE agent instead of waiting for a restart it may never
+get. `setProviders` classifies each role before merging: same `(providerID, modelID)` with a
+different resolved `ModelConfiguration` is a RETUNE and is pushed to every live agent of that role;
+a model or provider change is not pushed at all; an unchanged config is skipped so an untouched
+role's provider instance (and its prefix-cache key) survives. `AgentActor` stages the retune and
+applies it at the top of its next loop iteration, the boundary injected messages already drain at,
+which is what keeps a single turn's call, tool results and usage record describing one
+configuration. The actor refuses an identity change itself, fail-closed, so the invariant holds even
+if a future caller forgets.
+
+This was scoped deliberately. Switching a live agent's MODEL mid-conversation is NOT supported and
+is the harder half: stored history carries provider-shaped data (Anthropic thinking blocks, Gemini
+parts, Codex reasoning items) plus tool-call ids minted in one provider's format, and swapping TO
+Anthropic with thinking on, into a history with no thinking blocks, is a hard 400 with no recovery
+short of editing history. Deferred with the non-agent long-lived holders that still miss both kinds
+of change — `TaskSummarizer`, Smith's `SecurityEvaluator`, `validationSecurityEvaluator` — to a
+tracked issue (#9). Corrected along the way: `restartForNewTask` does not rebuild Smith while
+Smith is alive, so the long-standing claim that Smith picks up a new model "on the next task" was
+never true.
+
 Known-accepted behaviors and smaller follow-ups (from the third review pass):
 
 - **Restart coalescing.** Queued restarts run strictly FIFO; N stacked restarts churn

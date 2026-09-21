@@ -5,8 +5,13 @@ import os
 /// runs an async loop of receive -> LLM -> act -> report.
 public actor AgentActor {
     let id: UUID
-    let configuration: AgentConfiguration
-    private let provider: any LLMProvider
+    /// Mutable only through `applyPendingModelRetune`, which re-points this agent at a retuned
+    /// build of the SAME model at a turn boundary. Nothing else writes it.
+    private(set) var configuration: AgentConfiguration
+    /// Read once per turn, at the single `provider.send` call site. Providers are `Sendable`
+    /// value types, so a call already in flight holds its own copy and cannot be reached by a
+    /// retune — the swap is only ever visible to the NEXT call.
+    private var provider: any LLMProvider
     private let tools: [any AgentTool]
     /// Optional source of additional, dynamically-changing tools (currently MCP
     /// server tools for Brown). Queried at the top of each turn so per-server/per-tool
@@ -63,7 +68,7 @@ public actor AgentActor {
     /// rather than the static configured list.
     private var onActiveToolNamesChanged: (@Sendable ([String]) -> Void)?
     private var lastPublishedToolNames: [String]?
-    private let toolContext: ToolContext
+    private var toolContext: ToolContext
 
     private var conversationHistory: [LLMMessage] = []
 
@@ -473,6 +478,76 @@ public actor AgentActor {
         self.apiOverheadChars = toolChars
 
         conversationHistory.append(.system(configuration.systemPrompt))
+    }
+
+    /// A retune staged by `scheduleModelRetune`, applied at the top of the next run-loop
+    /// iteration. Queued rather than applied on arrival for the same reason external message
+    /// injections are queued: the loop top is the one point where the previous turn is complete.
+    /// Applying it mid-turn would let one turn's LLM call, its tool results and its usage record
+    /// describe two different configurations.
+    private var pendingModelRetune: ModelRetune?
+
+    /// A new provider build for the model this agent is already running.
+    struct ModelRetune: Sendable {
+        let provider: any LLMProvider
+        let llmConfig: ModelConfiguration
+        let providerAPIType: ProviderAPIType
+        /// Nil means the caller resolved no capability, so the agent keeps its current value.
+        let supportsVision: Bool?
+        let supportsDocuments: Bool?
+    }
+
+    /// Re-points this agent at a retuned build of the model it is ALREADY running, taking effect
+    /// at the top of the next run-loop iteration.
+    ///
+    /// This exists so a temperature / effort / thinking / token-cap edit in Settings reaches a
+    /// long-lived agent without tearing down its conversation. It deliberately refuses a change of
+    /// MODEL or PROVIDER, and that refusal is the whole safety argument: the stored conversation
+    /// carries provider-shaped data (Anthropic thinking blocks, Gemini parts, Codex reasoning
+    /// items) and tool-call ids minted in one provider's format, none of which survives being
+    /// handed to a different backend. Switching models mid-conversation needs a history strategy
+    /// this method has no way to apply, so it is out of scope rather than half-done.
+    ///
+    /// Fails CLOSED and loudly: a mismatched identity is a caller bug, and refusing it here keeps
+    /// the invariant true even though `OrchestrationRuntime.setProviders` already checks. Returns
+    /// false when the retune was refused.
+    @discardableResult
+    func scheduleModelRetune(_ retune: ModelRetune) -> Bool {
+        let current = configuration.llmConfig
+        guard retune.llmConfig.providerID == current.providerID,
+              retune.llmConfig.modelID == current.modelID else {
+            let roleName = configuration.role.rawValue
+            Self.agentLogger.error("Agent \(roleName, privacy: .public): refused a model retune changing identity from \(current.providerID, privacy: .public)/\(current.modelID, privacy: .public) to \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public) — a model change requires a fresh agent.")
+            return false
+        }
+        pendingModelRetune = retune
+        return true
+    }
+
+    /// Applies a staged retune. Called at the top of the run-loop iteration, BEFORE this
+    /// iteration's history pruning, so a changed context-window budget is honored by the very
+    /// prune that precedes the next call rather than one turn late.
+    ///
+    /// `learnedMaxOutputCeiling` is deliberately NOT cleared: it records what this MODEL actually
+    /// accepts, learned from its own rejection, and the model is unchanged by definition here. A
+    /// raised or lowered user cap still resolves correctly, because the call site clamps with
+    /// `min(configured, learned)`.
+    private func applyPendingModelRetune() {
+        guard let retune = pendingModelRetune else { return }
+        pendingModelRetune = nil
+        provider = retune.provider
+        configuration.applyRetunedModel(
+            llmConfig: retune.llmConfig,
+            providerAPIType: retune.providerAPIType,
+            supportsVision: retune.supportsVision,
+            supportsDocuments: retune.supportsDocuments
+        )
+        // The tool context stamps provider/model/config provenance onto every channel message this
+        // agent posts. Left alone it would keep reporting the spawn-time parameters forever.
+        toolContext.currentConfiguration = retune.llmConfig
+        toolContext.currentProviderType = retune.providerAPIType.rawValue
+        let roleName = configuration.role.rawValue
+        Self.agentLogger.info("Agent \(roleName, privacy: .public): applied a model retune for \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public)")
     }
 
     /// Injects the security evaluator used for Brown's tool approval flow.
@@ -1307,6 +1382,11 @@ public actor AgentActor {
             // orphaned agent must not fire scheduled wakes (which can drive restartForNewTask
             // on the live runtime) any more than it may run LLM turns.
             guard await verifyLivenessLease() else { break }
+
+            // A Settings edit that retuned this agent's model lands here, at the boundary where
+            // the previous turn is complete — so no turn ever spans two configurations, and the
+            // prune below already budgets against the new context window.
+            applyPendingModelRetune()
 
             // Re-inject deferred messages (e.g. task_complete held back from a previous batch)
             // so they get their own focused LLM turn.

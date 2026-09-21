@@ -1619,18 +1619,55 @@ public actor OrchestrationRuntime {
     /// model change in Settings takes effect without tearing down the session. Merges by role —
     /// roles absent from the passed dictionaries keep their current provider.
     ///
-    /// Timing: Brown and its `SecurityEvaluator` (Security Agent) read `llmProviders`/`llmConfigs` at spawn,
-    /// so they pick up the new model on the **next task**. The long-lived Smith and the
-    /// `TaskSummarizer` are rebuilt from these same dicts on the next runtime restart
-    /// (`restartForNewTask`). An in-flight agent keeps the provider it started with — a model swap
-    /// never yanks a call mid-flight.
+    /// Timing, by what actually changed:
+    ///
+    /// - **A RETUNE of the same model** (same `providerID` + `modelID`, different parameters —
+    ///   temperature, effort, thinking, token caps) reaches every LIVE agent of that role
+    ///   immediately, via `AgentActor.scheduleModelRetune`. The agent applies it at its next
+    ///   turn boundary and keeps its conversation.
+    /// - **A MODEL or PROVIDER change** does NOT touch a live agent, deliberately. Brown picks it
+    ///   up at its next spawn. Smith and the `TaskSummarizer` keep theirs until the runtime cold
+    ///   starts, which `restartForNewTask` does NOT do while Smith is alive — it cycles only the
+    ///   worker. See `scheduleModelRetune` for why a mid-conversation model change is unsafe.
+    /// - Non-agent holders — the `TaskSummarizer` and the long-lived `SecurityEvaluator`s (Smith's
+    ///   and `validationSecurityEvaluator`) — take NEITHER a retune nor a model change until the
+    ///   runtime restarts. Only per-Brown evaluators refresh, at spawn. Known limitation.
+    /// - The validator needs none of this: `validatorModel()` reads these dictionaries fresh for
+    ///   every criterion judgment.
+    ///
+    /// An in-flight call always keeps the provider it started with. Providers are `Sendable` value
+    /// types, so a call already suspended holds its own copy and a swap cannot reach it.
     public func setProviders(
         providers: [AgentRole: any LLMProvider],
         configurations: [AgentRole: ModelConfiguration],
         apiTypes: [AgentRole: ProviderAPIType],
         supportsVisionByRole: [AgentRole: Bool] = [:],
         supportsDocumentsByRole: [AgentRole: Bool] = [:]
-    ) {
+    ) async {
+        // Decide what is a RETUNE before the merge overwrites the configs being compared against.
+        // Three conditions, all required: the role already had a config (nothing live otherwise),
+        // the model identity is unchanged (a model change is out of scope — see the doc above),
+        // and the resolved configuration actually differs. That last one is not an optimization:
+        // the caller rebuilds every role's provider on every edit, and some providers mint
+        // per-instance state (the ChatGPT-subscription provider's `prompt_cache_key`, which is its
+        // prefix-cache routing hint), so retuning a role nobody touched would throw away a live
+        // agent's cache locality to apply a change that isn't there.
+        var retunes: [AgentRole: AgentActor.ModelRetune] = [:]
+        for (role, newConfig) in configurations {
+            guard let currentConfig = llmConfigs[role],
+                  currentConfig.providerID == newConfig.providerID,
+                  currentConfig.modelID == newConfig.modelID,
+                  currentConfig != newConfig,
+                  let newProvider = providers[role] else { continue }
+            retunes[role] = AgentActor.ModelRetune(
+                provider: newProvider,
+                llmConfig: newConfig,
+                providerAPIType: apiTypes[role] ?? providerAPITypes[role] ?? .openAICompatible,
+                supportsVision: supportsVisionByRole[role],
+                supportsDocuments: supportsDocumentsByRole[role]
+            )
+        }
+
         for (role, provider) in providers { llmProviders[role] = provider }
         for (role, config) in configurations { llmConfigs[role] = config }
         for (role, apiType) in apiTypes { providerAPITypes[role] = apiType }
@@ -1646,6 +1683,14 @@ public actor OrchestrationRuntime {
         // user — so this is the release point.
         if llmProviders[.validator] != nil, llmConfigs[.validator] != nil {
             releaseTasksBlockedOnValidatorModel()
+        }
+
+        // Push retunes AFTER the merge, so a spawn racing this call reads the same configuration
+        // the live agents just received.
+        for (role, retune) in retunes {
+            for workerHandle in supervisor.handles(role: role) {
+                await workerHandle.agent.scheduleModelRetune(retune)
+            }
         }
     }
 
@@ -1855,6 +1900,15 @@ public actor OrchestrationRuntime {
     /// strand a stale "Thinking" badge on an agent that no longer existed (observed
     /// 2026-08-06: 20 hours). An indicator keyed to an instance absent from this set is
     /// definitionally stale.
+    /// The live agent actor for an instance id, or nil once it has been torn down.
+    ///
+    /// Addressed by INSTANCE, never by role, for the reason worker lookups are: `.brown` is a pool,
+    /// so a role lookup answers "the oldest one" to every caller. Pair it with `agentIDForRole` for
+    /// the genuine singletons, or with `liveWorkerID(taskID:)` for a worker.
+    func liveAgent(id: UUID) -> AgentActor? {
+        supervisor.handlesByID[id]?.agent
+    }
+
     public func liveAgentInstanceIDs() -> Set<UUID> {
         supervisor.allIDs
     }
