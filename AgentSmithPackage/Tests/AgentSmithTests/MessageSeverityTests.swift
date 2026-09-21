@@ -287,6 +287,43 @@ struct SecurityDispositionSeverityTests {
         #expect(SecurityDisposition(outcome: .reviewCancelled).severity == .warning)
     }
 
+    /// The legacy tag map and the live mapping must agree — they describe the same outcomes, one
+    /// for rows written before severity existed and one for rows written now. Derived from the
+    /// live enum so adding an outcome cannot leave the legacy table behind.
+    @Test("Legacy security rows resolve to the same severity as live ones")
+    func legacySecurityRowsMatchLiveSeverity() {
+        let outcomes: [SecurityDisposition.Outcome] = [
+            .approved, .autoApproved, .approvedWithoutReview, .warned,
+            .refused(.unsafe), .refused(.abort),
+            .reviewerUnavailable(.noEvaluatorConfigured), .reviewCancelled
+        ]
+        for outcome in outcomes {
+            let disposition = SecurityDisposition(outcome: outcome)
+            #expect(
+                MessageSeverity.forSecurityDispositionTag(disposition.channelTag) == disposition.severity,
+                "\(disposition.channelTag) disagrees between the legacy map and the live one" as Comment
+            )
+        }
+    }
+
+    /// A row carrying only `securityDisposition` — the shape of the pre-severity corpus — must
+    /// read at the right level without any severity or isError key.
+    @Test("A legacy security row reads its level from the disposition tag alone")
+    func legacySecurityRowDerivesSeverity() {
+        func legacyRow(_ tag: String) -> ChannelMessage {
+            ChannelMessage(sender: .system, content: "x",
+                           metadata: ["securityDisposition": .string(tag)])
+        }
+        #expect(legacyRow("denied").severity == .error)
+        #expect(legacyRow("abort").severity == .error)
+        #expect(legacyRow("unavailable").severity == .error)
+        #expect(legacyRow("warning").severity == .warning)
+        #expect(legacyRow("cancelled").severity == .warning)
+        #expect(legacyRow("approved").severity == .info)
+        // An unknown tag stays plain rather than painting every unrecognized row red.
+        #expect(legacyRow("something-new").severity == .info)
+    }
+
     @Test("A refusal or a missing reviewer is an error")
     func refusalsAreErrors() {
         #expect(SecurityDisposition(outcome: .refused(.unsafe)).severity == .error)

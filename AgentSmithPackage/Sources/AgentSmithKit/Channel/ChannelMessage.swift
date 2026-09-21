@@ -160,6 +160,14 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
             return MessageSeverity(rawValue: raw) ?? .error
         }
         if case .bool(true)? = metadata?["isError"] { return .error }
+        // Legacy security-review rows, which carry only `securityDisposition` — the same corpus
+        // `kind` derives `.securityReview` for, and derived here for the same reason: a historical
+        // row must be indistinguishable from a current one to every consumer. Without this a
+        // pre-severity denial renders amber while today's renders red, and the view needs a second
+        // colour table to paper over it.
+        if case .string(let tag)? = metadata?["securityDisposition"] {
+            return MessageSeverity.forSecurityDispositionTag(tag)
+        }
         return .info
     }
 

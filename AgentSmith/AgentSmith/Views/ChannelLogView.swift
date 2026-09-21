@@ -969,18 +969,16 @@ private struct MessageRow: View, Equatable {
         // hand-rolled `isError` unwrap stopped matching any of them — the row still appeared
         // (the filter floor sees severity) but lost its error background, which is the one thing
         // that makes it findable in a long transcript.
-        let _isErrorMessage = message.severity >= .error
-        let _isWarningMessage = message.severity == .warning
         let _isSmithToUser: Bool = {
             guard case .agent(.smith) = message.sender else { return false }
             guard case .user = message.recipient else { return false }
             return true
         }()
-        let _securityDisposition: String? = {
-            guard let review = securityReviewMessage,
-                  case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
-            return d
-        }()
+        // The severity of the security review attached to THIS row — a different message, whose
+        // outcome colours the tool row it judged. Not expressible as this row's own severity (a
+        // tool_request is not itself an error), and read through the accessor so current and
+        // legacy review rows map identically.
+        let _reviewSeverity: MessageSeverity = securityReviewMessage?.severity ?? .info
         let _dispositionIndicator: String? = {
             guard let review = securityReviewMessage,
                   case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
@@ -1123,14 +1121,15 @@ private struct MessageRow: View, Equatable {
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background({
-            if _isErrorMessage { return AppColors.errorBackground }
-            if _isWarningMessage { return AppColors.warningRowBackground }
+            // Severity decides every alarm colour here — this row's own, then that of the
+            // security review attached to it. The `securityDisposition` string table that used to
+            // sit at the bottom is gone: `ChannelMessage.severity` derives the level for legacy
+            // review rows from that same tag, so the table could only agree with this — or, as it
+            // did, disagree, painting a denial amber where severity says red.
+            let worst = max(message.severity, _reviewSeverity)
+            if worst >= .error { return AppColors.errorBackground }
+            if worst == .warning { return AppColors.warningRowBackground }
             if _isSmithToUser { return AppColors.smithToUserBackground }
-            switch _securityDisposition {
-            case "warning", "denied", "unavailable", "cancelled": return AppColors.warningRowBackground
-            case "abort": return AppColors.errorBackground
-            default: break
-            }
             return Color.clear
         }())
         .clipShape(RoundedRectangle(cornerRadius: 4))

@@ -48,6 +48,25 @@ public enum MessageSeverity: String, Codable, Sendable, Hashable, CaseIterable, 
     /// recover, a validator that errored out, a provider that gave up.
     case error = "error"
 
+    /// The level for a legacy security-review row, keyed off its `securityDisposition` wire tag.
+    ///
+    /// Only for rows written before severity existed; current producers stamp `severity` from
+    /// `SecurityDisposition.severity` and never reach this. The two must agree, which is why the
+    /// tags are mapped here rather than re-judged: `SecurityDispositionSeverityTests` pins the
+    /// live mapping and `legacySecurityRowsMatchLiveSeverity` pins this one against it.
+    ///
+    /// An unrecognized tag answers `.info` rather than `.error`: unlike a malformed `severity`
+    /// value — which is corrupt data and fails toward visible — an unknown disposition tag is
+    /// just a row this build does not know about, and painting every one of them red would be
+    /// worse than leaving it plain.
+    static func forSecurityDispositionTag(_ tag: String) -> MessageSeverity {
+        switch tag {
+        case "denied", "abort", "unavailable": return .error
+        case "warning", "cancelled":           return .warning
+        default:                               return .info
+        }
+    }
+
     /// Rank used for both `Comparable` and the filter floor. Explicit rather than derived from
     /// `allCases` order so reordering the cases cannot silently reorder severity.
     private var rank: Int {
