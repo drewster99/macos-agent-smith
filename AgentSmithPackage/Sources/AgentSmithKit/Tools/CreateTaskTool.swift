@@ -265,7 +265,7 @@ public struct CreateTaskTool: AgentTool {
         // Unknown IDs are returned as a tool failure so Smith re-issues create_task with
         // a corrected list rather than silently dropping the user's attachments.
         var resolvedAttachments: [Attachment] = []
-        if case .array(let raw) = arguments["attachment_ids"] {
+        if let raw = ToolArguments.optionalArray(arguments, "attachment_ids") {
             let idStrings: [String] = raw.compactMap {
                 if case .string(let s) = $0 { return s }
                 return nil
@@ -280,7 +280,9 @@ public struct CreateTaskTool: AgentTool {
         }
 
         var scheduledRunAt: Date?
-        if case .string(let isoString) = arguments["scheduled_run_at"] {
+        // A blank value means "not scheduled" — see `ToolArguments`. Read as PRESENT it produced
+        // `Invalid scheduled_run_at: ''`, which the caller could not fix by omitting the key.
+        if let isoString = ToolArguments.optionalString(arguments, "scheduled_run_at") {
             guard let resolved = ISO8601Conversion.date(from: isoString) else {
                 return .failure("Invalid scheduled_run_at: '\(isoString)' is not a valid ISO-8601 timestamp.")
             }
@@ -307,7 +309,7 @@ public struct CreateTaskTool: AgentTool {
         // NO task, not an orphaned banner-less task plus a "fix it later" errand.
         // Criteria accept the same task-scoped prompt contract as set_acceptance_criteria.
         var seedCriteria: [AcceptanceCriterion] = []
-        if case .array(let rawCriteria) = arguments["acceptance_criteria"], !rawCriteria.isEmpty {
+        if let rawCriteria = ToolArguments.optionalArray(arguments, "acceptance_criteria") {
             switch CriterionArgumentParsing.parse(rawCriteria) {
             case .success(let parsed):
                 seedCriteria = parsed.map {
@@ -321,7 +323,10 @@ public struct CreateTaskTool: AgentTool {
         var isTemplate = false
         if case .bool(let flag) = arguments["is_template"] { isTemplate = flag }
         let templateInputDefinitions: [TemplateInputDefinition]
-        if case .array(let rawTemplateInputs) = arguments["template_inputs"] {
+        // An EMPTY array defines no inputs, which is what omitting the key means — so it must not
+        // trip the is_template guard below. Matching on presence made this an inescapable dead
+        // end: six consecutive rejections of a caller that could not stop sending `[]`.
+        if let rawTemplateInputs = ToolArguments.optionalArray(arguments, "template_inputs") {
             guard isTemplate else {
                 return .failure("template_inputs are valid only when is_template is true. Ordinary non-template tasks cannot define template inputs.")
             }
@@ -338,14 +343,14 @@ public struct CreateTaskTool: AgentTool {
             return .failure("Task NOT created — scheduled_run_at cannot be used with required template_inputs yet because scheduled template runs do not carry input_values. Create the template without scheduled_run_at, then run it manually with input_values.")
         }
         let templateInstanceTitleTemplate: String?
-        if case .string(let rawTitleTemplate) = arguments["template_instance_title_template"] {
+        // Same shape as the two above, and latent for the same reason: this guard never fired only
+        // because `template_inputs` rejected the call first. The reader already trims, so the
+        // separate blank test this replaced is gone with it.
+        if let trimmed = ToolArguments.optionalString(arguments, "template_instance_title_template") {
             guard isTemplate else {
                 return .failure("template_instance_title_template is valid only when is_template is true.")
             }
-            let trimmed = rawTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                templateInstanceTitleTemplate = nil
-            } else if let problem = TemplateStringRenderer.validate(trimmed, allowedNames: Set(templateInputDefinitions.map(\.name))) {
+            if let problem = TemplateStringRenderer.validate(trimmed, allowedNames: Set(templateInputDefinitions.map(\.name))) {
                 return .failure("Task NOT created — template_instance_title_template is invalid: \(problem)")
             } else {
                 templateInstanceTitleTemplate = trimmed
@@ -355,7 +360,7 @@ public struct CreateTaskTool: AgentTool {
         }
 
         let stepTexts: [String]
-        if case .array(let rawSteps) = arguments["steps"] {
+        if let rawSteps = ToolArguments.optionalArray(arguments, "steps") {
             stepTexts = rawSteps.compactMap { raw -> String? in
                 guard case .string(let s) = raw else { return nil }
                 let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)

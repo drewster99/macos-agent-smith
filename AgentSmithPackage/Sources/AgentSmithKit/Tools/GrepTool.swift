@@ -96,7 +96,7 @@ struct GrepTool: AgentTool {
 
         // Parse output mode.
         let contentMode: Bool
-        if case .string(let mode) = arguments["output_mode"] {
+        if let mode = ToolArguments.optionalString(arguments, "output_mode") {
             guard mode == "files_with_matches" || mode == "content" else {
                 return .failure("Error: `output_mode` must be 'files_with_matches' or 'content'. Got: '\(mode)'")
             }
@@ -114,7 +114,7 @@ struct GrepTool: AgentTool {
         // Compile glob filter if provided.
         let globRegex: NSRegularExpression?
         let globMatchesBasename: Bool
-        if case .string(let globPattern) = arguments["glob"] {
+        if let globPattern = ToolArguments.optionalString(arguments, "glob") {
             guard !globPattern.contains("..") else {
                 return .failure("Error: Glob pattern must not contain '..' (path traversal).")
             }

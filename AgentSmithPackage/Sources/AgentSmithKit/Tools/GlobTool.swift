@@ -193,7 +193,7 @@ final class GlobTool: AgentTool {
     // MARK: - execute
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
-        if case .string(let token) = arguments["resume"], !token.isEmpty {
+        if let token = ToolArguments.optionalString(arguments, "resume") {
             let limit = clampLimit(arguments["limit"])
             let timeoutSec = clampTimeout(arguments["timeout"])
             return resumeWalk(token: token, limit: limit, timeoutSeconds: timeoutSec)

@@ -61,12 +61,9 @@ struct BashTool: AgentTool {
             timeoutSeconds = 300
         }
 
-        let workingDir: String?
-        if case .string(let dir) = arguments["workingDirectory"] {
-            workingDir = dir
-        } else {
-            workingDir = nil
-        }
+        // Blank means "no directory given", not a directory named "" — which is what a caller
+        // that emits every key sends, and what would otherwise reach ProcessRunner verbatim.
+        let workingDir = ToolArguments.optionalString(arguments, "workingDirectory")
 
         let result = try await ProcessRunner.run(
             executable: "/bin/bash",

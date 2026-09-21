@@ -171,8 +171,10 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         guard task.status.isValidationContractEditable else {
             return .failure("Task '\(task.title)' is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active. Criteria are editable when the task is pending, paused, interrupted, scheduled, failed, or awaiting review.")
         }
-        let rawCriteria: [AnyCodable]? = { if case .array(let value) = arguments["criteria"] { return value }; return nil }()
-        let rawActions: [AnyCodable]? = { if case .array(let value) = arguments["actions"] { return value }; return nil }()
+        // Empty reads as absent, so a caller that sends BOTH keys as `[]` gets the "pass one of
+        // them" guidance rather than the "exactly one" refusal for two arguments it never meant.
+        let rawCriteria = ToolArguments.optionalArray(arguments, "criteria")
+        let rawActions = ToolArguments.optionalArray(arguments, "actions")
         switch (rawCriteria, rawActions) {
         case (nil, nil):
             return .failure("Pass either 'criteria' (replace the whole list — first-time authoring) or 'actions' (per-criterion add/update/delete).")

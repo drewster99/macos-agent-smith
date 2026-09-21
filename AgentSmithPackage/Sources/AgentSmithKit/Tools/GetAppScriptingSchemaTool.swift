@@ -57,12 +57,10 @@ struct GetAppScriptingSchemaTool: AgentTool {
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         let bundleID: String? = {
-            if case .string(let s) = arguments["bundle_id"], !s.isEmpty { return s }
-            return nil
+            return ToolArguments.optionalString(arguments, "bundle_id")
         }()
         let appName: String? = {
-            if case .string(let s) = arguments["app_name"], !s.isEmpty { return s }
-            return nil
+            return ToolArguments.optionalString(arguments, "app_name")
         }()
 
         guard bundleID != nil || appName != nil else {

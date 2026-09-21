@@ -83,9 +83,7 @@ struct FileReadTool: AgentTool {
         let outcome: ReadOutcome
         switch contentType {
         case .pdf:
-            let pagesParam: String?
-            if case .string(let p) = arguments["pages"] { pagesParam = p } else { pagesParam = nil }
-            outcome = Self.readPDF(at: url, pages: pagesParam)
+            outcome = Self.readPDF(at: url, pages: ToolArguments.optionalString(arguments, "pages"))
 
         case .image:
             outcome = Self.imageMetadata(at: resolvedPath, originalPath: path)

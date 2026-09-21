@@ -98,7 +98,7 @@ public struct ScheduleReminderTool: AgentTool {
         }
 
         var replacesID: UUID?
-        if case .string(let rawReplacesID) = arguments["replaces_id"] {
+        if let rawReplacesID = ToolArguments.optionalString(arguments, "replaces_id") {
             guard let parsed = UUID(uuidString: rawReplacesID) else {
                 return .failure("Invalid replaces_id: '\(rawReplacesID)' is not a valid UUID.")
             }

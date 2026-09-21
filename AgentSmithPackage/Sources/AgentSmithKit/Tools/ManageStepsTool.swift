@@ -181,10 +181,10 @@ public struct ManageStepsTool: AgentTool {
 
         case "add":
             var newTexts: [String] = []
-            if case .array(let raw) = arguments["texts"] {
+            if let raw = ToolArguments.optionalArray(arguments, "texts") {
                 newTexts = raw.compactMap { if case .string(let s) = $0 { return s }; return nil }
             }
-            if case .string(let single) = arguments["text"] {
+            if let single = ToolArguments.optionalString(arguments, "text") {
                 newTexts.append(single)
             }
             newTexts = newTexts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -217,10 +217,7 @@ public struct ManageStepsTool: AgentTool {
             guard case .string(let statusRaw) = arguments["status"], let status = Self.stepStatus(from: statusRaw) else {
                 return .failure("`set_status` requires `status`: pending | in_progress | completed | skipped. To remove a step, use the `delete` action.")
             }
-            var note: String?
-            if case .string(let n) = arguments["note"], !n.trimmingCharacters(in: .whitespaces).isEmpty {
-                note = n
-            }
+            let note = ToolArguments.optionalString(arguments, "note")
             if let error = await context.taskStore.applyStepAction(taskID: task.id, action: .setStatus(stepID: stepID, status: status, note: note)) {
                 return .failure(error)
             }
@@ -308,14 +305,14 @@ public struct ManageStepsTool: AgentTool {
     private static func destination(from arguments: [String: AnyCodable]) -> DestinationParse {
         var found: [TaskStepDestination] = []
         var malformed: [String] = []
-        if case .string(let raw) = arguments["before_step_id"] {
+        if let raw = ToolArguments.optionalString(arguments, "before_step_id") {
             if let anchorID = UUID(uuidString: raw) {
                 found.append(.before(stepID: anchorID))
             } else {
                 malformed.append("`before_step_id` must be a step UUID from `list` (got \"\(raw)\").")
             }
         }
-        if case .string(let raw) = arguments["after_step_id"] {
+        if let raw = ToolArguments.optionalString(arguments, "after_step_id") {
             if let anchorID = UUID(uuidString: raw) {
                 found.append(.after(stepID: anchorID))
             } else {

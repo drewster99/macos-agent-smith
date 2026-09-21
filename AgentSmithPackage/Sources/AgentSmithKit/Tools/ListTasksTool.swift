@@ -96,9 +96,11 @@ struct ListTasksTool: AgentTool {
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         // Disposition filter — defaults to active so the existing call pattern keeps working.
         let dispositionFilter: String
-        if case .string(let value) = arguments["disposition_filter"] {
+        if let value = ToolArguments.optionalString(arguments, "disposition_filter") {
             dispositionFilter = value
         } else {
+            // Blank reads as absent, so a caller that sends every key still gets the default
+            // rather than falling through every case of the switch below.
             dispositionFilter = "active"
         }
 
@@ -119,7 +121,7 @@ struct ListTasksTool: AgentTool {
         }
 
         let parentTaskID: UUID?
-        if case .string(let rawParentTaskID) = arguments["parent_task_id"] {
+        if let rawParentTaskID = ToolArguments.optionalString(arguments, "parent_task_id") {
             guard let parsed = UUID(uuidString: rawParentTaskID) else {
                 return .failure("Invalid parent_task_id: '\(rawParentTaskID)' is not a valid UUID.")
             }
@@ -158,7 +160,7 @@ struct ListTasksTool: AgentTool {
             .filter { allowedDispositions.contains($0.disposition) }
 
         // Optional status filter applied after disposition.
-        if case .string(let filterValue) = arguments["status_filter"] {
+        if let filterValue = ToolArguments.optionalString(arguments, "status_filter") {
             guard let status = AgentTask.Status(rawValue: filterValue) else {
                 return .failure("Invalid status_filter: '\(filterValue)'. Valid values: \(Self.validStatusValues)")
             }
@@ -177,13 +179,10 @@ struct ListTasksTool: AgentTool {
         if case .bool(let value) = arguments["is_scheduled"] {
             tasks = tasks.filter { ($0.scheduledRunAt != nil) == value }
         }
-        if case .string(let rawQuery) = arguments["query"] {
-            let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !query.isEmpty {
-                tasks = tasks.filter {
-                    $0.title.localizedCaseInsensitiveContains(query)
-                        || $0.description.localizedCaseInsensitiveContains(query)
-                }
+        if let query = ToolArguments.optionalString(arguments, "query") {
+            tasks = tasks.filter {
+                $0.title.localizedCaseInsensitiveContains(query)
+                    || $0.description.localizedCaseInsensitiveContains(query)
             }
         }
         tasks = tasks.filter { dateFilters.includes($0) }

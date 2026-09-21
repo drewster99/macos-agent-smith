@@ -71,7 +71,7 @@ struct SaveMemoryTool: AgentTool {
         }
 
         var tags: [String] = []
-        if case .array(let tagValues) = arguments["tags"] {
+        if let tagValues = ToolArguments.optionalArray(arguments, "tags") {
             for tagValue in tagValues {
                 if case .string(let tag) = tagValue {
                     tags.append(tag)

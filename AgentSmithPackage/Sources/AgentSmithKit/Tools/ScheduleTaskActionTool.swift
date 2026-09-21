@@ -134,7 +134,7 @@ struct ScheduleTaskActionTool: AgentTool {
         case .failure(let message): return .failure(message)
         }
         var replacesID: UUID?
-        if case .string(let rid) = arguments["replaces_id"] {
+        if let rid = ToolArguments.optionalString(arguments, "replaces_id") {
             guard let parsed = UUID(uuidString: rid) else {
                 return .failure("Invalid replaces_id: '\(rid)' is not a valid UUID.")
             }
@@ -145,10 +145,7 @@ struct ScheduleTaskActionTool: AgentTool {
             return .failure("Invalid recurrence: \(message)")
         }
         var extra: String?
-        if case .string(let value) = arguments["extra_instructions"] {
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            extra = trimmed.isEmpty ? nil : trimmed
-        }
+        extra = ToolArguments.optionalString(arguments, "extra_instructions")
 
         // A RECURRING run defaults the task to a TEMPLATE — the user wants a fresh
         // instance on each firing, not the same record re-run in place (which would

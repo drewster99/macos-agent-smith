@@ -36,13 +36,15 @@ struct GetTaskDetailsTool: AgentTool {
         // Accept the canonical `task_ids` array, and tolerate a single legacy `task_id` string
         // so the LLM can degrade gracefully if it forgets the new schema.
         var requestedIDStrings: [String] = []
-        if case .array(let items) = arguments["task_ids"] {
+        // An empty array must not shadow the `task_id` branch below — a caller sending both
+        // `task_ids: []` and a real `task_id` would otherwise be told it named no tasks.
+        if let items = ToolArguments.optionalArray(arguments, "task_ids") {
             for item in items {
                 if case .string(let s) = item {
                     requestedIDStrings.append(s)
                 }
             }
-        } else if case .string(let single) = arguments["task_id"] {
+        } else if let single = ToolArguments.optionalString(arguments, "task_id") {
             requestedIDStrings.append(single)
         }
 

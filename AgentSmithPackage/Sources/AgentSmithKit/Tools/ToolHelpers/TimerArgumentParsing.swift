@@ -1,9 +1,14 @@
 import Foundation
 
-/// Shared argument parsing for `schedule_task_action`, `reschedule_wake`, and (in
-/// `CreateTaskTool`) the `scheduled_run_at` field. Centralizes the validation rules so
-/// behaviour stays identical across tools — same min/max delay, same ISO-8601 forgiveness,
-/// same recurrence schema.
+/// Shared argument parsing for `schedule_task_action` and `reschedule_wake`. Centralizes the
+/// validation rules so behaviour stays identical across tools — same min/max delay, same
+/// ISO-8601 forgiveness, same recurrence schema.
+///
+/// NOTE: `CreateTaskTool`'s `scheduled_run_at` does NOT route through here, despite what this
+/// comment claimed until 2026-09-20. It hand-rolls its own parse, which is how the two drifted
+/// into disagreeing about a blank value. Both now read it through `ToolArguments`; merging them
+/// outright is still worth doing, since `scheduled_run_at` gets none of the min/max bounds
+/// `resolveFireTime` applies.
 enum TimerArgumentParsing {
 
     /// Resolves a fire-time `Date` from either `delay_seconds` or `at_time`. Returns
@@ -20,7 +25,11 @@ enum TimerArgumentParsing {
         minDelaySeconds: Double,
         maxDelaySeconds: Double
     ) -> FireTimeResult {
-        if let value = arguments["at_time"], case .string(let isoString) = value {
+        // A blank `at_time` means the caller is not naming a time — it must fall through to
+        // `delay_seconds`, not fail as a malformed timestamp. Identical in shape to the
+        // `scheduled_run_at` dead end in `CreateTaskTool`; latent here only because no model had
+        // yet sent `at_time: ""` to `schedule_task_action` or `reschedule_wake`.
+        if let isoString = ToolArguments.optionalString(arguments, "at_time") {
             guard let parsed = ISO8601Conversion.date(from: isoString) else {
                 return .failure("Invalid at_time: '\(isoString)' is not a valid ISO-8601 timestamp.")
             }

@@ -59,8 +59,7 @@ struct ListScriptableAppsTool: AgentTool {
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         let query: String? = {
-            if case .string(let q) = arguments["query"], !q.isEmpty { return q }
-            return nil
+            return ToolArguments.optionalString(arguments, "query")
         }()
         let scriptableOnly = boolArg(arguments["scriptable_only"], default: true)
         let nonStandardOnly = boolArg(arguments["non_standard_only"], default: true)

@@ -103,7 +103,7 @@ public struct TaskUpdateTool: AgentTool {
     ) async -> (attachments: [Attachment], failure: String?) {
         var collected: [Attachment] = []
 
-        if case .array(let raw) = arguments["attachment_ids"] {
+        if let raw = ToolArguments.optionalArray(arguments, "attachment_ids") {
             let idStrings: [String] = raw.compactMap {
                 if case .string(let s) = $0 { return s }
                 return nil
@@ -117,7 +117,7 @@ public struct TaskUpdateTool: AgentTool {
             }
         }
 
-        if case .array(let raw) = arguments["attachment_paths"] {
+        if let raw = ToolArguments.optionalArray(arguments, "attachment_paths") {
             let paths: [String] = raw.compactMap {
                 if case .string(let s) = $0 { return s }
                 return nil

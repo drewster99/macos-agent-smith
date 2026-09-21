@@ -77,11 +77,7 @@ public struct TaskCompleteTool: AgentTool {
         }
 
         let commentary: String?
-        if case .string(let c) = arguments["commentary"] {
-            commentary = c
-        } else {
-            commentary = nil
-        }
+        commentary = ToolArguments.optionalString(arguments, "commentary")
 
         guard let task = await context.taskStore.taskForAgent(agentID: context.agentID) else {
             return .failure("No active task assigned to you.")

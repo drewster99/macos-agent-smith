@@ -75,7 +75,10 @@ struct RunTaskTool: AgentTool {
         //     entirely.
         let resolvedTaskID: UUID
         var autoResolved = false
-        if case .string(let taskIDString) = arguments["task_id"] {
+        // Blank falls through to the auto-resolve branch below, which is the whole point of that
+        // branch. Read as present it answered "Invalid task_id: ''" to a caller that meant
+        // "you pick".
+        if let taskIDString = ToolArguments.optionalString(arguments, "task_id") {
             guard let parsed = UUID(uuidString: taskIDString) else {
                 return .failure("""
                     Invalid task_id: '\(taskIDString)' is not a valid UUID. \
@@ -210,8 +213,7 @@ struct RunTaskTool: AgentTool {
         // a missing instructions field re-traps the same model into another
         // text-only apology loop.
         let instructions: String = {
-            if case .string(let s) = arguments["instructions"] { return s }
-            return ""
+            return ToolArguments.optionalString(arguments, "instructions") ?? ""
         }()
 
         // Amend the task with the instructions before restarting, so they survive

@@ -314,12 +314,7 @@ struct GhTool: AgentTool {
             timeoutSeconds = 300
         }
 
-        let workingDir: String?
-        if case .string(let dir) = arguments["workingDirectory"] {
-            workingDir = dir
-        } else {
-            workingDir = nil
-        }
+        let workingDir = ToolArguments.optionalString(arguments, "workingDirectory")
 
         guard let ghPath = await Self.resolveGhPath() else {
             return .failure("""

@@ -70,7 +70,8 @@ public struct EditTaskTool: AgentTool {
             isTemplate = task.isTemplate
         }
         let definitions: [TemplateInputDefinition]
-        if case .array(let rawInputs) = arguments["template_inputs"] {
+        // An empty array defines no inputs — same dead end `create_task` hit. See `ToolArguments`.
+        if let rawInputs = ToolArguments.optionalArray(arguments, "template_inputs") {
             // Refuse rather than silently drop them — a caller that thinks it just defined
             // inputs would otherwise go on to call run_task with input_values that reject.
             guard isTemplate else {

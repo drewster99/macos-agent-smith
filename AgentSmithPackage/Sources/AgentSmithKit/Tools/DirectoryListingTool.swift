@@ -69,11 +69,10 @@ struct DirectoryListingTool: AgentTool {
             throw ToolCallError.missingRequiredArgument("path")
         }
         let filterGlob: String? = {
-            if case .string(let s) = arguments["filter"], !s.isEmpty { return s }
-            return nil
+            return ToolArguments.optionalString(arguments, "filter")
         }()
         let sortBy: SortKey = {
-            if case .string(let s) = arguments["sort"], s == "name" { return .name }
+            if ToolArguments.optionalString(arguments, "sort") == "name" { return .name }
             return .mtime
         }()
         let limit: Int = {

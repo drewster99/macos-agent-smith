@@ -132,10 +132,7 @@ struct WebFetchTool: AgentTool {
         }
 
         var prompt: String?
-        if case .string(let promptValue) = arguments["prompt"] {
-            let trimmed = promptValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            prompt = trimmed.isEmpty ? nil : trimmed
-        }
+        prompt = ToolArguments.optionalString(arguments, "prompt")
 
         var forceSaveToFile = false
         switch arguments["forceSaveToFile"] {
