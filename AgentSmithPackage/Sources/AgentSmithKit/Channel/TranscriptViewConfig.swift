@@ -479,14 +479,41 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     }
 
     /// The default bottom-pane view — the Smith↔user ORCHESTRATION conversation: nothing to OR from a
-    /// worker (Brown), and nothing scoped to a specific task (that history lives in the top pane per
-    /// task). Every kind group is on, but the task-scope + no-Brown filters carry the weight, so what
-    /// remains is the user's conversation with Smith plus orchestration-level notices.
-    public static let conversation = TranscriptViewConfig(
-        allowedSenders: Set(selectableSenders.filter { $0 != .agent(.brown) }),
-        allowedRecipients: Set(selectableRecipients.filter { $0 != .agent(.brown) }),
-        hideTaskScoped: true
-    )
+    /// worker (Brown), nothing scoped to a specific task (that history lives in the top pane per
+    /// task), and none of Smith's own tool or security-review plumbing.
+    ///
+    /// ## Why the tool and security groups are off by DEFAULT (audited 2026-09-20)
+    ///
+    /// The task-scope filter does not touch them. A worker's tool rows carry a `taskID` and are
+    /// duly hidden, but **Smith's do not** — measured on a real session, every one of its
+    /// `tool_request` / `tool_output` rows had `taskID == nil`, so they landed squarely in the
+    /// pane that is supposed to be the conversation. Counting what actually survived this filter
+    /// over one session: 25% `tool_request`, 23% `tool_output`, 25% `security_review` — **73%
+    /// plumbing against 12% actual conversation.** A pane whose whole job is "what you and Smith
+    /// said" was six parts noise to one part signal, which is why this session's user had hidden
+    /// these groups by hand.
+    ///
+    /// **This is only safe because of `TranscriptFilter.alwaysShowAtOrAbove`.** Hiding tool rows
+    /// is exactly what hid seven consecutive `create_task` failures on 2026-09-20; before the
+    /// severity floor existed, a quiet default here would have been a dangerous one. With the
+    /// floor at `.warning`, a failed tool call and a WARN/UNSAFE/unavailable verdict still come
+    /// through — only the routine traffic is hidden. Measured on the same session: of 57
+    /// security-review rows, 53 were `autoApproved`/`approved` (hidden, correctly) and 4 were
+    /// WARNs (surfaced by the floor). Do not turn these groups back on to "make errors visible";
+    /// that is the floor's job, and doing it this way costs the pane its readability.
+    public static let conversation: TranscriptViewConfig = {
+        var kinds = TranscriptKindSelection.allVisible
+        // Via the group API rather than a kind list, so a kind added to either group later is
+        // covered without anyone remembering to edit this.
+        kinds.setGroup(.toolCalls, visible: false)
+        kinds.setGroup(.securityReviews, visible: false)
+        return TranscriptViewConfig(
+            defaultKinds: kinds,
+            allowedSenders: Set(selectableSenders.filter { $0 != .agent(.brown) }),
+            allowedRecipients: Set(selectableRecipients.filter { $0 != .agent(.brown) }),
+            hideTaskScoped: true
+        )
+    }()
 
     /// The unfiltered firehose — every group, sender, recipient; task-scoped included; errors shown.
     /// Equals `TranscriptFilter.all`.

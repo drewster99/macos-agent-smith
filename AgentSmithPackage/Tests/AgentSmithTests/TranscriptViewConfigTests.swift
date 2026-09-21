@@ -29,6 +29,16 @@ import Foundation
         #expect(TranscriptKindGroup.chat.governsKindless)
     }
 
+    /// A kindless-free message carrying `kind`, scoped to no task so only the KIND axis can
+    /// exclude it — otherwise `hideTaskScoped` would hide it and the assertion would pass for
+    /// the wrong reason.
+    private static func kindedMessage(_ kind: ChannelMessageKind,
+                                      severity: MessageSeverity? = nil) -> ChannelMessage {
+        var metadata: [String: AnyCodable] = ["messageKind": .kind(kind)]
+        if let severity { metadata["severity"] = .severity(severity) }
+        return ChannelMessage(sender: .agent(.smith), content: "x", metadata: metadata)
+    }
+
     @Test func everythingConfigIsTheFirehose() {
         let filter = TranscriptViewConfig.everything.makeFilter()
         #expect(filter == TranscriptFilter.all)
@@ -37,8 +47,20 @@ import Foundation
 
     @Test func conversationDefaultIsOrchestrationWithoutBrown() {
         let filter = TranscriptViewConfig.conversation.makeFilter()
-        // Every kind group is on — the default's work is done by the scope + recipient axes, not kinds.
-        #expect(filter.kinds == .all)
+        // The tool and security groups are OFF (2026-09-20 audit). The scope axis does not reach
+        // them: a worker's tool rows carry a taskID and are hidden by it, but SMITH's do not, so
+        // they used to make up ~73% of this pane against ~12% actual conversation. Safe to hide
+        // only because `alwaysShowAtOrAbove` still surfaces failures and WARN/UNSAFE verdicts —
+        // see the doc comment on `TranscriptViewConfig.conversation`.
+        for kind in TranscriptKindGroup.toolCalls.kinds.union(TranscriptKindGroup.securityReviews.kinds) {
+            #expect(filter.matches(Self.kindedMessage(kind)) == false,
+                    "\(kind.rawValue) should be hidden in the conversation default" as Comment)
+        }
+        // The floor is what makes that safe: the same kind at .error still comes through.
+        #expect(filter.matches(Self.kindedMessage(.toolOutput, severity: .error)))
+        #expect(filter.alwaysShowAtOrAbove == .warning)
+        // Plain conversation — the point of the pane — still shows.
+        #expect(filter.matches(ChannelMessage(sender: .agent(.smith), content: "hello")))
         // Nothing scoped to a task: only the Smith↔user orchestration layer.
         #expect(filter.taskScope == .orchestration)
         // Nothing FROM Brown.
