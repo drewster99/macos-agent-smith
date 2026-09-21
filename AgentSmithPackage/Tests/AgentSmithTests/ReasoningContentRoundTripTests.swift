@@ -93,7 +93,11 @@ struct ReasoningContentRoundTripTests {
     /// run loop; we need to wait for that to land in history before assertions.
     private static func waitForAssistantMessage(
         _ agent: AgentActor,
-        deadline: TimeInterval = 1.0
+        // Generous because this POLLS: it returns the instant the message lands, so a long
+        // deadline costs nothing on an idle machine and is the difference between passing and
+        // flaking when the whole suite is competing for CPU. A one-second budget made this one
+        // of the suite's regular false failures.
+        deadline: TimeInterval = 10.0
     ) async -> LLMMessage? {
         let until = Date().addingTimeInterval(deadline)
         while Date() < until {

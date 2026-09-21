@@ -8,7 +8,10 @@ import SemanticSearch
 @Suite("Long-lived Smith worker cycling")
 struct Phase2LongLivedSmithTests {
 
-    private func waitUntil(timeout: Duration = .seconds(2), _ predicate: @Sendable () async -> Bool) async -> Bool {
+    /// Polls, so the timeout is an upper bound rather than a wait — see the note in
+    /// `ReasoningContentRoundTripTests`. Two seconds was short enough that a loaded machine
+    /// failed these on timing rather than on behavior.
+    private func waitUntil(timeout: Duration = .seconds(15), _ predicate: @Sendable () async -> Bool) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
             if await predicate() { return true }

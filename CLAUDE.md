@@ -121,6 +121,30 @@ The set that matters is *what has ever been written to disk*, not *what the curr
 
 Four guard tests in `ChannelMessageKindTests.swift` enforce all of this: wire strings asserted against an independent literal table (renaming a case is free, changing a `rawValue` is a build failure); `allCases` checked against that table so a new case can't go unpinned; the observed-on-disk corpus checked to still decode; and a source scan over **both** targets that fails on any new bare `messageKind` literal or hand-rolled metadata unwrap. The type alone is a convenience; the guards are what keep the antipattern from coming back.
 
+### Severity is an axis of its own, and the transcript filter has a floor
+
+**Decided 2026-09-20 (user): "our tool call filtering — and in fact nearly all our filtering — does not have an option that always surfaces errors and warnings."** That gap was live: a failed tool call was posted with the identical `messageKind` as a successful one, so hiding `tool_output` to quiet the transcript also hid every failure. Seven consecutive `create_task` failures reached nobody and the user's request was abandoned in silence.
+
+- **`MessageSeverity`** (`info < warning < error`, `Comparable`) is orthogonal to `ChannelMessageKind`. Kind = *what this message is*; severity = *how bad it is*. A `.toolFailed` KIND was considered and rejected — it needs a case per failure flavour, splits each family across two kinds, and still cannot express "show me anything bad".
+- **`ChannelMessage.severity` is the single accessor**, same discipline as `.kind`. It derives `.error` from legacy `isError: true` rows (the persisted corpus is full of them) and treats a JSON null as absent. It does **not** trap on an unknown value — severity drives display, not control flow — but resolves it to `.error`, because failing toward visible is the point. Never read `metadata["severity"]` by hand.
+- **`TranscriptFilter.alwaysShowAtOrAbove`** (default `.warning`) admits anything at or above it. **Order in `matches()` is load-bearing**: `hideErrors` → SCOPE (`taskScope`, `visibility`) → floor → NOISE (sender, recipient, tool, kind). Scope decides which pane a message belongs to and the floor must never cross it — otherwise a per-task pane shows another task's errors and `.matchNone`, which exists to show NOTHING, shows them anyway. `hideErrors` outranks the floor: it is an explicit opt-out, whereas the floor exists to defeat filters that hide errors *incidentally*.
+- **Severity is calibrated on FREQUENCY as well as gravity.** A level that fires on every call stops being a signal and becomes unfilterable noise. `approvedWithoutReview` is `.info` despite running unjudged (it fires on every call when review is off; it stays visible under its own kind); `reviewCancelled` is `.warning`, not `.error`, because a user pressing Stop must not paint the transcript red.
+- Failed tool calls carry the typed outcome: `postToolOutputToChannel` takes `succeeded` and stamps `.error`. The kind stays `.toolOutput`. Producers write `severity` only — `isError`/`isWarning` are retired as writes (`isWarning` had twelve writers and zero readers).
+
+### An agent that goes quiet with a tool still failing must say so
+
+`AgentActor.reportAbandonedToolFailures` runs at the idle transition and posts a user-addressed `.error` naming the tool, the count and the last error. The signal is **structural, never prose** — an unresolved entry in `toolFailureStreaks` when the run loop parks; a streak clears only when that tool SUCCEEDS. Do not replace this with a check on what the model wrote: the existing mid-streak correction already tells the model to "report the blocker" and the model ignored it, which is the whole reason this exists. The stop-threshold breaker reports BEFORE clearing the streak (otherwise the worst case is the only silent one), the no-evaluator block path records its outcome like every other blocked path, and "already reported" lives INSIDE `ToolFailureStreak` so it cannot outlive the streak it describes.
+
+### Optional tool arguments: empty means ABSENT
+
+**Some models emit every optional property on every call.** `gpt-5.6-sol` on the Codex endpoint does it unprompted — no `strict` flag, only `title`/`description` required, and it still sent `scheduled_run_at: ""`, `template_inputs: []`, `attachment_ids: []` on every `create_task`. A tool that pattern-matches on PRESENCE reads the sentinel as a deliberate value and rejects it, and **the caller cannot comply because it cannot stop sending the key.**
+
+- Read every OPTIONAL argument through **`ToolArguments`** (`optionalString` / `optionalArray` / `optionalBool` / `optionalInt` / `optionalUUID`). A REQUIRED argument keeps `guard case` and keeps rejecting empty.
+- **Opt-in per call site, never a blanket rule.** For some arguments empty IS the meaning — `FileEditTool`'s `new_string: ""` is a deletion. Normalizing centrally at the dispatch boundary would be a bug.
+- **`optionalUUID` returns three cases, not two.** Absent and malformed demand opposite responses; collapsing to `UUID?` forces one behavior for both. The all-zero UUID reads as ABSENT — it is worse than `""` because it *parses*, and `list_tasks` accepted it and filtered to the children of a task that cannot exist.
+- Two guard tests enforce this: an absolute one (no `if case` unwrap of an optional argument — there are none) and a ratchet on the `guard case` sites that read required arguments.
+- `strict: true` is a per-TOOL flag on a function definition, not a request-level one, and this app sets it nowhere. It would have prevented the bug (its canonical unset value is `null`, which `AnyCodable.null` already handles), but it is a per-model capability requiring strict-valid schemas — a complement, never a substitute for reading arguments correctly.
+
 ### Tool model
 
 `AgentTool` is the protocol every tool implements. Each role gets a fixed tool list assembled in its `*Behavior.swift` file (`SmithBehavior`, `BrownBehavior`, `SecurityAgentBehavior`). When adding a tool:

@@ -223,6 +223,25 @@ struct CostBoardTests {
         await board.stop()
     }
 
+    /// Waits for `condition` to hold, polling until `timeout`.
+    ///
+    /// Replaces a fixed `Task.sleep` past the board's 750ms coalescing window. That sleep was a
+    /// bet that the scheduled recompute had run within a fixed wall-clock budget, and under a
+    /// full-suite CPU load it lost often enough to make this file the suite's most frequent
+    /// flake. Polling converges in milliseconds when the machine is idle and still waits when it
+    /// is busy — and because the assertions afterwards are unchanged, a value that never
+    /// converges still fails the test rather than being waited into existence.
+    private func waitUntil(
+        timeout: Duration = .seconds(10),
+        _ condition: @Sendable () async -> Bool
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if await condition() { return }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
     @Test("a record for a running task raises its total without waiting for completion")
     func taskUsageGrowsWhileRunning() async throws {
         let (store, _) = await makeStore()
@@ -236,15 +255,14 @@ struct CostBoardTests {
         #expect(await board.taskUsage[runningTask] == nil, "no records yet")
 
         await store.append(record(at: Date(), input: 1000, output: 500, taskID: runningTask))
-        // Longer than the coalescing window so the scheduled recompute has run.
-        try await Task.sleep(for: .milliseconds(1500))
+        await waitUntil { await board.taskUsage[runningTask]?.inputTokens == 1000 }
         let afterFirst = await board.taskUsage[runningTask]
         #expect(abs((afterFirst?.cost ?? 0) - expectedCost(input: 1000, output: 500)) < 0.0001)
         #expect(afterFirst?.inputTokens == 1000)
         #expect(afterFirst?.outputTokens == 500)
 
         await store.append(record(at: Date(), input: 100, output: 100, taskID: runningTask))
-        try await Task.sleep(for: .milliseconds(1500))
+        await waitUntil { await board.taskUsage[runningTask]?.inputTokens == 1100 }
         let afterSecond = await board.taskUsage[runningTask]
         #expect(abs((afterSecond?.cost ?? 0) - expectedCost(input: 1100, output: 600)) < 0.0001,
                 "the still-running task's cost must include both records; was \(afterSecond?.cost ?? 0)")
@@ -264,7 +282,7 @@ struct CostBoardTests {
         await board.bootstrap()
 
         await store.append(record(at: Date(), input: 400, output: 400, taskID: taskID))
-        try await Task.sleep(for: .milliseconds(1500))
+        await waitUntil { await inbox.latest[taskID] != nil }
 
         let latest = await inbox.latest
         #expect(abs((latest[taskID]?.cost ?? 0) - expectedCost(input: 400, output: 400)) < 0.0001,
