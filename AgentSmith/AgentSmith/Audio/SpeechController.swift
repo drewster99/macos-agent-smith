@@ -290,8 +290,12 @@ final class SpeechController {
             return
         }
 
-        // Error messages with agent role metadata
-        if message.metadata?["isError"] != nil,
+        // Error messages with agent role metadata.
+        //
+        // Via the severity accessor: producers write `severity` now, so the raw `isError` probe
+        // this replaced matched nothing and the error sound stopped playing altogether. It also
+        // tested for the key's PRESENCE, which fired on an explicit `isError: false`.
+        if message.severity >= .error,
            case .string(let roleName) = message.metadata?["agentRole"],
            let role = AgentRole(rawValue: roleName) {
             guard agentEnabled[role] == true else { return }

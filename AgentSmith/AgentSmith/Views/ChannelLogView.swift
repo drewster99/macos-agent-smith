@@ -965,10 +965,12 @@ private struct MessageRow: View, Equatable {
         let _effectiveSplitLines = cachedSplitLines
         let _isSummarizerMessage = message.sender == .agent(.summarizer)
         let _attachmentTier: ImageCache.Tier = message.sender == .user ? .small : .medium
-        let _isErrorMessage: Bool = {
-            if case .bool(let value) = message.metadata?["isError"] { return value }
-            return false
-        }()
+        // Reads the accessor, never the raw metadata: producers write `severity` now, and this
+        // hand-rolled `isError` unwrap stopped matching any of them — the row still appeared
+        // (the filter floor sees severity) but lost its error background, which is the one thing
+        // that makes it findable in a long transcript.
+        let _isErrorMessage = message.severity >= .error
+        let _isWarningMessage = message.severity == .warning
         let _isSmithToUser: Bool = {
             guard case .agent(.smith) = message.sender else { return false }
             guard case .user = message.recipient else { return false }
@@ -1122,6 +1124,7 @@ private struct MessageRow: View, Equatable {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background({
             if _isErrorMessage { return AppColors.errorBackground }
+            if _isWarningMessage { return AppColors.warningRowBackground }
             if _isSmithToUser { return AppColors.smithToUserBackground }
             switch _securityDisposition {
             case "warning", "denied", "unavailable", "cancelled": return AppColors.warningRowBackground

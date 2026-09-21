@@ -2818,7 +2818,25 @@ public actor AgentActor {
     /// (`swift test` → exit 1, edit, retest…) or `grep -q` misses would trip the streak
     /// breaker and idle the agent mid-task (fresh-Opus review finding). Exempt from
     /// streak counting; the identical-call breaker still covers true bash loops.
-    private static let toolFailureStreakExemptTools: Set<String> = ["bash"]
+    ///
+    /// The SAME set decides how loudly a failed call is reported (`severityForToolOutcome`), for
+    /// the same reason: a non-zero exit from `swift test` is the agent working, not something the
+    /// user needs pulled through their filters. One set, both decisions — splitting them would let
+    /// the two drift into disagreeing about what counts as a failure.
+    static let calleeExitStatusTools: Set<String> = ["bash"]
+
+    /// How prominent a finished tool call's transcript row should be.
+    ///
+    /// A failure is an `.error` — that is the whole point of stamping severity, and what carries a
+    /// rejected call through a filter that hides tool output. The exception is a tool whose
+    /// "failure" is the CALLEE's exit status: those are routine and frequent (a red test run, a
+    /// `grep` that matched nothing), and treating them as errors would pierce every filter on
+    /// every iteration of an ordinary edit-build-test loop — turning the floor from a signal into
+    /// noise the user cannot switch off. Severity is calibrated on frequency as well as gravity.
+    static func severityForToolOutcome(toolName: String, succeeded: Bool) -> MessageSeverity {
+        guard !succeeded else { return .info }
+        return calleeExitStatusTools.contains(toolName) ? .info : .error
+    }
 
     /// Feeds the per-tool failure-streak breaker (`toolFailureStreaks`). A success wipes
     /// that tool's streak and re-arms its warning; a failure increments it.
@@ -2826,7 +2844,7 @@ public actor AgentActor {
         if succeeded {
             toolFailureStreaks[name] = nil
             toolFailureWarnedTools.remove(name)
-        } else if !Self.toolFailureStreakExemptTools.contains(name) {
+        } else if !Self.calleeExitStatusTools.contains(name) {
             let previous = toolFailureStreaks[name]
             toolFailureStreaks[name] = ToolFailureStreak(
                 count: (previous?.count ?? 0) + 1,
@@ -3178,7 +3196,8 @@ public actor AgentActor {
         // quiet the transcript unable to see failures at all. The kind stays `.toolOutput` (this
         // IS a tool's output, whatever it says); severity is the axis that says it went wrong,
         // and `TranscriptFilter`'s floor is what surfaces it through an unrelated filter.
-        if !succeeded { outputMetadata["severity"] = .severity(.error) }
+        let severity = severityForToolOutcome(toolName: call.name, succeeded: succeeded)
+        if severity > .info { outputMetadata["severity"] = .severity(severity) }
         if let executionMs {
             outputMetadata["executionMs"] = .int(executionMs)
         }

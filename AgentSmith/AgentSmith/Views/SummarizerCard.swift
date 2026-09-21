@@ -43,7 +43,7 @@ struct SummarizerCard: View {
             if message.kind == .taskSummarized {
                 summaryCount += 1
             }
-            if case .bool(true) = message.metadata?["isError"] {
+            if message.severity >= .error {
                 errorCount += 1
             }
         }
@@ -117,10 +117,9 @@ struct SummarizerActivityRow: View {
 
     @State private var isExpanded = false
 
-    private var isError: Bool {
-        if case .bool(true) = message.metadata?["isError"] { return true }
-        return false
-    }
+    /// Via the accessor — the raw `isError` key this used to read is no longer written, so a
+    /// FAILED summary was about to render with a green checkmark.
+    private var isError: Bool { message.severity >= .error }
 
     private var taskID: String? {
         if case .string(let id) = message.metadata?["taskID"] { return id }

@@ -232,6 +232,40 @@ struct TranscriptFilterSeverityFloorTests {
     }
 }
 
+/// A failed tool call is an error — EXCEPT where "failure" means the callee's exit status.
+@Suite("Tool outcome severity")
+struct ToolOutcomeSeverityTests {
+
+    @Test("A successful call is routine")
+    func successIsInfo() {
+        #expect(AgentActor.severityForToolOutcome(toolName: "create_task", succeeded: true) == .info)
+        #expect(AgentActor.severityForToolOutcome(toolName: "bash", succeeded: true) == .info)
+    }
+
+    /// The case the whole floor exists for.
+    @Test("An ordinary tool failure is an error")
+    func ordinaryFailureIsError() {
+        #expect(AgentActor.severityForToolOutcome(toolName: "create_task", succeeded: false) == .error)
+        #expect(AgentActor.severityForToolOutcome(toolName: "file_read", succeeded: false) == .error)
+    }
+
+    /// `swift test` returning 1 is the agent WORKING. Stamping it `.error` would pierce every
+    /// filter on every iteration of an edit-build-test loop and drown the signal it carries.
+    @Test("A non-zero exit from a callee-status tool is not an error")
+    func calleeExitStatusIsNotAnError() {
+        #expect(AgentActor.severityForToolOutcome(toolName: "bash", succeeded: false) == .info)
+    }
+
+    /// The streak breaker and the severity call must agree about what counts as a real failure;
+    /// they read one set so they cannot drift apart.
+    @Test("The exempt set is shared with the failure-streak breaker")
+    func exemptSetIsShared() {
+        for tool in AgentActor.calleeExitStatusTools {
+            #expect(AgentActor.severityForToolOutcome(toolName: tool, succeeded: false) == .info)
+        }
+    }
+}
+
 /// Security dispositions map to severity by gravity AND frequency — a level that fires on every
 /// call would be unfilterable noise rather than signal, since the floor treats `.warning` as
 /// always-visible.
@@ -297,5 +331,70 @@ struct TranscriptViewConfigSeverityFloorTests {
         var config = TranscriptViewConfig()
         config.alwaysShowAtOrAbove = .error
         #expect(config.makeFilter().alwaysShowAtOrAbove == .error)
+    }
+}
+
+
+/// Guards the rule rather than trusting it: severity is read through the accessor, never by
+/// unwrapping the metadata by hand.
+///
+/// This is not hypothetical tidiness. Converting the producers from `isError` to `severity` left
+/// four hand-rolled `metadata["isError"]` readers behind, and every one of them silently stopped
+/// matching: the transcript's error background, the Summarizer card's red/green verdict (a FAILED
+/// summary was about to render with a green checkmark), its error count, and the error sound.
+/// Nothing failed — they just quietly answered "not an error" forever.
+@Suite("Severity accessor guard")
+struct SeverityAccessorGuardTests {
+
+    private static var sourceRoots: [URL] {
+        var repo = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { repo.deleteLastPathComponent() }
+        return [
+            repo.appendingPathComponent("AgentSmithPackage/Sources", isDirectory: true),
+            repo.appendingPathComponent("AgentSmith/AgentSmith", isDirectory: true)
+        ]
+    }
+
+    /// The single accessor, plus the type that defines the wire strings.
+    private static let exemptFileNames: Set<String> = ["ChannelMessage.swift", "MessageSeverity.swift"]
+
+    @Test("No hand-rolled severity or isError metadata access")
+    func noHandRolledSeverityReads() throws {
+        // Both the retired flag and the current key: reading either by hand is the bug.
+        let regex = try NSRegularExpression(pattern: #"metadata\??\["(?:isError|isWarning|severity)"\]"#)
+        var hits: [String] = []
+        var filesScanned = 0
+        for root in Self.sourceRoots {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) else {
+                Issue.record("Could not enumerate \(root.path) — this guard covers less than it claims.")
+                continue
+            }
+            for case let url as URL in enumerator where url.pathExtension == "swift" {
+                guard !Self.exemptFileNames.contains(url.lastPathComponent) else { continue }
+                filesScanned += 1
+                let source = try String(contentsOf: url, encoding: .utf8)
+                for (index, line) in source.components(separatedBy: .newlines).enumerated() {
+                    // Doc comments legitimately name the keys.
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.hasPrefix("//") else { continue }
+                    let range = NSRange(line.startIndex..<line.endIndex, in: line)
+                    if regex.firstMatch(in: line, options: [], range: range) != nil {
+                        hits.append("\(url.lastPathComponent):\(index + 1): \(trimmed)")
+                    }
+                }
+            }
+        }
+        #expect(filesScanned > 100, "only \(filesScanned) files scanned — the roots are wrong")
+        #expect(hits.isEmpty, Comment(rawValue: """
+            Severity read by hand instead of through `ChannelMessage.severity`:
+
+            \(hits.joined(separator: "\n"))
+
+            Use `message.severity`. A hand-rolled unwrap of `isError` / `isWarning` / `severity`
+            silently answers "not an error" the moment producers change which key they write —
+            which is exactly what happened to four UI read sites on 2026-09-20.
+            """))
     }
 }

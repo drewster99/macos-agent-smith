@@ -410,9 +410,19 @@ struct Phase2LongLivedSmithTests {
 
         await runtime.start()
 
-        // Capacity 2: two resume now, the third waits in the launch queue.
-        var boot: [AgentTask.Status?] = []
-        for t in [a, b, c] { boot.append(await statusOf(t.id)) }
+        // Capacity 2: two resume now, the third waits in the launch queue. Polled rather than
+        // sampled — `start()` kicks the resume off asynchronously, so reading the statuses at a
+        // fixed instant was a bet on scheduling that a loaded machine loses.
+        let ids = [a.id, b.id, c.id]
+        // Captures the STORE (an actor, Sendable) rather than the local `statusOf` function,
+        // which is not — the closure below crosses into `waitUntil`'s @Sendable context.
+        let statuses: @Sendable () async -> [AgentTask.Status?] = {
+            var out: [AgentTask.Status?] = []
+            for id in ids { out.append(await store.task(id: id)?.status) }
+            return out
+        }
+        _ = await waitUntil { await statuses().filter { $0 == .running }.count == 2 }
+        let boot = await statuses()
         #expect(boot.filter { $0 == .running }.count == 2, "two resume at capacity")
         #expect(boot.filter { $0 == .interrupted }.count == 1, "the third waits, queued")
 
@@ -426,8 +436,8 @@ struct Phase2LongLivedSmithTests {
         await runtime.drainPendingTaskQueueForTesting()
         await runtime.waitForPendingRestarts()
 
-        var after: [AgentTask.Status?] = []
-        for t in [a, b, c] { after.append(await statusOf(t.id)) }
+        _ = await waitUntil { await statuses().filter { $0 == .interrupted }.isEmpty }
+        let after = await statuses()
         #expect(after.filter { $0 == .interrupted }.count == 0, "the queued interrupted task resumed when a slot freed")
         #expect(after.filter { $0 == .running }.count == 2, "two running again (one completed, the queued one took its slot)")
 
