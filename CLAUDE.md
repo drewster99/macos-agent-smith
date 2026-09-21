@@ -195,6 +195,17 @@ The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch 
 
 `AppDefaults` (schema v2, `defaults.json` bundled in app resources) seeds first-launch state. The `ExportDefaults` CLI target exists to regenerate `defaults.json` from the current user's installed configuration. UserDefaults-set values always win over bundled defaults.
 
+### Loading a session never deletes its assignments
+
+**Decided 2026-09-20 (user), after a smoke test destroyed this repo's own config.** The rule lives in `AgentAssignmentResolution.resolve` (package, tested) rather than inline in `AppViewModel.loadPersistedState`, and its contract is one line: **loading never deletes.**
+
+- A saved assignment whose provider is not in `llmKit.providers` is **kept and reported**, never cleared. `ConfigValidationView` already renders "Provider not configured" and `start()`'s `unqualifiedRoles` guard already refuses — so a genuinely stale assignment fails VISIBLY with the user's choice intact, instead of being silently replaced by another vendor's model. This is a real behavior change: the app now refuses to start where it used to start on a substituted default.
+- **Why:** the prune it replaced was guarded only by `!configuredProviderIDs.isEmpty` — all-or-nothing. A PARTIALLY loaded provider list passes that guard, so providers that had arrived kept their roles while ones still loading had theirs deleted, and `agentAssignments.didSet` persists it immediately. The old comment stated the assumption outright ("A genuinely removed single provider still prunes normally below, since the list is then non-empty"), i.e. non-empty ⇒ complete. `builtin.codex-chatgpt` is credentialed from `~/.codex/auth.json` rather than the Keychain, making it a natural straggler and the likeliest loser of that race. Same shape as the other 2026-09-20 defects: **partial state indistinguishable from deliberate removal, destructive branch silent.**
+- **Healing fills; it never replaces**, so it needs no equivalent guard. It covers **every role with a bundled default**, not just `requiredRoles` — "blocks app launch" and "has a sensible default" are different questions, and conflating them is why `.validator` (deliberately outside `requiredRoles`) was the one role never healed, leaving submitted tasks parked unresolvably. `requiredRoles` still governs launch-blocking; that architecture is unchanged.
+- **An EMPTY provider list reports nothing and heals nothing.** Zero providers almost always means the catalog hasn't loaded, not that the user deleted everything; flagging all of them is the same false signal in a louder voice.
+- The load **logs every kept-but-unavailable assignment**. The destructive path logged only what it substituted, which is why recovering the lost values took archaeology instead of a grep.
+- The validator has a row in `ConfigValidationView` that never gates Start, because an unassigned validator parks every submitted task where not even Smith can resolve it — invisible until the first task hit it.
+
 ### Orchestration settings (app-wide defaults + per-session overrides)
 
 **Built 2026-08-01.** A typed, layered configuration family (`AgentSmithKit/Configuration/OrchestrationSettings.swift`) modeled on the model-override system: system facts + sparse override → resolved value. It governs the OFF behaviors below.

@@ -555,46 +555,36 @@ final class AppViewModel {
             agentAssignments = shared.defaultAgentAssignments
         }
 
-        // Auto-heal roles that have NO assignment. A saved assignment is NEVER cleared here.
+        // Resolve the assignments through `AgentAssignmentResolution` — the rule lives there so
+        // it is testable (this target has no test bundle) and stated once. Its contract in one
+        // line: LOADING NEVER DELETES. A saved assignment whose provider is not configured is
+        // kept and reported, never cleared.
         //
-        // This used to prune any assignment whose provider was not in `llmKit.providers`, guarded
-        // only by "the provider list is not EMPTY". That guard is all-or-nothing, and a partially
-        // loaded list passes it: the providers that had arrived kept their roles while the ones
-        // still loading had theirs deleted — and `agentAssignments.didSet` persists, so the
-        // deletion was immediate and permanent. The old comment stated the assumption outright
-        // ("A genuinely removed single provider still prunes normally below, since the list is
-        // then non-empty"), i.e. non-empty ⇒ complete. It is not.
+        // The version this replaced pruned such assignments, guarded only by "the provider list
+        // is not EMPTY" — all-or-nothing, so a PARTIALLY loaded list passed it and deleted
+        // exactly the roles whose providers had not arrived yet. `agentAssignments.didSet`
+        // persists, so that was immediate and permanent. It cost this session its Codex and
+        // DeepSeek models on 2026-09-20; `builtin.codex-chatgpt` is credentialed from
+        // ~/.codex/auth.json rather than the Keychain, which makes it a natural straggler.
         //
-        // That cost this session's own config on 2026-09-20: `builtin.codex-chatgpt` is
-        // credentialed from `~/.codex/auth.json` rather than the Keychain, so it is a natural
-        // straggler, and Smith/Brown/Security lost their Codex models to Anthropic defaults with
-        // no record of what had been there. A load must never be able to destroy what it loaded.
-        //
-        // An assignment whose provider is genuinely gone now SURVIVES and is reported instead:
-        // `ConfigValidationView` already renders "Provider not configured" and
-        // `allAgentConfigsValid` already refuses to start. Failing visibly, with the user's
-        // choice intact, beats silently substituting a different vendor's model.
-        let configuredProviderIDs = Set(shared.llmKit.providers.map(\.id))
-        for (role, assignment) in agentAssignments
-        where assignment.modelID.isEmpty || !configuredProviderIDs.contains(assignment.providerID) {
-            logger.notice("Assignment kept but UNAVAILABLE in session \(self.session.name, privacy: .public): \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public) — provider not configured (yet). The role will read as invalid until it is.")
+        // A genuinely stale assignment now fails VISIBLY instead: `ConfigValidationView` renders
+        // "Provider not configured" and `start()` refuses via its `unqualifiedRoles` guard, with
+        // the user's choice intact to re-pick or restore.
+        let resolution = AgentAssignmentResolution.resolve(
+            saved: agentAssignments,
+            configuredProviderIDs: Set(shared.llmKit.providers.map(\.id)),
+            defaults: shared.defaultAgentAssignments
+        )
+        if resolution.assignments != agentAssignments {
+            agentAssignments = resolution.assignments
         }
-
-        // Healing only FILLS an empty slot, so it cannot destroy a choice — which is why it needs
-        // no equivalent of the guard above. Every role with a bundled default is healed, not just
-        // `requiredRoles`: "blocks app launch" and "has a sensible default" are different
-        // questions, and conflating them is why `.validator` — deliberately absent from
-        // `requiredRoles` so a missing one blocks VALIDATION rather than the app — was the one
-        // role that never got healed, leaving submitted tasks parked unresolvably.
-        if !configuredProviderIDs.isEmpty {
-            let defaultAssignments = shared.defaultAgentAssignments
-            for role in AgentRole.allCases where agentAssignments[role] == nil {
-                guard let fallback = defaultAssignments[role],
-                      !fallback.modelID.isEmpty,
-                      configuredProviderIDs.contains(fallback.providerID) else { continue }
-                agentAssignments[role] = fallback
-                logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(fallback.providerID, privacy: .public)/\(fallback.modelID, privacy: .public) [bundled default] in session \(self.session.name, privacy: .public)")
-            }
+        // Logged because the destructive path logged only what it SUBSTITUTED, never what it
+        // removed — which is why recovering the lost values took archaeology instead of a grep.
+        for (role, assignment) in resolution.unavailable {
+            logger.notice("Assignment KEPT but unavailable in session \(self.session.name, privacy: .public): \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public) — that provider is not configured (yet). The role reads as invalid until it is; nothing was changed.")
+        }
+        for (role, assignment) in resolution.healed {
+            logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public) [bundled default] in session \(self.session.name, privacy: .public)")
         }
 
         // Load message history for up-arrow recall (per-session).
