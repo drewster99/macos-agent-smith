@@ -29,6 +29,13 @@ struct ConfigValidationView: View {
                 agentRow(role: .brown, label: "Agent Brown (Executor)", color: AppColors.brownAgent)
                 agentRow(role: .securityAgent, label: "Security Agent (Safety Monitor)", color: AppColors.securityAgent)
                 agentRow(role: .summarizer, label: "Task Summarizer", color: .secondary)
+                // Shown, but NEVER gates Start — `allAgentConfigsValid` reads `requiredRoles`,
+                // which deliberately excludes the validator so a missing one blocks VALIDATION
+                // rather than the app. Displaying it anyway is the point: an unassigned validator
+                // parks every submitted task in `.awaitingReview` where not even Smith can resolve
+                // it, and before this row that state was invisible until the first task hit it.
+                agentRow(role: .validator, label: "Validator (Acceptance Judge)",
+                         color: AppColors.validatorAgent, blocksStart: false)
             }
 
             HStack(spacing: 12) {
@@ -49,7 +56,8 @@ struct ConfigValidationView: View {
         .frame(minWidth: 670, minHeight: 730)
     }
 
-    private func agentRow(role: AgentRole, label: String, color: Color) -> some View {
+    private func agentRow(role: AgentRole, label: String, color: Color,
+                          blocksStart: Bool = true) -> some View {
         let assignment = viewModel.agentAssignments[role]
         let provider = assignment.flatMap { a in viewModel.shared.llmKit.providers.first { $0.id == a.providerID } }
         let hasModel = (assignment?.modelID.isEmpty == false)
@@ -76,8 +84,15 @@ struct ConfigValidationView: View {
                                 .foregroundStyle(.red)
                         }
                     }
-                } else {
+                } else if blocksStart {
                     Label("No model assigned", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else {
+                    // Says what the absence COSTS, since it does not stop the app from starting
+                    // and the price is otherwise paid silently, one parked task at a time.
+                    Label("Not assigned — submitted tasks will park unvalidated",
+                          systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }

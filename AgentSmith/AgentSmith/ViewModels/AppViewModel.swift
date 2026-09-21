@@ -555,29 +555,40 @@ final class AppViewModel {
             agentAssignments = shared.defaultAgentAssignments
         }
 
-        // Prune assignments whose provider is no longer configured (or that carry no model), then
-        // auto-heal missing required roles from the bundled defaults.
+        // Auto-heal roles that have NO assignment. A saved assignment is NEVER cleared here.
         //
-        // DATA-SAFETY GUARD: skip the whole pass when NO provider is configured. Clearing an
-        // assignment sets `agentAssignments[role] = nil`, which `didSet` PERSISTS to disk — so an
-        // empty provider list here (almost always the catalog not having finished loading, not the
-        // user having deleted every provider) would wipe every saved assignment irrecoverably once
-        // providers return. With zero providers there is also nothing to heal to. A genuinely
-        // removed single provider still prunes normally below, since the list is then non-empty.
+        // This used to prune any assignment whose provider was not in `llmKit.providers`, guarded
+        // only by "the provider list is not EMPTY". That guard is all-or-nothing, and a partially
+        // loaded list passes it: the providers that had arrived kept their roles while the ones
+        // still loading had theirs deleted — and `agentAssignments.didSet` persists, so the
+        // deletion was immediate and permanent. The old comment stated the assumption outright
+        // ("A genuinely removed single provider still prunes normally below, since the list is
+        // then non-empty"), i.e. non-empty ⇒ complete. It is not.
+        //
+        // That cost this session's own config on 2026-09-20: `builtin.codex-chatgpt` is
+        // credentialed from `~/.codex/auth.json` rather than the Keychain, so it is a natural
+        // straggler, and Smith/Brown/Security lost their Codex models to Anthropic defaults with
+        // no record of what had been there. A load must never be able to destroy what it loaded.
+        //
+        // An assignment whose provider is genuinely gone now SURVIVES and is reported instead:
+        // `ConfigValidationView` already renders "Provider not configured" and
+        // `allAgentConfigsValid` already refuses to start. Failing visibly, with the user's
+        // choice intact, beats silently substituting a different vendor's model.
         let configuredProviderIDs = Set(shared.llmKit.providers.map(\.id))
-        if !configuredProviderIDs.isEmpty {
-            for (role, assignment) in agentAssignments {
-                if assignment.modelID.isEmpty || !configuredProviderIDs.contains(assignment.providerID) {
-                    agentAssignments[role] = nil
-                    logger.notice("Cleared stale assignment in session \(self.session.name, privacy: .public) for \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public)")
-                }
-            }
+        for (role, assignment) in agentAssignments
+        where assignment.modelID.isEmpty || !configuredProviderIDs.contains(assignment.providerID) {
+            logger.notice("Assignment kept but UNAVAILABLE in session \(self.session.name, privacy: .public): \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public) — provider not configured (yet). The role will read as invalid until it is.")
+        }
 
-            // Only fills a role whose default resolves to a currently-configured provider — otherwise
-            // the role stays unassigned and the UI asks the user to pick, rather than binding to an
-            // arbitrary provider.
+        // Healing only FILLS an empty slot, so it cannot destroy a choice — which is why it needs
+        // no equivalent of the guard above. Every role with a bundled default is healed, not just
+        // `requiredRoles`: "blocks app launch" and "has a sensible default" are different
+        // questions, and conflating them is why `.validator` — deliberately absent from
+        // `requiredRoles` so a missing one blocks VALIDATION rather than the app — was the one
+        // role that never got healed, leaving submitted tasks parked unresolvably.
+        if !configuredProviderIDs.isEmpty {
             let defaultAssignments = shared.defaultAgentAssignments
-            for role in AgentRole.requiredRoles where agentAssignments[role] == nil {
+            for role in AgentRole.allCases where agentAssignments[role] == nil {
                 guard let fallback = defaultAssignments[role],
                       !fallback.modelID.isEmpty,
                       configuredProviderIDs.contains(fallback.providerID) else { continue }
