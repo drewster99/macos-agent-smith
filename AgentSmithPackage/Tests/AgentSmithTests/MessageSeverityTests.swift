@@ -92,6 +92,14 @@ struct MessageSeverityTests {
         #expect(message(metadata: ["severity": .string("catastrophe")]).severity == .error)
         #expect(message(metadata: ["severity": .int(3)]).severity == .error)
     }
+
+    /// A JSON null says no severity was RECORDED — absent, not corrupt. Reading it as `.error`
+    /// would make every null-stamped row unfilterable.
+    @Test("A null severity is absent, not corrupt")
+    func nullSeverityIsAbsent() {
+        #expect(message(metadata: ["severity": .null]).severity == .info)
+        #expect(message(metadata: ["severity": .null, "isError": .bool(true)]).severity == .error)
+    }
 }
 
 /// The floor's actual job: surviving a filter that hides the message on another axis.
@@ -171,6 +179,87 @@ struct TranscriptFilterSeverityFloorTests {
     func explicitHideErrorsBeatsFloor() {
         let hidden = TranscriptFilter(hideErrors: true, alwaysShowAtOrAbove: .warning)
         #expect(hidden.matches(toolOutput(succeeded: false)) == false)
+    }
+
+    // MARK: Scope axes are NOT noise axes
+
+    private func failureInTask(_ taskID: UUID?) -> ChannelMessage {
+        ChannelMessage(
+            sender: .agent(.brown), content: "boom",
+            metadata: ["messageKind": .kind(.toolOutput), "severity": .severity(.error)],
+            taskID: taskID
+        )
+    }
+
+    /// The floor defeats NOISE filters (a kind, a sender, a tool the user chose not to read). It
+    /// must never defeat SCOPE — which pane a message belongs to. A per-task pane showing another
+    /// task's errors is not "surfacing" anything; it is putting a row where it is not about.
+    @Test("The floor does NOT leak an error across task scopes")
+    func floorRespectsTaskScope() {
+        let mine = UUID(), theirs = UUID()
+        let pane = TranscriptFilter(taskScope: .task(mine))
+        #expect(pane.matches(failureInTask(mine)))
+        #expect(pane.matches(failureInTask(theirs)) == false)
+        #expect(pane.matches(failureInTask(nil)) == false)
+    }
+
+    /// The orchestration pane is the mirror image: it shows what is NOT tied to a task.
+    @Test("The orchestration scope still excludes task-scoped errors")
+    func floorRespectsOrchestrationScope() {
+        let pane = TranscriptFilter(taskScope: .orchestration)
+        #expect(pane.matches(failureInTask(nil)))
+        #expect(pane.matches(failureInTask(UUID())) == false)
+    }
+
+    /// `.matchNone` exists to show NOTHING until a task is picked. "Nothing" includes errors.
+    @Test("matchNone shows nothing, errors included")
+    func matchNoneShowsNothing() {
+        #expect(TranscriptFilter(taskScope: .matchNone).matches(failureInTask(UUID())) == false)
+        #expect(TranscriptFilter(taskScope: .matchNone).matches(failureInTask(nil)) == false)
+    }
+
+    /// Public/private is a scope boundary too — an error addressed privately must not appear in a
+    /// pane that shows only public traffic.
+    @Test("The floor respects the public/private boundary")
+    func floorRespectsVisibility() {
+        let privateFailure = ChannelMessage(
+            sender: .system, recipientID: UUID(), recipient: .agent(.brown),
+            content: "blocked",
+            metadata: ["messageKind": .kind(.securityReview), "severity": .severity(.error)]
+        )
+        #expect(TranscriptFilter(visibility: .publicOnly).matches(privateFailure) == false)
+        #expect(TranscriptFilter(visibility: .privateOnly).matches(privateFailure))
+    }
+}
+
+/// Security dispositions map to severity by gravity AND frequency — a level that fires on every
+/// call would be unfilterable noise rather than signal, since the floor treats `.warning` as
+/// always-visible.
+@Suite("SecurityDisposition severity")
+struct SecurityDispositionSeverityTests {
+
+    @Test("Allowed calls are routine, including the unjudged ones")
+    func allowedCallsAreInfo() {
+        #expect(SecurityDisposition(outcome: .approved).severity == .info)
+        #expect(SecurityDisposition(outcome: .autoApproved).severity == .info)
+        // Fires on EVERY call when review is off. Visible by kind; never unfilterable.
+        #expect(SecurityDisposition(outcome: .approvedWithoutReview).severity == .info)
+    }
+
+    @Test("Blocked-but-recoverable is a warning")
+    func blockedRecoverableIsWarning() {
+        #expect(SecurityDisposition(outcome: .warned).severity == .warning)
+        // User pressed Stop — blocked and unjudged, but nobody's failure.
+        #expect(SecurityDisposition(outcome: .reviewCancelled).severity == .warning)
+    }
+
+    @Test("A refusal or a missing reviewer is an error")
+    func refusalsAreErrors() {
+        #expect(SecurityDisposition(outcome: .refused(.unsafe)).severity == .error)
+        #expect(SecurityDisposition(outcome: .refused(.abort)).severity == .error)
+        #expect(SecurityDisposition(
+            outcome: .reviewerUnavailable(.noEvaluatorConfigured)
+        ).severity == .error)
     }
 }
 

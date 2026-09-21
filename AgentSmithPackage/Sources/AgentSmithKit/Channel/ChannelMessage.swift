@@ -153,7 +153,9 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// so an unparseable severity resolves to `.error`: it is certainly not routine, and the
     /// floor's whole purpose is that questionable rows surface rather than vanish.
     public var severity: MessageSeverity {
-        if let stored = metadata?["severity"] {
+        // `.null` is ABSENT, not corrupt — a JSON null in this slot says no severity was recorded,
+        // which is the `isError` / `.info` path below, not a garbled value.
+        if let stored = metadata?["severity"], stored != .null {
             guard case .string(let raw) = stored else { return .error }
             return MessageSeverity(rawValue: raw) ?? .error
         }

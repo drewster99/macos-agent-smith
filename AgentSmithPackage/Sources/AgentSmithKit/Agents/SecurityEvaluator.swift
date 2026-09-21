@@ -81,17 +81,26 @@ public struct SecurityDisposition: Sendable, Equatable {
     /// reason `approved` is: a new outcome must be classified here before it compiles, rather
     /// than defaulting to routine and disappearing into a filtered pane.
     ///
-    /// A blocked call is an `.error` — something the agent asked for did not happen. A WARN is a
-    /// `.warning`: blocked, but an identical retry is auto-approved, so it is a speed bump rather
-    /// than a wall. `approvedWithoutReview` is deliberately a `.warning` even though the call ran
-    /// — it ran UNJUDGED, which is precisely the state the transcript must not let vanish.
+    /// Calibrated against FREQUENCY as well as gravity, because the transcript floor treats
+    /// `.warning` as unfilterable — a level that fires on every call would stop being a signal
+    /// and start being noise the user cannot turn off without giving up real errors too.
+    ///
+    /// - `approvedWithoutReview` is `.info` despite running UNJUDGED. It fires on EVERY call from
+    ///   an emitter whose review is switched off, so promoting it would flood the pane past every
+    ///   filter. Visibility is preserved the way it always was: the row is posted, says "approved
+    ///   without review", and shows by default under its own kind. The floor is for things that
+    ///   must pierce a DELIBERATE filter, not for making a setting the user chose unmutable.
+    /// - `reviewCancelled` is `.warning`, not `.error`: the call was blocked and never judged, but
+    ///   the cause is the user stopping the agent. A Stop must not paint the transcript red.
+    /// - `refused` and `reviewerUnavailable` are `.error` — something the agent asked for did not
+    ///   happen, and nobody chose that.
     public var severity: MessageSeverity {
         switch outcome {
-        case .approved, .autoApproved:
+        case .approved, .autoApproved, .approvedWithoutReview:
             return .info
-        case .warned, .approvedWithoutReview:
+        case .warned, .reviewCancelled:
             return .warning
-        case .refused, .reviewerUnavailable, .reviewCancelled:
+        case .refused, .reviewerUnavailable:
             return .error
         }
     }

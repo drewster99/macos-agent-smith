@@ -130,12 +130,37 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// call from any isolation domain (it reads only the message's own value).
     public func matches(_ message: ChannelMessage) -> Bool {
         let severity = message.severity
-        // `hideErrors` is the one axis allowed to veto a message the floor would admit: it is an
-        // explicit request not to see errors here, whereas the floor exists to defeat filters that
-        // hide errors INCIDENTALLY. Checked first so the two can never disagree about a row.
+        // `hideErrors` is the one NOISE axis allowed to veto a message the floor would admit: it
+        // is an explicit request not to see errors here, whereas the floor exists to defeat
+        // filters that hide errors INCIDENTALLY. Checked first so the two cannot disagree.
         if hideErrors, severity >= .error { return false }
-        // The floor. Every check below this line is an exclusion, so returning true here is the
-        // only way a message that some other axis hides can still reach the pane.
+
+        // SCOPE axes, checked BEFORE the floor — these decide whether the message belongs to this
+        // pane at all, and the floor must never override them. A pane showing one task would
+        // otherwise display another task's errors; `.matchNone`, which exists to show NOTHING
+        // until a task is picked, would show them too. "Surface anything bad" means surfacing it
+        // where it belongs, not everywhere.
+        switch taskScope {
+        case .any:
+            break
+        case .task(let id):
+            if message.taskID != id { return false }
+        case .orchestration:
+            if message.taskID != nil { return false }
+        case .matchNone:
+            return false
+        }
+        switch visibility {
+        case .all:
+            break
+        case .publicOnly:
+            if message.isPrivate { return false }
+        case .privateOnly:
+            if !message.isPrivate { return false }
+        }
+
+        // The floor. Everything below is a NOISE exclusion — a category the user chose not to
+        // read — so returning true here is the only way a message those axes hide still lands.
         if let alwaysShowAtOrAbove, severity >= alwaysShowAtOrAbove { return true }
 
         if let allowedSenders, !allowedSenders.contains(message.sender) { return false }
@@ -162,26 +187,6 @@ public struct TranscriptFilter: Sendable, Equatable {
             }
         case .allExcept(let set):
             if let kind = message.kind, set.contains(kind) { return false }
-        }
-
-        switch taskScope {
-        case .any:
-            break
-        case .task(let id):
-            if message.taskID != id { return false }
-        case .orchestration:
-            if message.taskID != nil { return false }
-        case .matchNone:
-            return false
-        }
-
-        switch visibility {
-        case .all:
-            break
-        case .publicOnly:
-            if message.isPrivate { return false }
-        case .privateOnly:
-            if !message.isPrivate { return false }
         }
 
         return true
