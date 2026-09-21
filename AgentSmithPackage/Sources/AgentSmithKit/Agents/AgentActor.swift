@@ -277,10 +277,28 @@ public actor AgentActor {
     /// A tool that fails this many times without a single success is a loop regardless of
     /// what happens in between. Warned once per streak; the streak resets only when the
     /// same tool finally succeeds.
-    private var toolFailureStreaks: [String: Int] = [:]
+    private var toolFailureStreaks: [String: ToolFailureStreak] = [:]
     private var toolFailureWarnedTools: Set<String> = []
     private static let toolFailureStreakWarnThreshold = 5
     private static let toolFailureStreakStopThreshold = 10
+
+    /// One tool's unresolved failure run: how many times, what it last said, and whether the
+    /// user has already been told.
+    ///
+    /// The message is kept because the report written when an agent goes quiet has to say WHY
+    /// the tool was failing. Reconstructing it from the transcript is not an option — the row
+    /// may be filtered, and the agent that could explain it has already stopped.
+    ///
+    /// `reported` lives HERE rather than in a parallel `Set` so it cannot outlive the streak it
+    /// describes. As a separate set it desynced three ways — the streak is cleared on success,
+    /// by the stop-threshold breaker, and by a context reset, and a set that missed any of those
+    /// would silently suppress the report for the NEXT streak on that tool. Inside the struct,
+    /// clearing the streak clears the flag by construction.
+    struct ToolFailureStreak: Sendable, Equatable {
+        var count: Int
+        var lastError: String
+        var reported = false
+    }
 
     /// Brown-only. Counts the `Continue.` continuation nudges injected since the worker last
     /// made forward progress, and bounds them.
@@ -1420,6 +1438,9 @@ public actor AgentActor {
             await pruneHistoryIfNeeded()
 
             guard hasUnprocessedInput else {
+                // About to go quiet. If a tool is STILL failing, say so before falling silent —
+                // see `reportAbandonedToolFailures`.
+                await reportAbandonedToolFailures()
                 await idleWait()
                 continue
             }
@@ -2217,7 +2238,7 @@ public actor AgentActor {
                         result = "Unknown tool: \(call.name)"
                         succeeded = false
                         await toolContext.setToolExecutionStatus(call.id, false)
-                        recordToolOutcome(name: call.name, succeeded: false)
+                        recordToolOutcome(name: call.name, succeeded: false, output: result)
                     }
                     executedCallIDs.insert(call.id)
                     updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
@@ -2432,7 +2453,7 @@ public actor AgentActor {
                     executedCallIDs.insert(r.callID)
                     turnToolExecutionMs += r.executionMs
                     turnToolResultChars += r.result.count
-                    recordToolOutcome(name: r.toolName, succeeded: r.succeeded)
+                    recordToolOutcome(name: r.toolName, succeeded: r.succeeded, output: r.result)
                     conversationHistory.append(.toolResult(Self.capToolResult(r.result), callID: r.callID))
                 }
                 pushLiveContext()
@@ -2468,7 +2489,7 @@ public actor AgentActor {
                         result = "Unknown tool: \(call.name)"
                         succeeded = false
                         await toolContext.setToolExecutionStatus(call.id, false)
-                        recordToolOutcome(name: call.name, succeeded: false)
+                        recordToolOutcome(name: call.name, succeeded: false, output: result)
                     }
                     executedCallIDs.insert(call.id)
                     updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
@@ -2533,22 +2554,27 @@ public actor AgentActor {
         // with varying arguments and narration/successful other tools interleaved. Warn
         // once mid-streak so the model can change course; if it still can't land a single
         // success, break the loop the same way as above (idle until new input).
-        if let worst = toolFailureStreaks.max(by: { $0.value < $1.value }) {
-            if worst.value >= Self.toolFailureStreakStopThreshold {
+        if let worst = toolFailureStreaks.max(by: { $0.value.count < $1.value.count }) {
+            if worst.value.count >= Self.toolFailureStreakStopThreshold {
                 await toolContext.post(ChannelMessage(
                     sender: .system,
-                    content: "Agent \(configuration.role.displayName)'s calls to \(worst.key) have failed \(worst.value) times without a single success. Breaking loop — agent will idle until new input arrives.",
+                    content: "Agent \(configuration.role.displayName)'s calls to \(worst.key) have failed \(worst.value.count) times without a single success. Breaking loop — agent will idle until new input arrives.",
                     metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error)]
                 ))
+                // Report BEFORE clearing: this branch idles the agent, and the idle-transition
+                // reporter reads the very streak being cleared here. Clearing first meant the
+                // WORST case — a tool that never once worked — was the only one that produced no
+                // user-addressed report, leaving just a system row to notice.
+                await reportAbandonedToolFailures()
                 toolFailureStreaks[worst.key] = nil
                 toolFailureWarnedTools.remove(worst.key)
                 hasUnprocessedInput = false
                 return
             }
-            if worst.value >= Self.toolFailureStreakWarnThreshold, !toolFailureWarnedTools.contains(worst.key) {
+            if worst.value.count >= Self.toolFailureStreakWarnThreshold, !toolFailureWarnedTools.contains(worst.key) {
                 toolFailureWarnedTools.insert(worst.key)
                 conversationHistory.append(.user("""
-                    [System] Your calls to `\(worst.key)` have now failed \(worst.value) times without a single success. \
+                    [System] Your calls to `\(worst.key)` have now failed \(worst.value.count) times without a single success. \
                     STOP retrying the same approach. Re-read the most recent error text carefully and either change \
                     your approach or report the blocker\(configuration.role == .brown ? " via request_help" : ""). \
                     After \(Self.toolFailureStreakStopThreshold) failures without a success you will be stopped.
@@ -2671,6 +2697,13 @@ public actor AgentActor {
                 roleName: configuration.role.displayName,
                 agentRoleValue: configuration.role.rawValue, post: { await toolContext.post($0) }
             )
+            // Feed the failure-streak breaker, as every other blocked path does. Without this the
+            // one state in which EVERY call is blocked was also the one state in which no streak
+            // accumulated — so neither circuit breaker could ever fire, and the agent would
+            // retry forever against a gate that can never open.
+            await toolContext.setToolExecutionStatus(call.id, false)
+            recordToolOutcome(name: call.name, succeeded: false,
+                              output: Self.blockedToolResultMessage(unconfigured))
             return (Self.blockedToolResultMessage(unconfigured), false)
         }
 
@@ -2732,7 +2765,7 @@ public actor AgentActor {
             // a retry of the same call is recognized as a legitimate response, not a
             // duplicate operation.
             await toolContext.setToolExecutionStatus(call.id, false)
-            recordToolOutcome(name: call.name, succeeded: false)
+            recordToolOutcome(name: call.name, succeeded: false, output: Self.blockedToolResultMessage(disposition))
             return (Self.blockedToolResultMessage(disposition), false)
         }
     }
@@ -2776,7 +2809,7 @@ public actor AgentActor {
         turnToolExecutionMs += outcome.executionMs
         turnToolResultChars += outcome.result.count
         await toolContext.setToolExecutionStatus(call.id, outcome.succeeded)
-        recordToolOutcome(name: call.name, succeeded: outcome.succeeded)
+        recordToolOutcome(name: call.name, succeeded: outcome.succeeded, output: outcome.result)
         return (outcome.result, outcome.succeeded, outcome.executionMs)
     }
 
@@ -2789,15 +2822,68 @@ public actor AgentActor {
 
     /// Feeds the per-tool failure-streak breaker (`toolFailureStreaks`). A success wipes
     /// that tool's streak and re-arms its warning; a failure increments it.
-    private func recordToolOutcome(name: String, succeeded: Bool) {
+    private func recordToolOutcome(name: String, succeeded: Bool, output: String = "") {
         if succeeded {
             toolFailureStreaks[name] = nil
             toolFailureWarnedTools.remove(name)
         } else if !Self.toolFailureStreakExemptTools.contains(name) {
-            toolFailureStreaks[name, default: 0] += 1
+            let previous = toolFailureStreaks[name]
+            toolFailureStreaks[name] = ToolFailureStreak(
+                count: (previous?.count ?? 0) + 1,
+                lastError: output.isEmpty ? (previous?.lastError ?? "") : output,
+                reported: previous?.reported ?? false
+            )
         }
     }
 
+
+    /// Tells the user when this agent goes quiet with a tool still failing.
+    ///
+    /// The gap this closes: on 2026-09-20 Smith called `create_task` seven times, was rejected
+    /// every time, then moved on to the user's NEXT message and said nothing about the first.
+    /// Neither breaker caught it. The identical-call breaker resets on any differing call, and
+    /// the arguments differed each time; the streak breaker only fires at ten, and Smith gave up
+    /// at seven. The mid-streak correction does tell the model to "report the blocker", and the
+    /// model simply did not — which is exactly why this cannot be left to the model.
+    ///
+    /// The signal is structural, never prose: an unresolved entry in `toolFailureStreaks` at the
+    /// moment the run loop parks. A streak only clears when that tool SUCCEEDS, so surviving to
+    /// the idle transition means the failures were never resolved — whatever the agent said in
+    /// between. Nothing here inspects what the model wrote.
+    ///
+    /// Sent as a user-addressed `.error`, so the transcript floor carries it through whatever
+    /// else the user has filtered — a failure the user cannot see is the other half of this bug.
+    ///
+    /// Reported once per streak. A model that DID report the blocker in its own words produces a
+    /// second, blunter message here; that duplication is the deliberate trade, because the
+    /// alternative is trusting a model that has already demonstrated it does not always comply.
+    private func reportAbandonedToolFailures() async {
+        let abandoned = toolFailureStreaks
+            .filter { $0.value.count >= Self.toolFailureStreakWarnThreshold && !$0.value.reported }
+            .sorted { $0.value.count > $1.value.count }
+        guard !abandoned.isEmpty else { return }
+
+        for (toolName, streak) in abandoned {
+            toolFailureStreaks[toolName]?.reported = true
+            let reason = streak.lastError.trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = reason.isEmpty ? "" : "\n\nThe last error was:\n\(Self.truncateOutput(reason, maxLines: 4))"
+            await toolContext.post(ChannelMessage(
+                sender: .agent(configuration.role),
+                recipientID: OrchestrationRuntime.userID,
+                recipient: .user,
+                content: """
+                    `\(toolName)` failed \(streak.count) times in a row and never succeeded — \
+                    \(configuration.role.displayName) has stopped without it working.\(detail)
+                    """,
+                metadata: [
+                    "messageKind": .kind(.advisory),
+                    "severity": .severity(.error),
+                    "tool": .string(toolName),
+                    "agentRole": .string(configuration.role.rawValue)
+                ]
+            ))
+        }
+    }
 
     /// Rebuilds the per-turn `ToolAvailabilityContext` using current actor state.
     /// Availability can flip mid-turn (e.g. `hasAwaitingReviewTasks` changes after

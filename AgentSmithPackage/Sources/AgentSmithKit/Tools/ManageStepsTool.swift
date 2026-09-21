@@ -305,19 +305,17 @@ public struct ManageStepsTool: AgentTool {
     private static func destination(from arguments: [String: AnyCodable]) -> DestinationParse {
         var found: [TaskStepDestination] = []
         var malformed: [String] = []
-        if let raw = ToolArguments.optionalString(arguments, "before_step_id") {
-            if let anchorID = UUID(uuidString: raw) {
-                found.append(.before(stepID: anchorID))
-            } else {
-                malformed.append("`before_step_id` must be a step UUID from `list` (got \"\(raw)\").")
-            }
+        switch ToolArguments.optionalUUID(arguments, "before_step_id") {
+        case .absent: break
+        case .value(let anchorID): found.append(.before(stepID: anchorID))
+        case .malformed(let raw):
+            malformed.append("`before_step_id` must be a step UUID from `list` (got \"\(raw)\").")
         }
-        if let raw = ToolArguments.optionalString(arguments, "after_step_id") {
-            if let anchorID = UUID(uuidString: raw) {
-                found.append(.after(stepID: anchorID))
-            } else {
-                malformed.append("`after_step_id` must be a step UUID from `list` (got \"\(raw)\").")
-            }
+        switch ToolArguments.optionalUUID(arguments, "after_step_id") {
+        case .absent: break
+        case .value(let anchorID): found.append(.after(stepID: anchorID))
+        case .malformed(let raw):
+            malformed.append("`after_step_id` must be a step UUID from `list` (got \"\(raw)\").")
         }
         if let position = arguments["position"] {
             switch position {

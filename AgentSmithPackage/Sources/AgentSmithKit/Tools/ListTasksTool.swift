@@ -120,14 +120,17 @@ struct ListTasksTool: AgentTool {
             return .failure("Invalid disposition_filter: '\(dispositionFilter)'. Valid values: active, archived, recentlyDeleted, inactive, all")
         }
 
+        // The all-zero UUID reads as ABSENT, not as a parent to match: it parses, so it used to
+        // filter to the children of a task that cannot exist and answer "no tasks" to a caller
+        // that meant "no filter". See `ToolArguments.optionalUUID`.
         let parentTaskID: UUID?
-        if let rawParentTaskID = ToolArguments.optionalString(arguments, "parent_task_id") {
-            guard let parsed = UUID(uuidString: rawParentTaskID) else {
-                return .failure("Invalid parent_task_id: '\(rawParentTaskID)' is not a valid UUID.")
-            }
-            parentTaskID = parsed
-        } else {
+        switch ToolArguments.optionalUUID(arguments, "parent_task_id") {
+        case .absent:
             parentTaskID = nil
+        case .value(let parsed):
+            parentTaskID = parsed
+        case .malformed(let raw):
+            return .failure("Invalid parent_task_id: '\(raw)' is not a valid UUID.")
         }
 
         let dateFilters: DateFilters

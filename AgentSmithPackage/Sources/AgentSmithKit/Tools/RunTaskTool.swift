@@ -78,19 +78,21 @@ struct RunTaskTool: AgentTool {
         // Blank falls through to the auto-resolve branch below, which is the whole point of that
         // branch. Read as present it answered "Invalid task_id: ''" to a caller that meant
         // "you pick".
-        if let taskIDString = ToolArguments.optionalString(arguments, "task_id") {
-            guard let parsed = UUID(uuidString: taskIDString) else {
-                return .failure("""
-                    Invalid task_id: '\(taskIDString)' is not a valid UUID. \
-                    \(await Self.candidateTaskList(context: context))
-                    """)
-            }
+        switch ToolArguments.optionalUUID(arguments, "task_id") {
+        case .malformed(let taskIDString):
+            return .failure("""
+                Invalid task_id: '\(taskIDString)' is not a valid UUID. \
+                \(await Self.candidateTaskList(context: context))
+                """)
+        case .value(let parsed):
             resolvedTaskID = parsed
-        } else if let onlyPending = await Self.onlyPendingRunnableTaskID(context: context) {
-            resolvedTaskID = onlyPending
-            autoResolved = true
-        } else {
-            return .failure(await Self.missingTaskIDFailure(context: context))
+        case .absent:
+            if let onlyPending = await Self.onlyPendingRunnableTaskID(context: context) {
+                resolvedTaskID = onlyPending
+                autoResolved = true
+            } else {
+                return .failure(await Self.missingTaskIDFailure(context: context))
+            }
         }
         let taskID = resolvedTaskID
         // Resolve across active + global inactive: a completed task older than 4h is auto-archived

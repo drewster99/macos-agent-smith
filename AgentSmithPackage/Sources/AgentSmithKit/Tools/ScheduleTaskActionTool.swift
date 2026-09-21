@@ -133,12 +133,13 @@ struct ScheduleTaskActionTool: AgentTool {
         case .success(let date): wakeAt = date
         case .failure(let message): return .failure(message)
         }
+        // `var`: the recurring-run branch below adopts an existing wake's id when none was given.
         var replacesID: UUID?
-        if let rid = ToolArguments.optionalString(arguments, "replaces_id") {
-            guard let parsed = UUID(uuidString: rid) else {
-                return .failure("Invalid replaces_id: '\(rid)' is not a valid UUID.")
-            }
-            replacesID = parsed
+        switch ToolArguments.optionalUUID(arguments, "replaces_id") {
+        case .absent: replacesID = nil
+        case .value(let parsed): replacesID = parsed
+        case .malformed(let rid):
+            return .failure("Invalid replaces_id: '\(rid)' is not a valid UUID.")
         }
         let recurrenceResult = TimerArgumentParsing.parseRecurrence(arguments["recurrence"])
         if case .invalid(let message) = recurrenceResult {

@@ -47,6 +47,39 @@ struct ToolArgumentReadingTests {
         #expect(ToolArguments.optionalBool(["k": .string("true")], "k") == nil)
     }
 
+    // MARK: Optional UUIDs
+
+    @Test("A real UUID reads as a value")
+    func realUUIDReadsAsValue() {
+        let id = UUID()
+        #expect(ToolArguments.optionalUUID(["k": .string(id.uuidString)], "k") == .value(id))
+    }
+
+    /// The sentinel a model invents when it must send the key but means nothing by it. Unlike
+    /// "" and [] this one PARSES, so it reached `list_tasks` as a real filter and matched the
+    /// children of a task that cannot exist.
+    @Test("The all-zero UUID reads as absent, not as an id")
+    func placeholderUUIDReadsAsAbsent() {
+        let zero = "00000000-0000-0000-0000-000000000000"
+        #expect(ToolArguments.optionalUUID(["k": .string(zero)], "k") == .absent)
+        #expect(ToolArguments.optionalUUID(["k": .string(zero.lowercased())], "k") == .absent)
+    }
+
+    @Test("Absent and blank read as absent")
+    func absentUUIDReadsAsAbsent() {
+        #expect(ToolArguments.optionalUUID([:], "k") == .absent)
+        #expect(ToolArguments.optionalUUID(["k": .string("")], "k") == .absent)
+        #expect(ToolArguments.optionalUUID(["k": .string("   ")], "k") == .absent)
+        #expect(ToolArguments.optionalUUID(["k": .null], "k") == .absent)
+    }
+
+    /// Garbage must still be REFUSED — absent and malformed demand opposite responses, which is
+    /// why this returns three cases rather than `UUID?`.
+    @Test("Garbage is malformed, never absent")
+    func garbageUUIDIsMalformed() {
+        #expect(ToolArguments.optionalUUID(["k": .string("not-a-uuid")], "k") == .malformed("not-a-uuid"))
+    }
+
     @Test("An integral double is an int; a fractional one is refused, not truncated")
     func integralDoublesAreInts() {
         #expect(ToolArguments.optionalInt(["k": .int(5)], "k") == 5)
@@ -143,6 +176,36 @@ struct EmptySentinelArgumentTests {
         )
         #expect(result.succeeded == false)
         #expect(result.output.contains("ISO-8601"))
+    }
+
+    /// The zero-UUID sentinel end to end: it must not become a filter that hides every task.
+    @Test("list_tasks with a placeholder parent_task_id does not filter everything away")
+    func listTasksIgnoresPlaceholderParentID() async throws {
+        let store = TaskStore()
+        _ = await store.addTask(title: "Visible task", description: "d")
+        let result = try await ListTasksTool().execute(
+            arguments: [
+                "parent_task_id": .string("00000000-0000-0000-0000-000000000000"),
+                "disposition_filter": .string(""),
+                "query": .string("")
+            ],
+            context: TestToolContext.make(taskStore: store)
+        )
+        #expect(result.succeeded, "\(result.output)" as Comment)
+        #expect(result.output.contains("Visible task"), "\(result.output)" as Comment)
+    }
+
+    /// A REAL parent id must still filter — the reader must not have disabled the argument.
+    @Test("A real parent_task_id still filters")
+    func realParentTaskIDStillFilters() async throws {
+        let store = TaskStore()
+        _ = await store.addTask(title: "Unrelated task", description: "d")
+        let result = try await ListTasksTool().execute(
+            arguments: ["parent_task_id": .string(UUID().uuidString)],
+            context: TestToolContext.make(taskStore: store)
+        )
+        #expect(result.succeeded, "\(result.output)" as Comment)
+        #expect(result.output.contains("Unrelated task") == false, "\(result.output)" as Comment)
     }
 
     /// The same guard on the other tool that carries it. `edit_task` had the identical dead end.

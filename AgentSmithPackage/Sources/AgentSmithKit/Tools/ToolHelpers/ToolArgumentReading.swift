@@ -50,6 +50,37 @@ enum ToolArguments {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// How an optional UUID argument read.
+    ///
+    /// Three outcomes, not two, because "absent" and "malformed" demand opposite responses: the
+    /// first falls through to whatever the tool does without the argument, the second must be
+    /// refused so the caller learns it sent garbage. Collapsing them to `UUID?` is what forces a
+    /// call site to pick one of those behaviors for both.
+    enum OptionalUUID: Equatable {
+        /// Not supplied — absent, null, blank, or the all-zero placeholder.
+        case absent
+        case value(UUID)
+        /// Supplied and unparseable. Carries the original text so the error can quote it.
+        case malformed(String)
+    }
+
+    /// The all-zero UUID, which this system never issues as an id.
+    ///
+    /// Every task, step, wake and attachment id comes from `UUID()`, whose version-4 layout
+    /// cannot produce all zeroes — so a nil UUID on the wire is never something to look up. It
+    /// is a model's invented stand-in for "no value", the same reflex that produces `""` and
+    /// `[]`, and it is MORE dangerous than those because it parses: `list_tasks` accepted it and
+    /// filtered to the children of a task that does not exist, answering "no tasks" to a caller
+    /// that meant "no filter". Reserving it here is what makes that unrepresentable.
+    private static let placeholderUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")
+
+    /// A UUID argument that a caller may legitimately omit. See `OptionalUUID`.
+    static func optionalUUID(_ arguments: [String: AnyCodable], _ key: String) -> OptionalUUID {
+        guard let raw = optionalString(arguments, key) else { return .absent }
+        guard let parsed = UUID(uuidString: raw) else { return .malformed(raw) }
+        return parsed == placeholderUUID ? .absent : .value(parsed)
+    }
+
     /// A non-empty array, or `nil` when the argument is absent, null, empty, or not an array.
     static func optionalArray(_ arguments: [String: AnyCodable], _ key: String) -> [AnyCodable]? {
         guard case .array(let values)? = arguments[key], !values.isEmpty else { return nil }
