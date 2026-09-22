@@ -250,6 +250,12 @@ public actor AgentActor {
     private var consecutiveEmptyResponses = 0
     private static let maxConsecutiveEmptyResponses = 3
 
+    /// Tracks Brown responses cut off inside Qwen's text-form `<tool_call>` wrapper. These are
+    /// neither narration nor executable structured calls: the partial text stays out of the
+    /// transcript while Brown receives an internal instruction to retry with smaller payloads.
+    private var consecutiveTruncatedToolCallResponses = 0
+    private static let maxConsecutiveTruncatedToolCallResponses = 3
+
     /// Content of the synthetic assistant message appended when a non-Brown agent returns an empty
     /// completion (no text, no tool calls). It is a structural TURN BOUNDARY in `conversationHistory`
     /// — it stops the next injection from merging into the still-open user turn and re-feeding a
@@ -897,6 +903,7 @@ public actor AgentActor {
         Self.stopLogger.notice("AgentActor.stop entry role=\(role, privacy: .public) agent=\(agentID, privacy: .public)")
         isRunning = false
         consecutiveEmptyResponses = 0
+        consecutiveTruncatedToolCallResponses = 0
         guard let task = runTask else {
             // Only on THIS path. A first `stop()` that timed out set `runTask = nil` while
             // abandoning a run loop that may still be registering evaluations, and the later
@@ -1899,6 +1906,20 @@ public actor AgentActor {
         await toolContext.onSelfTerminate()
     }
 
+    static func isTruncatedQwenToolCall(_ response: LLMResponse) -> Bool {
+        guard response.hitOutputTokenLimit,
+              response.toolCalls.isEmpty,
+              let text = response.text?.lowercased(),
+              let opening = text.range(of: "<tool_call", options: .backwards) else {
+            return false
+        }
+
+        return text.range(
+            of: "</tool_call>",
+            range: opening.lowerBound..<text.endIndex
+        ) == nil
+    }
+
     private func handleResponse(_ response: LLMResponse) async throws {
         // Mark the whole append span in-flight so a reentrant `/clear` or `/compact` (which arrive
         // as external actor calls at any of this method's `await` suspension points) defers rather
@@ -1907,6 +1928,37 @@ public actor AgentActor {
         // every exit path (normal, thrown, self-terminate).
         isProcessingToolTurn = true
         defer { isProcessingToolTurn = false }
+
+        // Some OpenAI-compatible Qwen servers expose tool use as a textual `<tool_call>` wrapper.
+        // If generation hits its output ceiling before that wrapper closes, the adapter cannot
+        // produce an executable LLMToolCall. Do not publish or preserve the malformed fragment as
+        // assistant narration. Tell Brown why it failed and require a smaller, chunked retry.
+        if configuration.role == .brown, Self.isTruncatedQwenToolCall(response) {
+            consecutiveTruncatedToolCallResponses += 1
+
+            if consecutiveTruncatedToolCallResponses >= Self.maxConsecutiveTruncatedToolCallResponses {
+                isRunning = false
+                await toolContext.post(ChannelMessage(
+                    sender: .system,
+                    content: "Brown produced \(consecutiveTruncatedToolCallResponses) consecutive tool calls that were truncated by the output-token limit. The model could not recover with smaller calls. Terminating.",
+                    metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
+                ))
+                await toolContext.onSelfTerminate()
+                return
+            }
+
+            conversationHistory.append(.user("""
+                [System] Your previous Qwen <tool_call> was truncated by the output-token limit before its wrapper closed, so it was not executed. Retry the operation now with a smaller tool call. Split large file_write/file_edit content across multiple bounded calls, and do not repeat the same oversized payload.
+                """))
+            hasUnprocessedInput = true
+            await toolContext.post(ChannelMessage(
+                sender: .system,
+                content: "Brown's tool call was truncated by the output-token limit before it could be parsed. Requesting a smaller, chunked retry.",
+                metadata: ["messageKind": .kind(.agentRecovery), "severity": .severity(.warning), "agentRole": .string(configuration.role.rawValue)]
+            ))
+            return
+        }
+        consecutiveTruncatedToolCallResponses = 0
 
         // The model can PARROT the synthetic empty-turn marker from its own history back as literal
         // text. Such a response is "nothing to say": never post it, and treat it as empty below.
