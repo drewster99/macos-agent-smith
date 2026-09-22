@@ -19,6 +19,14 @@ import Foundation
 @Suite("Worker addressing with concurrent workers")
 struct WorkerAddressingTests {
 
+    private actor TerminationRecorder {
+        private(set) var calls: [(workerID: UUID, callerID: UUID)] = []
+
+        func record(workerID: UUID, callerID: UUID) {
+            calls.append((workerID, callerID))
+        }
+    }
+
     /// A `workerIDForTask` that behaves like the real runtime resolver: task → its assigned
     /// live worker, and nothing else. `agentIDForRole(.brown)` is deliberately wired to the
     /// OLDEST worker so a regression to the role lookup shows up as a wrong recipient.
@@ -26,15 +34,17 @@ struct WorkerAddressingTests {
         channel: MessageChannel,
         taskStore: TaskStore,
         liveWorkers: [UUID],
-        oldestWorker: UUID
+        oldestWorker: UUID,
+        smithID: UUID = UUID(),
+        terminateAgent: @escaping @Sendable (UUID, UUID) async -> Bool = { _, _ in false }
     ) -> ToolContext {
         ToolContext(
-            agentID: UUID(),
+            agentID: smithID,
             agentRole: .smith,
             channel: channel,
             taskStore: taskStore,
             spawnBrown: { nil },
-            terminateAgent: { _, _ in false },
+            terminateAgent: terminateAgent,
             abort: { _, _ in },
             agentRoleForID: { id in liveWorkers.contains(id) ? .brown : nil },
             agentIDForRole: { role in role == .brown ? oldestWorker : nil },
@@ -172,5 +182,69 @@ struct WorkerAddressingTests {
         let delivered = await fixture.channel.allMessages().filter { $0.content.contains("also cover the German locale") }
         #expect(delivered.count == 1)
         #expect(delivered.first?.recipientID == fixture.newerWorker)
+    }
+
+    // MARK: - terminate_agent
+
+    @Test("terminate_agent resolves the worker from the task ID, not the oldest worker")
+    func terminateAddressesTheNamedTask() async throws {
+        let fixture = await TwoWorkers.make()
+        let smithID = UUID()
+        let recorder = TerminationRecorder()
+        let context = Self.makeContext(
+            channel: fixture.channel,
+            taskStore: fixture.taskStore,
+            liveWorkers: [fixture.olderWorker, fixture.newerWorker],
+            oldestWorker: fixture.olderWorker,
+            smithID: smithID,
+            terminateAgent: { workerID, callerID in
+                await recorder.record(workerID: workerID, callerID: callerID)
+                return true
+            }
+        )
+
+        let result = try await TerminateAgentTool().execute(
+            arguments: [
+                "task_id": .string(fixture.newerTask.id.uuidString),
+                "reason": .string("worker is stuck")
+            ],
+            context: context
+        )
+
+        #expect(result.succeeded)
+        let calls = await recorder.calls
+        #expect(calls.count == 1)
+        #expect(calls.first?.workerID == fixture.newerWorker)
+        #expect(calls.first?.workerID != fixture.olderWorker)
+        #expect(calls.first?.callerID == smithID)
+    }
+
+    @Test("terminate_agent never falls back to another worker when the task has none")
+    func terminateRejectsTaskWithoutLiveWorker() async throws {
+        let fixture = await TwoWorkers.make()
+        let idleTask = await fixture.taskStore.addTask(title: "Idle task", description: "not running")
+        let recorder = TerminationRecorder()
+        let context = Self.makeContext(
+            channel: fixture.channel,
+            taskStore: fixture.taskStore,
+            liveWorkers: [fixture.olderWorker, fixture.newerWorker],
+            oldestWorker: fixture.olderWorker,
+            terminateAgent: { workerID, callerID in
+                await recorder.record(workerID: workerID, callerID: callerID)
+                return true
+            }
+        )
+
+        let result = try await TerminateAgentTool().execute(
+            arguments: [
+                "task_id": .string(idleTask.id.uuidString),
+                "reason": .string("should not matter")
+            ],
+            context: context
+        )
+
+        #expect(result.succeeded == false)
+        #expect(result.output.contains("No live Brown worker"))
+        #expect(await recorder.calls.isEmpty)
     }
 }

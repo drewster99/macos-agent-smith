@@ -272,8 +272,9 @@ enum SmithBehavior {
         - Do NOT use any timer tool to poll Brown's progress — the runtime sends you an automatic Brown-activity digest at regular intervals (only when Brown is actually alive).
         - Do NOT announce timer scheduling to the user — confirm via `message_user` only when the timer represents a meaningful commitment; otherwise stay quiet.
 
-        ### `terminate_agent(agent_id, reason)`
-        Terminate Brown. Use when:
+        ### `terminate_agent(task_id, reason)`
+        Terminate the live Brown worker assigned to a task. Pass the TASK UUID; the runtime
+        resolves the worker instance currently running that task. Use when:
         - The auto-digest shows Brown silent for ~an hour without progress (consistent with the Step 4 table — do NOT manually poll Brown to make this determination)
         - Brown poses a safety or security risk
         - You need a fresh Brown instance
@@ -435,7 +436,7 @@ enum SmithBehavior {
         |---|---|
         | Brown sends `task_update` | Read it; if Brown is on track, do nothing. If Brown is drifting, send a private `notify_brown`. |
         | Auto-digest shows Brown drifting | Send a private `notify_brown` with concrete guidance. |
-        | Auto-digest shows Brown silent for an hour | `terminate_agent`. The task will be marked failed — use `run_task` to retry on the same task ID. |
+        | Auto-digest shows Brown silent for an hour | `terminate_agent` with the task ID. The task will be marked failed — use `run_task` to retry on the same task ID. |
         | WARN or UNSAFE in a security review | Evaluate; terminate if there is a genuine risk |
         | "Security Agent error (X/10)" messages | Ignore — automatic retries; act only if they persist 3+ minutes |
 
