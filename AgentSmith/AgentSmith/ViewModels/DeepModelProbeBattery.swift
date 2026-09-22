@@ -16,7 +16,10 @@ enum DeepModelProbeBattery {
 
         let catalog = kit.modelInfo(providerID: provider.id, modelID: modelID)
         let forcing: @MainActor @Sendable ([String: AnyCodable]) async -> any LLMProvider = { overrides in
-            kit.makeProvider(
+            // Keep the standard probe's guardrails while forcing the one raw parameter under
+            // test. In particular, omit parallel_tool_calls so its rejection cannot poison an
+            // otherwise unrelated reasoning, response-format, or tool-choice measurement.
+            kit.makeProbeProvider(
                 configuration: ModelConfiguration(
                     name: "deep-probe:\(modelID)", providerID: provider.id, modelID: modelID,
                     temperature: nil, maxOutputTokens: 512, streaming: false,
