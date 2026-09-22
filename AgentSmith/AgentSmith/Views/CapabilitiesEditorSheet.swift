@@ -90,6 +90,7 @@ struct CapabilitiesEditorSheet: View {
                 targetKey: key,
                 providerAvailable: provider != nil,
                 onProbe: { runProbe() },
+                onDeepProbe: { runProbe(depth: .deep) },
                 resetToken: resetToken,
                 states: $states,
                 maxContextOverride: $maxContextOverride,
@@ -107,9 +108,12 @@ struct CapabilitiesEditorSheet: View {
     /// Probes just this model, on demand. Reuses `ModelProbeRunner` (the same path the metadata
     /// inspector's Probe Now uses); on completion it refreshes the catalog, so the resolved rows and
     /// the "Capabilities probed" timestamp update live without a restart.
-    private func runProbe() {
+    private func runProbe(depth: ModelProbeRunner.Depth = .standard) {
         guard let provider else { return }
-        Task { await probeRunner.probe(targets: [(provider: provider, modelID: modelID)], kit: shared.llmKit) }
+        Task {
+            await probeRunner.probe(
+                targets: [(provider: provider, modelID: modelID)], kit: shared.llmKit, depth: depth)
+        }
     }
 
     private func resetAll() {
@@ -200,6 +204,7 @@ private struct CapabilitiesForm: View {
     let targetKey: String
     let providerAvailable: Bool
     let onProbe: () -> Void
+    let onDeepProbe: () -> Void
     let resetToken: Int
     @Binding var states: [String: TriStateOverride]
     @Binding var maxContextOverride: Int?
@@ -244,7 +249,8 @@ private struct CapabilitiesForm: View {
                 TimestampRow(title: "Capabilities probed", date: modelInfo?.lastProbedAt,
                              empty: "Never probed on this Mac")
                 ProbeControlRow(title: probeTitle, disabled: !providerAvailable || probeRunner.isRunning,
-                                statusText: probeStatusText, isRunning: probeRunner.isRunning, onProbe: onProbe)
+                                statusText: probeStatusText, isRunning: probeRunner.isRunning,
+                                onProbe: onProbe, onDeepProbe: onDeepProbe)
             }
             Section("Status & Identity") {
                 DisplayNameRow(resolvedName: modelInfo?.displayName ?? fallbackName)
@@ -359,6 +365,7 @@ private struct ProbeControlRow: View {
     let statusText: String?
     let isRunning: Bool
     let onProbe: () -> Void
+    let onDeepProbe: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -366,6 +373,9 @@ private struct ProbeControlRow: View {
                 Label(title, systemImage: "bolt.badge.checkmark")
             }
             .disabled(disabled)
+            Button("Deep Probe", action: onDeepProbe)
+                .disabled(disabled)
+                .help("Run every safe, applicable capability probe. This can make many paid model calls.")
             if isRunning { ProgressView().controlSize(.small) }
             Spacer()
             if let statusText {

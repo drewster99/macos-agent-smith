@@ -11,6 +11,7 @@ import SwiftLLMKit
 @MainActor
 @Observable
 final class ModelProbeRunner {
+    enum Depth: Sendable { case standard, deep }
     /// One model's place in the current run, keyed `providerID/modelID`.
     enum TargetState: Equatable {
         case pending
@@ -26,7 +27,8 @@ final class ModelProbeRunner {
     /// Probes the given models serially, storing each completed run. Seeds are fetched once per
     /// provider from the vendor's own `/models` payload. Finishes by refreshing the touched
     /// providers so the merged catalog reflects the new evidence immediately.
-    func probe(targets: [(provider: ModelProvider, modelID: String)], kit: LLMKitManager) async {
+    func probe(targets: [(provider: ModelProvider, modelID: String)], kit: LLMKitManager,
+               depth: Depth = .standard) async {
         guard !isRunning, !targets.isEmpty else { return }
         isRunning = true
         defer { isRunning = false }
@@ -74,7 +76,15 @@ final class ModelProbeRunner {
             let llm = kit.makeProbeProvider(configuration: throwawayConfig, provider: target.provider)
             let preferLowImageDetail = target.provider.endpoint.host?.contains("api.openai.com") == true
             var profile = await ModelProber.probe(llm: llm, seed: seed,
-                                                  preferLowImageDetail: preferLowImageDetail)
+                effortLevelsToProbe: depth == .deep ? EffortRank.allKnown : [],
+                supportsUnconditionalGeneralEffortEmission: depth == .deep && target.provider.apiType == .anthropic,
+                preferLowImageDetail: preferLowImageDetail,
+                modelCapabilities: kit.modelInfo(providerID: target.provider.id,
+                                                 modelID: target.modelID)?.capabilities ?? ModelCapabilities())
+            if depth == .deep {
+                profile = await DeepModelProbeBattery.probing(
+                    profile, llm: llm, provider: target.provider, modelID: target.modelID, kit: kit)
+            }
             // Trailing-system support isn't part of ModelProber.probe() (it needs a flag-on provider,
             // which only the caller can build); run it here so the GUI probe measures it too.
             profile = await TrailingSystemTurnProbe.probing(profile, provider: target.provider,
