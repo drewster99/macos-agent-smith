@@ -135,6 +135,20 @@ struct ModelMetadataInspectorWindow: View {
             })
             .disabled(selectedModelIDs.isEmpty || probeRunner.isRunning || selectedProvider == nil)
 
+            Button(action: {
+                startProbe(modelIDs: Array(selectedModelIDs), depth: .deep)
+            }, label: {
+                Label(
+                    "Deep Probe (\(selectedModelIDs.count))",
+                    systemImage: "bolt.badge.checkmark.fill"
+                )
+            })
+            .disabled(selectedModelIDs.isEmpty || probeRunner.isRunning || selectedProvider == nil)
+            .help(
+                "Run the standard probe and every safe, applicable advanced probe for each "
+                    + "selected model. This can make many paid model calls."
+            )
+
             if probeRunner.isRunning {
                 ProgressView().controlSize(.small)
                 Text("Probing…").font(.caption).foregroundStyle(.secondary)
@@ -144,7 +158,10 @@ struct ModelMetadataInspectorWindow: View {
         .padding(10)
     }
 
-    private func startProbe(modelIDs: [String]) {
+    private func startProbe(
+        modelIDs: [String],
+        depth: ModelProbeRunner.Depth = .standard
+    ) {
         guard let provider = selectedProvider else { return }
         // Belt to the onChange suspenders: only IDs the selected provider actually catalogs can
         // be probed, so a stale selection can never spend calls against the wrong endpoint.
@@ -152,7 +169,7 @@ struct ModelMetadataInspectorWindow: View {
         let targets = modelIDs.filter(known.contains).sorted().map { (provider: provider, modelID: $0) }
         guard !targets.isEmpty else { return }
         Task {
-            await probeRunner.probe(targets: targets, kit: kit)
+            await probeRunner.probe(targets: targets, kit: kit, depth: depth)
         }
     }
 
