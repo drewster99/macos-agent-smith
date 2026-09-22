@@ -62,6 +62,11 @@ struct AgentCardModelInfoLine: View {
         .foregroundStyle(.tertiary)
         .task(id: modelConfig.id) {
             guard let shared else { return }
+            if let provider = shared.llmKit.providers.first(where: { $0.id == modelConfig.providerID }),
+               LiteLLMProviderMapping.isLocal(provider) {
+                resolution = .resolved
+                return
+            }
             resolution = await shared.llmKit.liteLLMResolution(
                 providerID: modelConfig.providerID,
                 modelID: modelConfig.modelID

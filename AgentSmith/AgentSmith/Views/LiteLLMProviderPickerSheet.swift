@@ -72,10 +72,17 @@ struct LiteLLMProviderPickerSheet: View {
             TextField("Filter\u{2026}", text: $searchText)
                 .textFieldStyle(.roundedBorder)
 
-            // Only real litellm_provider values are selectable. "Unmapped" is a state a provider
-            // can arrive in (LiteLLM has no data for it), never one to be chosen — so nil keeps a
-            // single meaning here and seeding stays free to fill it from the preset.
             List(selection: $selection) {
+                HStack {
+                    Label("LOCAL", systemImage: "desktopcomputer")
+                        .font(.body.monospaced())
+                    Spacer()
+                    Text("No LiteLLM metadata")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .tag(String?.some(LiteLLMProviderMapping.local))
+
                 ForEach(filteredNames, id: \.name) { entry in
                     HStack {
                         Text(entry.name).font(.body.monospaced())

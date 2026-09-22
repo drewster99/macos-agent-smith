@@ -478,6 +478,8 @@ private struct ModelSegmentView: View {
     let segment: ModelRowSegment
     let highlightOffsets: IndexSet?
 
+    @State private var showingChipExplanation = false
+
     private var attributed: AttributedString {
         attributedHighlighting(
             segment.text,
@@ -527,14 +529,43 @@ private struct ModelSegmentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 3))
                 .foregroundStyle(.orange)
         case .flagChip:
-            Text(attributed)
-                .font(.caption2)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(AppColors.flagChipBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 3))
-                .foregroundStyle(AppColors.flagChipForeground)
+            Button(action: { showingChipExplanation = true }, label: {
+                Text(attributed)
+                    .font(.caption2)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(AppColors.flagChipBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .foregroundStyle(AppColors.flagChipForeground)
+            })
+            .buttonStyle(.plain)
+            .help(segment.helpDetail ?? segment.helpTitle ?? segment.text)
+            .popover(isPresented: $showingChipExplanation, arrowEdge: .bottom) {
+                ModelFlagExplanationPopover(
+                    title: segment.helpTitle ?? segment.text,
+                    detail: segment.helpDetail ?? "No explanation is available for this provider-specific flag."
+                )
+            }
         }
+    }
+}
+
+/// Click-through explanation for a behavior-flag chip in the model catalog.
+private struct ModelFlagExplanationPopover: View {
+    let title: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(width: 320, alignment: .leading)
     }
 }
 

@@ -97,6 +97,15 @@ nonisolated struct ModelRowSegment: Equatable, Sendable {
     }
     let text: String
     let kind: Kind
+    let helpTitle: String?
+    let helpDetail: String?
+
+    init(text: String, kind: Kind, helpTitle: String? = nil, helpDetail: String? = nil) {
+        self.text = text
+        self.kind = kind
+        self.helpTitle = helpTitle
+        self.helpDetail = helpDetail
+    }
 }
 
 /// Identifies one segment within a row: line index (0 = title … 3 = flag chips) + segment index.
@@ -174,8 +183,21 @@ nonisolated struct ModelRowContent: Identifiable, Sendable {
 
         var line3: [ModelRowSegment] = []
         if !model.behaviorFlags.isAllDefault {
-            for label in model.behaviorFlags.displayLabels {
-                line3.append(ModelRowSegment(text: label, kind: .flagChip))
+            for flag in BehaviorFlag.allCases where model.behaviorFlags[flag] {
+                line3.append(ModelRowSegment(
+                    text: flag.label,
+                    kind: .flagChip,
+                    helpTitle: flag.editorTitle,
+                    helpDetail: flag.editorDescription
+                ))
+            }
+            for key in model.behaviorFlags.extras.keys.sorted() {
+                line3.append(ModelRowSegment(
+                    text: "*\(key)",
+                    kind: .flagChip,
+                    helpTitle: key,
+                    helpDetail: "Provider-specific behavior flag. Open Flags to inspect or change its stored value."
+                ))
             }
         }
 

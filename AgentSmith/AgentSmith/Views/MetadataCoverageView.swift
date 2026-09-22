@@ -81,6 +81,7 @@ struct MetadataCoverageView: View {
         let hits = modelResolutions.values.filter { $0 == .resolved }.count
         let total = modelResolutions.count
         let isExpanded = expandedProviderIDs.contains(provider.id)
+        let isLocal = LiteLLMProviderMapping.isLocal(provider)
 
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -91,7 +92,8 @@ struct MetadataCoverageView: View {
                 .buttonStyle(.plain)
                 .disabled(total == 0)
 
-                statusIcon(providerIsMapped: provider.liteLLMProviderName != nil, hits: hits, total: total)
+                statusIcon(providerIsMapped: provider.liteLLMProviderName != nil, providerIsLocal: isLocal,
+                           hits: hits, total: total)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(provider.name).font(.headline)
@@ -100,7 +102,7 @@ struct MetadataCoverageView: View {
                         .foregroundStyle(provider.liteLLMProviderName == nil ? .orange : .secondary)
                 }
                 Spacer()
-                Text(total == 0 ? "no models" : "\(hits)/\(total)")
+                Text(isLocal ? "local" : (total == 0 ? "no models" : "\(hits)/\(total)"))
                     .font(.caption.monospaced())
                     .foregroundStyle(hits == total && total > 0 ? .green : .secondary)
                 Button("Change\u{2026}") {
@@ -111,7 +113,8 @@ struct MetadataCoverageView: View {
             if isExpanded {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(shared.llmKit.models(for: provider.id), id: \.modelID) { model in
-                        modelRow(provider: provider, modelID: model.modelID, resolution: modelResolutions[model.modelID])
+                        modelRow(provider: provider, modelID: model.modelID,
+                                 resolution: modelResolutions[model.modelID])
                     }
                 }
                 .padding(.leading, 32)
@@ -123,15 +126,16 @@ struct MetadataCoverageView: View {
 
     @ViewBuilder
     private func modelRow(provider: ModelProvider, modelID: String, resolution: ModelMetadataService.Resolution?) -> some View {
+        let isLocal = LiteLLMProviderMapping.isLocal(provider)
         HStack(spacing: 6) {
-            Image(systemName: resolution == .resolved ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(resolution == .resolved ? .green : .red)
+            Image(systemName: isLocal ? "desktopcomputer" : (resolution == .resolved ? "checkmark.circle.fill" : "xmark.circle.fill"))
+                .foregroundStyle(isLocal ? Color.secondary : (resolution == .resolved ? Color.green : Color.red))
                 .font(.caption)
             Text(modelID)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
             Spacer()
-            if let resolution, resolution != .resolved {
+            if !isLocal, let resolution, resolution != .resolved {
                 Text(explanation(for: resolution))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -149,8 +153,10 @@ struct MetadataCoverageView: View {
     }
 
     @ViewBuilder
-    private func statusIcon(providerIsMapped: Bool, hits: Int, total: Int) -> some View {
-        if !providerIsMapped {
+    private func statusIcon(providerIsMapped: Bool, providerIsLocal: Bool, hits: Int, total: Int) -> some View {
+        if providerIsLocal {
+            Image(systemName: "desktopcomputer").foregroundStyle(.secondary)
+        } else if !providerIsMapped {
             Image(systemName: "minus.circle.fill").foregroundStyle(.orange)
         } else if total == 0 {
             // No models listed (no key, or never fetched) — there is nothing to match, which is
@@ -175,6 +181,7 @@ struct MetadataCoverageView: View {
 
     private func mappingLabel(for provider: ModelProvider) -> String {
         guard let name = provider.liteLLMProviderName else { return "not mapped to a LiteLLM provider" }
+        if LiteLLMProviderMapping.isLocal(provider) { return "LOCAL — no LiteLLM metadata" }
         return "litellm_provider: \(name)"
     }
 
