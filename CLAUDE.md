@@ -432,7 +432,9 @@ tool-choice modes, strict tools, system messages, assistant prefill, parallel to
 thinking-budget searches. Deep Probe always runs the standard battery itself first; it must never
 require a separate prior Probe action or report that prerequisite as a user error. Deep Probe must
 remain an explicit action because it can make many paid model calls; adding a new empirically
-probeable capability means adding it to the deep battery.
+probeable capability means adding it to the deep battery. The Capabilities screen derives its
+Standard/Deep label from the persisted profile's probed evidence; do not create a parallel marker
+whose value can disagree with the probe record.
 
 - All actor state mutation must happen inside the actor; UI observers run via the `@Sendable` callbacks listed above. Don't add `MainActor` reach-ins from inside actors.
 - **`AgentActor.conversationHistory` has a single writer: the run loop.** External / asynchronous `.user` injections (`appendUserMessage`, and anything the runtime or `TaskValidationCoordinator` sends into an agent mid-run) must be **queued** (`pendingInjectedMessages`), never appended directly — the run loop drains them at the top of the iteration, a boundary where the previous turn is complete. This is what makes it structurally impossible to splice a message between an assistant `tool_calls` turn and its `tool_result`s (the provider adjacency rule; violating it is a non-retryable HTTP 400 that kills the agent). A concurrent writer (the validation coordinator informing Smith while he was parked in a long `save_memory`) was the original cause. The loop's own top-of-iteration writers (drains, digest, memory inject) and `pruneNonBrownHistory` (walks back past tool results, never splits a pair) are already safe. Don't reintroduce a direct external append, and don't "fix" adjacency with a silent normalizer — keep the invariant structural.

@@ -41,6 +41,13 @@ struct CapabilitiesEditorSheet: View {
         return shared.llmKit.probeRecords(provider: provider, modelID: modelID).local
     }
 
+    /// Derived from persisted probe evidence, so the label survives relaunch without a second
+    /// source of truth alongside the probe record itself.
+    private var localProbeDepthLabel: String? {
+        guard let profile = localProbeRecord?.profile else { return nil }
+        return Self.containsDeepProbeEvidence(profile) ? "Deep" : "Standard"
+    }
+
     /// The model's reported ceiling for a limit, resolved to be INDEPENDENT of this user override so
     /// it stays visible even after the used value is capped below it: a real probed measurement, then
     /// the composition's non-user layers, then the resolved catalog value (only when unoverridden).
@@ -86,6 +93,7 @@ struct CapabilitiesEditorSheet: View {
                 reportedOutput: reportedLimit(probed: \.maxOutputTokens, facts: \.maxOutputTokens,
                                               catalog: info?.maxOutputTokens, userOverride: maxOutputOverride),
                 fallbackName: modelID,
+                probeDepthLabel: localProbeDepthLabel,
                 probeRunner: probeRunner,
                 targetKey: key,
                 providerAvailable: provider != nil,
@@ -161,6 +169,24 @@ struct CapabilitiesEditorSheet: View {
         }
         shared.setUserModelOverride(providerID: providerID, modelID: modelID, override: merged)
     }
+
+    private static func containsDeepProbeEvidence(_ profile: ModelProfile) -> Bool {
+        if profile.generalEffortLevels.values.contains(where: { $0.source == .probed })
+            || profile.reasoningEffortLevels.values.contains(where: { $0.source == .probed })
+            || profile.reasoningControl?.source == .probed
+            || profile.maxThinkingBudgetTokens?.source == .probed
+            || profile.minThinkingBudgetTokens?.source == .probed {
+            return true
+        }
+        let deepCapabilities: [ModelCapability] = [
+            .structuredOutputSupportsJSONObject, .structuredOutputSupportsJSONSchema,
+            .reasoningCanBeEnabled, .reasoningCanBeDisabled, .reasoning,
+            .toolChoiceSupportsValueRequired, .toolChoiceSupportsValueNone,
+            .toolChoiceSupportsNamedFunction, .thinkingSupportsKeepAll,
+            .toolDefinitionsSupportStrict, .systemMessages, .assistantPrefill, .parallelToolCalls
+        ]
+        return deepCapabilities.contains { profile[$0]?.source == .probed }
+    }
 }
 
 // MARK: - Status descriptor
@@ -200,6 +226,7 @@ private struct CapabilitiesForm: View {
     let reportedContext: Int?
     let reportedOutput: Int?
     let fallbackName: String
+    let probeDepthLabel: String?
     let probeRunner: ModelProbeRunner
     let targetKey: String
     let providerAvailable: Bool
@@ -246,7 +273,9 @@ private struct CapabilitiesForm: View {
         Form {
             Section("Metadata & Probes") {
                 TimestampRow(title: "Model list fetched", date: modelInfo?.fetchedAt, empty: "unknown")
-                TimestampRow(title: "Capabilities probed", date: modelInfo?.lastProbedAt,
+                TimestampRow(title: probeDepthLabel.map { "Capabilities probed — \($0)" }
+                                         ?? "Capabilities probed",
+                             date: modelInfo?.lastProbedAt,
                              empty: "Never probed on this Mac")
                 ProbeControlRow(title: probeTitle, disabled: !providerAvailable || probeRunner.isRunning,
                                 statusText: probeStatusText, isRunning: probeRunner.isRunning,
