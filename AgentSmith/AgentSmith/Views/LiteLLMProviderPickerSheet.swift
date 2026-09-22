@@ -81,7 +81,7 @@ struct LiteLLMProviderPickerSheet: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
-                .tag(String?.some(LiteLLMProviderMapping.local))
+                .tag(LiteLLMProviderMapping.local)
 
                 ForEach(filteredNames, id: \.name) { entry in
                     HStack {
@@ -91,7 +91,7 @@ struct LiteLLMProviderPickerSheet: View {
                             .font(.caption.monospaced())
                             .foregroundStyle(.tertiary)
                     }
-                    .tag(String?.some(entry.name))
+                    .tag(entry.name)
                 }
             }
             .frame(minHeight: 220)

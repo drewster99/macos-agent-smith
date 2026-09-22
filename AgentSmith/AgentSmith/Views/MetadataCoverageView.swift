@@ -205,7 +205,18 @@ struct MetadataCoverageView: View {
     }
 
     private func reload() async {
-        availableNames = await shared.llmKit.allLiteLLMProviderNames()
+        let cataloguedNames = await shared.llmKit.allLiteLLMProviderNames()
+        var counts = Dictionary(uniqueKeysWithValues: cataloguedNames.map { ($0.name, $0.modelCount) })
+        // The downloaded LiteLLM cache may be temporarily unavailable (offline launch, first-run
+        // fetch failure). Keep every mapping the app already knows selectable instead of presenting
+        // a mysteriously empty picker that can only choose LOCAL.
+        let knownMappings = BuiltInProviders.all.compactMap(\.liteLLMProviderName)
+            + shared.llmKit.providers.compactMap(\.liteLLMProviderName)
+        for name in knownMappings where name != LiteLLMProviderMapping.local {
+            if counts[name] == nil { counts[name] = 0 }
+        }
+        availableNames = counts.map { (name: $0.key, modelCount: $0.value) }
+            .sorted { $0.name < $1.name }
         var next: [String: [String: ModelMetadataService.Resolution]] = [:]
         for provider in shared.llmKit.providers {
             next[provider.id] = await shared.llmKit.liteLLMResolutions(forProviderID: provider.id)

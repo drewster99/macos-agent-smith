@@ -375,7 +375,7 @@ private struct ProbeControlRow: View {
             .disabled(disabled)
             Button("Deep Probe", action: onDeepProbe)
                 .disabled(disabled)
-                .help("Run every safe, applicable capability probe. This can make many paid model calls.")
+                .help("Run the standard probe first, then every safe, applicable advanced probe. This can make many paid model calls.")
             if isRunning { ProgressView().controlSize(.small) }
             Spacer()
             if let statusText {
