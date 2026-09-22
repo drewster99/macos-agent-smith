@@ -42,6 +42,28 @@ struct RoleModelConfigOverrideEditor: View {
                           uniquingKeysWith: { a, _ in a })
     }
 
+    /// The runtime value inherited when Max output's Override switch is off. Clear only that one
+    /// field so a context override still participates in the fallback formula.
+    private var inheritedOutputLimit: EffectiveOutputLimitDisplay {
+        var inherited = override
+        inherited.maxOutputTokens = nil
+        let facts = modelInfo
+            ?? ModelInfo(providerID: providerID, modelID: modelID, displayName: modelID)
+        return EffectiveOutputLimitDisplay(override: inherited, modelInfo: facts)
+    }
+
+    private var inheritedOutputDescription: String {
+        let value = "\(inheritedOutputLimit.tokens.formatted()) tokens"
+        switch inheritedOutputLimit.source {
+        case .explicitOverride:
+            return value
+        case .modelMetadata:
+            return "\(value) · model metadata"
+        case .contextFallback(let contextTokens):
+            return "\(value) · fallback from \(contextTokens.formatted())-token context"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header()
@@ -129,13 +151,14 @@ struct RoleModelConfigOverrideEditor: View {
     private func maxOutputRow() -> some View {
         overrideRow(
             title: "Max output tokens",
-            help: "Ceiling for a single response. Off = the model's reported maximum.",
+            help: "Ceiling for a single response. Off = the effective runtime default shown below.",
             isOn: Binding(get: { override.maxOutputTokens != nil },
-                          set: { override.maxOutputTokens = $0 ? (modelInfo?.maxOutputTokens ?? 4096) : nil }),
-            defaultText: modelInfo?.maxOutputTokens.map { "\($0.formatted()) tokens" } ?? "unknown",
+                          set: { override.maxOutputTokens = $0 ? inheritedOutputLimit.tokens : nil }),
+            defaultText: inheritedOutputDescription,
             warning: warnings[.maxOutputTokens]
         ) {
-            numberField(value: Binding(get: { override.maxOutputTokens ?? 4096 }, set: { override.maxOutputTokens = max(1, $0) }))
+            numberField(value: Binding(get: { override.maxOutputTokens ?? inheritedOutputLimit.tokens },
+                                       set: { override.maxOutputTokens = max(1, $0) }))
         }
     }
 

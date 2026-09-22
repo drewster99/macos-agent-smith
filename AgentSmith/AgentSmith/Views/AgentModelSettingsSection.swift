@@ -226,10 +226,8 @@ struct AgentModelSettingsSection: View {
                     .foregroundStyle(.orange)
                     .clipShape(RoundedRectangle(cornerRadius: 3))
             }
-            if let maxOut = info.maxOutputTokens {
-                Text("Max output: \(formatTokenCount(maxOut))")
-                    .foregroundStyle(.secondary)
-            }
+            Text("Model max output: \(info.maxOutputTokens.map(formatTokenCount) ?? "unknown")")
+                .foregroundStyle(info.maxOutputTokens == nil ? .tertiary : .secondary)
             if let maxIn = info.maxInputTokens {
                 Text("Context: \(formatTokenCount(maxIn))")
                     .foregroundStyle(.secondary)
@@ -288,6 +286,7 @@ struct AgentModelSettingsSection: View {
     private func effectiveSettingsBar(for info: ModelInfo) -> some View {
         let override = viewModel.shared.roleModelConfigOverride(role: role, providerID: providerID, modelID: modelID)
         let resolved = override.resolved(against: info, name: info.displayName)
+        let outputLimit = EffectiveOutputLimitDisplay(override: override, modelInfo: info)
         let apiType = viewModel.shared.llmKit.providers.first(where: { $0.id == providerID })?.apiType
         // The four-state ACTUAL thinking state, resolved by the same library rules emission
         // uses — the old `?? "thinking off"` claimed off for every model-default/unknown case.
@@ -313,11 +312,8 @@ struct AgentModelSettingsSection: View {
                info.reasoningEffort?.isSupported == true {
                 Text("reasoning \(reasoningEffort)").foregroundStyle(.secondary)
             }
-            // Show a cap only when the user explicitly overrode it (keyed on the override's presence,
-            // not resolved-vs-model — the model may report no max, which the resolved fallback hides).
-            if let cap = override.maxOutputTokens {
-                Text("output cap \(formatTokenCount(cap))").foregroundStyle(.secondary)
-            }
+            Text("output cap \(formatTokenCount(outputLimit.tokens)) · \(outputSourceLabel(outputLimit.source))")
+                .foregroundStyle(.secondary)
             if let cap = override.maxContextTokens {
                 Text("context cap \(formatTokenCount(cap))").foregroundStyle(.secondary)
             }
@@ -327,6 +323,14 @@ struct AgentModelSettingsSection: View {
         }
         .font(.caption)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func outputSourceLabel(_ source: EffectiveOutputLimitDisplay.Source) -> String {
+        switch source {
+        case .explicitOverride: return "override"
+        case .modelMetadata: return "model metadata"
+        case .contextFallback: return "context fallback"
+        }
     }
 
     // MARK: - Load / select
