@@ -344,7 +344,14 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AgentSmith/Info.plist;
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Agent Smith uses Apple Events to script and automate other applications on your behalf when you ask it to.";
+				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "Agent Smith’s worker agent reads and writes files on your Desktop to carry out tasks you assign it.";
+				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "Agent Smith’s worker agent reads and writes files in your Documents folder to carry out tasks you assign it.";
+				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Agent Smith’s worker agent reads and writes files in your Downloads folder to carry out tasks you assign it.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Nuclear Cyborg Corp. Licensed under the Apache License 2.0.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Agent Smith needs to connect to computers on your local network to access models they provide.";
+				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = "Agent Smith’s worker agent reads and writes files on network volumes when a task you assign it involves one.";
+				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = "Agent Smith’s worker agent reads and writes files on removable volumes when a task you assign it involves one.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -383,7 +390,14 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AgentSmith/Info.plist;
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Agent Smith uses Apple Events to script and automate other applications on your behalf when you ask it to.";
+				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "Agent Smith’s worker agent reads and writes files on your Desktop to carry out tasks you assign it.";
+				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "Agent Smith’s worker agent reads and writes files in your Documents folder to carry out tasks you assign it.";
+				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Agent Smith’s worker agent reads and writes files in your Downloads folder to carry out tasks you assign it.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Nuclear Cyborg Corp. Licensed under the Apache License 2.0.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Agent Smith needs to connect to computers on your local network to access models they provide.";
+				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = "Agent Smith’s worker agent reads and writes files on network volumes when a task you assign it involves one.";
+				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = "Agent Smith’s worker agent reads and writes files on removable volumes when a task you assign it involves one.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
