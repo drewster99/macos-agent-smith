@@ -111,9 +111,18 @@ struct ModelMetadataInspectorWindow: View {
         switch state {
         case .pending: Image(systemName: "hourglass").foregroundStyle(.secondary)
         case .probing: ProgressView().controlSize(.small)
-        case .stored: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .skipped: Image(systemName: "minus.circle").foregroundStyle(.orange)
-        case .failed: Image(systemName: "xmark.circle").foregroundStyle(.red)
+        case .stored(let callCount):
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .help("Probed — \(callCount) calls")
+        case .skipped(let reason):
+            Image(systemName: "minus.circle")
+                .foregroundStyle(.orange)
+                .help("Skipped: \(reason)")
+        case .failed(let reason):
+            Image(systemName: "xmark.circle")
+                .foregroundStyle(.red)
+                .help("Failed: \(reason)")
         }
     }
 

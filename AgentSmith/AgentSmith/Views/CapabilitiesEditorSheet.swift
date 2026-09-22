@@ -408,7 +408,12 @@ private struct ProbeControlRow: View {
             if isRunning { ProgressView().controlSize(.small) }
             Spacer()
             if let statusText {
-                Text(statusText).font(.caption).foregroundStyle(.secondary)
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
     }

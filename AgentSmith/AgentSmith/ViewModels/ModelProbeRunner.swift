@@ -1,4 +1,5 @@
 import Foundation
+import AgentSmithKit
 import SwiftLLMKit
 
 /// Runs capability probes from inside the app — the GUI counterpart of the headless
@@ -95,7 +96,11 @@ final class ModelProbeRunner {
                 switch outcome {
                 case .stored:  states[stateKey] = .stored(callCount: profile.callCount)
                 case .pruned:  states[stateKey] = .skipped(reason: "not a chat model — stale record pruned")
-                case .skipped: states[stateKey] = .skipped(reason: "no established probed findings")
+                case .skipped:
+                    let reason = ProbeRunOutcomeExplanation.noStoredFindingsReason(for: profile)
+                    states[stateKey] = profile.chat.status == .inconclusive
+                        ? .failed(reason)
+                        : .skipped(reason: reason)
                 }
             } catch {
                 states[stateKey] = .failed(error.localizedDescription)
