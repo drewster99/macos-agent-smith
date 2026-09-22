@@ -1,5 +1,5 @@
 {
-  "originHash" : "a5b2406c77d9f2f385bf55f9ecd5acc787e5c38774480ffee7cfb82ddd904fd8",
+  "originHash" : "283df88870612a1ff6f9705de982d7ffaeb5346995fd55ae3044c80bd5d8ab13",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -96,8 +96,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/drewster99/swift-llm-kit.git",
       "state" : {
-        "revision" : "d5e092f9a7824083ad19333c2a720eb5e498ff37",
-        "version" : "0.0.206"
+        "revision" : "4ebfeb2dcc07862df15b1169174de64072ed3d64",
+        "version" : "0.0.207"
       }
     },
     {
