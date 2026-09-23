@@ -1639,16 +1639,32 @@ private struct MessageRow: View, Equatable {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
             }, label: {
-                if let toolName = message.toolName {
-                    Text("Output: \(toolName)")
-                        .font(AppFonts.channelBody)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Output")
-                        .font(AppFonts.channelBody)
-                        .foregroundStyle(.secondary)
-                }
+                StandaloneToolOutputLabelView(message: message)
             })
+        }
+    }
+
+    /// Identifies orphaned tool failures as tool feedback, not agent-authored prose.
+    struct StandaloneToolOutputLabelView: View {
+        let message: ChannelMessage
+
+        var body: some View {
+            if message.severity >= .error {
+                Label(failureTitle, systemImage: "exclamationmark.triangle.fill")
+                    .font(AppFonts.channelBody)
+                    .foregroundStyle(AppColors.verdictError)
+            } else {
+                Text(message.toolName.map { "Output: \($0)" } ?? "Output")
+                    .font(AppFonts.channelBody)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        private var failureTitle: String {
+            guard let toolName = message.toolName else {
+                return "\(message.sender.displayName) tool failed"
+            }
+            return "\(message.sender.displayName) tool failed: \(toolName)"
         }
     }
     
