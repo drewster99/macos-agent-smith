@@ -11,16 +11,35 @@ import SwiftLLMKit
 /// literal text on a later turn — which the normal text paths (raw-text post, Smith's implicit
 /// message_user) would then post to the channel, spamming the transcript with "(no response)".
 ///
-/// The fix: a response whose (trimmed) text equals the marker is treated as an empty response —
-/// never posted, never recorded as real text — while the synthetic marker still closes the turn in
-/// history (which is fine to show there).
+/// The fix: canonical, whitespace-padded, and observed one-character-short marker echoes are treated
+/// as empty responses — never posted, never recorded as real text — while the synthetic marker still
+/// closes the turn in history (which is fine to show there).
 @Suite("AgentActor empty-response marker")
 struct AgentActorEmptyResponseTests {
 
     private static let sharedEngine = SemanticSearchEngine()
 
-    @Test("A parroted marker is treated as empty and never posted to the channel")
-    func markerEchoNotPostedToChannel() async throws {
+    @Test(
+        "Legitimate text containing the marker words remains visible",
+        arguments: [
+            "no response",
+            "(no response) from the server",
+            "There was (no response) during the probe."
+        ]
+    )
+    func legitimateTextIsNotAnEmptyMarkerEcho(responseText: String) {
+        #expect(!AgentActor.isEmptyResponseTurnMarkerEcho(responseText))
+    }
+
+    @Test(
+        "A parroted marker is treated as empty and never posted to the channel",
+        arguments: [
+            AgentActor.emptyResponseTurnMarker,
+            "(no response",
+            " \n(no response)\t"
+        ]
+    )
+    func markerEchoNotPostedToChannel(responseText: String) async throws {
         let channel = MessageChannel()
         let taskStore = TaskStore()
         let memoryStore = MemoryStore(engine: Self.sharedEngine)
@@ -31,11 +50,9 @@ struct AgentActorEmptyResponseTests {
         )
         let config = AgentConfiguration(role: .smith, llmConfig: llmConfig, systemPrompt: "test-system")
 
-        // The model parrots the synthetic marker back as its text output.
+        // The model parrots the synthetic marker, or its observed malformed variant, as text.
         let provider = MockLLMProvider(responses: [
-            LLMResponse(text: AgentActor.emptyResponseTurnMarker),
-            LLMResponse(text: AgentActor.emptyResponseTurnMarker),
-            LLMResponse(text: AgentActor.emptyResponseTurnMarker)
+            LLMResponse(text: responseText)
         ])
 
         let agentID = UUID()
@@ -68,16 +85,13 @@ struct AgentActorEmptyResponseTests {
                 closed = true
                 break
             }
-            try? await Task.sleep(for: .milliseconds(20))
+            try await Task.sleep(for: .milliseconds(20))
         }
         await agent.stop()
 
         #expect(closed, "Smith should have processed the parroted-marker turn and closed it with the synthetic marker")
 
         let posted = await channel.allMessages()
-        #expect(
-            !posted.contains { $0.content == AgentActor.emptyResponseTurnMarker },
-            "the parroted marker must never reach the channel transcript"
-        )
+        #expect(posted.isEmpty, "the parroted marker must never reach the channel transcript")
     }
 }

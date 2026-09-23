@@ -268,6 +268,16 @@ public actor AgentActor {
     /// also keeps the parrot from reinforcing itself in the channel.
     public static let emptyResponseTurnMarker = "(no response)"
 
+    /// Some models omit the marker's final delimiter when echoing it. Recognizing only that exact
+    /// one-character-short form prevents an internal turn boundary from becoming a user-facing
+    /// Smith message without hiding legitimate prose that happens to mention "no response."
+    static func isEmptyResponseTurnMarkerEcho(_ text: String?) -> Bool {
+        guard let text else { return false }
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let unterminatedMarker = String(emptyResponseTurnMarker.dropLast())
+        return trimmedText == emptyResponseTurnMarker || trimmedText == unterminatedMarker
+    }
+
     /// Tracks consecutive identical tool calls (same name + same normalized arguments).
     /// Catches degenerate loops where the LLM repeatedly calls the same tool with the same
     /// arguments (e.g. task_update spam). Any different tool call or text-only response resets.
@@ -1963,7 +1973,7 @@ public actor AgentActor {
         // The model can PARROT the synthetic empty-turn marker from its own history back as literal
         // text. Such a response is "nothing to say": never post it, and treat it as empty below.
         // Trim-tolerant so a whitespace-padded echo is caught too.
-        let isEmptyMarkerEcho = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.emptyResponseTurnMarker
+        let isEmptyMarkerEcho = Self.isEmptyResponseTurnMarkerEcho(response.text)
 
         // Post text to channel unless this agent's raw LLM output is suppressed.
         // Suppressed text is still stored in conversationHistory and visible in the inspector.
