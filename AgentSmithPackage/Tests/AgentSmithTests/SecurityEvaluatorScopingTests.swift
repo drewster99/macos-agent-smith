@@ -14,6 +14,34 @@ struct SecurityEvaluatorScopingTests {
         return "{\"toolResponses\":[\(entries)]}"
     }
 
+    @Test("scoping prompt and provider request share a tool-free evidence boundary")
+    func scopingPromptDeclaresNoTools() async {
+        let prompt = SecurityAgentBehavior.toolScopingSystemPrompt
+        #expect(prompt.contains("This initial scoping pass has no tools."))
+        #expect(prompt.contains("You have access to a `file_read` tool") == false)
+
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(text: json([("get_current_time", true)]))
+        ])
+        let evaluator = SecurityEvaluator(
+            provider: provider,
+            systemPrompt: "unused per-call prompt",
+            channel: MessageChannel(),
+            abort: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
+        )
+        let result = await evaluator.scopeTools(
+            candidateTools: [CurrentTimeTool()],
+            taskTitle: "Test",
+            taskID: UUID().uuidString,
+            taskDescription: "Check the time"
+        )
+
+        #expect(result.succeeded)
+        #expect(provider.receivedToolNames == [[]])
+    }
+
     @Test("clean JSON parses to the allowed set")
     func cleanParse() {
         let text = json([("file_read", true), ("grep", true), ("bash", false), ("file_write", false)])

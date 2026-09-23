@@ -273,6 +273,50 @@ struct SecurityEvaluatorTests {
         #expect(provider.receivedMaxTokenOverrides == [1500])
     }
 
+    @Test("cache-stable evaluation context precedes timestamp and call-specific arguments")
+    func cacheStableContextComesFirst() async throws {
+        let provider = PromptCapturingProvider(responses: [textResponse("SAFE ordered")])
+        let evaluator = SecurityEvaluator(
+            provider: provider,
+            systemPrompt: "sys",
+            channel: MessageChannel(),
+            abort: { _, _ in },
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
+        )
+
+        _ = await evaluator.evaluate(
+            toolName: "bash",
+            toolParams: "{\"command\":\"DYNAMIC-COMMAND\"}",
+            toolDescription: "STABLE-TOOL-DESCRIPTION",
+            toolParameterDefs: "STABLE-PARAMETER-DEFINITIONS",
+            taskTitle: "STABLE-TASK-TITLE",
+            taskID: "STABLE-TASK-ID",
+            taskDescription: "STABLE-TASK-DESCRIPTION",
+            siblingCalls: nil,
+            agentRoleName: "Brown",
+            callerRole: .brown,
+            toolGroupDescription: nil,
+            sanctionedDirectories: ["/tmp/STABLE-EVIDENCE"],
+            evaluatingForAgentID: UUID()
+        )
+
+        let prompt = try #require(provider.capturedPrompts.first)
+        let task = try #require(prompt.range(of: "STABLE-TASK-TITLE"))
+        let directory = try #require(prompt.range(of: "/tmp/STABLE-EVIDENCE"))
+        let toolDescription = try #require(prompt.range(of: "STABLE-TOOL-DESCRIPTION"))
+        let parameterDefinitions = try #require(prompt.range(of: "STABLE-PARAMETER-DEFINITIONS"))
+        let timestamp = try #require(prompt.range(of: "The current date and time are"))
+        let arguments = try #require(prompt.range(of: "DYNAMIC-COMMAND"))
+
+        #expect(prompt.hasPrefix("# Current task"))
+        #expect(task.lowerBound < directory.lowerBound)
+        #expect(directory.lowerBound < toolDescription.lowerBound)
+        #expect(toolDescription.lowerBound < parameterDefinitions.lowerBound)
+        #expect(parameterDefinitions.lowerBound < timestamp.lowerBound)
+        #expect(timestamp.lowerBound < arguments.lowerBound)
+    }
+
     // MARK: - Execution-outcome annotation (the new feature)
 
     /// Captures the prompt the provider sees on a target call.

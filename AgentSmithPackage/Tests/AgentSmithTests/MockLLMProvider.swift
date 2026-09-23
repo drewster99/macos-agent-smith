@@ -7,6 +7,7 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
     private var _responses: [LLMResponse]
     private var _callCount = 0
     private var _receivedMessages: [[LLMMessage]] = []
+    private var _receivedToolNames: [[String]] = []
     private var _receivedMaxTokenOverrides: [Int?] = []
 
     /// Initializes with a queue of responses that will be returned in order.
@@ -22,6 +23,10 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
         lock.withLock { _receivedMessages }
     }
 
+    var receivedToolNames: [[String]] {
+        lock.withLock { _receivedToolNames }
+    }
+
     var receivedMaxTokenOverrides: [Int?] {
         lock.withLock { _receivedMaxTokenOverrides }
     }
@@ -33,6 +38,7 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
     ) async throws -> LLMResponse {
         lock.withLock {
             _receivedMessages.append(messages)
+            _receivedToolNames.append(tools.map(\.name))
             _receivedMaxTokenOverrides.append(overrides.maxOutputTokens)
             precondition(!_responses.isEmpty, "MockLLMProvider has no canned responses")
             let index = min(_callCount, _responses.count - 1)

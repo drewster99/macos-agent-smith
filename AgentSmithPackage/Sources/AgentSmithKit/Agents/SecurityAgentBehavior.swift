@@ -85,12 +85,12 @@ enum SecurityAgentBehavior {
         For example, you may be able to grant a Git tool, a compiler tool and a file editor
         rather than granting full shell access.
         
-        ## `file_read` tool
+        ## Evidence boundary
 
-        You have access to a `file_read` tool to inspect file contents during this evaluation. Use it
-        if you think reading a file would better inform your tool list adjudication.
-
-        \(ParallelToolCallGuidance.text(examples: ["Need to inspect several referenced files? Call `file_read` once per file, all in one response."]))
+        This initial scoping pass has no tools. You cannot inspect files or gather additional evidence
+        during this pass. Decide from the task description and candidate-tool metadata in the user
+        message. When a tool could reasonably be needed but the available metadata does not settle the
+        question, prefer allowing it here: every concrete tool call is still evaluated separately later.
 
         ## Step by step evaluation
         
