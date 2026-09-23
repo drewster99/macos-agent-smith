@@ -204,6 +204,14 @@ public actor AgentActor {
     private var consecutiveContextOverflows = 0
     private static let maxContextOverflowRetries = 3
 
+    /// Consecutive LLM calls the model server refused for lack of memory
+    /// (`LLMProviderError.serverMemoryExhaustion`). Reaching
+    /// `serverMemoryExhaustionsBeforeContextReduction` shrinks the context once and tells the user.
+    /// The ordinary backoff retry continues either way, because the server may free memory on its
+    /// own; any other outcome — success or a different error — ends the streak.
+    private var consecutiveServerMemoryExhaustions = 0
+    private static let serverMemoryExhaustionsBeforeContextReduction = 3
+
     /// The model's true maximum output-token limit, learned from a backend rejection
     /// ("max_tokens (X) exceeds model's maximum output tokens (Y)"). Once set, every send
     /// this run clamps its output cap to it so the agent stops re-hitting the same 400.
@@ -1582,6 +1590,7 @@ public actor AgentActor {
                 consecutiveErrors = 0
                 retryWindowStartedAt = nil
                 consecutiveContextOverflows = 0
+                consecutiveServerMemoryExhaustions = 0
                 consecutivePruneRebuilds = 0
                 lastUsageStale = false
                 // Defensive clamp: every site that reassigns `conversationHistory` resets
@@ -1686,6 +1695,17 @@ public actor AgentActor {
                 let agentID = id.uuidString.prefix(8)
                 Self.stopLogger.notice("AgentActor.runLoop catch role=\(role, privacy: .public) agent=\(agentID, privacy: .public) isRunning=\(self.isRunning, privacy: .public) isCancelled=\(cancelled, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                 guard isRunning else { break }
+
+                // Server out of memory: counted here, ahead of every branch below, so that any
+                // other error — including the ones those branches `continue` past — ends the streak.
+                if let memoryExhaustion = (error as? LLMProviderError)?.serverMemoryExhaustion {
+                    consecutiveServerMemoryExhaustions += 1
+                    if consecutiveServerMemoryExhaustions == Self.serverMemoryExhaustionsBeforeContextReduction {
+                        await reduceContextAfterServerMemoryExhaustion(memoryExhaustion, error: error)
+                    }
+                } else {
+                    consecutiveServerMemoryExhaustions = 0
+                }
 
                 // Context overflow: the API rejected the request because messages + completion
                 // exceed the model's context window. Rebuild context from task state (Brown)
@@ -1809,6 +1829,14 @@ public actor AgentActor {
                 // `serverRetryAfter` clause in `shouldSurfaceNow`.
                 let isPersistentClientError = classification == .permanent
                 let isRateLimited = httpStatus == 429
+                // The server refused with its own code and reason (an error object — oMLX sends
+                // one on an HTTP 200). That reason is what the user needs, and a short retry streak
+                // would otherwise hide it behind the >=5 gate.
+                var isServerDeclaredFailure = false
+                if let providerError = error as? LLMProviderError,
+                   case .responseFailed = providerError {
+                    isServerDeclaredFailure = true
+                }
 
                 // Honor a server-supplied Retry-After (e.g. on a 429) over our own guess: the
                 // server knows when its window resets. Floored at 1s so a `Retry-After: 0`
@@ -1821,6 +1849,7 @@ public actor AgentActor {
                 let shouldSurfaceNow = consecutiveErrors >= 5
                     || (isPersistentClientError && consecutiveErrors == 1)
                     || (isRateLimited && consecutiveErrors == 1)
+                    || (isServerDeclaredFailure && consecutiveErrors == 1)
                     // Any server-directed wait (e.g. 503/408 + Retry-After), so honoring a long
                     // delay is announced and the ridiculous-wait flag is reachable — never silent.
                     || (serverRetryAfter != nil && consecutiveErrors == 1)
@@ -2963,6 +2992,71 @@ public actor AgentActor {
                 ]
             ))
         }
+    }
+
+    /// Shrinks this agent's context after the model server has refused
+    /// `serverMemoryExhaustionsBeforeContextReduction` requests in a row for lack of memory, and
+    /// tells the user what happened and what they can change. Less context is the one lever the
+    /// agent holds; the server's memory is the user's. Uses the same reduction as a context
+    /// overflow: Brown rebuilds from its task record, everyone else (or a Brown with no task to
+    /// rebuild from) prunes to recent history.
+    private func reduceContextAfterServerMemoryExhaustion(
+        _ code: LLMProviderError.ServerMemoryExhaustionCode,
+        error: Error
+    ) async {
+        let roleName = configuration.role.displayName
+        let messageCountBefore = conversationHistory.count
+        let reductionMethod: String
+        if configuration.role == .brown, await rebuildContextFromTask() {
+            reductionMethod = "rebuilt from the task record"
+        } else {
+            forceAggressivePrune()
+            reductionMethod = "pruned to its most recent messages"
+        }
+        let messageCountAfter = conversationHistory.count
+        let reductionSentence = messageCountAfter < messageCountBefore
+            ? "\(roleName)'s context was \(reductionMethod) (\(messageCountBefore) → \(messageCountAfter) messages)"
+            : "\(roleName)'s context could not be reduced any further"
+
+        let serverSpecificAdvice: String
+        switch code {
+        case .omlxPrefillMemoryExceeded:
+            serverSpecificAdvice = "Raise oMLX's Memory Guard tier or its custom memory ceiling."
+        }
+
+        let serverMessage: String
+        if let providerError = error as? LLMProviderError,
+           case .responseFailed(_, let message) = providerError {
+            serverMessage = message
+        } else {
+            serverMessage = error.localizedDescription
+        }
+
+        await toolContext.post(ChannelMessage(
+            sender: .agent(configuration.role),
+            recipientID: OrchestrationRuntime.userID,
+            recipient: .user,
+            content: """
+                The model server for \(roleName) (`\(configuration.llmConfig.model)`) refused \
+                \(consecutiveServerMemoryExhaustions) requests in a row because it did not have enough \
+                memory to process them (`\(code.rawValue)`). \(reductionSentence), and \(roleName) will \
+                keep retrying.
+
+                If it keeps happening:
+                • Free memory on the machine running the model server (quit other apps, unload other models).
+                • \(serverSpecificAdvice)
+                • Lower "Max context tokens" for this model in \(roleName)'s model settings, so its \
+                conversation is pruned sooner and every request stays smaller.
+
+                The server said:
+                \(Self.truncateOutput(serverMessage, maxLines: 4))
+                """,
+            metadata: [
+                "messageKind": .kind(.advisory),
+                "severity": .severity(.warning),
+                "agentRole": .string(configuration.role.rawValue)
+            ]
+        ))
     }
 
     /// Rebuilds the per-turn `ToolAvailabilityContext` using current actor state.
