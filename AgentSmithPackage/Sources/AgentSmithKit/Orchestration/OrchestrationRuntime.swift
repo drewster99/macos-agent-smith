@@ -2345,7 +2345,7 @@ public actor OrchestrationRuntime {
             // task titled "Agent cleanup" reached Smith through its completion banner).
             if case .system = message.sender {
                 let smithRelevantSystemKinds: Set<ChannelMessageKind> = [
-                    .taskUpdateGuidance, .agentLifecycle, .rateLimit
+                    .taskUpdateGuidance, .agentLifecycle, .rateLimit, .userTaskAction
                 ]
                 guard let kind = message.kind, smithRelevantSystemKinds.contains(kind) else {
                     return false
@@ -3956,6 +3956,22 @@ public actor OrchestrationRuntime {
                 await taskStore.setSummary(id: taskID, summary: summary)
             }
         }
+    }
+
+    /// Tells Smith the user changed a task's state from the app UI (pause, stop, delete).
+    ///
+    /// Posted as `.system`, not `.user`: the text is composed by the app, and attributing it to
+    /// the user put words in their mouth in the transcript and in Smith's context.
+    public func notifySmithOfUserTaskAction(taskID: UUID, text: String) async {
+        guard let agentID = agentIDForRole(.smith) else { return }
+        await channel.post(ChannelMessage(
+            sender: .system,
+            recipientID: agentID,
+            recipient: .agent(.smith),
+            content: text,
+            metadata: ["messageKind": .kind(.userTaskAction)],
+            taskID: taskID
+        ))
     }
 
     /// Posts a private message from the user directly to the agent with the given role.

@@ -1627,16 +1627,16 @@ final class AppViewModel {
         }
     }
 
-    /// Tells Smith — via a user-directed channel message, the same path `retryTask` uses — that
+    /// Tells Smith — via a system notice, never a message in the user's name — that
     /// the user changed a task's state from the app UI. Without this, Smith's conversational
     /// context keeps treating a paused/stopped/deleted task as still in progress (it can't see
     /// deleted tasks via its tools, so its only knowledge is what it was last told), and it
     /// refuses to start new work. Capture the title BEFORE the mutation so a soft-deleted task
     /// (already gone from `tasks`) still names itself.
     private func notifySmithTaskStateChanged(taskID: UUID, title: String, message: String) async {
-        await runtime?.sendDirectMessage(
-            to: .smith,
-            text: "[System notice — user action in the app] \(message) Task: \"\(title)\" (ID: \(taskID.uuidString)). No reply to the user is needed unless they ask about it."
+        await runtime?.notifySmithOfUserTaskAction(
+            taskID: taskID,
+            text: "User action in the app: \(message) Task: \"\(title)\" (ID: \(taskID.uuidString)). No reply to the user is needed unless they ask about it."
         )
     }
 

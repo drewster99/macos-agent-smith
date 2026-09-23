@@ -80,6 +80,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// Deliberately NOT in `parkedWorkerInformationalMessageKinds` — an amendment is work
     /// handed back, so like `orchestratorMessage` it resumes a parked worker.
     case taskAmendment = "task_amendment"
+    /// The user paused, stopped, or deleted a task from the app UI; addressed to Smith so its
+    /// picture of the task matches reality. Posted by the SYSTEM, never as the user — the user
+    /// clicked a control, they did not write the notice.
+    case userTaskAction = "user_task_action"
 
     // MARK: Validation
     case changesRequested = "changes_requested"
