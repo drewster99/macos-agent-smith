@@ -29,11 +29,11 @@ import SwiftLLMKit
 /// ## Wire compatibility
 ///
 /// Severity is persisted in `metadata["severity"]`, which is the ONLY key written going forward.
-/// Before this type existed, producers stamped a bare `isError: true` boolean and the persisted
-/// corpus is full of those rows, so `ChannelMessage.severity` derives `.error` from `isError`
-/// when no `severity` key is present — the same way `kind` derives `.securityReview` for rows
-/// written before that kind existed. The derivation lives in the accessor, never at a read site,
-/// and nothing dual-writes: one slot, one writer.
+/// Before this type existed, producers stamped bare `isError: true` and `isWarning: true`
+/// booleans and the persisted corpus is full of those rows, so `ChannelMessage.severity` derives
+/// their corresponding levels when no `severity` key is present — the same way `kind` derives
+/// `.securityReview` for rows written before that kind existed. The derivation lives in the
+/// accessor, never at a read site, and nothing dual-writes: one slot, one writer.
 public enum MessageSeverity: String, Codable, Sendable, Hashable, CaseIterable, Comparable {
 
     /// Ordinary traffic. The overwhelming majority of messages; never stamped explicitly, since

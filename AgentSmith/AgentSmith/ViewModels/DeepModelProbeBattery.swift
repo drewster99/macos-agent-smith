@@ -13,6 +13,7 @@ enum DeepModelProbeBattery {
     ) async -> ModelProfile {
         var profile = initial
         guard profile.chat.value == true else { return profile }
+        let started = Date()
 
         let catalog = kit.modelInfo(providerID: provider.id, modelID: modelID)
         let forcing: @MainActor @Sendable ([String: AnyCodable]) async -> any LLMProvider = { overrides in
@@ -80,12 +81,14 @@ enum DeepModelProbeBattery {
             profile.callCount += 1
         }
 
-        if profile[.thinkingSupportsKeepAll] == nil,
-           let finding = await ModelProber.probeThinkingKeep(
-               reasoningControl: mechanism, acceptedThinkingBlock: false,
-               makeProviderForcing: forcing) {
-            profile[.thinkingSupportsKeepAll] = finding
-            profile.callCount += 1
+        if profile[.thinkingSupportsKeepAll] == nil {
+            let calls = ProbeCallCounter()
+            if let finding = await ModelProber.probeThinkingKeep(
+                reasoningControl: mechanism, acceptedThinkingBlock: false,
+                makeProviderForcing: forcing, calls: calls) {
+                profile[.thinkingSupportsKeepAll] = finding
+            }
+            profile.callCount += calls.value
         }
         if profile[.toolDefinitionsSupportStrict] == nil,
            let finding = await ModelProber.probeStrictToolDefinitions(
@@ -134,6 +137,7 @@ enum DeepModelProbeBattery {
                 profile.callCount += minimumCalls.value
             }
         }
+        profile.duration += Date().timeIntervalSince(started)
         return profile
     }
 

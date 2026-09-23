@@ -217,6 +217,8 @@ struct WorkerAddressingTests {
         #expect(calls.first?.workerID == fixture.newerWorker)
         #expect(calls.first?.workerID != fixture.olderWorker)
         #expect(calls.first?.callerID == smithID)
+        #expect(await fixture.taskStore.task(id: fixture.newerTask.id)?.status == .failed)
+        #expect(result.output.contains("marked failed"))
     }
 
     @Test("terminate_agent never falls back to another worker when the task has none")

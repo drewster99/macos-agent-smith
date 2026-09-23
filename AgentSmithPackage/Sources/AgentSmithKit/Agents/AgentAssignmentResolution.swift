@@ -21,9 +21,9 @@ public enum AgentAssignmentResolution {
     public struct Resolution: Equatable, Sendable {
         /// The assignments to apply. A superset of `saved` — never a subset.
         public var assignments: [AgentRole: ModelAssignment]
-        /// Saved assignments whose provider is not currently configured. **Kept** in
-        /// `assignments`, reported so the caller can log them and the UI can mark the role
-        /// unusable. Empty when the provider list is empty — see `resolve`.
+        /// Saved assignments whose model id is blank or whose provider is not currently
+        /// configured. **Kept** in `assignments`, reported so the caller can log them and the UI
+        /// can mark the role unusable. Empty when the provider list is empty — see `resolve`.
         public var unavailable: [AgentRole: ModelAssignment]
         /// Roles that had NO assignment and were filled from the defaults.
         public var healed: [AgentRole: ModelAssignment]

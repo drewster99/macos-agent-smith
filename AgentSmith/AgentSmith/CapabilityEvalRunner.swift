@@ -768,8 +768,9 @@ enum CapabilityEvalRunner {
             }
             // nil unless the model's mechanism actually has a `keep` key — acceptance-grading
             // it everywhere recorded `true` on any endpoint that ignores unknown body keys.
-            if profile[.thinkingSupportsKeepAll] == nil,
-               let finding = await ModelProber.probeThinkingKeep(
+            if profile[.thinkingSupportsKeepAll] == nil {
+                let keepCalls = ProbeCallCounter()
+                if let finding = await ModelProber.probeThinkingKeep(
                    // The DISCOVERED mechanism first — the same resolution the budget gate uses.
                    // Passing only the catalog's (which nothing decodes) plus the old
                    // `reasoningCanBeEnabled` stand-in went stale the day discovery landed:
@@ -782,9 +783,10 @@ enum CapabilityEvalRunner {
                    // models this matters for (DeepSeek, Kimi) now demonstrate `.thinkingBlock`
                    // and arrive through the parameter above.
                    acceptedThinkingBlock: false,
-                   makeProviderForcing: forcing) {
-                profile[.thinkingSupportsKeepAll] = finding
-                profile.callCount += 1
+                   makeProviderForcing: forcing, calls: keepCalls) {
+                    profile[.thinkingSupportsKeepAll] = finding
+                }
+                profile.callCount += keepCalls.value
             }
             // nil where the family has no `strict` concept — no call is spent there.
             if profile[.toolDefinitionsSupportStrict] == nil,

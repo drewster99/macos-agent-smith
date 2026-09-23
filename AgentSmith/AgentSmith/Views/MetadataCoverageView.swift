@@ -174,9 +174,18 @@ struct MetadataCoverageView: View {
     // MARK: - Labels
 
     private var totalsSummary: String {
-        let all = resolutions.values.flatMap(\.values)
+        let localProviderIDs = Set(shared.llmKit.providers
+            .filter(LiteLLMProviderMapping.isLocal)
+            .map(\.id))
+        let all = resolutions
+            .filter { !localProviderIDs.contains($0.key) }
+            .flatMap { $0.value.values }
         let hits = all.filter { $0 == .resolved }.count
-        return "\(hits) of \(all.count) models have LiteLLM metadata"
+        let localCount = shared.llmKit.providers
+            .filter { localProviderIDs.contains($0.id) }
+            .reduce(0) { $0 + shared.llmKit.models(for: $1.id).count }
+        let localSuffix = localCount == 0 ? "" : " · \(localCount) local"
+        return "\(hits) of \(all.count) eligible models have LiteLLM metadata\(localSuffix)"
     }
 
     private func mappingLabel(for provider: ModelProvider) -> String {

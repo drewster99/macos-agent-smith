@@ -146,9 +146,11 @@ enum TrailingSystemTurnProbe {
         flags.supportsTrailingSystemMessage = true
         let llm = kit.makeProvider(configuration: config, provider: provider, behaviorFlags: flags)
         var updated = profile
+        let started = Date()
         updated.trailingSystemMessage = await ModelProber.probeTrailingSystemTurn(
             llm: llm, test: test, modelID: modelID)
         updated.callCount += 1
+        updated.duration += Date().timeIntervalSince(started)
         return updated
     }
 }

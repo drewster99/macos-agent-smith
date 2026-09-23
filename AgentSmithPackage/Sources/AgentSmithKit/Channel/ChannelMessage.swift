@@ -140,10 +140,10 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     ///
     /// Two derivations live here, in the single accessor, rather than at read sites:
     ///
-    /// - A row with no `severity` but `isError: true` answers `.error`. Every failure posted
-    ///   before this type existed is stamped that way and the persisted corpus is full of
-    ///   them; folding it in here makes historical and current rows indistinguishable to
-    ///   every consumer, exactly as `kind` does for legacy security-review rows.
+    /// - A row with no `severity` but `isError: true` answers `.error`; a legacy
+    ///   `isWarning: true` row answers `.warning`. The persisted corpus is full of both shapes,
+    ///   so folding them in here makes historical and current rows indistinguishable to every
+    ///   consumer, exactly as `kind` does for legacy security-review rows.
     /// - A row with neither answers `.info`.
     ///
     /// Unlike `kind` this does NOT trap on an unrecognized value. A kind drives control flow, so
@@ -168,6 +168,7 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
         if case .string(let tag)? = metadata?["securityDisposition"] {
             return MessageSeverity.forSecurityDispositionTag(tag)
         }
+        if case .bool(true)? = metadata?["isWarning"] { return .warning }
         return .info
     }
 

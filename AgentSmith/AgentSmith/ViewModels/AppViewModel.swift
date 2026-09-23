@@ -581,7 +581,10 @@ final class AppViewModel {
         // Logged because the destructive path logged only what it SUBSTITUTED, never what it
         // removed — which is why recovering the lost values took archaeology instead of a grep.
         for (role, assignment) in resolution.unavailable {
-            logger.notice("Assignment KEPT but unavailable in session \(self.session.name, privacy: .public): \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public) — that provider is not configured (yet). The role reads as invalid until it is; nothing was changed.")
+            let reason = assignment.modelID.isEmpty
+                ? "the saved model id is empty"
+                : "provider \(assignment.providerID) is not configured (yet)"
+            logger.notice("Assignment KEPT but unavailable in session \(self.session.name, privacy: .public): \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public) — \(reason, privacy: .public). The role reads as invalid until it is; nothing was changed.")
         }
         for (role, assignment) in resolution.healed {
             logger.notice("Auto-assigned \(role.rawValue, privacy: .public) → \(assignment.providerID, privacy: .public)/\(assignment.modelID, privacy: .public) [bundled default] in session \(self.session.name, privacy: .public)")

@@ -63,13 +63,32 @@ struct TerminateAgentTool: AgentTool {
 
         let success = await context.terminateAgent(workerID, context.agentID)
         if success {
+            // `terminateAgent` owns agent teardown and deliberately does not impose a task
+            // disposition: UI pause/stop flows use the same callback and choose their own state.
+            // This tool, however, promises Smith that an explicitly killed worker leaves a failed,
+            // retryable task. Use compare-and-set so a submission that raced into validation or
+            // completion is never overwritten by the stale task snapshot above.
+            let markedFailed = await context.taskStore.updateStatus(
+                id: taskID,
+                to: .failed,
+                ifCurrentlyIn: [.running, .awaitingHelp]
+            )
+            if markedFailed {
+                await context.taskStore.addUpdate(
+                    id: taskID,
+                    message: "Brown worker terminated by \(context.agentRole.displayName): \(reason)"
+                )
+            }
             await context.post(ChannelMessage(
                 sender: .system,
                 content: "Brown worker \(workerID.uuidString) for task \"\(task.title)\" (\(taskIDString)) terminated by \(context.agentRole.displayName): \(reason)",
                 metadata: ["messageKind": .kind(.agentLifecycle)],
                 taskID: taskID
             ))
-            return .success("Brown worker for task \(taskIDString) (\"\(task.title)\") terminated successfully.")
+            let taskOutcome = markedFailed
+                ? " The task was marked failed and can be retried with `run_task`."
+                : " The task had already moved beyond active work, so its status was left unchanged."
+            return .success("Brown worker for task \(taskIDString) (\"\(task.title)\") terminated successfully.\(taskOutcome)")
         } else {
             return .failure("Failed to terminate the Brown worker for task \(taskIDString) — the worker was not found or had already stopped.")
         }

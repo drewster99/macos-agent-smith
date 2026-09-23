@@ -272,6 +272,16 @@ struct ToolOutcomeSeverityTests {
 @Suite("SecurityDisposition severity")
 struct SecurityDispositionSeverityTests {
 
+    @Test("Legacy generic warning rows keep their warning severity")
+    func legacyWarningFlagDerivesSeverity() {
+        let message = ChannelMessage(
+            sender: .system,
+            content: "legacy warning",
+            metadata: ["isWarning": .bool(true)]
+        )
+        #expect(message.severity == .warning)
+    }
+
     @Test("Allowed calls are routine, including the unjudged ones")
     func allowedCallsAreInfo() {
         #expect(SecurityDisposition(outcome: .approved).severity == .info)

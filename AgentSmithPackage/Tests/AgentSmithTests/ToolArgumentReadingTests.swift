@@ -219,6 +219,34 @@ struct EmptySentinelArgumentTests {
         )
         #expect(result.output.contains("template_inputs are valid only") == false, "\(result.output)" as Comment)
     }
+
+    @Test("edit_task clears template inputs only with explicit destructive intent")
+    func editTaskClearsTemplateInputsExplicitly() async throws {
+        let store = TaskStore()
+        let task = await store.addTask(
+            title: "Template",
+            description: "d",
+            isTemplate: true,
+            templateInputDefinitions: [
+                TemplateInputDefinition(name: "value", description: "A value", required: true)
+            ]
+        )
+        let context = TestToolContext.make(taskStore: store)
+
+        let placeholder = try await EditTaskTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "template_inputs": .array([])],
+            context: context
+        )
+        #expect(placeholder.succeeded)
+        #expect(await store.task(id: task.id)?.templateInputDefinitions.count == 1)
+
+        let cleared = try await EditTaskTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "clear_template_inputs": .bool(true)],
+            context: context
+        )
+        #expect(cleared.succeeded)
+        #expect(await store.task(id: task.id)?.templateInputDefinitions.isEmpty == true)
+    }
 }
 
 /// Guards the rule rather than trusting it: no NEW hand-unwraps of an optional tool argument.

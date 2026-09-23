@@ -7,7 +7,8 @@ public struct EditTaskTool: AgentTool {
     public let toolDescription = """
         Edit a pending, paused, interrupted, failed, scheduled, or template task's definition. \
         Use this for title, full description replacement, template toggle, template input \
-        definitions, template instance title template, and per-task worker tool overrides. \
+        definitions (or `clear_template_inputs: true` to remove them), template instance title \
+        template, and per-task worker tool overrides. \
         Do not use while a worker is running the task. On a TEMPLATE, title and description may \
         use `{{input_name}}` placeholders; one naming no defined input is refused. Renaming an \
         input and the text that references it in a SINGLE call is accepted — the two are checked \
@@ -34,7 +35,11 @@ public struct EditTaskTool: AgentTool {
                     ]),
                     "required": .array([.string("name"), .string("description")])
                 ]),
-                "description": .string("Optional COMPLETE replacement input definition list.")
+                "description": .string("Optional COMPLETE replacement input definition list. An empty array is treated as an omitted placeholder; use clear_template_inputs to remove every input.")
+            ]),
+            "clear_template_inputs": .dictionary([
+                "type": .string("boolean"),
+                "description": .string("Set true to remove every template input definition. This explicit flag avoids mistaking a model-emitted empty placeholder array for destructive intent.")
             ]),
             "tool_overrides": .dictionary([
                 "type": .string("object"),
@@ -70,8 +75,16 @@ public struct EditTaskTool: AgentTool {
             isTemplate = task.isTemplate
         }
         let definitions: [TemplateInputDefinition]
-        // An empty array defines no inputs — same dead end `create_task` hit. See `ToolArguments`.
-        if let rawInputs = ToolArguments.optionalArray(arguments, "template_inputs") {
+        let clearsTemplateInputs = ToolArguments.optionalBool(arguments, "clear_template_inputs") == true
+        // An empty array is still an absent placeholder — some models emit it on every call. A
+        // destructive clear therefore has its own boolean, while a populated array remains the
+        // complete replacement surface.
+        if clearsTemplateInputs,
+           ToolArguments.optionalArray(arguments, "template_inputs") != nil {
+            return .failure("Pass template_inputs OR clear_template_inputs: true, not both.")
+        } else if clearsTemplateInputs {
+            definitions = []
+        } else if let rawInputs = ToolArguments.optionalArray(arguments, "template_inputs") {
             // Refuse rather than silently drop them — a caller that thinks it just defined
             // inputs would otherwise go on to call run_task with input_values that reject.
             guard isTemplate else {
