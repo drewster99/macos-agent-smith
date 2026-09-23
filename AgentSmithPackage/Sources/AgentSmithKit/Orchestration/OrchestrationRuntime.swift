@@ -3958,18 +3958,19 @@ public actor OrchestrationRuntime {
         }
     }
 
-    /// Tells Smith the user changed a task's state from the app UI (pause, stop, delete).
+    /// Tells Smith the user acted on a task from the app UI (pause, stop, delete, Retry, Run Again).
     ///
     /// Posted as `.system`, not `.user`: the text is composed by the app, and attributing it to
-    /// the user put words in their mouth in the transcript and in Smith's context.
-    public func notifySmithOfUserTaskAction(taskID: UUID, text: String) async {
+    /// the user put words in their mouth in the transcript and in Smith's context. `action` is the
+    /// typed fact the transcript keys its inline control on; `text` is for Smith only.
+    public func notifySmithOfUserTaskAction(_ action: UserTaskAction, taskID: UUID, text: String) async {
         guard let agentID = agentIDForRole(.smith) else { return }
         await channel.post(ChannelMessage(
             sender: .system,
             recipientID: agentID,
             recipient: .agent(.smith),
             content: text,
-            metadata: ["messageKind": .kind(.userTaskAction)],
+            metadata: ["messageKind": .kind(.userTaskAction), "userTaskAction": .userTaskAction(action)],
             taskID: taskID
         ))
     }

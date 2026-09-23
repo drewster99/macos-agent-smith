@@ -224,6 +224,47 @@ private enum ChannelBannerKind: String {
     case memorySearched = "memory_searched"
     /// An MCP server failed to load — rendered as a clickable banner that opens Settings.
     case mcpFailed = "mcp_status"
+    /// The user paused/stopped/deleted/retried a task — a system row with an inline control.
+    case userTaskAction = "user_task_action"
+}
+
+/// A `.userTaskAction` notice: the ordinary message row, plus the inline control the notice's
+/// task currently supports (Resume a paused/stopped task, Undelete a deleted one).
+private struct UserTaskActionNoticeRow: View {
+    let message: ChannelMessage
+    let displayPrefs: TimestampPreferences
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            MessageRow(
+                message: message,
+                securityReviewMessage: nil,
+                toolOutputMessage: nil,
+                displayPrefs: displayPrefs,
+                selectedImageAttachment: $selectedImageAttachment
+            )
+            .equatable()
+            UserTaskActionInlineControl(notice: message.userTaskAction, taskID: message.taskID)
+        }
+    }
+}
+
+private struct UserTaskActionInlineControl: View {
+    let notice: UserTaskAction?
+    let taskID: UUID?
+    @Environment(\.transcriptTaskActionHandler) private var handler
+
+    var body: some View {
+        if let notice, let taskID, let action = handler.availableAction(notice, taskID) {
+            Button(action: { Task { await handler.perform(action, taskID) } }, label: {
+                Label(action.title, systemImage: action.symbolName)
+            })
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.leading, 8)
+        }
+    }
 }
 
 /// Grouping lookups the channel log needs to fold tool-call follow-ups (security reviews,
@@ -709,6 +750,12 @@ private struct ChannelMessageBanner: View {
                 content: message.content,
                 timestamp: message.timestamp,
                 onOpenSettings: onOpenMCPSettings
+            )
+        case .userTaskAction:
+            UserTaskActionNoticeRow(
+                message: message,
+                displayPrefs: displayPrefs,
+                selectedImageAttachment: $selectedImageAttachment
             )
         case .none:
             // Plain message — fall through to the generic row.

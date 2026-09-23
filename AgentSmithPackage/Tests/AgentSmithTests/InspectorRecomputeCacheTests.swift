@@ -68,7 +68,8 @@ struct InspectorRecomputeCacheTests {
             .memorySaved,
             .memorySearched,
             .restartChrome,
-            .timerActivity
+            .timerActivity,
+            .userTaskAction
         ]
         // Kinds that the runtime emits but ChannelBannerKind intentionally doesn't list —
         // they fall through to MessageRow via the `.none` case in `bannerView(for:…)`.

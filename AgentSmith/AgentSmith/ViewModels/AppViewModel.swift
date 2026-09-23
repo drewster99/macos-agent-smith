@@ -1633,8 +1633,14 @@ final class AppViewModel {
     /// deleted tasks via its tools, so its only knowledge is what it was last told), and it
     /// refuses to start new work. Capture the title BEFORE the mutation so a soft-deleted task
     /// (already gone from `tasks`) still names itself.
-    private func notifySmithTaskStateChanged(taskID: UUID, title: String, message: String) async {
+    private func notifySmithTaskStateChanged(
+        _ action: UserTaskAction,
+        taskID: UUID,
+        title: String,
+        message: String
+    ) async {
         await runtime?.notifySmithOfUserTaskAction(
+            action,
             taskID: taskID,
             text: "User action in the app: \(message) Task: \"\(title)\" (ID: \(taskID.uuidString)). No reply to the user is needed unless they ask about it."
         )
@@ -1651,7 +1657,7 @@ final class AppViewModel {
         }
         let succeeded = await taskStore.softDelete(id: id)
         if succeeded {
-            await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user deleted this task. It is no longer active — do not work on it, wait for it, or treat it as in progress.")
+            await notifySmithTaskStateChanged(.deleted, taskID: id, title: title, message: "The user deleted this task. It is no longer active — do not work on it, wait for it, or treat it as in progress.")
         } else if task?.status.isInProgress == true {
             taskActionError = "This task is in progress and cannot be deleted."
         } else {
@@ -1886,7 +1892,7 @@ final class AppViewModel {
             stopLogger.notice("VM.pauseTask task=\(slug, privacy: .public) not in a pausable state — skipped")
             return
         }
-        await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user paused this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress; the user may resume it later.")
+        await notifySmithTaskStateChanged(.paused, taskID: id, title: title, message: "The user paused this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress; the user may resume it later.")
         stopLogger.notice("VM.pauseTask exit task=\(slug, privacy: .public) totalMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
     }
 
@@ -1904,16 +1910,59 @@ final class AppViewModel {
             stopLogger.notice("VM.stopTask task=\(slug, privacy: .public) not in a stoppable state — skipped")
             return
         }
-        await notifySmithTaskStateChanged(taskID: id, title: title, message: "The user stopped this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress.")
+        await notifySmithTaskStateChanged(.stopped, taskID: id, title: title, message: "The user stopped this task. Brown has been stopped and is no longer working on it. Do not wait for it or treat it as in progress.")
         stopLogger.notice("VM.stopTask exit task=\(slug, privacy: .public) totalMs=\(Int(Date().timeIntervalSince(entry) * 1000), privacy: .public)")
     }
 
     func retryTask(_ task: AgentTask) async {
         await taskStore?.softDelete(id: task.id)
-        await sendDirectMessage(
-            to: .smith,
-            text: "Please retry this failed task:\nTitle: \(task.title)\nDescription: \(task.description)\nID: \(task.id.uuidString)"
+        await runtime?.notifySmithOfUserTaskAction(
+            .retryRequested,
+            taskID: task.id,
+            text: "User action in the app: the user chose Retry on a failed task. Please retry it:\nTitle: \(task.title)\nDescription: \(task.description)\nID: \(task.id.uuidString)"
         )
+    }
+
+    /// The inline control a user-task-action notice offers, resolved against LIVE task state so the
+    /// button is gone once the task has left the state the notice describes. Retry and Run Again
+    /// notices offer none: the notice IS the retry, and a second click would duplicate the work.
+    func inlineTranscriptAction(for notice: UserTaskAction, taskID: UUID) -> TranscriptInlineTaskAction? {
+        switch notice {
+        case .paused, .stopped:
+            guard let task = tasks.first(where: { $0.id == taskID }),
+                  task.status == .paused || task.status == .interrupted else { return nil }
+            return .resume
+        case .deleted:
+            return shared.deletedTasks.contains { $0.id == taskID } ? .undelete : nil
+        case .retryRequested, .runAgainRequested:
+            return nil
+        }
+    }
+
+    /// The transcript's inline-control handler for this session's live panes.
+    var transcriptTaskActionHandler: TranscriptTaskActionHandler {
+        TranscriptTaskActionHandler(
+            availableAction: { [weak self] notice, taskID in
+                self?.inlineTranscriptAction(for: notice, taskID: taskID)
+            },
+            perform: { [weak self] action, taskID in
+                await self?.performInlineTranscriptAction(action, taskID: taskID)
+            }
+        )
+    }
+
+    func performInlineTranscriptAction(_ action: TranscriptInlineTaskAction, taskID: UUID) async {
+        switch action {
+        case .resume:
+            // Re-resolved at click time: the row's snapshot may predate a status change.
+            guard let task = tasks.first(where: { $0.id == taskID }) else {
+                taskActionError = "This task is no longer in the active list."
+                return
+            }
+            await startTask(task)
+        case .undelete:
+            await undeleteTask(id: taskID)
+        }
     }
 
     // MARK: - User resolution of a validator-error escalation (`.awaitingReview`)
@@ -2041,10 +2090,11 @@ final class AppViewModel {
     /// message is phrased to override Smith's usual reuse bias (it would otherwise treat
     /// "run again" as a `run_task` on the existing id).
     func runTaskAgain(_ task: AgentTask) async {
-        await sendDirectMessage(
-            to: .smith,
+        await runtime?.notifySmithOfUserTaskAction(
+            .runAgainRequested,
+            taskID: task.id,
             text: """
-            The user chose "Run Again" on a completed task and wants a fresh, separate copy run from scratch. Call `create_task` with the title and description below. Do NOT reopen, reuse, or call `run_task` on any existing task — this must be a brand-new task.
+            User action in the app: the user chose "Run Again" on a completed task and wants a fresh, separate copy run from scratch. Call `create_task` with the title and description below. Do NOT reopen, reuse, or call `run_task` on any existing task — this must be a brand-new task.
             Title: \(task.title)
             Description: \(task.description)
             """

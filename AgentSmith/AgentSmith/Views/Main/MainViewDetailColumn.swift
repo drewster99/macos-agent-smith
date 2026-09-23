@@ -276,6 +276,7 @@ private struct BottomTranscriptPane: View {
                 selectedImageAttachment: $selectedImageAttachment
             )
             .equatable()
+            .environment(\.transcriptTaskActionHandler, viewModel.transcriptTaskActionHandler)
         }
     }
 }
@@ -414,6 +415,7 @@ private struct LiveTaskTranscript: View {
             selectedImageAttachment: $selectedImageAttachment
         )
         .equatable()
+        .environment(\.transcriptTaskActionHandler, viewModel.transcriptTaskActionHandler)
     }
 }
 
