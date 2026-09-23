@@ -110,6 +110,19 @@ struct SecurityEvaluatorTests {
         )
     }
 
+    @Test(
+        "Smith's direct worker-stop controls are pre-cleared",
+        arguments: ["terminate_agent", "abort"]
+    )
+    func smithWorkerStopControlsArePreCleared(toolName: String) {
+        #expect(SecurityEvaluator.isAutoApproved(toolName: toolName, role: .smith))
+    }
+
+    @Test("Smith's other stateful tools remain fail-closed")
+    func smithStatefulToolsRemainReviewed() {
+        #expect(SecurityEvaluator.isAutoApproved(toolName: "save_memory", role: .smith) == false)
+    }
+
     // MARK: - Parser robustness (the failed-to-parse bug)
 
     @Test("clean SAFE first line is approved")

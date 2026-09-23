@@ -314,6 +314,8 @@ actor SecurityEvaluator {
 
                 "notify_brown",
                 "provide_help",
+                "terminate_agent",
+                "abort",
 
                 "get_current_time",
                 "search_memory",
