@@ -863,12 +863,16 @@ Status as of 2026-09-23 (phases 1–7 committed).
 - [x] Candidate query, Summarizer turn, and final mutation share a correlation ID.
 - [x] Manual Memory Browser mutations and agent mutations use the same authoritative event path.
 - [x] Internal retrieval/injection/statistics maintenance does not pollute the activity feed.
-- [ ] Sidebar rendering remains compact and responsive during concurrent activity — responsive in
-      live runs, but SwiftUI logged "onChange … tried to update multiple times per frame" faults from
-      the role-card watchers; no pre-change baseline run exists to say whether any are new.
+- [x] Sidebar rendering remains compact and responsive during concurrent activity. Live runs logged
+      SwiftUI "onChange … tried to update multiple times per frame" faults, but they are the
+      pre-existing, render-neutral class documented in `4ec1756` (driven by the role-card watcher
+      VALUE expressions). This work only swapped `turnsByRole[role]` → `callLogsByRole[role]` and
+      `evaluationRecords.count` → `evaluationLifetimeCount` in those watchers and added none; the
+      proper fix (one per-role Equatable snapshot) remains the open item that commit names.
 - [x] All new controls have help and accessibility labels.
-- [ ] All affected tests pass — the full `swift test` suite passes (1,288 tests); the MLX-gated
-      `MemoryStoreIntegrationTests` additions have not been run (needs the `xcodebuild` invocation).
+- [x] All affected tests pass — full `swift test` suite (1,288) and the MLX-gated
+      `MemoryStoreIntegrationTests` (13, via `TEST_RUNNER_AGENT_SMITH_RUN_MLX_TESTS=1 xcodebuild`),
+      with a mutation check confirming the new MLX assertions fail when the behavior breaks.
 - [x] The full project builds without errors or new warnings.
 
 ## Non-goals
