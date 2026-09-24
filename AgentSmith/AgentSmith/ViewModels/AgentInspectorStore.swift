@@ -40,8 +40,13 @@ final class AgentInspectorStore {
     private var instanceTouchOrder: [AgentInstanceRef] = []
     private static let maxTrackedInstances = 32
 
-    /// Security evaluation records from Security Agent/SecurityEvaluator.
+    /// Security evaluation records from Security Agent/SecurityEvaluator, oldest first, bounded
+    /// by `maxEvaluationRecords`.
     var evaluationRecords: [EvaluationRecord] = []
+
+    /// Every evaluation received this run, including those evicted from `evaluationRecords`, so
+    /// a view can say "newest 10 of 327" rather than implying the retained list is everything.
+    private(set) var evaluationLifetimeCount = 0
 
     // MARK: - Push API (called from runtime callbacks)
 
@@ -100,6 +105,7 @@ final class AgentInspectorStore {
 
     /// Appends a newly completed security evaluation record, evicting oldest-first past the cap.
     func appendEvaluation(_ record: EvaluationRecord) {
+        evaluationLifetimeCount += 1
         evaluationRecords.append(record)
         if evaluationRecords.count > Self.maxEvaluationRecords {
             evaluationRecords.removeFirst(evaluationRecords.count - Self.maxEvaluationRecords)
@@ -149,6 +155,7 @@ final class AgentInspectorStore {
         liveContextsByInstance.removeAll()
         instanceTouchOrder.removeAll()
         evaluationRecords.removeAll()
+        evaluationLifetimeCount = 0
     }
 
     // MARK: - Derived accessors

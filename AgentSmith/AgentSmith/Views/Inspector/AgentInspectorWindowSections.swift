@@ -1,9 +1,8 @@
 import SwiftUI
 import AgentSmithKit
 
-/// Scrolling content body for `AgentInspectorWindow`: tools, recent calls/messages,
-/// context, LLM turns, and direct-message input. Mirrors AgentCardExpandedSections but
-/// laid out at the larger window scale.
+/// Scrolling content for a resident agent's (Smith / Brown) inspector window: tools, recent
+/// calls/messages, context, LLM turns, and direct-message input.
 struct AgentInspectorWindowSections: View {
     let role: AgentRole
     let availableTools: [String]

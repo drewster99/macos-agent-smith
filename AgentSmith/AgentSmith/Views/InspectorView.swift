@@ -121,8 +121,6 @@ struct InspectorView: View {
 private struct AgentRoleData: Equatable {
     let role: AgentRole
     let roleMessages: [ChannelMessage]
-    let recentMessages: [ChannelMessage]
-    let recentToolUses: [ChannelMessage]
     let contextMessages: [LLMMessage]
     let callLog: InspectorCallLog?
     let pollInterval: TimeInterval
@@ -131,6 +129,7 @@ private struct AgentRoleData: Equatable {
     let hasActivity: Bool
     let availableTools: [String]
     let evaluationRecords: [EvaluationRecord]
+    let evaluationLifetimeCount: Int
     let isProcessing: Bool
     let executingTools: [String]
     let modelConfig: ModelConfiguration?
@@ -213,17 +212,10 @@ private struct RoleAgentCard: View {
             viewModel: viewModel,
             data: cached,
             speechController: speechController,
-            onSendDirectMessage: makeSendMessageHandler(role: cached.role),
             onUpdateSystemPrompt: makeUpdateSystemPromptHandler(role: cached.role),
             onUpdatePollInterval: makeUpdatePollIntervalHandler(role: cached.role),
             onUpdateMaxToolCalls: makeUpdateMaxToolCallsHandler(role: cached.role)
         )
-    }
-
-    private func makeSendMessageHandler(role: AgentRole) -> (String) -> Void {
-        { [viewModel] text in
-            Task { await viewModel.sendDirectMessage(to: role, text: text) }
-        }
     }
 
     private func makeUpdateSystemPromptHandler(role: AgentRole) -> (String) -> Void {
@@ -255,8 +247,6 @@ private struct RoleAgentCard: View {
         let next = AgentRoleData(
             role: role,
             roleMessages: roleMessages,
-            recentMessages: Array(roleMessages.suffix(5).reversed()),
-            recentToolUses: Array(roleMessages.filter { $0.toolName != nil }.suffix(3).reversed()),
             contextMessages: store.contextMessages(for: role),
             callLog: store.callLogsByRole[role],
             pollInterval: viewModel.agentPollIntervals[role] ?? 5,
@@ -265,6 +255,7 @@ private struct RoleAgentCard: View {
             hasActivity: !roleMessages.isEmpty || viewModel.hasAgentActivity(role),
             availableTools: viewModel.agentToolNames[role] ?? [],
             evaluationRecords: role == .securityAgent ? store.evaluationRecords : [],
+            evaluationLifetimeCount: role == .securityAgent ? store.evaluationLifetimeCount : 0,
             isProcessing: role == .securityAgent ? viewModel.isSecurityAgentBusy : viewModel.processingRoles.contains(role),
             executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[role]),
             modelConfig: viewModel.resolvedAgentConfigs[role]
@@ -378,7 +369,6 @@ private struct AgentCard: View {
     /// type-checker's overload-resolution budget when the call sat inside a `@ViewBuilder`.
     let data: AgentRoleData
     let speechController: SpeechController
-    let onSendDirectMessage: (String) -> Void
     let onUpdateSystemPrompt: (String) -> Void
     let onUpdatePollInterval: (TimeInterval) -> Void
     let onUpdateMaxToolCalls: (Int) -> Void
@@ -391,7 +381,6 @@ private struct AgentCard: View {
     @State private var processingStartDate: Date?
     @State private var toolExecutingStartDate: Date?
     @State private var showingConfig = false
-    @State private var expandedTurnIDs: Set<UUID> = []
 
 
     // Read through to the slice, so the body and its helpers read exactly as before.
@@ -400,10 +389,7 @@ private struct AgentCard: View {
     private var executingTools: [String] { data.executingTools }
     private var hasActivity: Bool { data.hasActivity }
     private var availableTools: [String] { data.availableTools }
-    private var recentMessages: [ChannelMessage] { data.recentMessages }
-    private var recentToolUses: [ChannelMessage] { data.recentToolUses }
     private var contextMessages: [LLMMessage] { data.contextMessages }
-    private var callLog: InspectorCallLog? { data.callLog }
     private var llmTurns: [LLMTurnRecord] { data.callLog?.retainedTurns ?? [] }
     private var modelConfig: ModelConfiguration? { data.modelConfig }
     private var evaluationRecords: [EvaluationRecord] { data.evaluationRecords }
@@ -411,11 +397,17 @@ private struct AgentCard: View {
     private var pollInterval: TimeInterval { data.pollInterval }
     private var maxToolCalls: Int { data.maxToolCalls }
 
-    /// Smith and Brown open in a separate window; Security Agent expands inline.
+    /// Smith and Brown open in a separate window from the title; Security Agent's title expands
+    /// its recent evaluations inline and a separate button opens its window.
     private var opensInWindow: Bool { role == .smith || role == .brown }
+    private var hasSeparatePopOutButton: Bool { role == .securityAgent }
 
     private var roleColor: Color { AppColors.color(for: .agent(role)) }
     private var isSpeechEnabled: Bool { speechController.agentEnabled[role] ?? false }
+
+    /// The sidebar lists only the newest few evaluations; the inspector window lists every
+    /// retained one.
+    private static let inlineEvaluationLimit = 10
 
     /// Display name override for the inspector panel.
     private var inspectorDisplayName: String {
@@ -452,6 +444,7 @@ private struct AgentCard: View {
             AgentCardHeaderRow(
                 role: role, roleColor: roleColor, displayName: inspectorDisplayName,
                 hasActivity: hasActivity, opensInWindow: opensInWindow,
+                hasSeparatePopOutButton: hasSeparatePopOutButton,
                 isSpeechEnabled: isSpeechEnabled, expanded: $expanded,
                 onOpenWindow: openOwnWindow, onToggleSpeech: toggleSpeech,
                 onOpenConfig: { showingConfig = true }
@@ -477,12 +470,11 @@ private struct AgentCard: View {
             AgentCardSessionCostLine(cost: viewModel.sessionCost(for: role))
 
             if expanded && !opensInWindow {
-                AgentCardExpandedSections(
-                    role: role, availableTools: availableTools,
-                    evaluationRecords: evaluationRecords, recentToolUses: recentToolUses,
-                    recentMessages: recentMessages, contextMessages: contextMessages,
-                    callLog: callLog, expandedTurnIDs: $expandedTurnIDs,
-                    onSendDirectMessage: onSendDirectMessage)
+                SecurityEvaluationsSection(
+                    records: evaluationRecords, lifetimeCount: data.evaluationLifetimeCount,
+                    limit: Self.inlineEvaluationLimit, detail: .compact)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
             }
             Divider()
         }
@@ -527,6 +519,8 @@ private struct AgentCardHeaderRow: View {
     let displayName: String
     let hasActivity: Bool
     let opensInWindow: Bool
+    /// A dedicated pop-out button beside a title that expands inline (Security Agent).
+    let hasSeparatePopOutButton: Bool
     let isSpeechEnabled: Bool
     @Binding var expanded: Bool
     let onOpenWindow: () -> Void
@@ -551,6 +545,12 @@ private struct AgentCardHeaderRow: View {
                                     expanded: expanded)
             })
             .buttonStyle(.plain)
+            .help(opensInWindow ? "Open \(displayName) inspector" : (expanded ? "Collapse" : "Expand") + " \(displayName)")
+            .accessibilityLabel(opensInWindow ? "Open \(displayName) inspector" : (expanded ? "Collapse" : "Expand") + " \(displayName)")
+
+            if hasSeparatePopOutButton {
+                AgentCardPopOutButton(displayName: displayName, onOpen: onOpenWindow)
+            }
 
             AgentCardMuteButton(role: role, isSpeechEnabled: isSpeechEnabled,
                                 onToggle: onToggleSpeech)
@@ -560,6 +560,8 @@ private struct AgentCardHeaderRow: View {
                     .foregroundStyle(.secondary)
             })
             .buttonStyle(.plain)
+            .help("\(displayName) settings")
+            .accessibilityLabel("\(displayName) settings")
             .padding(.leading, 4)
         }
         .padding(.horizontal, 12)
@@ -696,6 +698,23 @@ private struct RoleAgentCardWatchers: ViewModifier {
             .onChange(of: viewModel.agentMaxToolCalls[role]) { _, _ in onRecompute() }
             .onChange(of: viewModel.agentToolNames[role]) { _, _ in onRecompute() }
             .onChange(of: viewModel.resolvedAgentConfigs[role]) { _, _ in onRecompute() }
+    }
+}
+
+/// Opens an agent's inspector window, for cards whose title expands inline instead.
+private struct AgentCardPopOutButton: View {
+    let displayName: String
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen, label: {
+            Image(systemName: "arrow.up.forward.square")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        })
+        .buttonStyle(.plain)
+        .help("Open \(displayName) inspector")
+        .accessibilityLabel("Open \(displayName) inspector")
     }
 }
 
@@ -932,111 +951,6 @@ struct ContextMessageRow: View {
         let limit = 120
         guard s.count > limit else { return s }
         return String(s.prefix(limit)) + "…"
-    }
-}
-
-/// A row showing a single security evaluation result from SecurityEvaluator.
-struct EvaluationRecordRow: View {
-    let record: EvaluationRecord
-    @State private var expanded = false
-
-    /// Per-task tool-scoping records aren't a SAFE/UNSAFE verdict on one call — they're a
-    /// "here's the approved tool set" decision — so they get their own label/color.
-    private var isScoping: Bool { record.toolName == "(tool scoping)" }
-
-    private var dispositionLabel: String {
-        if isScoping, record.disposition.wasJudged {
-            return record.disposition.approved ? "SCOPED" : "NO TOOLS"
-        }
-        switch record.disposition.outcome {
-        case .reviewCancelled:          return "CANCELLED"
-        // Orange, not grey: a reviewer that cannot answer is an operational fault the user has to
-        // act on, not a neutral outcome to be skimmed past.
-        case .reviewerUnavailable:      return "NOT REVIEWED"
-        case .autoApproved:             return "AUTO"
-        case .approvedWithoutReview:    return "NOT REVIEWED (review off)"
-        case .approved:                 return "SAFE"
-        case .warned:                   return "WARN"
-        case .refused(.abort):          return "ABORT"
-        case .refused(.unsafe):         return "UNSAFE"
-        }
-    }
-
-    private var dispositionColor: Color {
-        if isScoping, record.disposition.wasJudged {
-            return record.disposition.approved ? .blue : .red
-        }
-        switch record.disposition.outcome {
-        case .reviewCancelled:                        return .secondary
-        case .reviewerUnavailable:                    return .orange
-        case .approved, .autoApproved:                return .green
-        case .approvedWithoutReview:                  return .orange
-        case .warned:                                 return .orange
-        case .refused:                                return .red
-        }
-    }
-
-    var body: some View {
-        Button(action: {
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-        }, label: {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(dispositionLabel)
-                        .font(AppFonts.microMonoBadge)
-                        .fontWeight(.bold)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(dispositionColor.opacity(0.8))
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-
-                    Text(record.toolName)
-                        .font(AppFonts.inspectorBody.bold())
-                        .foregroundStyle(.primary)
-
-                    Spacer()
-
-                    Text("\(record.latencyMs)ms")
-                        .font(AppFonts.inspectorBody)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-
-                    Text(record.timestamp, style: .time)
-                        .font(AppFonts.inspectorBody)
-                        .foregroundStyle(.tertiary)
-                }
-
-                if expanded {
-                    if !record.toolParams.isEmpty {
-                        Text(record.toolParams)
-                            .font(AppFonts.smallMonoCode)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(5)
-                    }
-                    if isScoping {
-                        // The scoping response is the full allow/block JSON — show all of it
-                        // (mono, no truncation); the row grows and the inspector scrolls.
-                        Text(record.response)
-                            .font(AppFonts.smallMonoCode)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Text("Response: \(record.response)")
-                            .font(AppFonts.inspectorBody.italic())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                    }
-                }
-            }
-            .padding(.vertical, 3)
-            .padding(.horizontal, 6)
-            .background(dispositionColor.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 4))
-            .contentShape(Rectangle())
-        })
-        .buttonStyle(.plain)
     }
 }
 

@@ -174,15 +174,15 @@ private struct LLMCallFailureTiming: View {
     }
 }
 
-/// Operation badge, attempt, and task association for an annotated call.
+/// Operation badge, call number within the operation, and task association for an annotated call.
 struct LLMCallAnnotationLine: View {
     let annotation: LLMCallAnnotation
 
     var body: some View {
         HStack(spacing: 6) {
             LLMCallOperationBadge(operation: annotation.operation)
-            if let attempt = annotation.attempt, attempt > 1 {
-                Text("attempt \(attempt)")
+            if let callNumber = annotation.callNumberWithinOperation, callNumber > 1 {
+                Text("call \(callNumber)")
                     .font(AppFonts.microMonoBadge)
                     .foregroundStyle(.secondary)
             }

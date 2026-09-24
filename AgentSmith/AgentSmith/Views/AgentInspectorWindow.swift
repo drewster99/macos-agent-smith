@@ -1,7 +1,8 @@
 import SwiftUI
 import AgentSmithKit
 
-/// Standalone window showing full agent inspector detail for Smith or Brown.
+/// Standalone inspector window — the one shell every role's inspector opens in. Role-specific
+/// sections come from `AgentInspectorWindowContent`.
 struct AgentInspectorWindow: View {
     let viewModel: AppViewModel
     let role: AgentRole
@@ -25,7 +26,9 @@ struct AgentInspectorWindow: View {
         }
     }
 
-    private var isProcessing: Bool { viewModel.processingRoles.contains(role) }
+    private var isProcessing: Bool {
+        role == .securityAgent ? viewModel.isSecurityAgentBusy : viewModel.processingRoles.contains(role)
+    }
     private var executingTools: [String] {
         guard let counts = viewModel.toolExecutingByRole[role] else { return [] }
         var out: [String] = []
@@ -35,12 +38,10 @@ struct AgentInspectorWindow: View {
         return out
     }
     private var availableTools: [String] { viewModel.agentToolNames[role] ?? [] }
-    private var contextMessages: [LLMMessage] { viewModel.inspectorStore.contextMessages(for: role) }
-    private var callLog: InspectorCallLog? { viewModel.inspectorStore.callLogsByRole[role] }
 
     /// True when the agent has activity history but no live tools — i.e. terminated.
     private var isTerminated: Bool {
-        availableTools.isEmpty && !contextMessages.isEmpty
+        availableTools.isEmpty && !viewModel.inspectorStore.contextMessages(for: role).isEmpty
     }
 
     var body: some View {
@@ -49,8 +50,6 @@ struct AgentInspectorWindow: View {
         // and the sidebar card never disagree.
         let roleMessages = InspectorView.bucketMessagesByRole(viewModel.messages)[role] ?? []
         let hasActivity = !roleMessages.isEmpty || viewModel.hasAgentActivity(role)
-        let recentMessages = Array(roleMessages.suffix(10).reversed())
-        let recentToolUses = Array(roleMessages.filter { $0.toolName != nil }.suffix(5).reversed())
 
         return VStack(spacing: 0) {
             AgentInspectorWindowHeader(
@@ -65,20 +64,15 @@ struct AgentInspectorWindow: View {
                 toolExecutingStartDate: toolExecutingStartDate,
                 onDone: { dismiss() }
             )
+            InspectorModelCostLine(viewModel: viewModel, role: role)
 
             Divider()
 
-            AgentInspectorWindowSections(
+            AgentInspectorWindowContent(
+                viewModel: viewModel,
                 role: role,
-                availableTools: availableTools,
-                recentToolUses: recentToolUses,
-                recentMessages: recentMessages,
-                contextMessages: contextMessages,
-                callLog: callLog,
-                expandedTurnIDs: $expandedTurnIDs,
-                onSendDirectMessage: { [viewModel] text in
-                    Task { await viewModel.sendDirectMessage(to: role, text: text) }
-                }
+                roleMessages: roleMessages,
+                expandedCallIDs: $expandedTurnIDs
             )
         }
         .frame(minWidth: 600, idealWidth: 800, minHeight: 500, idealHeight: 700)

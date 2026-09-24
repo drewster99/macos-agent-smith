@@ -559,13 +559,27 @@ actor SecurityEvaluator {
         onLLMCallRecorded = handler
     }
 
-    /// Builds and emits a turn record for one Security Agent LLM call.
-    private func emitTurnRecord(response: LLMResponse, latencyMs: Int, messageCount: Int) {
+    /// Emits a turn record for one Security Agent provider call that returned a response.
+    ///
+    /// `request` is the exact message array handed to the provider, captured BEFORE the call:
+    /// the evaluator keeps appending to its working conversation afterwards (assistant tool calls,
+    /// tool results, staged attachments), and this actor is re-entrant, so reconstructing the
+    /// request later could describe a different call. Each Security call is self-contained, so the
+    /// whole request is the outgoing input; it is also the full-context snapshot (the two share
+    /// storage). Binary attachment bytes are dropped from the recorded copy.
+    private func emitTurnRecord(
+        response: LLMResponse,
+        request: [LLMMessage],
+        latencyMs: Int,
+        annotation: LLMCallAnnotation
+    ) {
         guard let onLLMCallRecorded else { return }
+        let inspectedRequest = Self.withoutBinaryAttachments(request)
         onLLMCallRecorded(.completed(LLMTurnRecord(
-            inputDelta: [],
+            inputDelta: inspectedRequest,
             response: response,
-            totalMessageCount: messageCount,
+            totalMessageCount: request.count,
+            contextSnapshot: inspectedRequest,
             latencyMs: latencyMs,
             modelID: configuration?.model ?? "",
             providerType: providerType,
@@ -573,7 +587,34 @@ actor SecurityEvaluator {
             temperature: configuration?.temperature ?? 0,
             maxOutputTokens: configuration?.maxTokens ?? 0,
             thinkingBudget: configuration?.thinkingBudget,
-            usage: response.usage
+            usage: response.usage,
+            annotation: annotation
+        )))
+    }
+
+    /// The request as the inspector keeps it: every message and its text — including the
+    /// attachment reference lines that name what was attached — but not the image/PDF bytes, which
+    /// the inspector does not render and which would otherwise be retained once per recorded call.
+    static func withoutBinaryAttachments(_ messages: [LLMMessage]) -> [LLMMessage] {
+        messages.map { message in
+            guard message.images != nil || message.documents != nil else { return message }
+            var textOnly = message
+            textOnly.images = nil
+            textOnly.documents = nil
+            return textOnly
+        }
+    }
+
+    /// Emits a failed-attempt record for a Security Agent provider call that threw before any
+    /// response existed.
+    private func emitCallFailure(_ error: Error, startedAt: Date, annotation: LLMCallAnnotation) {
+        guard let onLLMCallRecorded else { return }
+        onLLMCallRecorded(.failed(LLMCallFailureRecord(
+            error: error,
+            startedAt: startedAt,
+            modelID: configuration?.model ?? "",
+            providerID: configuration?.providerID,
+            annotation: annotation
         )))
     }
 
@@ -788,6 +829,12 @@ actor SecurityEvaluator {
         var transportFailures = 0
         var toolRounds = 0
         var lastError: Error?
+        let reviewAnnotation = LLMCallAnnotation(
+            operation: .securityToolReview(toolName: toolName),
+            taskID: taskID.flatMap { UUID(uuidString: $0) },
+            taskTitle: taskTitle
+        )
+        var providerCallCount = 0
         // Three independent bounds: parse-failure retries (`maxRetries`), transport-failure
         // retries (`LLMRetryPolicy.maxAttempts`), and evidence-gathering rounds
         // (`maxToolRounds`). Once tool rounds are exhausted the model is offered NO tools,
@@ -802,19 +849,23 @@ actor SecurityEvaluator {
             let response: LLMResponse
             let callLatencyMs: Int
             let offerTools = toolRounds < Self.maxToolRounds
+            let request = conversationMessages
+            providerCallCount += 1
+            let callAnnotation = reviewAnnotation.forCall(providerCallCount)
+            let callStart = Date()
             do {
-                let callStart = Date()
                 // Floor the output budget so a small configured Security Agent max_tokens can't starve
                 // the verdict (the model may reason a little before committing). The configured
                 // value still wins when it's larger; the floor only raises it. A FLOOR, never a
                 // cap — an earlier hard 200-token cap here collided with extended thinking.
                 response = try await provider.send(
-                    messages: conversationMessages,
+                    messages: request,
                     tools: offerTools ? evalTools : [],
                     overrides: LLMCallOverrides(maxOutputTokens: max(configuration?.maxTokens ?? 0, Self.perCallEvalMaxTokensFloor))
                 )
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {
+                emitCallFailure(error, startedAt: callStart, annotation: callAnnotation)
                 if Task.isCancelled {
                     // Release the probe slot WITHOUT recording a verdict: a cancelled call says
                     // nothing about whether the backend is healthy, and leaving the slot held would
@@ -921,7 +972,7 @@ actor SecurityEvaluator {
                 )
             }
 
-            emitTurnRecord(response: response, latencyMs: callLatencyMs, messageCount: conversationMessages.count)
+            emitTurnRecord(response: response, request: request, latencyMs: callLatencyMs, annotation: callAnnotation)
 
             // The backend answered. Close the breaker here rather than at the verdict — reachability
             // is about the transport, and an unparseable answer is still an answer.
@@ -1089,11 +1140,19 @@ actor SecurityEvaluator {
         var retryCount = 0
         var transportFailures = 0
         var lastError: Error?
+        let scopingAnnotation = LLMCallAnnotation(
+            operation: .securityToolScoping,
+            taskID: UUID(uuidString: taskID),
+            taskTitle: taskTitle
+        )
+        var providerCallCount = 0
         while retryCount < Self.maxRetries {
             let response: LLMResponse
             let callLatencyMs: Int
+            providerCallCount += 1
+            let callAnnotation = scopingAnnotation.forCall(providerCallCount)
+            let callStart = Date()
             do {
-                let callStart = Date()
                 // Scoping responds with the full allow/block JSON for every candidate tool and
                 // typically reasons through them first — it needs far more room than a single
                 // verdict. Floor it high; a larger configured max_tokens still wins.
@@ -1104,6 +1163,7 @@ actor SecurityEvaluator {
                 )
                 callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
             } catch {
+                emitCallFailure(error, startedAt: callStart, annotation: callAnnotation)
                 if Task.isCancelled {
                     return ToolScopingResult(approvedNames: [], rawResponse: ToolScopingResult.cancelledSentinel, succeeded: false)
                 }
@@ -1140,7 +1200,7 @@ actor SecurityEvaluator {
                 )
             }
 
-            emitTurnRecord(response: response, latencyMs: callLatencyMs, messageCount: messages.count)
+            emitTurnRecord(response: response, request: messages, latencyMs: callLatencyMs, annotation: callAnnotation)
 
             let responseText = response.text ?? ""
             guard let approved = Self.parseScopingResponse(responseText, candidateNames: candidateNames) else {

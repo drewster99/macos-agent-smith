@@ -28,31 +28,32 @@ public struct LLMCallAnnotation: Sendable, Equatable {
     /// Links calls that belong to one logical operation across surfaces (e.g. a memory
     /// consolidation's candidate search, reconciliation call, and resulting mutation).
     public let correlationID: UUID?
-    /// 1-based attempt number within the operation's retry loop, when the caller retries.
-    public let attempt: Int?
+    /// 1-based position of this provider call within its operation — a transport or parse retry,
+    /// or a further evidence round. Nil when the operation makes exactly one call.
+    public let callNumberWithinOperation: Int?
 
     public init(
         operation: Operation,
         taskID: UUID? = nil,
         taskTitle: String? = nil,
         correlationID: UUID? = nil,
-        attempt: Int? = nil
+        callNumberWithinOperation: Int? = nil
     ) {
         self.operation = operation
         self.taskID = taskID
         self.taskTitle = taskTitle
         self.correlationID = correlationID
-        self.attempt = attempt
+        self.callNumberWithinOperation = callNumberWithinOperation
     }
 
-    /// The same annotation for another attempt of the same operation.
-    public func forAttempt(_ attempt: Int) -> LLMCallAnnotation {
+    /// The same annotation for the `callNumber`-th provider call of the same operation.
+    public func forCall(_ callNumber: Int) -> LLMCallAnnotation {
         LLMCallAnnotation(
             operation: operation,
             taskID: taskID,
             taskTitle: taskTitle,
             correlationID: correlationID,
-            attempt: attempt
+            callNumberWithinOperation: callNumber
         )
     }
 }

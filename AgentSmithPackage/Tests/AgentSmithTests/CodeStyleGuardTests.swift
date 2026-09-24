@@ -523,7 +523,6 @@ struct CodeStyleGuardTests {
         "Views/CompactionDiffWindow.swift": 1,
         "Views/ConfigValidationView.swift": 1,
         "Views/Input/UserInputTextField.swift": 1,
-        "Views/Inspector/AgentCardExpandedSections.swift": 1,
         "Views/Inspector/AgentCardModelInfoLine.swift": 1,
         "Views/Inspector/AgentCardStatusBadge.swift": 1,
         "Views/Inspector/AgentConfigResponsivenessSection.swift": 1,
@@ -558,7 +557,7 @@ struct CodeStyleGuardTests {
 
     /// The sum of the ceilings, pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number and unused headroom cannot quietly accumulate. See `someViewFunctionTotal`.
-    private static let oversizedBodyTotal = 134
+    private static let oversizedBodyTotal = 133
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.
