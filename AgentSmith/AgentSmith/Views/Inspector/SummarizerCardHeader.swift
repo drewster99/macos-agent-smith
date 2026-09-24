@@ -1,19 +1,18 @@
 import SwiftUI
 
-/// Header row for `SummarizerCard` — activity dot, title, status, mute placeholder, gear.
+/// Header row for `SummarizerCard` — activity dot, title (opens the inspector window), status,
+/// mute placeholder, gear.
 struct SummarizerCardHeader: View {
     let hasActivity: Bool
     let isProcessing: Bool
     let executingTools: [String]
     let roleColor: Color
-    @Binding var expanded: Bool
+    let onOpenWindow: () -> Void
     let onShowConfig: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-            }, label: {
+            Button(action: onOpenWindow, label: {
                 HStack(spacing: 8) {
                     Circle()
                         .fill(hasActivity ? roleColor : AppColors.inactiveDot)
@@ -49,14 +48,15 @@ struct SummarizerCardHeader: View {
                             .foregroundStyle(.tertiary)
                     }
 
-                    Image(systemName: "chevron.right")
+                    Image(systemName: "arrow.up.forward.square")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
                 .contentShape(Rectangle())
             })
             .buttonStyle(.plain)
+            .help("Open Summarizer inspector")
+            .accessibilityLabel("Open Summarizer inspector")
 
             Image(systemName: "speaker.slash")
                 .font(.caption)
@@ -71,6 +71,7 @@ struct SummarizerCardHeader: View {
             .buttonStyle(.plain)
             .padding(.leading, 4)
             .help("Configure summarizer")
+            .accessibilityLabel("Configure summarizer")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

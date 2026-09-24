@@ -15,6 +15,23 @@ public enum MemoryReconciliation: Sendable, Equatable {
     case merged(String)
 }
 
+/// One consolidation decision to put to the reconciler.
+public struct MemoryReconciliationRequest: Sendable, Equatable {
+    /// The existing memory's full content.
+    public let existing: String
+    /// The new memory's full content, as the agent proposed it.
+    public let proposed: String
+    /// Shared by every record of this consolidation attempt (candidate search, reconciler call,
+    /// resulting mutation) so the inspector can link them.
+    public let correlationID: UUID
+
+    public init(existing: String, proposed: String, correlationID: UUID) {
+        self.existing = existing
+        self.proposed = proposed
+        self.correlationID = correlationID
+    }
+}
+
 actor TaskSummarizer {
     private let provider: any LLMProvider
     private let memoryStore: MemoryStore
@@ -30,6 +47,10 @@ actor TaskSummarizer {
     private let sessionID: UUID?
     /// Bumps the live-activity counter while a summarization run is in flight (inspector strip).
     private let activityTracker: LiveActivityTracker?
+    /// Fires after every provider call — task summary, memory reconciliation, or web extraction —
+    /// with the exact request, so the inspector shows the same calls the Summarizer's session
+    /// cost is made of.
+    private var onLLMCallRecorded: (@Sendable (LLMCallEvent) -> Void)?
 
     private static let systemPrompt = """
         You are a task summarizer for an AI agent system. Given a completed or failed task's \
@@ -70,6 +91,70 @@ actor TaskSummarizer {
         self.activityTracker = activityTracker
     }
 
+    /// Registers (or, with nil, clears) the provider-call observer.
+    func setOnLLMCallRecorded(_ handler: (@Sendable (LLMCallEvent) -> Void)?) {
+        onLLMCallRecorded = handler
+    }
+
+    /// The one path every Summarizer provider call takes: sends `messages`, records usage, and
+    /// reports the call to the inspector — a turn carrying the exact request, or a failure record
+    /// when the provider throws. `messages` is an immutable local, so the recorded request is the
+    /// one sent even though this actor is re-entrant.
+    private func sendRecorded(
+        _ messages: [LLMMessage],
+        annotation: LLMCallAnnotation
+    ) async throws -> LLMResponse {
+        let callStart = Date()
+        let response: LLMResponse
+        do {
+            response = try await provider.send(messages: messages, tools: [])
+        } catch {
+            onLLMCallRecorded?(.failed(LLMCallFailureRecord(
+                error: error,
+                startedAt: callStart,
+                modelID: configuration?.model ?? "",
+                providerID: configuration?.providerID,
+                annotation: annotation
+            )))
+            throw error
+        }
+        let callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
+
+        if let usageStore {
+            await UsageRecorder.record(
+                response: response,
+                context: LLMCallContext(
+                    agentRole: .summarizer,
+                    taskID: annotation.taskID,
+                    modelID: configuration?.model ?? "",
+                    providerType: providerType,
+                    providerID: configuration?.providerID,
+                    configuration: configuration,
+                    sessionID: sessionID
+                ),
+                latencyMs: callLatencyMs,
+                to: usageStore
+            )
+        }
+
+        onLLMCallRecorded?(.completed(LLMTurnRecord(
+            inputDelta: messages,
+            response: response,
+            totalMessageCount: messages.count,
+            contextSnapshot: messages,
+            latencyMs: callLatencyMs,
+            modelID: configuration?.model ?? "",
+            providerType: providerType,
+            providerID: configuration?.providerID,
+            temperature: configuration?.temperature ?? 0,
+            maxOutputTokens: configuration?.maxTokens ?? 0,
+            thinkingBudget: configuration?.thinkingBudget,
+            usage: response.usage,
+            annotation: annotation
+        )))
+        return response
+    }
+
     /// Posts a channel message stamped with the summarizer's provider/model/config
     /// context. `taskID` can be passed for messages tied to a specific task.
     private func postToChannel(_ message: ChannelMessage, taskID: UUID? = nil) async {
@@ -93,6 +178,7 @@ actor TaskSummarizer {
         defer { activityTracker?.end(.summarizerRun) }
         let startTime = Date()
         var lastError: Error?
+        let annotation = LLMCallAnnotation(operation: .taskSummary, taskID: task.id, taskTitle: task.title)
 
         var attempt = 0
         while true {
@@ -100,7 +186,7 @@ actor TaskSummarizer {
             attempt += 1
 
             do {
-                let summary = try await generateSummary(for: task)
+                let summary = try await generateSummary(for: task, annotation: annotation.forCall(attempt))
                 let latencyMs = Int(Date().timeIntervalSince(startTime) * 1000)
                 try await memoryStore.saveTaskSummary(
                     task: task,
@@ -153,7 +239,19 @@ actor TaskSummarizer {
     /// changed fact supersedes the old value instead of piling up a contradictory
     /// duplicate. Retries transient HTTP errors; on any failure returns `.distinct`
     /// (the safe default: never clobber an existing memory on an unreliable call).
-    public func reconcileMemoryTexts(existing: String, new: String) async -> MemoryReconciliation {
+    public func reconcileMemoryTexts(
+        existing: String,
+        new: String,
+        correlationID: UUID,
+        taskID: UUID?,
+        taskTitle: String?
+    ) async -> MemoryReconciliation {
+        let annotation = LLMCallAnnotation(
+            operation: .memoryReconciliation,
+            taskID: taskID,
+            taskTitle: taskTitle,
+            correlationID: correlationID
+        )
         let systemPrompt = """
             You decide whether two memories should be ONE memory or kept SEPARATE.
 
@@ -191,26 +289,7 @@ actor TaskSummarizer {
             attempt += 1
 
             do {
-                let callStart = Date()
-                let response = try await provider.send(messages: messages, tools: [])
-                let callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
-
-                if let usageStore {
-                    await UsageRecorder.record(
-                        response: response,
-                        context: LLMCallContext(
-                            agentRole: .summarizer,
-                            taskID: nil,
-                            modelID: configuration?.model ?? "",
-                            providerType: providerType,
-                            providerID: configuration?.providerID,
-                            configuration: configuration,
-                            sessionID: sessionID
-                        ),
-                        latencyMs: callLatencyMs,
-                        to: usageStore
-                    )
-                }
+                let response = try await sendRecorded(messages, annotation: annotation.forCall(attempt))
 
                 guard let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
                     return .distinct
@@ -257,7 +336,8 @@ actor TaskSummarizer {
     /// No length cap: the extractor sees the FULL page — an answer near the end of a long page
     /// must stay reachable. Oversized-context handling is deferred to a holistic solution
     /// (see ROADMAP).
-    public func extractWebContent(content: String, prompt: String) async -> String? {
+    public func extractWebContent(content: String, prompt: String, taskID: UUID?, taskTitle: String?) async -> String? {
+        let annotation = LLMCallAnnotation(operation: .webContentExtraction, taskID: taskID, taskTitle: taskTitle)
         let systemPrompt = """
             You extract information from web page content. Given a page's text and a user's \
             request, answer the request using ONLY information present in the content. Be concise \
@@ -278,26 +358,7 @@ actor TaskSummarizer {
             attempt += 1
 
             do {
-                let callStart = Date()
-                let response = try await provider.send(messages: messages, tools: [])
-                let callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
-
-                if let usageStore {
-                    await UsageRecorder.record(
-                        response: response,
-                        context: LLMCallContext(
-                            agentRole: .summarizer,
-                            taskID: nil,
-                            modelID: configuration?.model ?? "",
-                            providerType: providerType,
-                            providerID: configuration?.providerID,
-                            configuration: configuration,
-                            sessionID: sessionID
-                        ),
-                        latencyMs: callLatencyMs,
-                        to: usageStore
-                    )
-                }
+                let response = try await sendRecorded(messages, annotation: annotation.forCall(attempt))
 
                 guard let text = response.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return nil
@@ -322,7 +383,9 @@ actor TaskSummarizer {
 
     // MARK: - Private
 
-    private func generateSummary(for task: AgentTask) async throws -> String {
+    /// Makes the one provider call that summarizes `task`. Internal rather than private so tests
+    /// can drive it without the embedding model `summarizeAndEmbed`'s save step needs.
+    func generateSummary(for task: AgentTask, annotation: LLMCallAnnotation) async throws -> String {
         let userPrompt = buildUserPrompt(for: task)
 
         let messages: [LLMMessage] = [
@@ -330,26 +393,7 @@ actor TaskSummarizer {
             .user(userPrompt)
         ]
 
-        let callStart = Date()
-        let response = try await provider.send(messages: messages, tools: [])
-        let callLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
-
-        if let usageStore {
-            await UsageRecorder.record(
-                response: response,
-                context: LLMCallContext(
-                    agentRole: .summarizer,
-                    taskID: task.id,
-                    modelID: configuration?.model ?? "",
-                    providerType: providerType,
-                    providerID: configuration?.providerID,
-                    configuration: configuration,
-                    sessionID: sessionID
-                ),
-                latencyMs: callLatencyMs,
-                to: usageStore
-            )
-        }
+        let response = try await sendRecorded(messages, annotation: annotation)
 
         guard let text = response.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SummarizerError.emptyResponse

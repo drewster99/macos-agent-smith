@@ -2269,6 +2269,12 @@ public actor OrchestrationRuntime {
                 sessionID: sessionID,
                 activityTracker: liveActivityTracker
             )
+            // One inspector identity per summarizer instance, so its calls form one stable
+            // subject in the inspector for the life of this run.
+            if let callCallback = onLLMCallRecorded, let summarizer = taskSummarizer {
+                let summarizerRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
+                await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
+            }
         } else {
             taskSummarizer = nil
         }
@@ -3365,6 +3371,9 @@ public actor OrchestrationRuntime {
         // turn records stopped accumulating, and timer-event channel posts went silent.
         if !preserveObserverCallbacks {
             clearObserverCallbacks()
+            // The summarizer outlives a stop (late summaries still land), but its inspector
+            // observer holds the same app-layer closure and goes with the others.
+            await taskSummarizer?.setOnLLMCallRecorded(nil)
         }
 
         await channel.post(ChannelMessage(
@@ -4056,6 +4065,14 @@ public actor OrchestrationRuntime {
         }
     }
 
+    /// The task a Summarizer call made on an agent's behalf belongs to: a worker's bound task
+    /// (`taskForAgent`, never "whatever is running"), and none for Smith, whose calls act on no
+    /// single task.
+    func inspectorTaskAssociation(agentID: UUID, role: AgentRole) async -> AgentTask? {
+        guard role == .brown else { return nil }
+        return await taskStore.taskForAgent(agentID: agentID)
+    }
+
     func makeToolContext(
         agentID: UUID,
         role: AgentRole,
@@ -4178,13 +4195,22 @@ public actor OrchestrationRuntime {
                 guard let self else { return }
                 await self.summarizeAndEmbedTask(taskID: taskID)
             },
-            reconcileMemory: { [weak self] existing, new in
+            reconcileMemory: { [weak self] request in
                 guard let self, let summarizer = await self.taskSummarizer else { return .distinct }
-                return await summarizer.reconcileMemoryTexts(existing: existing, new: new)
+                let task = await self.inspectorTaskAssociation(agentID: agentID, role: role)
+                return await summarizer.reconcileMemoryTexts(
+                    existing: request.existing,
+                    new: request.proposed,
+                    correlationID: request.correlationID,
+                    taskID: task?.id,
+                    taskTitle: task?.title
+                )
             },
             extractWebContent: { [weak self] content, prompt in
-                guard let self else { return nil }
-                return await self.taskSummarizer?.extractWebContent(content: content, prompt: prompt)
+                guard let self, let summarizer = await self.taskSummarizer else { return nil }
+                let task = await self.inspectorTaskAssociation(agentID: agentID, role: role)
+                return await summarizer.extractWebContent(
+                    content: content, prompt: prompt, taskID: task?.id, taskTitle: task?.title)
             },
             autoAdvanceEnabled: { [weak self] in await self?.autoAdvanceEnabled ?? false },
             retrieveContext: { [weak self] source, query in

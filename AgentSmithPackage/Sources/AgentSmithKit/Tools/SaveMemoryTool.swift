@@ -119,7 +119,9 @@ struct SaveMemoryTool: AgentTool {
             // wins), and `.distinct` for two different facts that merely phrase alike.
             // No hard tag requirement: tags were an unreliable second axis (agents tag
             // the same fact inconsistently), and the LLM is a better one.
-            if case .merged(let merged) = await context.reconcileMemory(match.memory.content, content) {
+            let reconciliationRequest = MemoryReconciliationRequest(
+                existing: match.memory.content, proposed: content, correlationID: UUID())
+            if case .merged(let merged) = await context.reconcileMemory(reconciliationRequest) {
                 let mergedTags = Array(Set(match.memory.tags + tags))
                 do {
                     try await context.memoryStore.update(

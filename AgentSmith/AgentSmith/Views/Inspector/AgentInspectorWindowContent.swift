@@ -10,6 +10,7 @@ import AgentSmithKit
 /// - Security Agent: evaluations plus the exact provider calls behind them; no direct message
 ///   (its message filter drops private messages).
 /// - Validator: the task verdict ledgers — it has no resident conversation.
+/// - Summarizer: its operations and the exact provider calls behind them.
 struct AgentInspectorWindowContent: View {
     let viewModel: AppViewModel
     let role: AgentRole
@@ -22,17 +23,14 @@ struct AgentInspectorWindowContent: View {
             ResidentAgentInspectorContent(viewModel: viewModel, role: role, roleMessages: roleMessages,
                                           expandedCallIDs: $expandedCallIDs)
         case .securityAgent:
-            SecurityAgentInspectorSections(
-                evaluationRecords: viewModel.inspectorStore.evaluationRecords,
-                evaluationLifetimeCount: viewModel.inspectorStore.evaluationLifetimeCount,
-                recentMessages: Array(roleMessages.suffix(10).reversed()),
-                callLog: viewModel.inspectorStore.callLogsByRole[.securityAgent],
-                expandedCallIDs: $expandedCallIDs
-            )
+            SecurityAgentInspectorContent(viewModel: viewModel, roleMessages: roleMessages,
+                                          expandedCallIDs: $expandedCallIDs)
         case .validator:
             ValidatorInspectorSections(viewModel: viewModel)
         case .summarizer:
-            UnavailableInspectorContent(role: role)
+            SummarizerInspectorSections(
+                callLog: viewModel.inspectorStore.callLogsByRole[.summarizer],
+                recentMessages: Array(roleMessages.reversed()), expandedCallIDs: $expandedCallIDs)
         }
     }
 }
@@ -60,16 +58,20 @@ private struct ResidentAgentInspectorContent: View {
     }
 }
 
-/// Shown for a role whose inspector content has not been built. No card opens a window on such
-/// a role; this exists so the switch is exhaustive without inventing content.
-private struct UnavailableInspectorContent: View {
-    let role: AgentRole
+/// Reads the Security Agent's slice of the inspector store for its sections.
+private struct SecurityAgentInspectorContent: View {
+    let viewModel: AppViewModel
+    let roleMessages: [ChannelMessage]
+    @Binding var expandedCallIDs: Set<UUID>
 
     var body: some View {
-        Text("No inspector detail is available for \(role.displayName).")
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        SecurityAgentInspectorSections(
+            evaluationRecords: viewModel.inspectorStore.evaluationRecords,
+            evaluationLifetimeCount: viewModel.inspectorStore.evaluationLifetimeCount,
+            recentMessages: Array(roleMessages.suffix(10).reversed()),
+            callLog: viewModel.inspectorStore.callLogsByRole[.securityAgent],
+            expandedCallIDs: $expandedCallIDs
+        )
     }
 }
 

@@ -530,7 +530,6 @@ struct CodeStyleGuardTests {
         "Views/Inspector/AgentInspectorWindowHeader.swift": 1,
         "Views/Inspector/AgentInspectorWindowSections.swift": 1,
         "Views/Inspector/CostEstimateSection.swift": 1,
-        "Views/Inspector/SummarizerCardExpandedSections.swift": 1,
         "Views/Inspector/SummarizerCardHeader.swift": 1,
         "Views/LaunchSplashView.swift": 1,
         "Views/LiteLLMProviderPickerSheet.swift": 1,
@@ -557,7 +556,7 @@ struct CodeStyleGuardTests {
 
     /// The sum of the ceilings, pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number and unused headroom cannot quietly accumulate. See `someViewFunctionTotal`.
-    private static let oversizedBodyTotal = 133
+    private static let oversizedBodyTotal = 132
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.

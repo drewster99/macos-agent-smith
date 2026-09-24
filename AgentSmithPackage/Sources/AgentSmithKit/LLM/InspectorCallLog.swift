@@ -67,6 +67,38 @@ public struct InspectorCallLog: Sendable, Equatable {
     /// Calls dropped by the capacity bound.
     public var evictedCount: Int { lifetimeCount - entries.count }
 
+    /// Completed and failed call counts for one annotated operation.
+    public struct OperationTally: Sendable, Equatable {
+        public let operation: LLMCallAnnotation.Operation
+        public var completed: Int
+        public var failed: Int
+    }
+
+    /// Per-operation counts over the RETAINED entries, in order of first appearance. Calls with no
+    /// annotation are not counted. Covers only what is retained — callers must say so when
+    /// `evictedCount > 0`.
+    public func retainedOperationTallies() -> [OperationTally] {
+        var tallies: [OperationTally] = []
+        for entry in entries {
+            let operation: LLMCallAnnotation.Operation?
+            let failed: Bool
+            switch entry {
+            case .completed(_, let turn, _): operation = turn.annotation?.operation; failed = false
+            case .failed(_, let failure): operation = failure.annotation?.operation; failed = true
+            }
+            guard let operation else { continue }
+            let index: Int
+            if let existing = tallies.firstIndex(where: { $0.operation == operation }) {
+                index = existing
+            } else {
+                tallies.append(OperationTally(operation: operation, completed: 0, failed: 0))
+                index = tallies.count - 1
+            }
+            if failed { tallies[index].failed += 1 } else { tallies[index].completed += 1 }
+        }
+        return tallies
+    }
+
     /// Appends one call event, assigning its lifetime ordinal.
     public mutating func append(_ event: LLMCallEvent) {
         lifetimeCount += 1

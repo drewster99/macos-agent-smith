@@ -330,12 +330,13 @@ public struct ToolContext: Sendable {
     /// Triggers summarization and embedding of a completed or failed task.
     public let summarizeCompletedTask: @Sendable (UUID) async -> Void
     /// Decides whether a new memory should merge into a similar existing one, and if so
-    /// produces the reconciled text (newer info wins conflicts). Parameters:
-    /// (existingContent, newContent). The LLM is the decider; `.distinct` on any failure.
-    public let reconcileMemory: @Sendable (String, String) async -> MemoryReconciliation
+    /// produces the reconciled text (newer info wins conflicts). The LLM is the decider;
+    /// `.distinct` on any failure. The runtime attaches the calling agent's task.
+    public let reconcileMemory: @Sendable (MemoryReconciliationRequest) async -> MemoryReconciliation
     /// Runs a prompt against fetched web-page content via the summarizer's LLM and returns the
     /// extracted answer, or nil if unavailable or the call fails. Backs `web_fetch`'s hybrid
-    /// extraction mode. Parameters: (content, prompt).
+    /// extraction mode. Parameters: (content, prompt). The runtime attaches the calling agent's
+    /// task.
     public let extractWebContent: @Sendable (String, String) async -> String?
     /// Whether Smith should automatically run the next pending task after completing one.
     /// Closure so the value reflects the current setting, not the value at init time.
@@ -443,7 +444,7 @@ public struct ToolContext: Sendable {
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
         summarizeCompletedTask: @escaping @Sendable (UUID) async -> Void = { _ in },
-        reconcileMemory: @escaping @Sendable (String, String) async -> MemoryReconciliation = { _, _ in .distinct },
+        reconcileMemory: @escaping @Sendable (MemoryReconciliationRequest) async -> MemoryReconciliation = { _ in .distinct },
         extractWebContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
         autoAdvanceEnabled: @escaping @Sendable () async -> Bool = { true },
         retrieveContext: @escaping @Sendable (RetrievalSource, String) async -> SemanticSearchResults = { _, _ in SemanticSearchResults(memories: [], taskSummaries: []) },

@@ -7,8 +7,9 @@ import AgentSmithKit
 
 /// Inspector card for the TaskSummarizer, matching AgentCard visual style.
 ///
-/// The summarizer is transient (fires once per task completion), so it doesn't have
-/// persistent context, tools, or LLM turns. Instead, we show activity history and stats.
+/// The summarizer is transient (fires once per task completion, memory consolidation, or prompted
+/// web fetch), so it has no persistent context or tools. The card is status only; its title opens
+/// the shared inspector window, which shows every provider call with its exact request.
 struct SummarizerCard: View {
     @Bindable var viewModel: AppViewModel
     let messages: [ChannelMessage]
@@ -22,9 +23,8 @@ struct SummarizerCard: View {
     let onUpdatePollInterval: (TimeInterval) -> Void
     let onUpdateMaxToolCalls: (Int) -> Void
 
-    /// Starts COLLAPSED, like the other agent cards.
-    @State private var expanded = false
     @State private var showingConfig = false
+    @Environment(\.openWindow) private var openWindow
 
     private static let roleColor = AppColors.summarizerAgent
 
@@ -54,11 +54,8 @@ struct SummarizerCard: View {
         // Single pass to bucket the summarizer's messages and count summary/error events.
         // Without caching, summarizerMessages was filtering the full message array per
         // body access, and summaryCount/errorCount each re-filtered it again.
-        let stats = Self.summarizerStats(messages)
-        let summarizerMessages = stats.messages
-        let hasActivity = !summarizerMessages.isEmpty
-        let summaryCount = stats.summaryCount
-        let errorCount = stats.errorCount
+        let hasActivity = !Self.summarizerStats(messages).messages.isEmpty
+            || viewModel.hasAgentActivity(.summarizer)
 
         return VStack(alignment: .leading, spacing: 0) {
             SummarizerCardHeader(
@@ -66,7 +63,7 @@ struct SummarizerCard: View {
                 isProcessing: isProcessing,
                 executingTools: executingTools,
                 roleColor: Self.roleColor,
-                expanded: $expanded,
+                onOpenWindow: openInspector,
                 onShowConfig: { showingConfig = true }
             )
 
@@ -81,14 +78,6 @@ struct SummarizerCard: View {
             .padding(.leading, 28)
             .padding(.trailing, 12)
             .padding(.bottom, 6)
-
-            if expanded {
-                SummarizerCardExpandedSections(
-                    summarizerMessages: summarizerMessages,
-                    summaryCount: summaryCount,
-                    errorCount: errorCount
-                )
-            }
 
             Divider()
         }
@@ -108,6 +97,10 @@ struct SummarizerCard: View {
                 }
             )
         }
+    }
+
+    private func openInspector() {
+        openWindow(value: AgentInspectorTarget(sessionID: viewModel.session.id, role: .summarizer))
     }
 }
 
