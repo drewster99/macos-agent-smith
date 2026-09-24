@@ -1,8 +1,8 @@
 # Task state events and task watches
 
-> **Status:** design approved in principle 2026-09-24 ("one event source, two kinds of subscriber");
-> this document is the finalized plan after a research recheck. Decisions marked **[CONFIRM]** need
-> the user's answer before the phase that depends on them starts.
+> **Status:** design approved 2026-09-24 ("one event source, two kinds of subscriber"); finalized
+> after a research recheck, with every open decision resolved (see Decisions). References below to
+> [CONFIRM n] point at those resolved decisions.
 
 ## Goal
 
@@ -225,25 +225,22 @@ touched) → commit → push.
    `get_task_details`, transcript kinds (+ ChannelMessageKind guard table).
 6. **Integrated recheck.** Live run: chain A→B, notifications, restart mid-chain; CLAUDE.md entry.
 
-## Decisions needed
+## Decisions (resolved 2026-09-24)
 
-1. **[CONFIRM 1] Smith briefing gaps.** Today Smith is not told about escalation, block/release,
-   rejections returned, user Fail/Re-validate/Send back, scheduled pause/interrupt, worker
-   self-terminate. Keep that exact set (recommended for Phase 2), or widen it in a follow-up?
-2. **[CONFIRM 2] Briefing durability.** Today's notes are dropped if no Smith is live. Route the
-   briefing through the broker's durable Smith queue (delivered after a restart) — recommended —
-   or keep direct injection?
-3. **[CONFIRM 3] Holding the chained task.** For "start B when A completes", B must not be started
-   early by auto-advance. Recommended: a typed hold on B (`startHold: .awaitingTask(A)`) that
-   auto-advance skips and the task list shows as "Waiting on A"; Play still starts it (explicit
-   override). If A fails or is deleted, B stays held and the user is told. Alternative: B stays a
-   normal pending task (auto-advance may start it early).
-4. **[CONFIRM 4] Cold-boot transitions and watches.** A task found mid-run after a crash is marked
-   interrupted at launch. Should an "interrupted" watch fire for that? Recommended: yes — it is a
-   real event the user asked to hear about.
-5. **[CONFIRM 5] Template watches as blueprints** (copied into every run). Recommended: yes.
-6. **[CONFIRM 6] "Summarize to me".** Smith writes it (an LLM call, natural wording — recommended),
-   or a deterministic post of the stored summary/result (no LLM cost).
+1. **Smith briefing set** — keep exactly today's set of notified transitions in Phase 2. Widening it
+   (escalation, rejections returned, user Fail/Re-validate/Send back, scheduled pause/interrupt,
+   worker self-terminate) is a separate later decision.
+2. **Briefing durability** — route the briefing through the broker's durable Smith queue, so a note
+   is delivered after a restart instead of being dropped when no Smith is live.
+3. **Holding the chained task** — a typed hold on B (`startHold: .awaitingTask(A)`): auto-advance
+   skips it, the task list shows "Waiting on A", Play still starts it (explicit override). If A fails
+   or is deleted, B stays held and the user is told.
+4. **Cold-boot transitions** — watches DO fire for them (a task found mid-run after a crash and
+   marked interrupted is a real event). The Smith briefing still skips them (its initial instruction
+   covers launch state).
+5. **Template watches** — blueprints copied into each run (recommended default; not separately
+   asked — revisit if it surprises).
+6. **"Summarize to me"** — Smith writes it (one turn, `message_user`).
 
 ## Existing defects found during research (fixed in the phase noted)
 

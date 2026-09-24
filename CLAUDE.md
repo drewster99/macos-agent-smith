@@ -436,6 +436,21 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
   snapshots; mutations are published only after commit, with typed `MemoryActivityOrigin`. Callers
   never synthesize memory events.
 
+### Task state events and task watches (decided 2026-09-24 — see TaskStateEventsPlan.md)
+
+**One event source, two kinds of subscriber.** Every live task status change goes through ONE
+`TaskStore` writer and emits ONE typed `TaskStatusTransition` (from, to, time, required typed
+`TaskTransitionCause`). Everything that reacts to a status change subscribes to it: the runtime's
+own reactions (`onTaskTerminated` is derived from it), the built-in Smith briefing (defined in
+code, always on), and user-defined **task watches** (data on `AgentTask.watches`: "when task X
+reaches state S, do A" — start another task, macOS notification, Smith summarizes to the user,
+instructions for Smith). Don't add a status write that bypasses the writer, and don't add a second
+notification path for task state — add a subscriber. Decisions: the Smith briefing keeps today's
+set of notified transitions and is delivered through the broker's durable Smith queue; a chained
+task is held (`startHold`) so auto-advance can't start it early (Play overrides); watches fire for
+cold-boot reconciliation transitions; template watches are blueprints copied into each run; a watch
+never reopens a completed task or resets a failed one.
+
 ## Conventions specific to this repo
 
 ### Local model metadata mapping
