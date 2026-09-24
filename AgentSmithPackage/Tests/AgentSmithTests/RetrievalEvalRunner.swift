@@ -99,7 +99,7 @@ struct RetrievalEvalRunner {
 
             // Fetch the whole corpus per pool so a cosine re-rank can't miss a high-cosine /
             // low-RRF doc that a small top-N would truncate.
-            let results = try await store.searchAll(query: label.text, memoryLimit: 200, taskLimit: 200)
+            let results = try await store.searchAll(query: label.text, memoryLimit: 200, taskLimit: 200, origin: .other("retrieval eval"))
             let docs = rankedDocs(results)
             let gold = Dictionary(uniqueKeysWithValues: label.gold.map { ($0.id, $0.grade) })
             let goldTasks = gold.filter { taskIDs.contains($0.key) }
@@ -133,10 +133,10 @@ struct RetrievalEvalRunner {
 
             // Semantic + per-pool instruction (query-side only; docs already raw → no re-embed).
             let instrTaskDocs = rankedDocs(try await store.searchAll(
-                query: instructed(Self.taskInstruct, label.text), memoryLimit: 200, taskLimit: 200))
+                query: instructed(Self.taskInstruct, label.text), memoryLimit: 200, taskLimit: 200, origin: .other("retrieval eval")))
                 .filter { $0.isTask }.sorted { $0.cosine > $1.cosine }
             let instrMemDocs = rankedDocs(try await store.searchAll(
-                query: instructed(Self.memoryInstruct, label.text), memoryLimit: 200, taskLimit: 200))
+                query: instructed(Self.memoryInstruct, label.text), memoryLimit: 200, taskLimit: 200, origin: .other("retrieval eval")))
                 .filter { !$0.isTask }.sorted { $0.cosine > $1.cosine }
             for g in Self.gates {
                 let injT = Array(instrTaskDocs.filter { $0.cosine >= g }.prefix(Self.K))
@@ -310,7 +310,7 @@ struct RetrievalEvalRunner {
 
             for cName in constructionsOrder {
                 guard let q = constructions[cName] else { continue }
-                let docs = rankedDocs(try await store.searchAll(query: q, memoryLimit: 0, taskLimit: 400)).filter { $0.isTask }
+                let docs = rankedDocs(try await store.searchAll(query: q, memoryLimit: 0, taskLimit: 400, origin: .other("retrieval eval"))).filter { $0.isTask }
 
                 var cosT = T["\(cName)|cosine"] ?? Tally()
                 rank(docs.map { ($0.id, $0.cosine) }, gold: goldTasks, into: &cosT)
@@ -428,7 +428,7 @@ struct RetrievalEvalRunner {
             let excluded = Set(excludeByQuery[qid] ?? [])
             await store.clear()
             await store.restore(memories: memories, taskSummaries: tasks.filter { !excluded.contains($0.id.uuidString) })
-            let docs = rankedDocs(try await store.searchAll(query: q, memoryLimit: 400, taskLimit: 400))
+            let docs = rankedDocs(try await store.searchAll(query: q, memoryLimit: 400, taskLimit: 400, origin: .other("retrieval eval")))
             let goldTasks = Set(label.gold.map(\.id).filter { taskIDs.contains($0) })
             let goldMems = Set(label.gold.map(\.id).filter { memIDs.contains($0) })
             measure("\(tag)→task", docs: docs.filter { $0.isTask }, gold: goldTasks, q: q, tokens: taskPool.tokens, idf: taskPool.idf)
@@ -514,14 +514,14 @@ struct RetrievalEvalRunner {
             if !goldTasks.isEmpty {
                 for (name, prompt) in taskPrompts {
                     let q = MemoryStore.instructed(prompt.isEmpty ? nil : prompt, label.text)
-                    let res = try await store.searchTaskSummaries(query: q, limit: 400, threshold: 0.0)
+                    let res = try await store.searchTaskSummaries(query: q, limit: 400, threshold: 0.0, origin: .other("retrieval eval"))
                     score(res.map { ($0.summary.id.uuidString, $0.similarity) }, goldTasks, into: "task|\(name)")
                 }
             }
             if !goldMems.isEmpty {
                 for (name, prompt) in memPrompts {
                     let q = MemoryStore.instructed(prompt.isEmpty ? nil : prompt, label.text)
-                    let res = try await store.searchMemories(query: q, limit: 400, threshold: 0.0)
+                    let res = try await store.searchMemories(query: q, limit: 400, threshold: 0.0, origin: .other("retrieval eval"))
                     score(res.map { ($0.memory.id.uuidString, $0.similarity) }, goldMems, into: "mem|\(name)")
                 }
             }

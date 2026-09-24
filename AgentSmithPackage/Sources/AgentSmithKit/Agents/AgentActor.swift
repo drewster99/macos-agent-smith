@@ -3695,14 +3695,22 @@ public actor AgentActor {
     /// Skipped if there are no user messages in the pending queue, the latest user query is empty,
     /// the conversation already contains the marker (background still in scope), or the search
     /// returns nothing.
+    /// The pending message Smith's auto-context retrieval reacts to: the latest one the USER sent.
+    /// Keyed on the typed sender, never on content — an app-composed notice (e.g. a
+    /// `.userTaskAction` posted as `.system`) must not trigger a memory search, however its prose
+    /// is worded.
+    static func autoContextTriggerMessage(in pending: [ChannelMessage]) -> ChannelMessage? {
+        pending.last { message in
+            if case .user = message.sender { return true }
+            return false
+        }
+    }
+
     private func injectAutoMemoryContextIfNeeded() async {
         // Find the most recent user-originated pending message — that's the one we react to.
         // If multiple user messages arrived in a burst, we attach context only to the latest
         // one (most recent intent) and rely on the marker to suppress further injections.
-        guard let userMessage = pendingChannelMessages.last(where: { msg in
-            if case .user = msg.sender { return true }
-            return false
-        }) else { return }
+        guard let userMessage = Self.autoContextTriggerMessage(in: pendingChannelMessages) else { return }
 
         let query = userMessage.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }

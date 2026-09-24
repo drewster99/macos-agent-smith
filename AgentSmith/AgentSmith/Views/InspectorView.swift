@@ -79,7 +79,7 @@ struct InspectorView: View {
                     RoleAgentCard(viewModel: viewModel, role: .securityAgent, roleMessages: securityAgentMessages)
                     ValidatorAgentCard(viewModel: viewModel)
                     SummarizerAgentCard(viewModel: viewModel, summarizerMessages: summarizerMessages)
-                    MemoryQueryCard(shared: viewModel.shared)
+                    MemoryActivityCard(shared: viewModel.shared)
                 }
             }
         }
@@ -1065,135 +1065,6 @@ private struct ConcurrencyChip: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(count) \(label) running")
-    }
-}
-
-// MARK: - Memory Query Log
-
-/// Global log of memory-store queries (semantic + keyword searches) with response times — the
-/// read-side analog of the Security Agent's evaluation log. Reads `shared.memoryQueryRecords`
-/// (global, since the `MemoryStore` is shared across sessions). Starts collapsed; the header shows a
-/// live query count so activity is glanceable without expanding.
-private struct MemoryQueryCard: View {
-    @Bindable var shared: SharedAppState
-    @State private var expanded = false
-
-    var body: some View {
-        let records = shared.memoryQueryRecords
-        VStack(alignment: .leading, spacing: 0) {
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-            }, label: {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(records.isEmpty ? AppColors.inactiveDot : Color.purple)
-                        .frame(width: 8, height: 8)
-                    Text("Memory")
-                        .font(.headline)
-                        .foregroundStyle(records.isEmpty ? .secondary : Color.purple)
-                    Spacer()
-                    Text("\(records.count) quer\(records.count == 1 ? "y" : "ies")")
-                        .font(AppFonts.inspectorLabel)
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                }
-                .contentShape(Rectangle())
-            })
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-
-            if expanded {
-                if records.isEmpty {
-                    Text("No memory queries yet.")
-                        .font(AppFonts.inspectorBody)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 8)
-                } else {
-                    VStack(alignment: .leading, spacing: 3) {
-                        // Newest first; cap the rendered rows so a long session doesn't build a huge tree.
-                        ForEach(records.suffix(40).reversed()) { record in
-                            MemoryQueryRecordRow(record: record)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
-                }
-            }
-
-            Divider()
-        }
-    }
-}
-
-/// A single memory-query log entry: hit counts, source, latency, time; tap to expand the full query.
-struct MemoryQueryRecordRow: View {
-    let record: MemoryQueryRecord
-    @State private var expanded = false
-
-    var body: some View {
-        Button(action: {
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-        }, label: {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text("\(record.memoryHits)m·\(record.taskHits)t")
-                        .font(AppFonts.microMonoBadge)
-                        .fontWeight(.bold)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Color.purple.opacity(0.8))
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-
-                    Text(record.source)
-                        .font(AppFonts.inspectorBody)
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    Text("\(record.latencyMs)ms")
-                        .font(AppFonts.inspectorBody)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-
-                    Text(record.timestamp, style: .time)
-                        .font(AppFonts.inspectorBody)
-                        .foregroundStyle(.tertiary)
-                }
-
-                Text(record.query)
-                    .font(AppFonts.inspectorBody)
-                    .foregroundStyle(.primary)
-                    .lineLimit(expanded ? nil : 1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .multilineTextAlignment(.leading)
-                    .textSelection(.enabled)
-
-                // Where the time actually went. Collapsed rows keep the single total — the split
-                // only earns its space once you're looking at one query in particular. A real
-                // conditional rather than a zero-height/zero-opacity row: the enclosing VStack
-                // has `spacing: 3`, so a hidden child would still pad every collapsed row. The
-                // usual objection to conditionals in a body is lost view identity, which a
-                // stateless leaf Text has nothing to lose.
-                if expanded {
-                    Text(record.phaseBreakdown)
-                        .font(AppFonts.inspectorBody)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
-            }
-            .padding(.vertical, 3)
-            .padding(.horizontal, 6)
-            .background(Color.purple.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 4))
-            .contentShape(Rectangle())
-        })
-        .buttonStyle(.plain)
     }
 }
 

@@ -143,7 +143,7 @@ struct MemoryStoreIntegrationTests {
         var misses: [(query: String, expected: String, got: String?, rrf: Double)] = []
         for test in Self.queryCases {
             let expectedUUID = try #require(idBySeed[test.expectedSeedID])
-            let results = try await fixture.store.searchMemories(query: test.query, limit: 5)
+            let results = try await fixture.store.searchMemories(query: test.query, limit: 5, origin: .other("integration test"))
             try #require(!results.isEmpty, "query \"\(test.query)\" returned no results")
             let topID = results[0].memory.id
             if topID != expectedUUID {
@@ -166,8 +166,8 @@ struct MemoryStoreIntegrationTests {
         let unrelatedQuery = "the flight path of a migrating humpback whale"
         let expectedUUID = try #require(fixture.ids["astro-aurora"])
 
-        let matchedResults = try await fixture.store.searchMemories(query: matchedQuery, limit: fixture.ids.count)
-        let unrelatedResults = try await fixture.store.searchMemories(query: unrelatedQuery, limit: fixture.ids.count)
+        let matchedResults = try await fixture.store.searchMemories(query: matchedQuery, limit: fixture.ids.count, origin: .other("integration test"))
+        let unrelatedResults = try await fixture.store.searchMemories(query: unrelatedQuery, limit: fixture.ids.count, origin: .other("integration test"))
 
         let matchedSimilarity = matchedResults.first(where: { $0.memory.id == expectedUUID })?.similarity ?? 0
         let unrelatedSimilarity = unrelatedResults.first(where: { $0.memory.id == expectedUUID })?.similarity ?? 0
@@ -183,7 +183,7 @@ struct MemoryStoreIntegrationTests {
         guard let fixture = try await Self.fixtureIfEnabled() else { return }
         for seed in Self.seeds {
             let expectedUUID = try #require(fixture.ids[seed.id])
-            let results = try await fixture.store.searchMemories(query: seed.content, limit: 1)
+            let results = try await fixture.store.searchMemories(query: seed.content, limit: 1, origin: .other("integration test"))
             try #require(!results.isEmpty, "exact-content query for \(seed.id) returned no results")
             #expect(results[0].memory.id == expectedUUID, "exact-content query for \(seed.id) did not return the same memory")
         }

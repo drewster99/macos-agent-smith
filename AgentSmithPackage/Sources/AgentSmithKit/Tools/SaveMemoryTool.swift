@@ -97,12 +97,17 @@ struct SaveMemoryTool: AgentTool {
         // candidate with the *highest raw cosine* over `consolidationThreshold`.
         // `searchMemories` orders by RRF (which mixes lexical overlap), so taking the
         // first match would miss higher-cosine candidates buried deeper in RRF order.
+        // One id for this whole consolidation attempt — candidate search, reconciler call, and the
+        // resulting mutation — so the inspector can show them as one operation.
+        let consolidationID = UUID()
         let similarMemories: [MemorySearchResult]
         do {
             similarMemories = try await context.memoryStore.searchMemories(
                 query: content,
                 limit: Self.consolidationCandidateLimit,
-                threshold: Self.consolidationCandidateFloor
+                threshold: Self.consolidationCandidateFloor,
+                origin: .memoryConsolidationCandidateSearch,
+                correlationID: consolidationID
             )
         } catch {
             // If search fails, proceed with normal save.
@@ -120,7 +125,7 @@ struct SaveMemoryTool: AgentTool {
             // No hard tag requirement: tags were an unreliable second axis (agents tag
             // the same fact inconsistently), and the LLM is a better one.
             let reconciliationRequest = MemoryReconciliationRequest(
-                existing: match.memory.content, proposed: content, correlationID: UUID())
+                existing: match.memory.content, proposed: content, correlationID: consolidationID)
             if case .merged(let merged) = await context.reconcileMemory(reconciliationRequest) {
                 let mergedTags = Array(Set(match.memory.tags + tags))
                 do {

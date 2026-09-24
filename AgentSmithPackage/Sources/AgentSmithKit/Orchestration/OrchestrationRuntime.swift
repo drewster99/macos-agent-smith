@@ -1765,7 +1765,7 @@ public actor OrchestrationRuntime {
                 taskCosineGate: MemoryStore.taskInjectionCosineGate,
                 memoryInstruction: MemoryStore.memoryRetrievalInstruction,
                 taskInstruction: MemoryStore.taskRetrievalInstruction,
-                source: source.rawValue
+                origin: .retrieval(source)
             )
         } catch {
             return SemanticSearchResults(memories: [], taskSummaries: [])
@@ -2314,53 +2314,6 @@ public actor OrchestrationRuntime {
         let wakeScheduler = ensureWakeScheduler()
         let context = makeToolContext(agentID: id, role: .smith, wakeScheduler: wakeScheduler, currentResumingTaskID: resumingTaskID)
 
-        // Smith only wakes for: private messages (user/Brown/Security Agent→Smith), system termination notices.
-        // Public Brown messages, tool_request/tool execution messages, and security review notices
-        // are completely filtered out — they generate too much noise and don't need Smith's attention.
-        let smithMessageFilter: @Sendable (ChannelMessage) -> Bool = { message in
-            // Drop Smith's own outgoing messages — they are published to the channel and would
-            // immediately re-wake Smith, producing an infinite loop of repeated messages.
-            if case .agent(let role) = message.sender, role == .smith {
-                return false
-            }
-            // Drop all public messages from Brown, Security Agent, or Summarizer, except online
-            // announcements which Smith needs for coordination. Summarizer results are
-            // persisted to the memory store and task record — Smith doesn't need them
-            // in its conversation history (and they can distract from pending user messages).
-            if case .agent(let role) = message.sender, message.recipientID == nil,
-               role == .brown || role == .securityAgent || role == .summarizer {
-                // Broadcasts from the worker cast are not Smith's to consume — it coordinates
-                // through directed messages and task lifecycle, not these.
-                return false
-            }
-            // Drop tool_request messages (Brown's approval requests).
-            if message.kind == .toolRequest {
-                return false
-            }
-            // Drop tool execution trace messages.
-            if message.toolName != nil {
-                return false
-            }
-            // For system messages, only pass through diagnostics directly relevant to Smith:
-            // agent lifecycle events (stalls, terminations, loop-breaker idles), rate-limit
-            // notices, and system guidance injected by tools (task_update_guidance). Everything
-            // else system-sent — context-management chatter, in-progress recovery attempts,
-            // status digests, UI banners — is information for the transcript, not supervisor
-            // signal. Keyed on message KINDS: the prefix test this replaced ("Agent " /
-            // "Rate limit:") silently unsubscribed Smith from any notice someone reworded, and
-            // conversely passed any banner whose content happened to start with "Agent " (a
-            // task titled "Agent cleanup" reached Smith through its completion banner).
-            if case .system = message.sender {
-                let smithRelevantSystemKinds: Set<ChannelMessageKind> = [
-                    .taskUpdateGuidance, .agentLifecycle, .rateLimit, .userTaskAction
-                ]
-                guard let kind = message.kind, smithRelevantSystemKinds.contains(kind) else {
-                    return false
-                }
-            }
-            return true
-        }
-
         let smithAgent = AgentActor(
             id: id,
             configuration: AgentConfiguration(
@@ -2372,7 +2325,7 @@ public actor OrchestrationRuntime {
                 suppressesRawTextToChannel: true,
                 pollInterval: agentTuning[.smith]?.pollInterval ?? 20,
                 messageDebounceInterval: agentTuning[.smith]?.messageDebounceInterval ?? 1,
-                messageAcceptFilter: smithMessageFilter,
+                messageAcceptFilter: Self.smithAcceptsMessage,
                 maxToolCallsPerIteration: agentTuning[.smith]?.maxToolCalls ?? 100,
                 supportsVision: supportsVisionByRole[.smith] ?? true,
                 supportsDocuments: supportsDocumentsByRole[.smith] ?? false
@@ -4063,6 +4016,55 @@ public actor OrchestrationRuntime {
         for subID in handle.subscriptionIDs {
             await channel.unsubscribe(subID)
         }
+    }
+
+    /// Smith's channel-message accept filter. Smith only wakes for: private messages
+    /// (user/Brown/Security Agent→Smith), and a few system notices. Public Brown messages,
+    /// tool_request/tool execution messages, and security review notices are filtered out — they
+    /// generate too much noise and don't need Smith's attention. Static and pure so it can be
+    /// tested directly.
+    static func smithAcceptsMessage(_ message: ChannelMessage) -> Bool {
+        // Drop Smith's own outgoing messages — they are published to the channel and would
+        // immediately re-wake Smith, producing an infinite loop of repeated messages.
+        if case .agent(let role) = message.sender, role == .smith {
+            return false
+        }
+        // Drop all public messages from Brown, Security Agent, or Summarizer, except online
+        // announcements which Smith needs for coordination. Summarizer results are
+        // persisted to the memory store and task record — Smith doesn't need them
+        // in its conversation history (and they can distract from pending user messages).
+        if case .agent(let role) = message.sender, message.recipientID == nil,
+           role == .brown || role == .securityAgent || role == .summarizer {
+            // Broadcasts from the worker cast are not Smith's to consume — it coordinates
+            // through directed messages and task lifecycle, not these.
+            return false
+        }
+        // Drop tool_request messages (Brown's approval requests).
+        if message.kind == .toolRequest {
+            return false
+        }
+        // Drop tool execution trace messages.
+        if message.toolName != nil {
+            return false
+        }
+        // For system messages, only pass through diagnostics directly relevant to Smith:
+        // agent lifecycle events (stalls, terminations, loop-breaker idles), rate-limit
+        // notices, and system guidance injected by tools (task_update_guidance). Everything
+        // else system-sent — context-management chatter, in-progress recovery attempts,
+        // status digests, UI banners — is information for the transcript, not supervisor
+        // signal. Keyed on message KINDS: the prefix test this replaced ("Agent " /
+        // "Rate limit:") silently unsubscribed Smith from any notice someone reworded, and
+        // conversely passed any banner whose content happened to start with "Agent " (a
+        // task titled "Agent cleanup" reached Smith through its completion banner).
+        if case .system = message.sender {
+            let smithRelevantSystemKinds: Set<ChannelMessageKind> = [
+                .taskUpdateGuidance, .agentLifecycle, .rateLimit, .userTaskAction
+            ]
+            guard let kind = message.kind, smithRelevantSystemKinds.contains(kind) else {
+                return false
+            }
+        }
+        return true
     }
 
     /// The task a Summarizer call made on an agent's behalf belongs to: a worker's bound task

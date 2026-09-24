@@ -115,6 +115,8 @@ enum AppColors {
     static let inspectorOperationBadge = Color.teal
     /// Notice that part of a record was released or never captured.
     static let inspectorRetentionNotice = Color.secondary
+    /// The inspector's Memory activity card and its rows.
+    static let memoryActivity = Color.purple
 
     // MARK: - Diff view
 

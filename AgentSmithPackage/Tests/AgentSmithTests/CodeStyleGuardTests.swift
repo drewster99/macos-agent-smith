@@ -490,7 +490,7 @@ struct CodeStyleGuardTests {
     private static let oversizedBodyBudget: [String: Int] = [
         "Views/TaskListView.swift": 13,
         "Views/ChannelLogView.swift": 10,
-        "Views/InspectorView.swift": 8,
+        "Views/InspectorView.swift": 6,
         "Views/Main/MainViewDetailColumn.swift": 7,
         "Views/TaskCostDetailSheet.swift": 6,
         "Views/Banners/ChannelBanners.swift": 4,
@@ -556,7 +556,7 @@ struct CodeStyleGuardTests {
 
     /// The sum of the ceilings, pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number and unused headroom cannot quietly accumulate. See `someViewFunctionTotal`.
-    private static let oversizedBodyTotal = 132
+    private static let oversizedBodyTotal = 130
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.

@@ -338,19 +338,15 @@ final class SharedAppState {
     /// inspector's concurrency strip observes it without touching the tracker's lock.
     private(set) var liveActivitySnapshot = LiveActivityTracker.Snapshot()
 
-    /// Rolling log of memory-store queries (newest last), surfaced in the inspector's Memory card.
-    /// Global because the `MemoryStore` is shared across sessions. Capped so a long-running app
-    /// doesn't accumulate unbounded records.
-    private(set) var memoryQueryRecords: [MemoryQueryRecord] = []
-    /// Newest-first cap for `memoryQueryRecords`.
-    private static let maxMemoryQueryRecords = 200
+    /// The Memory activity feed surfaced in the inspector's Memory card: every query (with its
+    /// exact per-corpus results), ordered by the store-assigned sequence. Global because the
+    /// `MemoryStore` is shared across sessions. Bounded, visibly — the feed counts what it evicted.
+    /// Runtime inspection only; never persisted.
+    private(set) var memoryActivityFeed = MemoryActivityFeed(capacity: 200)
 
-    /// Appends a memory-query record to the rolling log, trimming the oldest past the cap.
-    func appendMemoryQueryRecord(_ record: MemoryQueryRecord) {
-        memoryQueryRecords.append(record)
-        if memoryQueryRecords.count > Self.maxMemoryQueryRecords {
-            memoryQueryRecords.removeFirst(memoryQueryRecords.count - Self.maxMemoryQueryRecords)
-        }
+    /// Adds one store-published activity to the feed.
+    func receiveMemoryActivity(_ activity: MemoryActivity) {
+        memoryActivityFeed.insert(activity)
     }
 
     /// Live cost and token totals per task, keyed by task ID — the main-thread mirror of
@@ -903,10 +899,12 @@ final class SharedAppState {
         let engine = try await ensureSemanticEngine()
         let store = MemoryStore(engine: engine)
 
-        // Collect each query into the global memory log for the inspector's Memory card.
-        await store.setOnQueryRecorded { [weak self] record in
+        // Collect the store's activity into the global feed for the inspector's Memory card. Each
+        // delivery is its own main-actor hop and may land out of order; the feed orders by the
+        // sequence the store assigned.
+        await store.setOnActivityRecorded { [weak self] activity in
             Task { @MainActor [weak self] in
-                self?.appendMemoryQueryRecord(record)
+                self?.receiveMemoryActivity(activity)
             }
         }
 
@@ -1561,7 +1559,7 @@ final class SharedAppState {
     func searchMemories(query: String, limit: Int = 20) async throws -> [MemorySearchResult] {
         guard let store = memoryStore else { throw MemorySearchUIError.storeUnavailable }
         do {
-            return try await store.searchMemories(query: query, limit: limit, threshold: 0.0)
+            return try await store.searchMemories(query: query, limit: limit, threshold: 0.0, origin: .memoryBrowser)
         } catch {
             logger.error("Memory search failed: \(error.localizedDescription, privacy: .public)")
             throw MemorySearchUIError.underlying(error)
@@ -1571,7 +1569,7 @@ final class SharedAppState {
     func searchTaskSummaries(query: String, limit: Int = 20) async throws -> [TaskSummarySearchResult] {
         guard let store = memoryStore else { throw MemorySearchUIError.storeUnavailable }
         do {
-            return try await store.searchTaskSummaries(query: query, limit: limit, threshold: 0.0)
+            return try await store.searchTaskSummaries(query: query, limit: limit, threshold: 0.0, origin: .memoryBrowser)
         } catch {
             logger.error("Task summary search failed: \(error.localizedDescription, privacy: .public)")
             throw MemorySearchUIError.underlying(error)

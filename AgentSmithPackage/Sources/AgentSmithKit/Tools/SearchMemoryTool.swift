@@ -73,7 +73,8 @@ struct SearchMemoryTool: AgentTool {
             query: query,
             memoryLimit: limit,
             taskLimit: limit,
-            excludeDeletedTasks: false
+            excludeDeletedTasks: false,
+            origin: .agentSearchMemory(context.agentRole)
         )
         let memories = rawResults.memories.filter { $0.similarity >= Self.toolSearchFloor }
         let taskSummaries = rawResults.taskSummaries.filter { $0.similarity >= Self.toolSearchFloor }

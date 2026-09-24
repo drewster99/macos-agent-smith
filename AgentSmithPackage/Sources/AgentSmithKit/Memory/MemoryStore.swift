@@ -159,62 +159,6 @@ public struct RelevantPriorTask: Codable, Sendable, Equatable {
     }
 }
 
-/// A single memory-store query, logged for the inspector's Memory panel — the read-side analog of
-/// the Security Agent's `EvaluationRecord`. Captures what was asked, how many hits came back, and
-/// how long the round-trip (including the query embedding) took.
-public struct MemoryQueryRecord: Sendable, Identifiable, Equatable {
-    public let id = UUID()
-    /// When the query was issued.
-    public let timestamp: Date
-    /// The raw query text.
-    public let query: String
-    /// Number of memory hits returned.
-    public let memoryHits: Int
-    /// Number of prior-task-summary hits returned (0 for a memories-only search).
-    public let taskHits: Int
-    /// Wall-clock round-trip time in milliseconds, including the query embedding.
-    public let latencyMs: Int
-    /// Milliseconds spent producing the query embedding(s). Usually the dominant term — a
-    /// corpus scan is arithmetic over cached vectors, an embed is a model forward pass.
-    public let embedMs: Int
-    /// Milliseconds spent scoring the MEMORY corpus. Zero when memories weren't searched.
-    public let memorySearchMs: Int
-    /// Milliseconds spent scoring the PRIOR-TASK corpus. Zero when task summaries weren't
-    /// searched — which is the normal case for auto-context on a user message.
-    public let taskSearchMs: Int
-    /// What triggered the query (e.g. "auto-context", "task-context", "search_memory", "system").
-    public let source: String
-
-    /// Compact "embed 180ms · mem-scan 34ms · task-scan 0ms" phase split, for the inspector's
-    /// Memory card. Phases that didn't run are still printed: a ZERO is the informative part —
-    /// it's how you tell a corpus that was SKIPPED from one that was scored and matched nothing.
-    public var phaseBreakdown: String {
-        "embed \(embedMs)ms · mem-scan \(memorySearchMs)ms · task-scan \(taskSearchMs)ms"
-    }
-
-    public init(
-        timestamp: Date,
-        query: String,
-        memoryHits: Int,
-        taskHits: Int,
-        latencyMs: Int,
-        embedMs: Int = 0,
-        memorySearchMs: Int = 0,
-        taskSearchMs: Int = 0,
-        source: String
-    ) {
-        self.timestamp = timestamp
-        self.query = query
-        self.memoryHits = memoryHits
-        self.taskHits = taskHits
-        self.latencyMs = latencyMs
-        self.embedMs = embedMs
-        self.memorySearchMs = memorySearchMs
-        self.taskSearchMs = taskSearchMs
-        self.source = source
-    }
-}
-
 /// Thread-safe store for semantic memories and task summary embeddings.
 ///
 /// Uses **single-vector embeddings** produced by `SemanticSearchEngine` (Qwen3 via MLX
@@ -232,9 +176,11 @@ public actor MemoryStore {
     private var excludedTaskSummaryIDs: Set<UUID> = []
     private let engine: SemanticSearchEngine
     private var onChange: (@Sendable () -> Void)?
-    /// Fired after each `searchMemories` / `searchAll`, carrying the query, hit counts, and latency
-    /// for the inspector's Memory log (the read-side analog of the Security Agent's evaluation log).
-    private var onQueryRecorded: (@Sendable (MemoryQueryRecord) -> Void)?
+    /// Fired for every entry in the Memory activity feed — each query, with exact per-corpus
+    /// results. This actor is the feed's single publisher.
+    private var onActivityRecorded: (@Sendable (MemoryActivity) -> Void)?
+    /// The last sequence number handed out; see `MemoryActivity.sequence`.
+    private var lastActivitySequence = 0
     /// Bumps the "memory search" in-flight count for the concurrency meter. Optional so the store
     /// works headless (tests) with no tracker attached.
     private var activityTracker: LiveActivityTracker?
@@ -251,9 +197,16 @@ public actor MemoryStore {
         onChange = handler
     }
 
-    /// Registers a callback fired after each memory-store query with its timing + hit counts.
-    public func setOnQueryRecorded(_ handler: @escaping @Sendable (MemoryQueryRecord) -> Void) {
-        onQueryRecorded = handler
+    /// Registers the Memory activity feed's observer.
+    public func setOnActivityRecorded(_ handler: @escaping @Sendable (MemoryActivity) -> Void) {
+        onActivityRecorded = handler
+    }
+
+    /// Stamps the next sequence number on `kind` and delivers it. Called only from inside this
+    /// actor, after the operation it describes has completed.
+    private func publishActivity(_ kind: MemoryActivity.Kind, at timestamp: Date) {
+        lastActivitySequence += 1
+        onActivityRecorded?(MemoryActivity(sequence: lastActivitySequence, timestamp: timestamp, kind: kind))
     }
 
     /// Attaches the shared live-activity tracker so searches count toward the concurrency meter.
@@ -857,7 +810,8 @@ public actor MemoryStore {
         query: String,
         limit: Int = 5,
         threshold: Double = 0.10,
-        source: String = "system"
+        origin: MemoryActivityOrigin,
+        correlationID: UUID? = nil
     ) async throws -> [MemorySearchResult] {
         let tracker = activityTracker
         tracker?.begin(.memorySearch)
@@ -880,17 +834,18 @@ public actor MemoryStore {
         // Embed cost is very nearly linear in the number of characters fed to the model, so the
         // length is what makes `embedMs` interpretable. This path embeds the query verbatim — no
         // instruction preamble — so embedded length IS the query length.
-        memoryStoreLogger.notice("searchMemories [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.memories.count, privacy: .public) memories in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(query.count, privacy: .public) chars, memory-scan \(memorySearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
-        onQueryRecorded?(MemoryQueryRecord(
-            timestamp: start,
+        memoryStoreLogger.notice("searchMemories [\(String(describing: origin), privacy: .public)]: \(results.count, privacy: .public) results from \(self.memories.count, privacy: .public) memories in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(query.count, privacy: .public) chars, memory-scan \(memorySearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
+        publishActivity(.query(MemoryQueryActivity(
             query: query,
-            memoryHits: results.count,
-            taskHits: 0,
+            origin: origin,
+            correlationID: correlationID,
             latencyMs: ms,
             embedMs: embedMs,
-            memorySearchMs: memorySearchMs,
-            source: source
-        ))
+            memoryScanMs: memorySearchMs,
+            taskScanMs: nil,
+            memories: MemoryQueryActivity.memoryOutcome(searched: limit > 0, results: results),
+            taskSummaries: .notSearched
+        )), at: start)
         return results
     }
 
@@ -1015,7 +970,7 @@ public actor MemoryStore {
         limit: Int = 5,
         threshold: Double = 0.10,
         excludeDeletedTasks: Bool = true,
-        source: String = "system"
+        origin: MemoryActivityOrigin
     ) async throws -> [TaskSummarySearchResult] {
         let tracker = activityTracker
         tracker?.begin(.memorySearch)
@@ -1038,17 +993,18 @@ public actor MemoryStore {
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         // See `searchMemories` — length is what makes `embedMs` interpretable, and this path also
         // embeds the query verbatim, so embedded length IS the query length.
-        memoryStoreLogger.notice("searchTaskSummaries [\(source, privacy: .public)]: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(query.count, privacy: .public) chars, task-scan \(taskSearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
-        onQueryRecorded?(MemoryQueryRecord(
-            timestamp: start,
+        memoryStoreLogger.notice("searchTaskSummaries [\(String(describing: origin), privacy: .public)]: \(results.count, privacy: .public) results from \(self.taskSummaries.count, privacy: .public) summaries in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(query.count, privacy: .public) chars, task-scan \(taskSearchMs, privacy: .public)ms) (query: \(query.prefix(60), privacy: .public))")
+        publishActivity(.query(MemoryQueryActivity(
             query: query,
-            memoryHits: 0,
-            taskHits: results.count,
+            origin: origin,
+            correlationID: nil,
             latencyMs: ms,
             embedMs: embedMs,
-            taskSearchMs: taskSearchMs,
-            source: source
-        ))
+            memoryScanMs: nil,
+            taskScanMs: taskSearchMs,
+            memories: .notSearched,
+            taskSummaries: MemoryQueryActivity.taskOutcome(searched: limit > 0, results: results)
+        )), at: start)
         return results
     }
 
@@ -1137,7 +1093,7 @@ public actor MemoryStore {
         memoryInstruction: String? = nil,
         taskInstruction: String? = nil,
         excludeDeletedTasks: Bool = true,
-        source: String = "system"
+        origin: MemoryActivityOrigin
     ) async throws -> SemanticSearchResults {
         let tracker = activityTracker
         tracker?.begin(.memorySearch)
@@ -1156,7 +1112,7 @@ public actor MemoryStore {
         let embedMs = Int(Date().timeIntervalSince(embedStart) * 1000)
 
         var memoryResults: [MemorySearchResult] = []
-        var memorySearchMs = 0
+        var memorySearchMs: Int?
         if let memoryQuery {
             guard let memoryVector = vectors[memoryQuery] else {
                 throw MemoryStoreError.missingMemoryQueryEmbedding
@@ -1173,7 +1129,7 @@ public actor MemoryStore {
         }
 
         var taskResults: [TaskSummarySearchResult] = []
-        var taskSearchMs = 0
+        var taskSearchMs: Int?
         if let taskQuery {
             guard let taskVector = vectors[taskQuery] else {
                 throw MemoryStoreError.missingTaskQueryEmbedding
@@ -1213,18 +1169,18 @@ public actor MemoryStore {
         let embeddedVariants = [memoryQuery, taskQuery].compactMap { $0 }
         let embeddedChars = embeddedVariants.reduce(0) { $0 + $1.count }
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        memoryStoreLogger.notice("searchAll [\(source, privacy: .public)]: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(embeddedChars, privacy: .public) chars in \(embeddedVariants.count, privacy: .public) variant(s), memory-scan \(memorySearchMs, privacy: .public)ms over \(self.memories.count, privacy: .public), task-scan \(taskSearchMs, privacy: .public)ms over \(self.taskSummaries.count, privacy: .public)) (query: \(query.count, privacy: .public) chars: \(query.prefix(60), privacy: .public))")
-        onQueryRecorded?(MemoryQueryRecord(
-            timestamp: start,
+        memoryStoreLogger.notice("searchAll [\(String(describing: origin), privacy: .public)]: \(memoryResults.count, privacy: .public) memories + \(taskResults.count, privacy: .public) tasks in \(ms, privacy: .public)ms (embed \(embedMs, privacy: .public)ms over \(embeddedChars, privacy: .public) chars in \(embeddedVariants.count, privacy: .public) variant(s), memory-scan \(memorySearchMs.map { "\($0)ms" } ?? "skipped", privacy: .public) over \(self.memories.count, privacy: .public), task-scan \(taskSearchMs.map { "\($0)ms" } ?? "skipped", privacy: .public) over \(self.taskSummaries.count, privacy: .public)) (query: \(query.count, privacy: .public) chars: \(query.prefix(60), privacy: .public))")
+        publishActivity(.query(MemoryQueryActivity(
             query: query,
-            memoryHits: memoryResults.count,
-            taskHits: taskResults.count,
+            origin: origin,
+            correlationID: nil,
             latencyMs: ms,
             embedMs: embedMs,
-            memorySearchMs: memorySearchMs,
-            taskSearchMs: taskSearchMs,
-            source: source
-        ))
+            memoryScanMs: memorySearchMs,
+            taskScanMs: taskSearchMs,
+            memories: MemoryQueryActivity.memoryOutcome(searched: memoryQuery != nil, results: memoryResults),
+            taskSummaries: MemoryQueryActivity.taskOutcome(searched: taskQuery != nil, results: taskResults)
+        )), at: start)
         return SemanticSearchResults(memories: memoryResults, taskSummaries: taskResults)
     }
 
