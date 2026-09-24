@@ -234,7 +234,7 @@ public struct ToolScopingResult: Sendable {
 /// Thread-safe — can be called concurrently for parallel tool call batches.
 /// Each Brown agent gets its own evaluator instance; state dies with Brown.
 actor SecurityEvaluator {
-    private let provider: any LLMProvider
+    private var provider: any LLMProvider
     private let systemPrompt: String
     private let channel: MessageChannel
     private let abort: @Sendable (String, AgentRole) async -> Void
@@ -457,10 +457,10 @@ actor SecurityEvaluator {
     /// Full snapshot of the ModelConfiguration used for Security Agent's LLM calls. Carried
     /// directly so UsageRecords get the full config — context size, temperature, etc. —
     /// embedded as immutable historical truth.
-    private let configuration: ModelConfiguration?
+    private var configuration: ModelConfiguration?
     /// API type key for the provider (e.g. "anthropic", "openAICompatible"). Not on
     /// ModelConfiguration itself, so still passed separately.
-    private let providerType: String
+    private var providerType: String
     /// Session ID for the current orchestration run — stamped on every UsageRecord.
     private let sessionID: UUID?
 
@@ -471,9 +471,9 @@ actor SecurityEvaluator {
 
     /// Whether the Security Agent's own model can process images. Gates image injection when it
     /// pulls an attachment via `attach_file`.
-    private let supportsVision: Bool
+    private var supportsVision: Bool
     /// Whether the Security Agent's own model can process documents (PDFs). Gates document injection.
-    private let supportsDocuments: Bool
+    private var supportsDocuments: Bool
     /// Durably ingests a file path into the attachment store so the Security Agent can view it.
     /// Nil disables `attach_file` for the Security Agent (only `file_read` is offered).
     private let ingestAttachmentFile: (@Sendable (String) async -> (attachment: Attachment?, error: String?))?
@@ -541,6 +541,26 @@ actor SecurityEvaluator {
         self.hasToolFailed = hasToolFailed
         self.reviewsToolCalls = reviewsToolCalls
         self.retrieveContext = retrieveContext
+    }
+
+    /// Re-points this evaluator at a new provider/config in place, preserving evaluation state.
+    public func setModel(
+        provider: any LLMProvider,
+        configuration: ModelConfiguration?,
+        providerType: String,
+        supportsVision: Bool,
+        supportsDocuments: Bool
+    ) {
+        self.provider = provider
+        self.configuration = configuration
+        self.providerType = providerType
+        self.supportsVision = supportsVision
+        self.supportsDocuments = supportsDocuments
+    }
+
+    /// Snapshot of the evaluator's current model configuration for inspector display.
+    public func currentConfiguration() -> ModelConfiguration? {
+        configuration
     }
 
     /// Returns the evaluation history for inspector display.

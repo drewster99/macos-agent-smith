@@ -45,16 +45,16 @@ public struct MemoryReconciliationRequest: Sendable, Equatable {
 /// focused prompt, and no tools. Each summary captures the problem, outcome, and approach
 /// for semantic search retrieval.
 actor TaskSummarizer {
-    private let provider: any LLMProvider
+    private var provider: any LLMProvider
     private let memoryStore: MemoryStore
     private let channel: MessageChannel
     private let contextWindowSize: Int
     private let maxOutputTokens: Int
     private let usageStore: UsageStore?
     /// Full snapshot of the ModelConfiguration used for summarization LLM calls.
-    private let configuration: ModelConfiguration?
+    private var configuration: ModelConfiguration?
     /// Provider API type (e.g. "anthropic", "openAICompatible") — not on ModelConfiguration.
-    private let providerType: String
+    private var providerType: String
     /// Session ID for the current orchestration run — stamped on every UsageRecord.
     private let sessionID: UUID?
     /// Bumps the live-activity counter while a summarization run is in flight (inspector strip).
@@ -101,6 +101,23 @@ actor TaskSummarizer {
         self.providerType = providerType
         self.sessionID = sessionID
         self.activityTracker = activityTracker
+    }
+
+    /// Re-points this summarizer at a new provider/config without rebuilding the actor.
+    /// Used by live `setProviders` updates.
+    func setModel(
+        provider: any LLMProvider,
+        configuration: ModelConfiguration?,
+        providerType: String
+    ) {
+        self.provider = provider
+        self.configuration = configuration
+        self.providerType = providerType
+    }
+
+    /// Current model configuration used for outgoing summarizer calls.
+    func currentConfiguration() -> ModelConfiguration? {
+        configuration
     }
 
     /// Registers (or, with nil, clears) the provider-call observer.
