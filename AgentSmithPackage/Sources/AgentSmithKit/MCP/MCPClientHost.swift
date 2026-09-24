@@ -235,12 +235,13 @@ public actor MCPClientHost {
         // Stable ordering by server name keeps the tool list deterministic across turns.
         let ordered = connections.values.sorted { $0.config.name < $1.config.name }
         for conn in ordered {
-            for tool in conn.tools where !conn.config.disabledTools.contains(tool.name) {
-                var prefixed = MCPToolNaming.prefixedName(server: conn.config.name, tool: tool.name)
-                if usedNames.contains(prefixed) {
-                    prefixed = disambiguate(prefixed, used: usedNames)
-                }
-                usedNames.insert(prefixed)
+            let enabledTools = conn.tools.filter { !conn.config.disabledTools.contains($0.name) }
+            let prefixedNames = Self.assignPrefixedToolNames(
+                serverName: conn.config.name,
+                toolNames: enabledTools.map(\.name),
+                usedNames: &usedNames
+            )
+            for (tool, prefixed) in zip(enabledTools, prefixedNames) {
                 result.append(MCPBridgedTool(
                     prefixedName: prefixed,
                     serverName: conn.config.name,
@@ -565,10 +566,40 @@ public actor MCPClientHost {
         return tools.filter { !config.disabledTools.contains($0.name) }.count
     }
 
-    private func disambiguate(_ name: String, used: Set<String>) -> String {
+    static func assignPrefixedToolNames(
+        serverName: String,
+        toolNames: [String],
+        usedNames: inout Set<String>
+    ) -> [String] {
+        let baseNames = toolNames.map { MCPToolNaming.prefixedName(server: serverName, tool: $0) }
+        var futureNameCounts: [String: Int] = [:]
+        for base in baseNames {
+            futureNameCounts[base, default: 0] += 1
+        }
+
+        var namesForServer: [String] = []
+        var namesAssignedInServer = Set<String>()
+        for base in baseNames {
+            if let count = futureNameCounts[base] {
+                if count <= 1 {
+                    futureNameCounts.removeValue(forKey: base)
+                } else {
+                    futureNameCounts[base] = count - 1
+                }
+            }
+            let unavailableNames = usedNames.union(namesAssignedInServer).union(futureNameCounts.keys)
+            let resolved = unavailableNames.contains(base) ? disambiguate(base, unavailable: unavailableNames) : base
+            namesForServer.append(resolved)
+            namesAssignedInServer.insert(resolved)
+            usedNames.insert(resolved)
+        }
+        return namesForServer
+    }
+
+    private static func disambiguate(_ name: String, unavailable: Set<String>) -> String {
         var n = 2
         var candidate = "\(name)_\(n)"
-        while used.contains(candidate) { n += 1; candidate = "\(name)_\(n)" }
+        while unavailable.contains(candidate) { n += 1; candidate = "\(name)_\(n)" }
         return candidate
     }
 
