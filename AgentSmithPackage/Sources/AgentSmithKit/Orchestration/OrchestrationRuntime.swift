@@ -4198,7 +4198,9 @@ public actor OrchestrationRuntime {
                 await self.summarizeAndEmbedTask(taskID: taskID)
             },
             reconcileMemory: { [weak self] request in
-                guard let self, let summarizer = await self.taskSummarizer else { return .distinct }
+                guard let self, let summarizer = await self.taskSummarizer else {
+                    return .unavailable(errorDescription: "no Summarizer model is assigned")
+                }
                 let task = await self.inspectorTaskAssociation(agentID: agentID, role: role)
                 return await summarizer.reconcileMemoryTexts(
                     existing: request.existing,

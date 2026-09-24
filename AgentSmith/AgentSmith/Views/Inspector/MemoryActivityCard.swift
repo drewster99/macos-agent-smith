@@ -2,7 +2,7 @@ import SwiftUI
 import AgentSmithKit
 
 /// The app-wide Memory activity feed: every memory-store query with exactly what each corpus
-/// returned. Reads `shared.memoryActivityFeed` (global, since the `MemoryStore` is shared across
+/// returned, and every committed change to memories and task summaries. Reads `shared.memoryActivityFeed` (global, since the `MemoryStore` is shared across
 /// sessions). Starts collapsed; the header carries the retention wording so the count is honest
 /// without expanding.
 struct MemoryActivityCard: View {
@@ -94,6 +94,8 @@ struct MemoryActivityRow: View {
         switch activity.kind {
         case .query(let query):
             MemoryQueryActivityRow(query: query, timestamp: activity.timestamp)
+        case .mutation(let mutation):
+            MemoryMutationActivityRow(mutation: mutation, timestamp: activity.timestamp)
         }
     }
 }

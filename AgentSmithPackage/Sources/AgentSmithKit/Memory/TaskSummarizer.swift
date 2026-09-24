@@ -1,18 +1,25 @@
 import Foundation
 import SwiftLLMKit
 
-/// Generates concise summaries of completed or failed tasks using a dedicated LLM call.
-///
-/// Follows the `SecurityEvaluator` pattern: standalone actor with its own `LLMProvider`,
-/// focused prompt, and no tools. Each summary captures the problem, outcome, and approach
-/// for semantic search retrieval.
 /// The outcome of reconciling a new memory against a similar existing one.
+///
+/// Only `merged` changes the existing memory; every other case saves the new memory separately.
+/// They are kept distinct because only `different` is an affirmative judgment — a failed or
+/// garbled judge must never be reported as one.
 public enum MemoryReconciliation: Sendable, Equatable {
-    /// Distinct facts — keep both (save the new memory separately).
-    case distinct
     /// The new memory duplicates or supersedes the existing one; here is the single
     /// reconciled text (newer info preferred on any conflict).
     case merged(String)
+    /// The reconciler judged them distinct facts.
+    case different
+    /// The reconciler answered, but not with SAME or DIFFERENT first.
+    case malformed(response: String)
+    /// The reconciler answered SAME with no merged text.
+    case emptyMerge
+    /// The reconciler could not be consulted, or its call failed.
+    case unavailable(errorDescription: String)
+    /// The reconciliation was cancelled.
+    case cancelled
 }
 
 /// One consolidation decision to put to the reconciler.
@@ -32,6 +39,11 @@ public struct MemoryReconciliationRequest: Sendable, Equatable {
     }
 }
 
+/// Generates concise summaries of completed or failed tasks using a dedicated LLM call.
+///
+/// Follows the `SecurityEvaluator` pattern: standalone actor with its own `LLMProvider`,
+/// focused prompt, and no tools. Each summary captures the problem, outcome, and approach
+/// for semantic search retrieval.
 actor TaskSummarizer {
     private let provider: any LLMProvider
     private let memoryStore: MemoryStore
@@ -237,8 +249,9 @@ actor TaskSummarizer {
     /// produces the reconciled text. The LLM is the decider — cosine only chose the
     /// candidate — so distinct facts that merely phrase alike stay separate, and a
     /// changed fact supersedes the old value instead of piling up a contradictory
-    /// duplicate. Retries transient HTTP errors; on any failure returns `.distinct`
-    /// (the safe default: never clobber an existing memory on an unreliable call).
+    /// duplicate. Retries transient HTTP errors. Any outcome other than `.merged` saves the new
+    /// memory separately (the safe default: never clobber an existing memory on an unreliable
+    /// call), but each failure mode is reported as itself.
     public func reconcileMemoryTexts(
         existing: String,
         new: String,
@@ -285,15 +298,13 @@ actor TaskSummarizer {
         var lastError: Error?
         var attempt = 0
         while true {
-            if Task.isCancelled { return .distinct }
+            if Task.isCancelled { return .cancelled }
             attempt += 1
 
             do {
                 let response = try await sendRecorded(messages, annotation: annotation.forCall(attempt))
 
-                guard let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-                    return .distinct
-                }
+                let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 return Self.parseReconciliation(text)
             } catch {
                 lastError = error
@@ -303,31 +314,34 @@ actor TaskSummarizer {
             }
         }
 
-        if Task.isCancelled { return .distinct }   // cancelled mid-call: don't post a spurious failure
+        if Task.isCancelled { return .cancelled }   // cancelled mid-call: don't post a spurious failure
+        let errorDescription = lastError?.localizedDescription ?? "unknown error"
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
-            content: "Memory reconciliation failed: \(lastError?.localizedDescription ?? "unknown error")",
+            content: "Memory reconciliation failed: \(errorDescription)",
             metadata: ["severity": .severity(.error)]
         ))
-        return .distinct
+        return .unavailable(errorDescription: errorDescription)
     }
 
     /// Parses a reconciliation response: first line SAME/DIFFERENT (case-insensitive,
-    /// punctuation-tolerant), remaining lines the merged text on SAME. A SAME verdict
-    /// with no body degrades to `.distinct` — never destroy the existing memory on a
-    /// malformed response; a rare extra near-duplicate is the lesser harm.
+    /// punctuation-tolerant), remaining lines the merged text on SAME. A SAME verdict with no
+    /// body is `.emptyMerge` and anything else unrecognized is `.malformed` — both save
+    /// separately (never destroy the existing memory on a bad response; a rare extra
+    /// near-duplicate is the lesser harm), but neither is reported as a DIFFERENT judgment.
     static func parseReconciliation(_ text: String) -> MemoryReconciliation {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard let firstRaw = lines.first else { return .distinct }
+        guard let firstRaw = lines.first else { return .malformed(response: text) }
         let firstWord = firstRaw
             .trimmingCharacters(in: .whitespaces)
             .split(separator: " ", maxSplits: 1).first
             .map(String.init)?
             .trimmingCharacters(in: CharacterSet(charactersIn: ":.,!*#`"))
             .uppercased() ?? ""
-        guard firstWord == "SAME" else { return .distinct }
+        if firstWord == "DIFFERENT" { return .different }
+        guard firstWord == "SAME" else { return .malformed(response: text) }
         let body = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return body.isEmpty ? .distinct : .merged(body)
+        return body.isEmpty ? .emptyMerge : .merged(body)
     }
 
     /// Runs `prompt` against fetched web-page `content` and returns the extracted answer, or

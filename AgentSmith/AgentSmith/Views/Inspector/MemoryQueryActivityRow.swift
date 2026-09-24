@@ -41,7 +41,7 @@ private struct MemoryQueryActivitySummary: View {
             HStack(spacing: 6) {
                 MemoryActivityBadge(text: MemoryActivityPresentation.compactCorpusLabel(query))
                     .accessibilityLabel(MemoryActivityPresentation.corpusAccessibilityText(query))
-                Text(MemoryActivityPresentation.originLabel(query.origin))
+                Text(MemoryActivityPresentation.queryOriginLabel(query.origin))
                     .font(AppFonts.inspectorBody)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -72,6 +72,9 @@ private struct MemoryQueryActivityDetail: View {
                 .font(AppFonts.inspectorBody)
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
+            if let correlationID = query.correlationID {
+                CorrelationIDLabel(correlationID: correlationID)
+            }
             MemoryHitsSection(outcome: query.memories)
             TaskSummaryHitsSection(outcome: query.taskSummaries)
         }
@@ -163,6 +166,20 @@ private struct MemoryHitScores: View {
         }
         .font(AppFonts.microMonoBadge)
         .foregroundStyle(.tertiary)
+    }
+}
+
+/// Names the consolidation attempt a record belongs to, so the candidate search, the Summarizer's
+/// reconciliation turn, and the resulting mutation can be matched up.
+struct CorrelationIDLabel: View {
+    let correlationID: UUID
+
+    var body: some View {
+        Text("consolidation \(correlationID.uuidString.prefix(8))")
+            .font(AppFonts.microMonoBadge)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .help("Consolidation attempt \(correlationID.uuidString)")
     }
 }
 

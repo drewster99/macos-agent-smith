@@ -101,6 +101,7 @@ struct SaveMemoryTool: AgentTool {
         // resulting mutation — so the inspector can show them as one operation.
         let consolidationID = UUID()
         let similarMemories: [MemorySearchResult]
+        var candidateSearchError: String?
         do {
             similarMemories = try await context.memoryStore.searchMemories(
                 query: content,
@@ -110,71 +111,115 @@ struct SaveMemoryTool: AgentTool {
                 correlationID: consolidationID
             )
         } catch {
-            // If search fails, proceed with normal save.
+            // If search fails, proceed with normal save — and say why no candidate was considered.
             similarMemories = []
+            candidateSearchError = error.localizedDescription
         }
 
         let bestMatch = similarMemories
             .filter { $0.similarity >= Self.consolidationThreshold }
             .max(by: { $0.similarity < $1.similarity })
 
-        if let match = bestMatch {
-            // The LLM reconciler is the decider — cosine only picked the candidate. It
-            // returns `.merged` for a duplicate OR an update/supersession (newer info
-            // wins), and `.distinct` for two different facts that merely phrase alike.
-            // No hard tag requirement: tags were an unreliable second axis (agents tag
-            // the same fact inconsistently), and the LLM is a better one.
-            let reconciliationRequest = MemoryReconciliationRequest(
-                existing: match.memory.content, proposed: content, correlationID: consolidationID)
-            if case .merged(let merged) = await context.reconcileMemory(reconciliationRequest) {
-                let mergedTags = Array(Set(match.memory.tags + tags))
-                do {
-                    try await context.memoryStore.update(
-                        id: match.memory.id,
-                        content: merged,
-                        tags: mergedTags,
-                        updatedBy: .system
-                    )
-                } catch {
-                    // If update fails, fall through to normal save.
-                    return try await saveNew(
-                        content: content, source: source, tags: tags,
-                        sourceTaskID: sourceTaskID, consolidated: false, context: context
-                    )
-                }
-
-                await postChannelMessage(
-                    content: merged, tags: mergedTags, source: source,
-                    consolidated: true, context: context
-                )
-
-                let tagText = mergedTags.isEmpty ? "" : " [tags: \(mergedTags.joined(separator: ", "))]"
-                return .success("Consolidated into existing memory (ID: \(match.memory.id)).\(tagText)")
-            }
+        guard let match = bestMatch else {
+            let reason: MemoryConsolidationSeparateReason = candidateSearchError
+                .map { .candidateSearchFailed(errorDescription: $0) } ?? .noQualifyingCandidate
+            return try await saveNew(
+                content: content, source: source, tags: tags, sourceTaskID: sourceTaskID,
+                consolidation: MemoryConsolidationContext(
+                    correlationID: consolidationID, candidateMemoryID: nil, candidateSimilarity: nil,
+                    outcome: .keptSeparate(reason)),
+                context: context
+            )
         }
 
-        // No candidate, or the reconciler judged them distinct — save as new memory.
+        // The LLM reconciler is the decider — cosine only picked the candidate. It returns
+        // `.merged` for a duplicate OR an update/supersession (newer info wins), and `.different`
+        // for two different facts that merely phrase alike. No hard tag requirement: tags were an
+        // unreliable second axis (agents tag the same fact inconsistently), and the LLM is a
+        // better one.
+        let reconciliationRequest = MemoryReconciliationRequest(
+            existing: match.memory.content, proposed: content, correlationID: consolidationID)
+        let reconciliation = await context.reconcileMemory(reconciliationRequest)
+        func keptSeparate(_ reason: MemoryConsolidationSeparateReason) -> MemoryConsolidationContext {
+            MemoryConsolidationContext(
+                correlationID: consolidationID, candidateMemoryID: match.memory.id,
+                candidateSimilarity: match.similarity, outcome: .keptSeparate(reason))
+        }
+
+        let separateReason: MemoryConsolidationSeparateReason
+        switch reconciliation {
+        case .merged(let merged):
+            let mergedTags = Array(Set(match.memory.tags + tags))
+            let mergedEntry: MemoryEntry?
+            do {
+                mergedEntry = try await context.memoryStore.update(
+                    id: match.memory.id,
+                    content: merged,
+                    tags: mergedTags,
+                    updatedBy: .system,
+                    origin: .memoryConsolidation(requestedBy: context.agentRole),
+                    consolidation: MemoryConsolidationContext(
+                        correlationID: consolidationID, candidateMemoryID: match.memory.id,
+                        candidateSimilarity: match.similarity, outcome: .merged),
+                    proposed: MemoryContentSnapshot(text: content, tags: tags)
+                )
+            } catch {
+                // If update fails, fall through to normal save.
+                return try await saveNew(
+                    content: content, source: source, tags: tags, sourceTaskID: sourceTaskID,
+                    consolidation: keptSeparate(.mergeUpdateFailed(errorDescription: error.localizedDescription)),
+                    context: context
+                )
+            }
+            // The candidate was deleted while the reconciler ran: nothing was merged, so the
+            // proposed memory must still be saved rather than reported as consolidated.
+            guard mergedEntry != nil else {
+                return try await saveNew(
+                    content: content, source: source, tags: tags, sourceTaskID: sourceTaskID,
+                    consolidation: keptSeparate(.mergeUpdateFailed(
+                        errorDescription: "the existing memory was deleted before the merge could be applied")),
+                    context: context
+                )
+            }
+
+            await postChannelMessage(
+                content: merged, tags: mergedTags, source: source,
+                consolidated: true, context: context
+            )
+
+            let tagText = mergedTags.isEmpty ? "" : " [tags: \(mergedTags.joined(separator: ", "))]"
+            return .success("Consolidated into existing memory (ID: \(match.memory.id)).\(tagText)")
+        case .different: separateReason = .reconcilerJudgedDifferent
+        case .malformed(let response): separateReason = .reconcilerResponseMalformed(response: response)
+        case .emptyMerge: separateReason = .reconcilerMergeWasEmpty
+        case .unavailable(let errorDescription): separateReason = .reconcilerUnavailable(errorDescription: errorDescription)
+        case .cancelled: separateReason = .reconcilerCancelled
+        }
+
         return try await saveNew(
-            content: content, source: source, tags: tags,
-            sourceTaskID: sourceTaskID, consolidated: false, context: context
+            content: content, source: source, tags: tags, sourceTaskID: sourceTaskID,
+            consolidation: keptSeparate(separateReason), context: context
         )
     }
 
     // MARK: - Private
 
+    /// Saves the proposed memory as a new entry; `consolidation` records why it was not merged.
     private func saveNew(
         content: String,
         source: MemoryEntry.Source,
         tags: [String],
         sourceTaskID: UUID?,
-        consolidated: Bool,
+        consolidation: MemoryConsolidationContext,
         context: ToolContext
     ) async throws -> ToolExecutionResult {
         let entry = try await context.memoryStore.save(
             content: content,
             source: source,
             tags: tags,
-            sourceTaskID: sourceTaskID
+            sourceTaskID: sourceTaskID,
+            origin: .agentSaveMemory(context.agentRole),
+            consolidation: consolidation
         )
 
         await postChannelMessage(

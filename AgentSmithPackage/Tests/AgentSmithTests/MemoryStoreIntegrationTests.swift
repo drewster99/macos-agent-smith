@@ -42,7 +42,8 @@ struct MemoryStoreIntegrationTests {
             let entry = try await store.save(
                 content: seed.content,
                 source: .smith,
-                tags: seed.tags
+                tags: seed.tags,
+                origin: .other("integration test fixture")
             )
             ids[seed.id] = entry.id
         }
@@ -187,5 +188,230 @@ struct MemoryStoreIntegrationTests {
             try #require(!results.isEmpty, "exact-content query for \(seed.id) returned no results")
             #expect(results[0].memory.id == expectedUUID, "exact-content query for \(seed.id) did not return the same memory")
         }
+    }
+
+    // MARK: - Memory activity feed (inspector)
+
+    /// Collects the activity a store publishes.
+    private final class ActivityCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var collected: [MemoryActivity] = []
+        func record(_ activity: MemoryActivity) { lock.withLock { collected.append(activity) } }
+        var activities: [MemoryActivity] { lock.withLock { collected } }
+        var queries: [MemoryQueryActivity] {
+            activities.compactMap { if case .query(let query) = $0.kind { return query } else { return nil } }
+        }
+        var mutations: [MemoryMutationActivity] {
+            activities.compactMap { if case .mutation(let mutation) = $0.kind { return mutation } else { return nil } }
+        }
+    }
+
+    /// A fresh store sharing the fixture's prepared engine, with its activity collected.
+    private static func freshStore(_ fixture: Fixture) async -> (MemoryStore, ActivityCollector) {
+        let store = MemoryStore(engine: fixture.engine)
+        let collector = ActivityCollector()
+        await store.setOnActivityRecorded { collector.record($0) }
+        return (store, collector)
+    }
+
+    @Test("memories-only and tasks-only searches record the other corpus as not searched")
+    func singleCorpusSearchesRecordTheOtherAsNotSearched() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let (store, collector) = await Self.freshStore(fixture)
+        try await store.save(content: "The deploy key lives in the ops vault.", source: .smith, origin: .other("test"))
+        _ = try await store.searchMemories(query: "deploy key", limit: 5, threshold: 0, origin: .other("test"))
+        _ = try await store.searchTaskSummaries(query: "deploy key", limit: 5, threshold: 0, origin: .other("test"))
+
+        let queries = collector.queries
+        #expect(queries.count == 2)
+        #expect(queries[0].taskSummaries == .notSearched)
+        #expect(queries[0].taskScanMs == nil)
+        #expect(queries[0].memories.hits?.isEmpty == false)
+        #expect(queries[1].memories == .notSearched)
+        #expect(queries[1].memoryScanMs == nil)
+        #expect(queries[1].taskSummaries == .searched(hits: []), "an empty corpus that was searched is searched-and-empty")
+    }
+
+    @Test("searchAll with a zero task limit records tasks as not searched, not as zero results")
+    func searchAllZeroLimitIsNotSearched() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let (store, collector) = await Self.freshStore(fixture)
+        _ = try await store.searchAll(query: "anything", memoryLimit: 3, taskLimit: 0, origin: .other("test"))
+        let query = try #require(collector.queries.first)
+        #expect(query.memories == .searched(hits: []))
+        #expect(query.taskSummaries == .notSearched)
+    }
+
+    @Test("hit snapshots keep query-time content after the memory is edited and deleted")
+    func snapshotsSurviveLaterEdits() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let (store, collector) = await Self.freshStore(fixture)
+        let entry = try await store.save(content: "Staging runs on port 8443.", source: .brown, tags: ["identifier"],
+                                         origin: .other("test"))
+        _ = try await store.searchMemories(query: "staging port", limit: 5, threshold: 0, origin: .other("test"))
+        try await store.update(id: entry.id, content: "Staging runs on port 9443.", updatedBy: .user, origin: .memoryBrowser)
+        await store.delete(id: entry.id, origin: .memoryBrowser)
+
+        let hit = try #require(collector.queries.first?.memories.hits?.first)
+        #expect(hit.rank == 1)
+        #expect(hit.memoryID == entry.id)
+        #expect(hit.content == "Staging runs on port 8443.")
+        #expect(hit.tags == ["identifier"])
+        #expect(hit.reciprocalRankFusionScore > 0)
+    }
+
+    @Test("create, edit, delete, and task-summary writes each emit exactly one mutation, after commit")
+    func mutationsEmitOnceAfterCommit() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let (store, collector) = await Self.freshStore(fixture)
+        let entry = try await store.save(content: "A", source: .user, tags: ["x"], origin: .memoryBrowser)
+        #expect(await store.allMemories().contains { $0.id == entry.id })
+        try await store.update(id: entry.id, content: "B", updatedBy: .user, origin: .memoryBrowser)
+        // Unchanged content and tags is not a logical mutation.
+        try await store.update(id: entry.id, content: "B", updatedBy: .user, origin: .memoryBrowser)
+        await store.delete(id: entry.id, origin: .memoryBrowser)
+        let task = AgentTask(title: "Summarized", description: "d")
+        try await store.saveTaskSummary(task: task, summary: "first", status: .completed)
+        try await store.saveTaskSummary(task: task, summary: "second", status: .completed)
+        await store.removeTaskSummary(id: task.id)
+
+        let mutations = collector.mutations
+        #expect(mutations.map(\.operation) == [.create, .edit, .delete, .taskSummaryWrite, .taskSummaryWrite, .taskSummaryDelete])
+        #expect(mutations[1].before == MemoryContentSnapshot(text: "A", tags: ["x"]))
+        #expect(mutations[1].after == MemoryContentSnapshot(text: "B", tags: ["x"]))
+        #expect(mutations[2].before?.text == "B")
+        #expect(mutations[3].retainedExistingID == false)
+        #expect(mutations[4].retainedExistingID)
+        #expect(mutations[4].before?.text == "first")
+        let sequences = collector.activities.map(\.sequence)
+        #expect(sequences == Array(1...sequences.count), "sequences are assigned in commit order")
+    }
+
+    @Test("retrieval/injection bookkeeping and failed mutations publish nothing")
+    func maintenanceAndFailuresArePublishedAsNothing() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let (store, collector) = await Self.freshStore(fixture)
+        let entry = try await store.save(content: "Build with make release.", source: .smith, origin: .other("test"))
+        let before = collector.activities.count
+        await store.recordInjections(memoryIDs: [entry.id])
+        await store.persistRetrievalStatsIfNeeded()
+        let missing = try await store.update(id: UUID(), content: "x", updatedBy: .user, origin: .memoryBrowser)
+        let deletedMissing = await store.delete(id: UUID(), origin: .memoryBrowser)
+
+        #expect(missing == nil)
+        #expect(deletedMissing == false)
+        #expect(collector.activities.count == before)
+    }
+
+    @Test("a consolidation merge records existing, proposed, and final content with its decision")
+    func mergeRecordsItsInputsAndDecision() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let (store, collector) = await Self.freshStore(fixture)
+        let existing = try await store.save(content: "Phone: 555-0100", source: .smith, tags: ["identifier"], origin: .other("test"))
+        let correlationID = UUID()
+        try await store.update(
+            id: existing.id, content: "Phone: 555-0199", tags: ["identifier", "contact"], updatedBy: .system,
+            origin: .memoryConsolidation(requestedBy: .brown),
+            consolidation: MemoryConsolidationContext(correlationID: correlationID, candidateMemoryID: existing.id,
+                                                      candidateSimilarity: 0.91, outcome: .merged),
+            proposed: MemoryContentSnapshot(text: "New phone is 555-0199", tags: ["contact"])
+        )
+        let merge = try #require(collector.mutations.last)
+        #expect(merge.operation == .merge)
+        #expect(merge.retainedExistingID)
+        #expect(merge.before?.text == "Phone: 555-0100")
+        #expect(merge.proposed?.text == "New phone is 555-0199")
+        #expect(merge.after == MemoryContentSnapshot(text: "Phone: 555-0199", tags: ["identifier", "contact"]))
+        #expect(merge.consolidation?.correlationID == correlationID)
+        #expect(merge.consolidation?.outcome == .merged)
+    }
+
+    // MARK: - save_memory consolidation outcomes
+
+    private static let existingFact = "The staging database password rotates every 30 days."
+    private static let restatedFact = "The staging database password is rotated every 30 days."
+
+    /// Seeds one memory, runs `save_memory` with `proposed` against a stubbed reconciler, and
+    /// returns the store's mutations plus the correlation id the reconciler was handed.
+    private static func runSaveMemory(
+        _ fixture: Fixture,
+        proposed: String,
+        reconciler: MemoryReconciliation
+    ) async throws -> (mutations: [MemoryMutationActivity], queries: [MemoryQueryActivity], reconcilerCorrelation: UUID?, memoryCount: Int) {
+        let (store, collector) = await freshStore(fixture)
+        try await store.save(content: existingFact, source: .smith, tags: ["procedure"], origin: .other("seed"))
+        let handedCorrelation = CorrelationBox()
+        let context = TestToolContext.make(
+            agentRole: .smith,
+            memoryStore: store,
+            reconcileMemory: { request in
+                handedCorrelation.set(request.correlationID)
+                return reconciler
+            }
+        )
+        _ = try await SaveMemoryTool().execute(
+            arguments: ["content": .string(proposed), "tags": .array([.string("gotcha")])], context: context)
+        let seedCount = 1
+        return (Array(collector.mutations.dropFirst(seedCount)), collector.queries, handedCorrelation.value,
+                await store.allMemories().count)
+    }
+
+    private final class CorrelationBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: UUID?
+        func set(_ id: UUID) { lock.withLock { stored = id } }
+        var value: UUID? { lock.withLock { stored } }
+    }
+
+    @Test("a SAME merge retains the id, unions tags, and shares one correlation id end to end")
+    func consolidationMergeIsLinkedAndComplete() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let run = try await Self.runSaveMemory(fixture, proposed: Self.restatedFact,
+                                               reconciler: .merged("Staging DB password rotates every 30 days."))
+        #expect(run.memoryCount == 1)
+        let merge = try #require(run.mutations.first)
+        #expect(run.mutations.count == 1)
+        #expect(merge.operation == .merge)
+        #expect(merge.retainedExistingID)
+        #expect(merge.before?.text == Self.existingFact)
+        #expect(merge.proposed?.text == Self.restatedFact)
+        #expect(merge.after?.text == "Staging DB password rotates every 30 days.")
+        #expect(Set(merge.after?.tags ?? []) == ["procedure", "gotcha"])
+        let correlation = try #require(run.reconcilerCorrelation)
+        #expect(merge.consolidation?.correlationID == correlation)
+        #expect(run.queries.first?.correlationID == correlation)
+        #expect(run.queries.first?.origin == .memoryConsolidationCandidateSearch)
+    }
+
+    @Test(
+        "every non-merge reconciler outcome saves exactly one new memory and says why",
+        arguments: [
+            (MemoryReconciliation.different, MemoryConsolidationSeparateReason.reconcilerJudgedDifferent),
+            (.malformed(response: "hmm"), .reconcilerResponseMalformed(response: "hmm")),
+            (.emptyMerge, .reconcilerMergeWasEmpty),
+            (.unavailable(errorDescription: "503"), .reconcilerUnavailable(errorDescription: "503")),
+            (.cancelled, .reconcilerCancelled),
+        ]
+    )
+    func nonMergeOutcomesKeepSeparate(reconciler: MemoryReconciliation, expected: MemoryConsolidationSeparateReason) async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let run = try await Self.runSaveMemory(fixture, proposed: Self.restatedFact, reconciler: reconciler)
+        #expect(run.memoryCount == 2)
+        #expect(run.mutations.count == 1)
+        let create = try #require(run.mutations.first)
+        #expect(create.operation == .create)
+        #expect(create.origin == .agentSaveMemory(.smith))
+        #expect(create.consolidation?.outcome == .keptSeparate(expected))
+        #expect(create.consolidation?.candidateSimilarity != nil)
+    }
+
+    @Test("with no qualifying candidate the reconciler is never asked")
+    func noCandidateSkipsReconciler() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let run = try await Self.runSaveMemory(fixture, proposed: "Always run swiftlint before committing.",
+                                               reconciler: .merged("must not be used"))
+        #expect(run.reconcilerCorrelation == nil)
+        #expect(run.memoryCount == 2)
+        #expect(run.mutations.first?.consolidation?.outcome == .keptSeparate(.noQualifyingCandidate))
     }
 }

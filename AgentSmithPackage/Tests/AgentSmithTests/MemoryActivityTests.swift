@@ -83,4 +83,47 @@ struct MemoryActivityTests {
         #expect(feed.evictedCount == 2)
         #expect(MemoryActivityPresentation.feedHeading(feed) == "Latest 3 of 5 activities")
     }
+
+    private func mutation(_ operation: MemoryMutationActivity.Operation,
+                          consolidation: MemoryConsolidationContext? = nil) -> MemoryMutationActivity {
+        MemoryMutationActivity(operation: operation, subject: .memory(id: UUID()), origin: .memoryBrowser, taskID: nil,
+                               before: nil, proposed: nil, after: MemoryContentSnapshot(text: "t", tags: []),
+                               retainedExistingID: false, consolidation: consolidation)
+    }
+
+    @Test("mutation badges")
+    func mutationBadges() {
+        let expected: [(MemoryMutationActivity.Operation, String)] = [
+            (.create, "CREATE"), (.edit, "EDIT"), (.merge, "MERGE"), (.delete, "DELETE"),
+            (.taskSummaryWrite, "TASK SUMMARY"), (.taskSummaryDelete, "TASK SUMMARY"),
+        ]
+        for (operation, badge) in expected {
+            #expect(MemoryActivityPresentation.mutationBadge(mutation(operation)) == badge)
+        }
+    }
+
+    @Test("a failed or garbled reconciler is never described as a DIFFERENT decision")
+    func consolidationDecisionWording() {
+        func decision(_ reason: MemoryConsolidationSeparateReason) -> String {
+            MemoryActivityPresentation.consolidationDecision(MemoryConsolidationContext(
+                correlationID: UUID(), candidateMemoryID: UUID(), candidateSimilarity: 0.8, outcome: .keptSeparate(reason)))
+        }
+        #expect(decision(.reconcilerJudgedDifferent).contains("DIFFERENT"))
+        let nonDecisions: [MemoryConsolidationSeparateReason] = [
+            .reconcilerUnavailable(errorDescription: "503"), .reconcilerResponseMalformed(response: "?"),
+            .reconcilerMergeWasEmpty, .reconcilerCancelled,
+        ]
+        for reason in nonDecisions {
+            #expect(decision(reason).contains("answered DIFFERENT") == false)
+            #expect(decision(reason).contains("no decision"))
+        }
+    }
+
+    @Test("mutation origins get human labels")
+    func mutationOriginLabels() {
+        #expect(MemoryActivityPresentation.originLabel(.agentSaveMemory(.brown)) == "\(AgentRole.brown.displayName) save_memory")
+        #expect(MemoryActivityPresentation.originLabel(.taskSummarization) == "Task summarization")
+        #expect(MemoryActivityPresentation.originLabel(.memoryBrowser) == "Memory Browser")
+        #expect(MemoryActivityPresentation.queryOriginLabel(.memoryBrowser) == "Memory Browser search")
+    }
 }

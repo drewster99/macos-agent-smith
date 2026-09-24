@@ -176,8 +176,10 @@ public actor MemoryStore {
     private var excludedTaskSummaryIDs: Set<UUID> = []
     private let engine: SemanticSearchEngine
     private var onChange: (@Sendable () -> Void)?
-    /// Fired for every entry in the Memory activity feed — each query, with exact per-corpus
-    /// results. This actor is the feed's single publisher.
+    /// Fired for every entry in the Memory activity feed — each query (with exact per-corpus
+    /// results) and each committed logical content mutation. This actor is the feed's single
+    /// publisher. Retrieval/injection counters, embedding migration, restore, and persistence
+    /// flushes change no logical content and publish nothing.
     private var onActivityRecorded: (@Sendable (MemoryActivity) -> Void)?
     /// The last sequence number handed out; see `MemoryActivity.sequence`.
     private var lastActivitySequence = 0
@@ -239,13 +241,16 @@ public actor MemoryStore {
     }
 
     /// Saves a new memory, embedding its content + tags as a single L2-normalized vector
-    /// using the current `SemanticSearchEngine`.
+    /// using the current `SemanticSearchEngine`, and publishes a CREATE activity once stored.
+    /// `consolidation` records why a `save_memory` call created rather than merged.
     @discardableResult
     public func save(
         content: String,
         source: MemoryEntry.Source,
         tags: [String] = [],
-        sourceTaskID: UUID? = nil
+        sourceTaskID: UUID? = nil,
+        origin: MemoryActivityOrigin,
+        consolidation: MemoryConsolidationContext? = nil
     ) async throws -> MemoryEntry {
         let vector = try await engine.embed(MemoryEntry.embeddingSourceText(content: content, tags: tags))
         try Self.validate(embedding: vector)
@@ -259,6 +264,17 @@ public actor MemoryStore {
         )
         memories[entry.id] = entry
         onChange?()
+        publishActivity(.mutation(MemoryMutationActivity(
+            operation: .create,
+            subject: .memory(id: entry.id),
+            origin: origin,
+            taskID: sourceTaskID,
+            before: nil,
+            proposed: nil,
+            after: MemoryContentSnapshot(entry),
+            retainedExistingID: false,
+            consolidation: consolidation
+        )), at: Date())
         return entry
     }
 
@@ -266,12 +282,19 @@ public actor MemoryStore {
     /// in the entry's `lastUpdatedAt` / `lastUpdatedBy` fields. Re-embeds when the content
     /// changed. Returns the updated entry, or nil if the ID wasn't found (or was deleted
     /// concurrently while embedding).
+    ///
+    /// Publishes an EDIT activity when content or tags actually changed, or a MERGE activity when
+    /// `consolidation` is given (a consolidation outcome is recorded even if the merge happened to
+    /// change nothing). `proposed` is what consolidation was asked to merge in.
     @discardableResult
     public func update(
         id: UUID,
         content: String? = nil,
         tags: [String]? = nil,
-        updatedBy: MemoryEntry.UpdateSource
+        updatedBy: MemoryEntry.UpdateSource,
+        origin: MemoryActivityOrigin,
+        consolidation: MemoryConsolidationContext? = nil,
+        proposed: MemoryContentSnapshot? = nil
     ) async throws -> MemoryEntry? {
         guard let preEmbed = memories[id] else { return nil }
         let newContent = content ?? preEmbed.content
@@ -309,15 +332,42 @@ public actor MemoryStore {
         )
         memories[id] = updated
         onChange?()
+        // `current` — re-read after the suspension — is the true "before": the pre-embed
+        // snapshot could predate an interleaved edit.
+        let contentChanged = current.content != updated.content || current.tags != updated.tags
+        if contentChanged || consolidation != nil {
+            publishActivity(.mutation(MemoryMutationActivity(
+                operation: consolidation == nil ? .edit : .merge,
+                subject: .memory(id: id),
+                origin: origin,
+                taskID: current.sourceTaskID,
+                before: MemoryContentSnapshot(current),
+                proposed: proposed,
+                after: MemoryContentSnapshot(updated),
+                retainedExistingID: true,
+                consolidation: consolidation
+            )), at: Date())
+        }
         return updated
     }
 
-    /// Deletes a memory by ID.
+    /// Deletes a memory by ID, publishing a DELETE activity carrying what was removed.
     @discardableResult
-    public func delete(id: UUID) -> Bool {
-        guard memories.removeValue(forKey: id) != nil else { return false }
+    public func delete(id: UUID, origin: MemoryActivityOrigin) -> Bool {
+        guard let removed = memories.removeValue(forKey: id) else { return false }
         memoryTokenCache.removeValue(forKey: id)
         onChange?()
+        publishActivity(.mutation(MemoryMutationActivity(
+            operation: .delete,
+            subject: .memory(id: id),
+            origin: origin,
+            taskID: removed.sourceTaskID,
+            before: MemoryContentSnapshot(removed),
+            proposed: nil,
+            after: nil,
+            retainedExistingID: false,
+            consolidation: nil
+        )), at: Date())
         return true
     }
 
@@ -388,8 +438,20 @@ public actor MemoryStore {
             taskCreatedAt: task.createdAt,
             embeddingModelID: engine.model.identifier
         )
+        let replaced = taskSummaries[task.id]
         taskSummaries[task.id] = entry
         onChange?()
+        publishActivity(.mutation(MemoryMutationActivity(
+            operation: .taskSummaryWrite,
+            subject: .taskSummary(taskID: task.id, title: task.title),
+            origin: .taskSummarization,
+            taskID: task.id,
+            before: replaced.map { MemoryContentSnapshot(text: $0.summary, tags: []) },
+            proposed: nil,
+            after: MemoryContentSnapshot(text: summary, tags: []),
+            retainedExistingID: replaced != nil,
+            consolidation: nil
+        )), at: Date())
         return entry
     }
 
@@ -403,10 +465,21 @@ public actor MemoryStore {
     /// Permanently removes a task's summary from the corpus. Called when a task is permanently
     /// deleted (it's gone forever) — distinct from recently-deleted, which only hides the summary.
     public func removeTaskSummary(id: UUID) {
-        guard taskSummaries.removeValue(forKey: id) != nil else { return }
+        guard let removed = taskSummaries.removeValue(forKey: id) else { return }
         taskSummaryTokenCache.removeValue(forKey: id)
         excludedTaskSummaryIDs.remove(id)
         onChange?()
+        publishActivity(.mutation(MemoryMutationActivity(
+            operation: .taskSummaryDelete,
+            subject: .taskSummary(taskID: id, title: removed.title),
+            origin: .permanentTaskDeletion,
+            taskID: id,
+            before: MemoryContentSnapshot(text: removed.summary, tags: []),
+            proposed: nil,
+            after: nil,
+            retainedExistingID: false,
+            consolidation: nil
+        )), at: Date())
     }
 
     /// Re-embeds any stored memory or task summary whose `embeddingModelID` differs from the current

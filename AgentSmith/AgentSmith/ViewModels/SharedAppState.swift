@@ -1538,7 +1538,7 @@ final class SharedAppState {
     /// Deletes a memory by ID.
     func deleteMemory(id: UUID) async {
         guard let store = memoryStore else { return }
-        await store.delete(id: id)
+        await store.delete(id: id, origin: .memoryBrowser)
     }
 
     /// Errors thrown by the memory editor's search helpers, surfaced to the UI.
@@ -1580,7 +1580,7 @@ final class SharedAppState {
     /// `lastUpdatedBy` reflects who made the change.
     func updateMemory(id: UUID, content: String? = nil, tags: [String]? = nil) async throws {
         guard let store = memoryStore else { return }
-        try await store.update(id: id, content: content, tags: tags, updatedBy: .user)
+        try await store.update(id: id, content: content, tags: tags, updatedBy: .user, origin: .memoryBrowser)
     }
 
     /// Saves a brand-new memory authored by the user from the Memory Browser. Source is
@@ -1588,7 +1588,7 @@ final class SharedAppState {
     @discardableResult
     func saveMemory(content: String, tags: [String]) async throws -> MemoryEntry? {
         guard let store = memoryStore else { return nil }
-        return try await store.save(content: content, source: .user, tags: tags)
+        return try await store.save(content: content, source: .user, tags: tags, origin: .memoryBrowser)
     }
 
     private func runUsageHealthCheck() async {

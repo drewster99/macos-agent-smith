@@ -186,6 +186,9 @@ struct LLMCallAnnotationLine: View {
                     .font(AppFonts.microMonoBadge)
                     .foregroundStyle(.secondary)
             }
+            if let correlationID = annotation.correlationID {
+                CorrelationIDLabel(correlationID: correlationID)
+            }
             if let title = annotation.taskTitle {
                 Text(title)
                     .font(AppFonts.inspectorBody)

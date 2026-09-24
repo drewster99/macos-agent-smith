@@ -79,7 +79,7 @@ struct TaskSummarizerInspectorTests {
         let result = await summarizer.reconcileMemoryTexts(
             existing: "a", new: "b", correlationID: UUID(), taskID: nil, taskTitle: nil)
 
-        #expect(result == .distinct)
+        #expect(result == .different)
         let events = collector.events
         #expect(events.count == 2)
         #expect(collector.failures.first?.disposition == .transient)

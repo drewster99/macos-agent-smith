@@ -1,16 +1,17 @@
 import Testing
 @testable import AgentSmithKit
 
-/// The reconciliation-response parser: first line SAME/DIFFERENT, remaining lines the
-/// merged text on SAME, safe degradation to `.distinct` on anything malformed.
+/// The reconciliation-response parser: first line SAME/DIFFERENT, remaining lines the merged text
+/// on SAME. Malformed and empty-merge answers are their own outcomes — never an affirmative
+/// DIFFERENT — and none of them merges.
 @Suite("Memory reconciliation parsing")
 struct MemoryReconciliationParseTests {
 
-    @Test("DIFFERENT → distinct")
-    func differentIsDistinct() {
-        #expect(TaskSummarizer.parseReconciliation("DIFFERENT") == .distinct)
-        #expect(TaskSummarizer.parseReconciliation("DIFFERENT\nthey are unrelated") == .distinct)
-        #expect(TaskSummarizer.parseReconciliation("different.") == .distinct)
+    @Test("DIFFERENT → different")
+    func differentIsDifferent() {
+        #expect(TaskSummarizer.parseReconciliation("DIFFERENT") == .different)
+        #expect(TaskSummarizer.parseReconciliation("DIFFERENT\nthey are unrelated") == .different)
+        #expect(TaskSummarizer.parseReconciliation("different.") == .different)
     }
 
     @Test("SAME with a body → merged text")
@@ -25,15 +26,15 @@ struct MemoryReconciliationParseTests {
         #expect(out == .merged("line one\nline two"))
     }
 
-    @Test("SAME with no body degrades to distinct (never clobber on a malformed response)")
-    func sameWithoutBodyIsDistinct() {
-        #expect(TaskSummarizer.parseReconciliation("SAME") == .distinct)
-        #expect(TaskSummarizer.parseReconciliation("SAME\n   \n") == .distinct)
+    @Test("SAME with no body is an empty merge, not a merge (never clobber on a malformed response)")
+    func sameWithoutBodyIsEmptyMerge() {
+        #expect(TaskSummarizer.parseReconciliation("SAME") == .emptyMerge)
+        #expect(TaskSummarizer.parseReconciliation("SAME\n   \n") == .emptyMerge)
     }
 
-    @Test("Unrecognized first word → distinct")
-    func garbageIsDistinct() {
-        #expect(TaskSummarizer.parseReconciliation("maybe?\nsome text") == .distinct)
-        #expect(TaskSummarizer.parseReconciliation("") == .distinct)
+    @Test("Unrecognized first word → malformed, carrying the response")
+    func garbageIsMalformed() {
+        #expect(TaskSummarizer.parseReconciliation("maybe?\nsome text") == .malformed(response: "maybe?\nsome text"))
+        #expect(TaskSummarizer.parseReconciliation("") == .malformed(response: ""))
     }
 }

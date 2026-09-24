@@ -53,6 +53,9 @@ enum TestToolContext {
         fileReadTracker: FileReadTrackerStub = FileReadTrackerStub(),
         memoryStore: MemoryStore = MemoryStore(engine: SemanticSearchEngine()),
         extractWebContent: @escaping @Sendable (String, String) async -> String? = { _, _ in nil },
+        reconcileMemory: @escaping @Sendable (MemoryReconciliationRequest) async -> MemoryReconciliation = { _ in
+            .unavailable(errorDescription: "no reconciler in test")
+        },
         attachmentResolver: @escaping @Sendable ([String]) async -> (resolved: [Attachment], rejected: [String]) = { ids in ([], ids) },
         attachmentIngestor: @escaping @Sendable (String) async -> (attachment: Attachment?, error: String?) = { _ in (nil, "ingest not configured in test") },
         attachmentDataIngestor: @escaping @Sendable (Data, String, String) async -> (attachment: Attachment?, error: String?) = { data, filename, mimeType in
@@ -85,6 +88,7 @@ enum TestToolContext {
             scheduleWake: scheduleWake,
             reportInboundUserMessage: reportInboundUserMessage,
             memoryStore: memoryStore,
+            reconcileMemory: reconcileMemory,
             extractWebContent: extractWebContent,
             recordFileRead: { path in fileReadTracker.record(path) },
             hasFileBeenRead: { path in fileReadTracker.has(path) },

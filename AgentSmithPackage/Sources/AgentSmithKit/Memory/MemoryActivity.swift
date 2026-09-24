@@ -10,6 +10,14 @@ public enum MemoryActivityOrigin: Sendable, Equatable {
     case memoryBrowser
     /// `save_memory`'s search for an existing memory to consolidate into.
     case memoryConsolidationCandidateSearch
+    /// An agent's `save_memory` call that created a new memory.
+    case agentSaveMemory(AgentRole)
+    /// Consolidation merging an agent's proposed memory into an existing one.
+    case memoryConsolidation(requestedBy: AgentRole)
+    /// The Summarizer writing a completed/failed task's summary.
+    case taskSummarization
+    /// A task's permanent deletion removing its summary from the corpus.
+    case permanentTaskDeletion
     /// A caller outside the app's own paths (tests, tooling), named explicitly.
     case other(String)
 }
@@ -140,7 +148,127 @@ public struct MemoryQueryActivity: Sendable, Equatable {
     }
 }
 
-/// One entry in the app-wide Memory activity feed.
+/// The text (and tags) of a memory or task summary at one moment.
+public struct MemoryContentSnapshot: Sendable, Equatable {
+    public let text: String
+    public let tags: [String]
+
+    public init(text: String, tags: [String]) {
+        self.text = text
+        self.tags = tags
+    }
+
+    init(_ entry: MemoryEntry) {
+        self.init(text: entry.content, tags: entry.tags)
+    }
+}
+
+/// Why `save_memory` saved a new memory instead of merging into an existing one. Every case saves
+/// separately — the safe default — but they are different facts: only `reconcilerJudgedDifferent`
+/// is an affirmative decision that the two memories are distinct.
+public enum MemoryConsolidationSeparateReason: Sendable, Equatable {
+    /// No existing memory cleared the consolidation similarity threshold.
+    case noQualifyingCandidate
+    /// The search for an existing memory to consolidate into failed.
+    case candidateSearchFailed(errorDescription: String)
+    /// The reconciler answered DIFFERENT.
+    case reconcilerJudgedDifferent
+    /// The reconciler's answer did not start with SAME or DIFFERENT.
+    case reconcilerResponseMalformed(response: String)
+    /// The reconciler answered SAME but gave no merged text.
+    case reconcilerMergeWasEmpty
+    /// The reconciler could not be consulted or its call failed.
+    case reconcilerUnavailable(errorDescription: String)
+    /// The reconciliation was cancelled.
+    case reconcilerCancelled
+    /// The reconciler answered SAME, but updating the existing memory failed.
+    case mergeUpdateFailed(errorDescription: String)
+}
+
+/// How one `save_memory` consolidation attempt ended, and what it was compared against.
+public struct MemoryConsolidationContext: Sendable, Equatable {
+    public enum Outcome: Sendable, Equatable {
+        case merged
+        case keptSeparate(MemoryConsolidationSeparateReason)
+    }
+
+    /// Shared with the attempt's candidate query and Summarizer reconciliation call.
+    public let correlationID: UUID
+    /// The best candidate considered, if any cleared the threshold.
+    public let candidateMemoryID: UUID?
+    /// That candidate's cosine similarity to the proposed memory.
+    public let candidateSimilarity: Double?
+    public let outcome: Outcome
+
+    public init(correlationID: UUID, candidateMemoryID: UUID?, candidateSimilarity: Double?, outcome: Outcome) {
+        self.correlationID = correlationID
+        self.candidateMemoryID = candidateMemoryID
+        self.candidateSimilarity = candidateSimilarity
+        self.outcome = outcome
+    }
+}
+
+/// One committed change to the durable memory corpus. Emitted by `MemoryStore` only after the
+/// change is in the store — a failed write never produces one.
+public struct MemoryMutationActivity: Sendable, Equatable {
+    public enum Operation: Sendable, Equatable {
+        case create
+        case edit
+        /// Consolidation merged a proposed memory into an existing one.
+        case merge
+        case delete
+        /// A task summary was written — created, or replacing an earlier one.
+        case taskSummaryWrite
+        /// A task summary was removed from the corpus.
+        case taskSummaryDelete
+    }
+
+    /// What was changed.
+    public enum Subject: Sendable, Equatable {
+        case memory(id: UUID)
+        case taskSummary(taskID: UUID, title: String)
+    }
+
+    public let operation: Operation
+    public let subject: Subject
+    public let origin: MemoryActivityOrigin
+    /// The task the change was made for, when there is one.
+    public let taskID: UUID?
+    /// Content before the change (edit, merge, delete, replaced task summary).
+    public let before: MemoryContentSnapshot?
+    /// What consolidation was asked to merge in (merge only).
+    public let proposed: MemoryContentSnapshot?
+    /// Content after the change (create, edit, merge, task-summary write).
+    public let after: MemoryContentSnapshot?
+    /// True when the change kept the existing identifier (edit, merge, replaced task summary).
+    public let retainedExistingID: Bool
+    /// The consolidation attempt behind a `save_memory` create or merge.
+    public let consolidation: MemoryConsolidationContext?
+
+    public init(
+        operation: Operation,
+        subject: Subject,
+        origin: MemoryActivityOrigin,
+        taskID: UUID?,
+        before: MemoryContentSnapshot?,
+        proposed: MemoryContentSnapshot?,
+        after: MemoryContentSnapshot?,
+        retainedExistingID: Bool,
+        consolidation: MemoryConsolidationContext?
+    ) {
+        self.operation = operation
+        self.subject = subject
+        self.origin = origin
+        self.taskID = taskID
+        self.before = before
+        self.proposed = proposed
+        self.after = after
+        self.retainedExistingID = retainedExistingID
+        self.consolidation = consolidation
+    }
+}
+
+/// One entry in the app-wide Memory activity feed — a query or a committed mutation.
 ///
 /// `sequence` is assigned by `MemoryStore` — the single publisher — before the record leaves the
 /// actor, so a consumer that receives records out of order (each delivery is its own main-actor
@@ -148,6 +276,7 @@ public struct MemoryQueryActivity: Sendable, Equatable {
 public struct MemoryActivity: Identifiable, Sendable, Equatable {
     public enum Kind: Sendable, Equatable {
         case query(MemoryQueryActivity)
+        case mutation(MemoryMutationActivity)
     }
 
     public let id: UUID
