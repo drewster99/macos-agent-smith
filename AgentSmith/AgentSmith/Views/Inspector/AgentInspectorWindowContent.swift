@@ -9,6 +9,7 @@ import AgentSmithKit
 /// - Smith / Brown: a resident conversation — tools, messages, context, turns, direct message.
 /// - Security Agent: evaluations plus the exact provider calls behind them; no direct message
 ///   (its message filter drops private messages).
+/// - Validator: the task verdict ledgers — it has no resident conversation.
 struct AgentInspectorWindowContent: View {
     let viewModel: AppViewModel
     let role: AgentRole
@@ -28,7 +29,9 @@ struct AgentInspectorWindowContent: View {
                 callLog: viewModel.inspectorStore.callLogsByRole[.securityAgent],
                 expandedCallIDs: $expandedCallIDs
             )
-        case .validator, .summarizer:
+        case .validator:
+            ValidatorInspectorSections(viewModel: viewModel)
+        case .summarizer:
             UnavailableInspectorContent(role: role)
         }
     }

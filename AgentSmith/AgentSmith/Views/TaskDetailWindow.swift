@@ -1061,31 +1061,6 @@ private struct TaskDetailVerdictHeaderLine: View {
     }
 }
 
-/// Exactly what the validator was sent and what it said back — the assessment-debugging surface.
-private struct TaskDetailVerdictTranscripts: View {
-    let record: CriterionVerdictRecord
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let systemPrompt = record.renderedSystemPrompt, !systemPrompt.isEmpty {
-                TaskDetailDebugTextBox(
-                    title: "System prompt (exactly as sent — includes the criterion & response format)",
-                    text: systemPrompt
-                )
-            }
-            if let input = record.renderedInput, !input.isEmpty {
-                TaskDetailDebugTextBox(
-                    title: "User message (the results/evidence the validator judged)",
-                    text: input
-                )
-            }
-            if let log = record.responseLog, !log.isEmpty {
-                TaskDetailDebugTextBox(title: "Validator output (turn by turn)", text: log)
-            }
-        }
-    }
-}
-
 /// A section's attachment list, headed and copyable. Renders nothing when there are none.
 private struct TaskDetailAttachmentsBlock: View {
     let attachments: [Attachment]
@@ -1472,7 +1447,7 @@ private struct TaskDetailVerdictRecordRow: View {
                     .padding(.leading, 18)
             }
             if isDebugOpen {
-                TaskDetailVerdictTranscripts(record: record)
+                VerdictTranscripts(record: record, copyControl: { TaskDetailCopyButton(text: $0) })
                     .padding(.leading, 18)
             }
         }

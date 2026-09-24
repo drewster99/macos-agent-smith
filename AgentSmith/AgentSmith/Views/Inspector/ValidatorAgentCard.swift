@@ -7,14 +7,16 @@ import AgentSmithKit
 /// a gear that opens the model picker).
 ///
 /// A validator is not a resident agent — it exists for the duration of one criterion's
-/// evaluation — so it has no system prompt, poll interval, tool budget, speech, or inspector
-/// window. What it does have is a model assignment, and that assignment has no fallback: leave
+/// evaluation — so it has no system prompt, poll interval, tool budget, or speech, and no inline
+/// expansion. Its inspector window (the pop-out button) reads the task verdict ledgers. What it
+/// does have is a model assignment, and that assignment has no fallback: leave
 /// it empty and submitted tasks park unvalidated. This card is where that model is chosen
 /// outside first-run onboarding.
 struct ValidatorAgentCard: View {
     @Bindable var viewModel: AppViewModel
 
     @State private var showingConfig = false
+    @Environment(\.openWindow) private var openWindow
 
     private static let roleColor = AppColors.validatorAgent
 
@@ -81,6 +83,15 @@ struct ValidatorAgentCard: View {
                     .foregroundStyle(.tertiary)
             }
 
+            Button(action: openInspector, label: {
+                Image(systemName: "arrow.up.forward.square")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            })
+            .buttonStyle(.plain)
+            .help("Open \(AgentRole.validator.displayName) inspector")
+            .accessibilityLabel("Open \(AgentRole.validator.displayName) inspector")
+
             Button(action: { showingConfig = true }, label: {
                 Image(systemName: "gearshape")
                     .font(.caption)
@@ -89,9 +100,14 @@ struct ValidatorAgentCard: View {
             .buttonStyle(.plain)
             .padding(.leading, 4)
             .help("Configure the validator model")
+            .accessibilityLabel("Configure the validator model")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    private func openInspector() {
+        openWindow(value: AgentInspectorTarget(sessionID: viewModel.session.id, role: .validator))
     }
 }
 

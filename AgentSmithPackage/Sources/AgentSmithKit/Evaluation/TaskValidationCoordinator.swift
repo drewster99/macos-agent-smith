@@ -743,8 +743,8 @@ extension OrchestrationRuntime {
 
     /// Caps for the debugging fields persisted on each verdict record — big enough to
     /// diagnose any verdict, small enough that tasks.json doesn't balloon.
-    static let maxPersistedInputChars = 20_000
-    static let maxPersistedLogChars = 12_000
+    public static let maxPersistedInputChars = 20_000
+    public static let maxPersistedLogChars = 12_000
 
     static func capDebugText(_ text: String, limit: Int) -> String {
         text.count <= limit ? text : text.prefix(limit) + "\n…[truncated \(text.count - limit) chars]"
