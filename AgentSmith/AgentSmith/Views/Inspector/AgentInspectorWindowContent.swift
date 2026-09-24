@@ -120,7 +120,8 @@ struct InspectorModelCostLine: View {
                     llmTurns: viewModel.inspectorStore.retainedTurns(for: role),
                     role: role,
                     shared: viewModel.shared,
-                    lifetimeCallCount: viewModel.inspectorStore.callLogsByRole[role]?.lifetimeCount
+                    lifetimeCallCount: viewModel.inspectorStore.callLogsByRole[role]?.lifetimeCount,
+                    recordsPerCallStats: role != .validator
                 )
             }
             InspectorSessionCostRow(cost: viewModel.sessionCost(for: role))

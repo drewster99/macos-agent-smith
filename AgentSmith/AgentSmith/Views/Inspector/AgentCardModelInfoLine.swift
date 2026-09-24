@@ -17,6 +17,9 @@ struct AgentCardModelInfoLine: View {
     var shared: SharedAppState?
     /// Every call this run, including evicted ones — see `ModelStatsPopover.lifetimeCallCount`.
     var lifetimeCallCount: Int?
+    /// False for a role that records no per-call turns (the Validator): its model name then
+    /// offers no stats popover, which could only report zero calls.
+    var recordsPerCallStats = true
 
     @Environment(\.openSettings) private var openSettings
 
@@ -39,6 +42,10 @@ struct AgentCardModelInfoLine: View {
                     .truncationMode(.middle)
             })
             .buttonStyle(.plain)
+            .disabled(!recordsPerCallStats)
+            .help(recordsPerCallStats
+                  ? "Show \(role.displayName) call statistics"
+                  : "\(role.displayName) calls are recorded per verdict — open the \(role.displayName) inspector")
             .popover(isPresented: $showingModelStats, arrowEdge: .bottom) {
                 ModelStatsPopover(turns: llmTurns, modelID: modelConfig.modelID, role: role,
                                   lifetimeCallCount: lifetimeCallCount)

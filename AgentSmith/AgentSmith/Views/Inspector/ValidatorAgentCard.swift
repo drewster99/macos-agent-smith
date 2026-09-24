@@ -31,7 +31,8 @@ struct ValidatorAgentCard: View {
             header()
 
             if let config = assignedConfig {
-                AgentCardModelInfoLine(modelConfig: config, llmTurns: [], role: .validator, shared: viewModel.shared)
+                AgentCardModelInfoLine(modelConfig: config, llmTurns: [], role: .validator, shared: viewModel.shared,
+                                       recordsPerCallStats: false)
                     .padding(.leading, 28)
                     .padding(.trailing, 12)
                     .padding(.bottom, 6)

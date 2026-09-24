@@ -11,11 +11,13 @@ import Foundation
 /// cannot compile MLX's `.metal` shaders, so this suite is gated behind an explicit
 /// environment variable and skipped (with a recorded note) when not set:
 ///
-///   AGENT_SMITH_RUN_MLX_TESTS=1 \
-///   xcodebuild test \
-///       -scheme AgentSmith \
+///   cd AgentSmithPackage && TEST_RUNNER_AGENT_SMITH_RUN_MLX_TESTS=1 xcodebuild test \
+///       -scheme AgentSmithPackage \
 ///       -destination 'platform=macOS' \
 ///       -only-testing:AgentSmithTests/MemoryStoreIntegrationTests
+///
+/// `xcodebuild` forwards only `TEST_RUNNER_`-prefixed variables to the test process (with the
+/// prefix stripped); a bare `AGENT_SMITH_RUN_MLX_TESTS=1` never reaches it.
 ///
 /// Without the flag, every test in this suite returns immediately. This means the
 /// project's primary test command — `swift test --skip MemoryStoreIntegrationTests`
