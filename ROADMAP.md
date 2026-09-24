@@ -49,25 +49,30 @@ contributor.
 
 ### P3 — polish (good first issues)
 
-- 🌱 Extract the 4 `ProviderManagementView` `-> some View` functions into `View` structs (this
-  also removes a Keychain lookup per provider per render)
-- 🌱 Clamp the temperature slider to the model's `maxTemperature`
-- 🌱 Settled-criteria chip on task list rows; criteria and steps in the task PDF export
-- 🌱 Recursive evidence sweep in `task_complete`
-- 🌱 `.gitignore`-aware `glob`
-- 🌱 Accessibility identifiers and the remaining labels — [#19](https://github.com/drewster99/macos-agent-smith/issues/19)
-- 🌱 Per-tool tests for the 10 untested tools (Abort, CancelWake, ListScheduledWakes,
-  RescheduleWake, ScheduleTaskAction, ManageTaskDisposition, RunAppleScript,
-  ListScriptableApps, GetAppScriptingSchema, SearchMemory)
-- 🌱 `Phase2LongLivedSmithTests`: look up the worker by task, not by role
-- 🌱 Stale "BY NAME" comment — [#20](https://github.com/drewster99/macos-agent-smith/issues/20)
-- 🌱 Comments still describing the retired `review_work` as current — [#21](https://github.com/drewster99/macos-agent-smith/issues/21)
-- 🌱 Unit tests for `ToolResultCap` — [#22](https://github.com/drewster99/macos-agent-smith/issues/22)
-- `setAcceptanceCriteria` duplicate-name guard; `amend_task` template guard
-- 🌱 Apply attachment caps live, without a restart
-- 🌱 `ChannelBannerKind` rawValue bridge; `.scrollPosition` modernization
-- Badge attachments the worker's model can't see; model-menu sorting and benchmark chips;
-  deprecation-replacement hint
+All filed as `good first issue`:
+[#19](https://github.com/drewster99/macos-agent-smith/issues/19) accessibility baseline ·
+[#20](https://github.com/drewster99/macos-agent-smith/issues/20) stale "BY NAME" comment ·
+[#21](https://github.com/drewster99/macos-agent-smith/issues/21) stale `review_work` comments ·
+[#22](https://github.com/drewster99/macos-agent-smith/issues/22) `ToolResultCap` tests ·
+[#24](https://github.com/drewster99/macos-agent-smith/issues/24) `ProviderManagementView` View structs ·
+[#25](https://github.com/drewster99/macos-agent-smith/issues/25) temperature clamp ·
+[#26](https://github.com/drewster99/macos-agent-smith/issues/26) settled chip on task rows ·
+[#27](https://github.com/drewster99/macos-agent-smith/issues/27) criteria + steps in PDF export ·
+[#28](https://github.com/drewster99/macos-agent-smith/issues/28) recursive evidence sweep ·
+[#29](https://github.com/drewster99/macos-agent-smith/issues/29) `.gitignore`-aware `glob` ·
+[#30](https://github.com/drewster99/macos-agent-smith/issues/30) tests for 10 untested tools ·
+[#31](https://github.com/drewster99/macos-agent-smith/issues/31) `Phase2LongLivedSmithTests` by task ·
+[#32](https://github.com/drewster99/macos-agent-smith/issues/32) attachment caps live ·
+[#33](https://github.com/drewster99/macos-agent-smith/issues/33) `ChannelBannerKind` mapping ·
+[#34](https://github.com/drewster99/macos-agent-smith/issues/34) `.scrollPosition`
+
+Not filed: `setAcceptanceCriteria` duplicate-name guard; `amend_task` template guard; badge
+attachments the worker's model can't see; model-menu sorting and benchmark chips;
+deprecation-replacement hint.
+
+### Open bugs (not from the audit)
+
+- Task list no longer shows the next scheduled run time — [#23](https://github.com/drewster99/macos-agent-smith/issues/23)
 
 ### Decisions needed (product/architecture — the maintainer's call)
 
