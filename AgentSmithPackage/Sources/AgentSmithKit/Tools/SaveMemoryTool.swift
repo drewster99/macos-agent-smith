@@ -149,7 +149,10 @@ struct SaveMemoryTool: AgentTool {
         let separateReason: MemoryConsolidationSeparateReason
         switch reconciliation {
         case .merged(let merged):
-            let mergedTags = Array(Set(match.memory.tags + tags))
+            // Ordered union — existing tags first, then new ones not already present. A Set would
+            // scramble the order, which the store compares (and embeds) order-sensitively.
+            var mergedTags = match.memory.tags
+            for tag in tags where !mergedTags.contains(tag) { mergedTags.append(tag) }
             let mergedEntry: MemoryEntry?
             do {
                 mergedEntry = try await context.memoryStore.update(
@@ -161,7 +164,8 @@ struct SaveMemoryTool: AgentTool {
                     consolidation: MemoryConsolidationContext(
                         correlationID: consolidationID, candidateMemoryID: match.memory.id,
                         candidateSimilarity: match.similarity, outcome: .merged),
-                    proposed: MemoryContentSnapshot(text: content, tags: tags)
+                    proposed: MemoryContentSnapshot(text: content, tags: tags),
+                    onlyIfUnchangedFrom: MemoryContentSnapshot(text: match.memory.content, tags: match.memory.tags)
                 )
             } catch {
                 // If update fails, fall through to normal save.
@@ -171,13 +175,13 @@ struct SaveMemoryTool: AgentTool {
                     context: context
                 )
             }
-            // The candidate was deleted while the reconciler ran: nothing was merged, so the
-            // proposed memory must still be saved rather than reported as consolidated.
+            // The candidate was edited or deleted while the reconciler ran: the merge was computed
+            // from text that no longer exists, so nothing was written. The proposed memory must
+            // still be saved rather than reported as consolidated.
             guard mergedEntry != nil else {
                 return try await saveNew(
                     content: content, source: source, tags: tags, sourceTaskID: sourceTaskID,
-                    consolidation: keptSeparate(.mergeUpdateFailed(
-                        errorDescription: "the existing memory was deleted before the merge could be applied")),
+                    consolidation: keptSeparate(.mergeTargetChanged),
                     context: context
                 )
             }

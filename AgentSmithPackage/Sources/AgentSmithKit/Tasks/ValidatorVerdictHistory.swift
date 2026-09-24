@@ -4,10 +4,12 @@ import Foundation
 ///
 /// The ledgers (`TaskValidationState.verdictRecords`) are the ONE source of validator truth; this
 /// type only groups and labels them. It never copies a record into a second store, so the
-/// inspector and Task Detail can never disagree about what a validator said.
+/// inspector and Task Detail can never disagree about what a validator said. A ledger holds what
+/// the task currently carries: retry and reopen clear it and a criteria edit retires the edited
+/// criteria's verdicts — the full history is `ValidationMetricsLedger`'s job, not this one's.
 public enum ValidatorVerdictHistory {
 
-    /// One task's verdicts, ordered by criterion, then round, then time.
+    /// One task's verdicts, ordered by criterion, then time.
     public struct TaskGroup: Identifiable, Sendable, Equatable {
         public var id: UUID { taskID }
         public let taskID: UUID
@@ -21,11 +23,15 @@ public enum ValidatorVerdictHistory {
     public struct Entry: Identifiable, Sendable, Equatable {
         public var id: UUID { record.id }
         public let criterionID: UUID
-        /// 1-based position in the task's CURRENT contract; nil when the criterion has since been
-        /// removed from the task (its verdicts stay in the ledger).
+        /// 1-based position in the task's CURRENT contract; nil when the record names a criterion
+        /// the contract no longer has. Criteria edits normally retire such records, so this is a
+        /// defensive case (older ledgers), not a history the store keeps.
         public let criterionNumber: Int?
         /// The criterion's current name; nil when it is no longer on the task.
         public let criterionName: String?
+        /// Whether the criterion enumerates its inputs — its record's stored input is then the
+        /// enumerator's, not the judged evidence. Nil when the criterion is no longer on the task.
+        public let usesInputEnumerator: Bool?
         public let record: CriterionVerdictRecord
     }
 
@@ -34,15 +40,17 @@ public enum ValidatorVerdictHistory {
         var groups: [TaskGroup] = []
         for task in tasks {
             guard let records = task.validation?.verdictRecords, !records.isEmpty else { continue }
-            var positions: [UUID: (number: Int, name: String)] = [:]
+            var positions: [UUID: (number: Int, criterion: AcceptanceCriterion)] = [:]
             for (index, criterion) in task.acceptanceCriteria.enumerated() {
-                positions[criterion.id] = (index + 1, criterion.name)
+                positions[criterion.id] = (index + 1, criterion)
             }
             let entries = records.map { record in
-                Entry(
+                let current = positions[record.criterionID]
+                return Entry(
                     criterionID: record.criterionID,
-                    criterionNumber: positions[record.criterionID]?.number,
-                    criterionName: positions[record.criterionID]?.name,
+                    criterionNumber: current?.number,
+                    criterionName: current?.criterion.name,
+                    usesInputEnumerator: current.map { $0.criterion.effectiveInputEnumeratorPrompt != nil },
                     record: record
                 )
             }
@@ -56,7 +64,9 @@ public enum ValidatorVerdictHistory {
         }
     }
 
-    /// Criterion (current contract order; removed criteria last, by id), then round, then time.
+    /// Criterion (current contract order; removed criteria last, by id), then time. Not round: a
+    /// Re-validate or Send-back restarts round numbering while keeping the ledger, so ordering by
+    /// round would interleave separate validation runs.
     private static func entryOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {
         switch (lhs.criterionNumber, rhs.criterionNumber) {
         case let (left?, right?) where left != right: return left < right
@@ -66,8 +76,8 @@ public enum ValidatorVerdictHistory {
             return lhs.criterionID.uuidString < rhs.criterionID.uuidString
         default: break
         }
-        if lhs.record.round != rhs.record.round { return lhs.record.round < rhs.record.round }
         if lhs.record.recordedAt != rhs.record.recordedAt { return lhs.record.recordedAt < rhs.record.recordedAt }
+        if lhs.record.round != rhs.record.round { return lhs.record.round < rhs.record.round }
         return lhs.record.id.uuidString < rhs.record.id.uuidString
     }
 }

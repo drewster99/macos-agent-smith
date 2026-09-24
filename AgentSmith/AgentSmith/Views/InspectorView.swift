@@ -130,6 +130,7 @@ private struct AgentRoleData: Equatable {
     let availableTools: [String]
     let evaluationRecords: [EvaluationRecord]
     let evaluationLifetimeCount: Int
+    let sessionCost: Double
     let isProcessing: Bool
     let executingTools: [String]
     let modelConfig: ModelConfiguration?
@@ -256,6 +257,7 @@ private struct RoleAgentCard: View {
             availableTools: viewModel.agentToolNames[role] ?? [],
             evaluationRecords: role == .securityAgent ? store.evaluationRecords : [],
             evaluationLifetimeCount: role == .securityAgent ? store.evaluationLifetimeCount : 0,
+            sessionCost: viewModel.sessionCost(for: role),
             isProcessing: role == .securityAgent ? viewModel.isSecurityAgentBusy : viewModel.processingRoles.contains(role),
             executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[role]),
             modelConfig: viewModel.resolvedAgentConfigs[role]
@@ -422,18 +424,6 @@ private struct AgentCard: View {
         }
     }
 
-    /// Actual input token count from the most recent LLM turn, if available.
-    private var lastInputTokens: Int? {
-        llmTurns.last?.usage?.inputTokens
-    }
-
-    /// Context usage percentage based on actual token counts from the provider.
-    private var contextPercent: Int? {
-        guard let config = modelConfig, config.maxContextTokens > 0,
-              let inputTokens = lastInputTokens else { return nil }
-        return min(100, (inputTokens * 100) / config.maxContextTokens)
-    }
-
     /// Whether the agent has been terminated — has activity history but no live tools.
     private var isTerminated: Bool {
         availableTools.isEmpty && !contextMessages.isEmpty
@@ -465,10 +455,10 @@ private struct AgentCard: View {
             if let config = modelConfig {
                 AgentCardModelInfoLine(modelConfig: config, llmTurns: llmTurns,
                                        role: role, shared: viewModel.shared,
-                                       lifetimeCallCount: data.callLog?.lifetimeCount)
+                                       evictedCallCount: data.callLog?.evictedCount ?? 0)
                     .padding(.leading, 28).padding(.trailing, 12).padding(.bottom, 2)
             }
-            AgentCardSessionCostLine(cost: viewModel.sessionCost(for: role))
+            AgentCardSessionCostLine(cost: data.sessionCost)
 
             if expanded && !opensInWindow {
                 SecurityEvaluationsSection(
@@ -695,10 +685,24 @@ private struct RoleAgentCardWatchers: ViewModifier {
             // to wake the recompute too or its card stays dark through every per-call review.
             .onChange(of: role == .securityAgent ? viewModel.shared.liveActivitySnapshot.securityEvaluations : 0) { _, _ in onRecompute() }
             .onChange(of: viewModel.toolExecutingByRole[role]) { _, _ in onRecompute() }
+            .modifier(RoleAgentCardSettingsWatchers(viewModel: viewModel, role: role, onRecompute: onRecompute))
+    }
+}
+
+/// The role card's slower-moving inputs — its settings, tool set, model, and cost — split from
+/// `RoleAgentCardWatchers` only to keep each body short. Same narrowing rules apply.
+private struct RoleAgentCardSettingsWatchers: ViewModifier {
+    let viewModel: AppViewModel
+    let role: AgentRole
+    let onRecompute: () -> Void
+
+    func body(content: Content) -> some View {
+        content
             .onChange(of: viewModel.agentPollIntervals[role]) { _, _ in onRecompute() }
             .onChange(of: viewModel.agentMaxToolCalls[role]) { _, _ in onRecompute() }
             .onChange(of: viewModel.agentToolNames[role]) { _, _ in onRecompute() }
             .onChange(of: viewModel.resolvedAgentConfigs[role]) { _, _ in onRecompute() }
+            .onChange(of: viewModel.sessionCost(for: role)) { _, _ in onRecompute() }
     }
 }
 

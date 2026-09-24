@@ -24,9 +24,10 @@ public enum MemoryActivityOrigin: Sendable, Equatable {
 
 /// Whether one corpus was searched, and exactly what it returned.
 ///
-/// `notSearched` and `searched(hits: [])` are different facts: the first means the corpus's limit
-/// was zero and no embedding or scan ran for it; the second means it was scored and nothing
-/// passed ranking. Neither may be inferred from a hit count or an elapsed time.
+/// `notSearched` and `searched(hits: [])` are different facts: the first means the corpus was not
+/// part of the search (a single-corpus API, or a zero limit) and no scan ran for it; the second
+/// means it was scored and nothing passed ranking. Neither may be inferred from a hit count or an
+/// elapsed time.
 public enum CorpusSearchOutcome<Hit: Sendable & Equatable>: Sendable, Equatable {
     case notSearched
     case searched(hits: [Hit])
@@ -100,7 +101,12 @@ public struct TaskSummaryHitSnapshot: Sendable, Equatable, Identifiable {
 /// One memory-store query: what was asked, by whom, how long each phase took, and exactly what
 /// each corpus returned.
 public struct MemoryQueryActivity: Sendable, Equatable {
+    /// The query as recorded — at most `maxRecordedQueryCharacters`, with the cut marked. Some
+    /// retrieval points query with whole tool arguments (a Security review of a large file write),
+    /// and 200 retained activities must not each hold a copy.
     public let query: String
+    /// The query's full length, so a view can say how much was cut.
+    public let queryCharacterCount: Int
     public let origin: MemoryActivityOrigin
     /// Links this query to the rest of one logical operation (a consolidation attempt).
     public let correlationID: UUID?
@@ -126,7 +132,8 @@ public struct MemoryQueryActivity: Sendable, Equatable {
         memories: CorpusSearchOutcome<MemoryHitSnapshot>,
         taskSummaries: CorpusSearchOutcome<TaskSummaryHitSnapshot>
     ) {
-        self.query = query
+        self.query = Self.recorded(query)
+        self.queryCharacterCount = query.count
         self.origin = origin
         self.correlationID = correlationID
         self.latencyMs = latencyMs
@@ -136,6 +143,19 @@ public struct MemoryQueryActivity: Sendable, Equatable {
         self.memories = memories
         self.taskSummaries = taskSummaries
     }
+
+    /// The longest query text an activity keeps.
+    public static let maxRecordedQueryCharacters = 4_000
+
+    /// `query`, cut to `maxRecordedQueryCharacters` with the cut marked.
+    static func recorded(_ query: String) -> String {
+        guard query.count > maxRecordedQueryCharacters else { return query }
+        return String(query.prefix(maxRecordedQueryCharacters))
+            + "\n…[query truncated — \(query.count - maxRecordedQueryCharacters) more characters not recorded]"
+    }
+
+    /// Whether `query` holds less than the full text searched.
+    public var isQueryTruncated: Bool { queryCharacterCount > Self.maxRecordedQueryCharacters }
 
     static func memoryOutcome(searched: Bool, results: [MemorySearchResult]) -> CorpusSearchOutcome<MemoryHitSnapshot> {
         guard searched else { return .notSearched }
@@ -183,6 +203,9 @@ public enum MemoryConsolidationSeparateReason: Sendable, Equatable {
     case reconcilerCancelled
     /// The reconciler answered SAME, but updating the existing memory failed.
     case mergeUpdateFailed(errorDescription: String)
+    /// The existing memory was edited or deleted while the reconciler ran, so the merge — computed
+    /// from its old text — was not applied.
+    case mergeTargetChanged
 }
 
 /// How one `save_memory` consolidation attempt ended, and what it was compared against.

@@ -126,4 +126,26 @@ struct MemoryActivityTests {
         #expect(MemoryActivityPresentation.originLabel(.memoryBrowser) == "Memory Browser")
         #expect(MemoryActivityPresentation.queryOriginLabel(.memoryBrowser) == "Memory Browser search")
     }
+
+    @Test("an arrival older than the whole retained window is counted but not retained")
+    func lateArrivalOlderThanWindow() {
+        var feed = MemoryActivityFeed(capacity: 2)
+        let q = query(memories: .notSearched, tasks: .notSearched)
+        for sequence in [5, 6, 1] {
+            feed.insert(MemoryActivity(sequence: sequence, timestamp: Date(), kind: .query(q)))
+        }
+        #expect(feed.activities.map(\.sequence) == [5, 6])
+        #expect(feed.lifetimeCount == 3)
+    }
+
+    @Test("a recorded query is capped with the cut marked and its full length kept")
+    func recordedQueryIsCapped() {
+        let long = String(repeating: "x", count: MemoryQueryActivity.maxRecordedQueryCharacters + 5_000)
+        let activity = MemoryQueryActivity(query: long, origin: .memoryBrowser, correlationID: nil, latencyMs: 1, embedMs: 1,
+                                           memoryScanMs: 0, taskScanMs: nil, memories: .searched(hits: []), taskSummaries: .notSearched)
+        #expect(activity.isQueryTruncated)
+        #expect(activity.queryCharacterCount == long.count)
+        #expect(activity.query.contains("5000 more characters not recorded"))
+        #expect(activity.query.count < long.count)
+    }
 }

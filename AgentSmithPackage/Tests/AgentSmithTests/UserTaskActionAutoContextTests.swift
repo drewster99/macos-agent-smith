@@ -46,4 +46,27 @@ struct UserTaskActionAutoContextTests {
         #expect(securityToggle.memory)
         #expect(securityToggle.task == false)
     }
+
+    @Test("UserTaskAction raw values are pinned — they are persisted on every notice")
+    func rawValuesArePinned() {
+        let expected: [UserTaskAction: String] = [
+            .paused: "paused", .stopped: "stopped", .deleted: "deleted",
+            .retryRequested: "retry_requested", .runAgainRequested: "run_again_requested",
+            .undeleted: "undeleted",
+        ]
+        #expect(Set(UserTaskAction.allCases) == Set(expected.keys), "a new case must be pinned here")
+        for (action, raw) in expected {
+            #expect(action.rawValue == raw)
+        }
+    }
+
+    @Test("orchestration scope admits task-action notices but no other task-scoped message")
+    func orchestrationScopeAdmitsTaskActionNotices() {
+        let filter = TranscriptFilter(taskScope: .orchestration)
+        #expect(filter.matches(taskActionNotice()), "the notice must reach the conversation pane, where its inline control lives")
+        let otherTaskScoped = ChannelMessage(sender: .system, content: "progress", taskID: UUID())
+        #expect(filter.matches(otherTaskScoped) == false)
+        #expect(filter.matches(ChannelMessage(sender: .user, content: "hi")))
+        #expect(TranscriptFilter(taskScope: .matchNone).matches(taskActionNotice()) == false)
+    }
 }

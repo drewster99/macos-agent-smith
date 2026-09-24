@@ -16,6 +16,7 @@ struct MemoryMutationActivityRow: View {
             })
             .buttonStyle(.plain)
             .help(expanded ? "Hide the change" : "Show the change")
+            .accessibilityValue(expanded ? "expanded" : "collapsed")
             if expanded {
                 MemoryMutationActivityDetail(mutation: mutation)
             }
@@ -92,6 +93,12 @@ private struct MemoryConsolidationDetail: View {
                 Text(String(format: "Candidate cosine similarity %.3f", similarity))
                     .font(AppFonts.microMonoBadge)
                     .foregroundStyle(.secondary)
+            }
+            if let candidateID = consolidation.candidateMemoryID {
+                Text("Compared against memory \(candidateID.uuidString)")
+                    .font(AppFonts.microMonoBadge)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
             CorrelationIDLabel(correlationID: consolidation.correlationID)
         }

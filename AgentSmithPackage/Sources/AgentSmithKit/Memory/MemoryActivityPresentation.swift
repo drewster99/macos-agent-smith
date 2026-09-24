@@ -118,7 +118,7 @@ public enum MemoryActivityPresentation {
         case .keptSeparate(.reconcilerJudgedDifferent):
             return "Kept separate — reconciler answered DIFFERENT"
         case .keptSeparate(.reconcilerResponseMalformed(let response)):
-            return "Kept separate — reconciler reply was not SAME/DIFFERENT (no decision): \(response)"
+            return "Kept separate — reconciler reply was not SAME/DIFFERENT (no decision): \(Self.excerpt(response))"
         case .keptSeparate(.reconcilerMergeWasEmpty):
             return "Kept separate — reconciler answered SAME with no merged text (no decision)"
         case .keptSeparate(.reconcilerUnavailable(let error)):
@@ -127,7 +127,15 @@ public enum MemoryActivityPresentation {
             return "Kept separate — reconciliation was cancelled (no decision)"
         case .keptSeparate(.mergeUpdateFailed(let error)):
             return "Kept separate — reconciler answered SAME but the merge failed: \(error)"
+        case .keptSeparate(.mergeTargetChanged):
+            return "Kept separate — the existing memory was edited or deleted while the reconciler ran, so the merge was not applied"
         }
+    }
+
+    /// A model reply quoted inline in a one-line decision: the start of it, with any cut marked.
+    static func excerpt(_ text: String, limit: Int = 300) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + "… (\(text.count - limit) more characters)"
     }
 
     /// Retention heading for the feed, e.g. `Latest 200 of 327 activities`.

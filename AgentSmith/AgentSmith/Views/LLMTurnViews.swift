@@ -112,9 +112,14 @@ struct LLMTurnDisclosureRow: View, Equatable {
                                           isSelfContainedRequest: turn.isSelfContainedRequest)
                         .padding(.top, 2)
                 }
+                // For a self-contained call the snapshot is the request already shown above; the
+                // sheet still earns its place for the call's settings (temperature, output cap).
                 if !turn.contextSnapshot.isEmpty {
                     Button(action: { showingFullContext = true }) {
-                        Label("Full Context (\(turn.contextSnapshot.count) messages)", systemImage: "doc.text.magnifyingglass")
+                        Label(turn.isSelfContainedRequest
+                              ? "Request & call settings"
+                              : "Full Context (\(turn.contextSnapshot.count) messages)",
+                              systemImage: "doc.text.magnifyingglass")
                             .font(AppFonts.inspectorBody)
                     }
                     .buttonStyle(.plain)
@@ -333,7 +338,7 @@ struct FullContextSheet: View {
                 .padding(.vertical, 1)
                 .background(.quaternary)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
-            Text("temp \(String(format: "%.1f", turn.temperature))")
+            Text(turn.temperature.map { "temp \(String(format: "%.1f", $0))" } ?? "temp (provider default)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("max \(turn.maxOutputTokens) tokens")

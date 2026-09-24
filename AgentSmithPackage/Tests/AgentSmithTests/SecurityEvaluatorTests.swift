@@ -328,6 +328,11 @@ struct SecurityEvaluatorTests {
         #expect(toolDescription.lowerBound < parameterDefinitions.lowerBound)
         #expect(parameterDefinitions.lowerBound < timestamp.lowerBound)
         #expect(timestamp.lowerBound < arguments.lowerBound)
+        // The call under review must name its own tool next to its parameters — sibling and recent
+        // calls listed between the tool header and this section name other tools.
+        let callSection = try #require(prompt.range(of: "## Tool call to evaluate:"))
+        let callText = prompt[callSection.upperBound...]
+        #expect(callText.hasPrefix("\n- tool name: bash\n- parameters: "))
     }
 
     // MARK: - Execution-outcome annotation (the new feature)

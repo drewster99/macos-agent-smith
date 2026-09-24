@@ -38,6 +38,7 @@ struct InspectorCallWiringTests {
             .appendingPathComponent("agent-smith-inspector-wiring", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
         let brownCall = LLMResponse(toolCalls: [
             LLMToolCall(id: "c1", name: "file_read", arguments: #"{"path":"/nonexistent/agent-smith-wiring"}"#)
         ])
@@ -79,5 +80,60 @@ struct InspectorCallWiringTests {
         let reviewed = await waitUntil { log.roles().contains(.securityAgent) }
         #expect(reviewed, "no Security Agent call reached the observer; roles seen: \(log.roles())")
         await runtime.stopAll()
+    }
+
+    @Test("Smith context compaction is recorded as a typed Summarizer call")
+    func compactionIsRecordedUnderTheSummarizer() async throws {
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-inspector-wiring", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
+        let config = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+        let summarizerProvider = MockLLMProvider(responses: [LLMResponse(text: "THE SUMMARY")])
+        let runtime = OrchestrationRuntime(
+            providers: [
+                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
+                .summarizer: summarizerProvider,
+            ],
+            configurations: [.smith: config, .securityAgent: config, .summarizer: config],
+            providerAPITypes: [:],
+            agentTuning: [:],
+            semanticSearchEngine: SemanticSearchEngine(),
+            usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
+            autoAdvanceEnabled: false,
+            autoRunInterruptedTasks: false,
+            memoryStore: nil
+        )
+        let calls = EventCalls()
+        await runtime.setOnLLMCallRecorded { ref, event in calls.record(ref, event) }
+        await runtime.start()
+        let smith = try #require(await runtime.supervisor.firstHandle(role: .smith)?.agent)
+        for index in 1...8 {
+            await smith.appendUserMessage("message \(index)")
+        }
+        // compactSmithContext declines at `compactionRecentTurnsKept + 3` (= 9) messages or fewer.
+        let grown = await waitUntil { (await runtime.contextSnapshot(for: .smith)?.count ?? 0) > 9 }
+        #expect(grown, "Smith's context must grow past the compaction minimum for this test to mean anything")
+
+        _ = await runtime.compactSmithContext()
+
+        let compaction = calls.completed.first { $0.turn.annotation?.operation == .contextCompaction }
+        #expect(compaction != nil, "the compaction call must reach the call observer")
+        #expect(compaction?.ref.role == .summarizer)
+        #expect(compaction?.turn.isSelfContainedRequest == true)
+        #expect(compaction?.turn.contextSnapshot == summarizerProvider.receivedMessages.first)
+        await runtime.stopAll()
+    }
+
+    private final class EventCalls: @unchecked Sendable {
+        private let lock = NSLock()
+        private var turns: [(ref: AgentInstanceRef, turn: LLMTurnRecord)] = []
+        func record(_ ref: AgentInstanceRef, _ event: LLMCallEvent) {
+            guard case .completed(let turn) = event else { return }
+            lock.withLock { turns.append((ref, turn)) }
+        }
+        var completed: [(ref: AgentInstanceRef, turn: LLMTurnRecord)] { lock.withLock { turns } }
     }
 }

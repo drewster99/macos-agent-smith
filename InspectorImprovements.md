@@ -1,5 +1,9 @@
 # Inspector and Sidebar Improvements
 
+> **Status:** implemented 2026-09-23 (see Acceptance criteria). Sections titled "Current
+> behavior" and "Current implementation" describe the codebase BEFORE this work — e.g. the removed
+> `MemoryQueryRecord` / `MemoryQueryCard` — and are kept as the plan's historical baseline.
+
 ## Purpose
 
 Make every inspector surface answer the same basic questions clearly:

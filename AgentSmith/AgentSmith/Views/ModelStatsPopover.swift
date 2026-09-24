@@ -55,15 +55,17 @@ private struct ModelStats {
         maxInputTokens = turns.compactMap(\.usage?.inputTokens).max() ?? 0
         maxOutputTokens = turns.compactMap(\.usage?.outputTokens).max() ?? 0
 
-        let last = turns.last
+        let last = turns.last(where: \.isConversationTurn)
         lastInputTokens = last?.usage?.inputTokens ?? 0
         lastOutputTokens = last?.usage?.outputTokens ?? 0
         lastCacheReadTokens = last?.usage?.cacheReadTokens ?? 0
 
-        // Count turns where input tokens dropped significantly (context reset indicator)
+        // Count turns where input tokens dropped significantly (context reset indicator). Only the
+        // agent's own conversation turns: a self-contained call billed to the role (a compaction)
+        // is a different request, not a reset.
         var resets = 0
         var prevInput = 0
-        for turn in turns {
+        for turn in turns where turn.isConversationTurn {
             let input = turn.usage?.inputTokens ?? 0
             if prevInput > 0 && input < prevInput / 2 { resets += 1 }
             prevInput = input
@@ -77,14 +79,14 @@ struct ModelStatsPopover: View {
     let turns: [LLMTurnRecord]
     let modelID: String
     let role: AgentRole
-    /// Every call this run, completed or failed, including those no longer retained; nil when
-    /// unknown. When `turns` covers fewer, the figures describe only the retained turns and the
-    /// popover says so rather than presenting them as session totals.
-    var lifetimeCallCount: Int?
+    /// Calls evicted from the retained log. When nonzero the figures describe only the retained
+    /// turns, and the popover says so rather than presenting them as totals. (Failed calls are not
+    /// turns and carry no usage, so they never count as missing here.)
+    var evictedCallCount = 0
 
     private var coverageNote: String? {
-        guard let lifetimeCallCount, lifetimeCallCount > turns.count else { return nil }
-        return "Figures cover the latest \(turns.count) completed calls of \(lifetimeCallCount) this run (older calls are no longer retained; failed calls carry no usage)."
+        guard evictedCallCount > 0 else { return nil }
+        return "Figures cover the \(turns.count) retained completed calls; \(evictedCallCount) older calls are no longer retained."
     }
 
     var body: some View {

@@ -162,4 +162,18 @@ struct ServerMemoryExhaustionTests {
         let advisories = await Self.memoryAdvisories(in: channel)
         #expect(advisories.isEmpty, "two refusals, a 503, then one more is not three in a row")
     }
+
+    @Test("A memory refusal carried by an HTTP 4xx body is retryable, not permanent")
+    func memoryRefusalOnClientStatusIsTransient() {
+        let code = LLMProviderError.ServerMemoryExhaustionCode.omlxPrefillMemoryExceeded.rawValue
+        let body = #"{"error":{"code":"\#(code)","message":"not enough memory"}}"#
+        let refusal = LLMProviderError.httpError(statusCode: 400, body: body)
+        #expect(refusal.serverMemoryExhaustion != nil)
+        guard case .transient = LLMRetryPolicy.classify(refusal) else {
+            Issue.record("a 4xx memory refusal must not stop the agent before the context reduction can run")
+            return
+        }
+        // An ordinary 400 is still permanent.
+        #expect(LLMRetryPolicy.classify(LLMProviderError.httpError(statusCode: 400, body: "bad request")) == .permanent)
+    }
 }

@@ -1978,31 +1978,39 @@ public actor TaskStore {
         return false
     }
 
-    /// Returns an archived task to this (the current) session's active list.
-    public func unarchive(id: UUID) async {
+    /// Returns an archived task to this (the current) session's active list. Returns whether the
+    /// task was restored.
+    @discardableResult
+    public func unarchive(id: UUID) async -> Bool {
         await restoreFromInactive(id: id)
     }
 
-    /// Recovers a recently-deleted task back to this (the current) session's active list.
-    public func undelete(id: UUID) async {
+    /// Recovers a recently-deleted task back to this (the current) session's active list. Returns
+    /// whether the task was restored — false when it is no longer in the inactive store or the
+    /// restore could not be made durable.
+    @discardableResult
+    public func undelete(id: UUID) async -> Bool {
         await restoreFromInactive(id: id)
     }
 
     /// Restores a task from the global inactive store to this (the current) session's active list,
     /// regardless of whether it was archived or deleted. Used by `run_task` to "redo" a task the
     /// agent referenced by ID that has since been auto-archived (or deleted).
-    public func restoreToActive(id: UUID) async {
+    @discardableResult
+    public func restoreToActive(id: UUID) async -> Bool {
         await restoreFromInactive(id: id)
     }
 
-    /// Pulls a task out of the global inactive store and into this session's active list.
-    /// No-op when there's no inactive store (legacy in-place fallback) or the task isn't there.
-    private func restoreFromInactive(id: UUID) async {
+    /// Pulls a task out of the global inactive store and into this session's active list. Returns
+    /// false when the task isn't there or a durable write failed (the task is then left where it
+    /// was). With no inactive store (legacy in-place fallback) it flips the disposition in place.
+    private func restoreFromInactive(id: UUID) async -> Bool {
         guard let inactiveStore else {
+            guard tasks[id] != nil else { return false }
             setDisposition(id: id, disposition: .active)
-            return
+            return true
         }
-        guard let existing = await inactiveStore.task(id: id) else { return }
+        guard let existing = await inactiveStore.task(id: id) else { return false }
         // A template restores to the GLOBAL library (where templates live), not this session's active
         // list — UNLESS the library can't persist (then fall through to the session path so it isn't
         // lost, mirroring `addTask`). Destination-durable-before-source-removal, same as the task path.
@@ -2017,12 +2025,12 @@ public actor TaskStore {
             if let durablyPersistLibraryNow, await durablyPersistLibraryNow() == false {
                 await templateLibrary.removeTemplate(id: id)   // roll back; leave it in the inactive store
                 await templateLibrary.releaseEditLock(id)
-                return
+                return false
             }
             await inactiveStore.remove(id: id)
             _ = await durablyPersistInactiveNow?()   // make the source removal durable (no reconciler here)
             await templateLibrary.releaseEditLock(id)
-            return
+            return true
         }
         var task = existing
         task.disposition = .active
@@ -2036,10 +2044,11 @@ public actor TaskStore {
         // keeps the newer copy, which the freshly-stamped active copy always wins here.
         if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
             tasks.removeValue(forKey: task.id)
-            return
+            return false
         }
         await inactiveStore.remove(id: id)
         onChange?()
+        return true
     }
 
     /// Permanently removes a task. Unrecoverable. Looks in this session's active list first,

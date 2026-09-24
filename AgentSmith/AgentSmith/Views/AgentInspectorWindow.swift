@@ -49,7 +49,11 @@ struct AgentInspectorWindow: View {
         // (role-attributed system diagnostics included) so the standalone window
         // and the sidebar card never disagree.
         let roleMessages = InspectorView.bucketMessagesByRole(viewModel.messages)[role] ?? []
-        let hasActivity = !roleMessages.isEmpty || viewModel.hasAgentActivity(role)
+        // The Validator has no messages or call log of its own; like its card, its dot says whether
+        // a model is assigned to judge with.
+        let hasActivity = role == .validator
+            ? viewModel.resolvedAgentConfigs[.validator] != nil
+            : !roleMessages.isEmpty || viewModel.hasAgentActivity(role)
 
         return VStack(spacing: 0) {
             AgentInspectorWindowHeader(

@@ -74,10 +74,13 @@ struct SearchMemoryTool: AgentTool {
             memoryLimit: limit,
             taskLimit: limit,
             excludeDeletedTasks: false,
+            resultCosineFloor: Self.toolSearchFloor,
             origin: .agentSearchMemory(context.agentRole)
         )
-        let memories = rawResults.memories.filter { $0.similarity >= Self.toolSearchFloor }
-        let taskSummaries = rawResults.taskSummaries.filter { $0.similarity >= Self.toolSearchFloor }
+        // The floor is applied inside the store (after ranking and the limit, exactly as before),
+        // so the recorded memory activity matches what this tool hands the agent.
+        let memories = rawResults.memories
+        let taskSummaries = rawResults.taskSummaries
         // Count injections for what SURVIVES the floor, not what the search returned: the ones
         // filtered out here were retrieved but never shown to the agent. Recorded before the
         // early return below so a floor that rejects everything records nothing.

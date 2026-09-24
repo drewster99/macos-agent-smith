@@ -175,6 +175,14 @@ public enum LLMRetryPolicy {
                     }
                 }
 
+                // A server that says it lacked memory (typed by the kit from its error object) may
+                // well succeed on a smaller or later request, whatever status carried the refusal;
+                // the run loop shrinks the context after repeated ones. Classifying a 4xx refusal
+                // permanent would stop the agent before that reduction could ever run.
+                if providerError.serverMemoryExhaustion != nil {
+                    return .transient(retryAfter: serverDelay)
+                }
+
                 switch statusCode {
                 case 429:
                     // Still transient — the most common 429 by far is an ordinary rate limit, and

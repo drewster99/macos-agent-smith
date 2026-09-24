@@ -416,4 +416,31 @@ struct MemoryStoreIntegrationTests {
         #expect(run.memoryCount == 2)
         #expect(run.mutations.first?.consolidation?.outcome == .keptSeparate(.noQualifyingCandidate))
     }
+
+    @Test("an edit made while the reconciler runs survives: the stale merge is not applied")
+    func concurrentEditBeatsStaleMerge() async throws {
+        guard let fixture = try await Self.fixtureIfEnabled() else { return }
+        let (store, collector) = await Self.freshStore(fixture)
+        let existing = try await store.save(content: Self.existingFact, source: .smith, tags: ["procedure"],
+                                            origin: .other("seed"))
+        let context = TestToolContext.make(
+            agentRole: .smith,
+            memoryStore: store,
+            reconcileMemory: { _ in
+                // The user edits the candidate while the reconciler is deciding.
+                _ = try? await store.update(id: existing.id, content: "User's corrected fact.",
+                                            updatedBy: .user, origin: .memoryBrowser)
+                return .merged("Merge computed from the old text.")
+            }
+        )
+        _ = try await SaveMemoryTool().execute(
+            arguments: ["content": .string(Self.restatedFact)], context: context)
+
+        let kept = await store.allMemories().first { $0.id == existing.id }
+        #expect(kept?.content == "User's corrected fact.", "the user's edit must not be overwritten")
+        #expect(await store.allMemories().count == 2, "the proposed memory is saved separately")
+        let create = collector.mutations.last
+        #expect(create?.operation == .create)
+        #expect(create?.consolidation?.outcome == .keptSeparate(.mergeTargetChanged))
+    }
 }

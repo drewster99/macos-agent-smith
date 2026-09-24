@@ -16,6 +16,8 @@ public enum UserTaskAction: String, Codable, Sendable, Hashable, CaseIterable {
     case retryRequested = "retry_requested"
     /// The user chose Run Again on a completed task; Smith asked to create a fresh copy.
     case runAgainRequested = "run_again_requested"
+    /// The user recovered a task from Recently Deleted.
+    case undeleted = "undeleted"
 }
 
 public extension AnyCodable {

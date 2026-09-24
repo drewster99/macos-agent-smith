@@ -15,8 +15,8 @@ struct AgentCardModelInfoLine: View {
     let llmTurns: [LLMTurnRecord]
     let role: AgentRole
     var shared: SharedAppState?
-    /// Every call this run, including evicted ones — see `ModelStatsPopover.lifetimeCallCount`.
-    var lifetimeCallCount: Int?
+    /// Calls no longer retained — see `ModelStatsPopover.evictedCallCount`.
+    var evictedCallCount = 0
     /// False for a role that records no per-call turns (the Validator): its model name then
     /// offers no stats popover, which could only report zero calls.
     var recordsPerCallStats = true
@@ -29,7 +29,7 @@ struct AgentCardModelInfoLine: View {
 
     var body: some View {
         let contextLabel = Self.formatTokenCount(modelConfig.maxContextTokens)
-        let lastInputTokens = llmTurns.last?.usage?.inputTokens
+        let lastInputTokens = llmTurns.last(where: \.isConversationTurn)?.usage?.inputTokens
         let contextPercent: Int? = {
             guard modelConfig.maxContextTokens > 0, let inputTokens = lastInputTokens else { return nil }
             return min(100, (inputTokens * 100) / modelConfig.maxContextTokens)
@@ -48,7 +48,7 @@ struct AgentCardModelInfoLine: View {
                   : "\(role.displayName) calls are recorded per verdict — open the \(role.displayName) inspector")
             .popover(isPresented: $showingModelStats, arrowEdge: .bottom) {
                 ModelStatsPopover(turns: llmTurns, modelID: modelConfig.modelID, role: role,
-                                  lifetimeCallCount: lifetimeCallCount)
+                                  evictedCallCount: evictedCallCount)
             }
             if let resolution, resolution != .resolved {
                 Button(action: { showingMetadataWarning = true }, label: {

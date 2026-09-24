@@ -129,6 +129,10 @@ struct InspectorCallLogTests {
             startedAt: start, modelID: "m", providerID: nil, now: now)
         #expect(permanent.disposition == .permanent)
 
+        let urlCancelled = LLMCallFailureRecord(error: URLError(.cancelled), startedAt: start,
+                                                modelID: "m", providerID: nil, now: now)
+        #expect(urlCancelled.disposition == .cancelled, "a stopped URLSession request is cancelled, not a transient failure")
+
         let transient = LLMCallFailureRecord(
             error: LLMProviderError.httpError(statusCode: 503, body: "busy"),
             startedAt: start, modelID: "m", providerID: nil, now: now)

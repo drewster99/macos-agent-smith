@@ -11,11 +11,12 @@ struct MemoryQueryActivityRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Button(action: toggle, label: {
-                MemoryQueryActivitySummary(query: query, timestamp: timestamp, expanded: expanded)
+                MemoryQueryActivitySummary(query: query, timestamp: timestamp)
                     .contentShape(Rectangle())
             })
             .buttonStyle(.plain)
             .help(MemoryActivityPresentation.corpusAccessibilityText(query))
+            .accessibilityValue(expanded ? "expanded" : "collapsed")
             if expanded {
                 MemoryQueryActivityDetail(query: query)
             }
@@ -34,7 +35,6 @@ struct MemoryQueryActivityRow: View {
 private struct MemoryQueryActivitySummary: View {
     let query: MemoryQueryActivity
     let timestamp: Date
-    let expanded: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -48,10 +48,11 @@ private struct MemoryQueryActivitySummary: View {
                 Spacer()
                 MemoryActivityTiming(latencyMs: query.latencyMs, timestamp: timestamp)
             }
+            // One line always: the expanded detail shows the full, selectable query below.
             Text(query.query)
                 .font(AppFonts.inspectorBody)
                 .foregroundStyle(.primary)
-                .lineLimit(expanded ? nil : 1)
+                .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .multilineTextAlignment(.leading)
         }
@@ -68,6 +69,11 @@ private struct MemoryQueryActivityDetail: View {
                 .font(AppFonts.inspectorBody)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if query.isQueryTruncated {
+                Text("Query recorded to \(MemoryQueryActivity.maxRecordedQueryCharacters.formatted()) of \(query.queryCharacterCount.formatted()) characters")
+                    .font(AppFonts.inspectorBody)
+                    .foregroundStyle(AppColors.inspectorRetentionNotice)
+            }
             Text(MemoryActivityPresentation.phaseBreakdown(query))
                 .font(AppFonts.inspectorBody)
                 .foregroundStyle(.tertiary)

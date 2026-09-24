@@ -28,8 +28,9 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
     /// from OpenRouter-via-Anthropic-protocol. Optional only for records constructed
     /// in older test fixtures that pre-date this field.
     public let providerID: String?
-    /// Temperature setting used for this turn.
-    public let temperature: Double
+    /// The temperature configured for this call; nil when none was configured (the provider's own
+    /// default applied). Never defaulted to 0 — that would claim a setting that wasn't made.
+    public let temperature: Double?
     /// Max output tokens configured for this turn.
     public let maxOutputTokens: Int
     /// Thinking budget configured for this turn (Anthropic only), nil if disabled.
@@ -63,7 +64,7 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         modelID: String = "",
         providerType: String = "",
         providerID: String? = nil,
-        temperature: Double = 0,
+        temperature: Double? = nil,
         maxOutputTokens: Int = 0,
         thinkingBudget: Int? = nil,
         usage: TokenUsage? = nil,
@@ -87,6 +88,11 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         self.annotation = annotation
         self.isSelfContainedRequest = isSelfContainedRequest
     }
+
+    /// Whether this turn describes the agent's own conversation — the turns whose input size is the
+    /// agent's context use. Self-contained calls billed to the same role (a context compaction run
+    /// on the role's model) are not, and must not drive a context gauge.
+    public var isConversationTurn: Bool { !isSelfContainedRequest }
 
     /// Releases the heavy context snapshot to reclaim memory on older turn records.
     public mutating func stripContextSnapshot() {

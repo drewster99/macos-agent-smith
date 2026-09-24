@@ -58,7 +58,10 @@ public struct LLMCallFailureRecord: Identifiable, Sendable, Equatable {
         now: Date = Date()
     ) {
         let disposition: Disposition
-        if error is CancellationError {
+        // A stop that interrupts an in-flight request surfaces as `CancellationError` or as
+        // URLSession's own `URLError.cancelled`, which the retry policy (rightly, for retrying)
+        // files under transient network errors. Either way the call was stopped, not failed.
+        if error is CancellationError || (error as? URLError)?.code == .cancelled || Task.isCancelled {
             disposition = .cancelled
         } else {
             switch LLMRetryPolicy.classify(error) {

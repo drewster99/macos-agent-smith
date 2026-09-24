@@ -1393,7 +1393,10 @@ private struct TaskDetailCriterionExpandedDetail: View {
                 )
             }
             ForEach(verdictRecords.reversed()) { record in
-                TaskDetailVerdictRecordRow(record: record, expandedDebugRecordIDs: $expandedDebugRecordIDs)
+                TaskDetailVerdictRecordRow(
+                    record: record,
+                    inputKind: VerdictInputKind(usesInputEnumerator: criterion.effectiveInputEnumeratorPrompt != nil),
+                    expandedDebugRecordIDs: $expandedDebugRecordIDs)
             }
         }
     }
@@ -1431,6 +1434,7 @@ private struct TaskDetailCriterionExpandedDetail: View {
 
 private struct TaskDetailVerdictRecordRow: View {
     let record: CriterionVerdictRecord
+    let inputKind: VerdictInputKind
     @Binding var expandedDebugRecordIDs: Set<UUID>
 
     private var isDebugOpen: Bool { expandedDebugRecordIDs.contains(record.id) }
@@ -1447,7 +1451,8 @@ private struct TaskDetailVerdictRecordRow: View {
                     .padding(.leading, 18)
             }
             if isDebugOpen {
-                VerdictTranscripts(record: record, copyControl: { TaskDetailCopyButton(text: $0) })
+                VerdictTranscripts(record: record, inputKind: inputKind,
+                                   copyControl: { TaskDetailCopyButton(text: $0) })
                     .padding(.leading, 18)
             }
         }

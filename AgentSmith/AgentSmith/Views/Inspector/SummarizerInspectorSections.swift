@@ -1,10 +1,10 @@
 import SwiftUI
 import AgentSmithKit
 
-/// Summarizer: an overview of its operations, every provider call with its exact request, and
-/// its errors/retries. The call log covers all three operation classes billed to the Summarizer —
-/// task summaries, memory consolidation, web extraction — so the calls shown and the session
-/// cost describe the same work.
+/// Summarizer: an overview of its operations, its provider calls (a completed call with its exact
+/// request, a failed attempt with its error), and its errors/retries. The call log covers every
+/// operation billed to the Summarizer — task summaries, memory consolidation, web extraction, and
+/// Smith's context compaction — over the same runs the session cost covers.
 struct SummarizerInspectorSections: View {
     let callLog: InspectorCallLog?
     /// The Summarizer's own channel messages, newest first.

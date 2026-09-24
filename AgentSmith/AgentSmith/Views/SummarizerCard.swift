@@ -9,7 +9,8 @@ import AgentSmithKit
 ///
 /// The summarizer is transient (fires once per task completion, memory consolidation, or prompted
 /// web fetch), so it has no persistent context or tools. The card is status only; its title opens
-/// the shared inspector window, which shows every provider call with its exact request.
+/// the shared inspector window, which lists its provider calls (a completed call with its exact
+/// request, a failed attempt with its error).
 struct SummarizerCard: View {
     @Bindable var viewModel: AppViewModel
     let messages: [ChannelMessage]
@@ -28,34 +29,9 @@ struct SummarizerCard: View {
 
     private static let roleColor = AppColors.summarizerAgent
 
-    /// Aggregated stats over the summarizer's message slice. Walks the input once and
-    /// returns the filtered messages alongside summary/error counts so the body doesn't
-    /// re-scan three separate times per render.
-    static func summarizerStats(
-        _ messages: [ChannelMessage]
-    ) -> (messages: [ChannelMessage], summaryCount: Int, errorCount: Int) {
-        var filtered: [ChannelMessage] = []
-        var summaryCount = 0
-        var errorCount = 0
-        for message in messages {
-            guard case .agent(.summarizer) = message.sender else { continue }
-            filtered.append(message)
-            if message.kind == .taskSummarized {
-                summaryCount += 1
-            }
-            if message.severity >= .error {
-                errorCount += 1
-            }
-        }
-        return (filtered, summaryCount, errorCount)
-    }
-
     var body: some View {
-        // Single pass to bucket the summarizer's messages and count summary/error events.
-        // Without caching, summarizerMessages was filtering the full message array per
-        // body access, and summaryCount/errorCount each re-filtered it again.
-        let hasActivity = !Self.summarizerStats(messages).messages.isEmpty
-            || viewModel.hasAgentActivity(.summarizer)
+        // `messages` is already the Summarizer's own slice (bucketed by the parent).
+        let hasActivity = !messages.isEmpty || viewModel.hasAgentActivity(.summarizer)
 
         return VStack(alignment: .leading, spacing: 0) {
             SummarizerCardHeader(

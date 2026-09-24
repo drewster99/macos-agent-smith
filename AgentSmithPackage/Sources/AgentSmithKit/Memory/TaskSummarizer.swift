@@ -158,7 +158,7 @@ actor TaskSummarizer {
             modelID: configuration?.model ?? "",
             providerType: providerType,
             providerID: configuration?.providerID,
-            temperature: configuration?.temperature ?? 0,
+            temperature: configuration?.temperature,
             maxOutputTokens: configuration?.maxTokens ?? 0,
             thinkingBudget: configuration?.thinkingBudget,
             usage: response.usage,
@@ -181,10 +181,13 @@ actor TaskSummarizer {
 
     /// Summarizes a task and saves the embedded summary to the memory store.
     ///
-    /// Retries transient failures per `LLMRetryPolicy`, shared with every other LLM caller.
-    /// Returns the generated summary text on success, or `nil` if summarization failed.
-    /// Errors are posted to the channel rather than thrown, since this runs
-    /// as a fire-and-forget background operation.
+    /// The paid summary CALL retries transient failures per `LLMRetryPolicy`, shared with every
+    /// other LLM caller; an empty answer is retried at most `maxEmptySummaryAttempts` times, since
+    /// a model that keeps answering empty will not start answering on attempt 50. The SAVE runs
+    /// once, outside that loop: a failed embed or write must never buy another summary call.
+    /// Returns the summary text whenever one was generated — even if saving it failed, so the task
+    /// record still gets it — or `nil` if no summary was produced. Errors are posted to the channel
+    /// rather than thrown, since this runs as a fire-and-forget background operation.
     @discardableResult
     public func summarizeAndEmbed(task: AgentTask) async -> String? {
         activityTracker?.begin(.summarizerRun)
@@ -193,34 +196,20 @@ actor TaskSummarizer {
         var lastError: Error?
         let annotation = LLMCallAnnotation(operation: .taskSummary, taskID: task.id, taskTitle: task.title)
 
+        var summary: String?
         var attempt = 0
-        while true {
+        var emptyResponses = 0
+        while summary == nil {
             if Task.isCancelled { return nil }
             attempt += 1
-
             do {
-                let summary = try await generateSummary(for: task, annotation: annotation.forCall(attempt))
-                let latencyMs = Int(Date().timeIntervalSince(startTime) * 1000)
-                try await memoryStore.saveTaskSummary(
-                    task: task,
-                    summary: summary,
-                    status: task.status
-                )
-                await postToChannel(ChannelMessage(
-                    sender: .agent(.summarizer),
-                    content: summary,
-                    metadata: [
-                        "messageKind": .kind(.taskSummarized),
-                        "taskID": .string(task.id.uuidString),
-                        "taskTitle": .string(task.title),
-                        "latencyMs": .int(latencyMs)
-                    ]
-                ))
-                return summary
+                summary = try await generateSummary(for: task, annotation: annotation.forCall(attempt))
             } catch {
                 lastError = error
+                if case SummarizerError.emptyResponse = error { emptyResponses += 1 }
                 guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
-                      attempt < LLMRetryPolicy.maxAttempts else { break }
+                      attempt < LLMRetryPolicy.maxAttempts,
+                      emptyResponses < Self.maxEmptySummaryAttempts else { break }
                 let delay = LLMRetryPolicy.delay(attempt: attempt, retryAfter: retryAfter)
                 await postToChannel(ChannelMessage(
                     sender: .agent(.summarizer),
@@ -231,18 +220,46 @@ actor TaskSummarizer {
             }
         }
 
-        if Task.isCancelled { return nil }   // cancelled mid-call: don't post a spurious failure
+        guard let summary else {
+            if Task.isCancelled { return nil }   // cancelled mid-call: don't post a spurious failure
+            let latencyMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            await postToChannel(ChannelMessage(
+                sender: .agent(.summarizer),
+                content: "Task summarization failed for '\(task.title)': \(lastError?.localizedDescription ?? "unknown error")",
+                metadata: [
+                    "severity": .severity(.error),
+                    "latencyMs": .int(latencyMs)
+                ]
+            ))
+            return nil
+        }
+
+        do {
+            try await memoryStore.saveTaskSummary(task: task, summary: summary, status: task.status)
+        } catch {
+            await postToChannel(ChannelMessage(
+                sender: .agent(.summarizer),
+                content: "The summary for '\(task.title)' was written but could not be saved for search: \(error.localizedDescription)",
+                metadata: ["severity": .severity(.error)]
+            ))
+            return summary
+        }
         let latencyMs = Int(Date().timeIntervalSince(startTime) * 1000)
         await postToChannel(ChannelMessage(
             sender: .agent(.summarizer),
-            content: "Task summarization failed for '\(task.title)': \(lastError?.localizedDescription ?? "unknown error")",
+            content: summary,
             metadata: [
-                "severity": .severity(.error),
+                "messageKind": .kind(.taskSummarized),
+                "taskID": .string(task.id.uuidString),
+                "taskTitle": .string(task.title),
                 "latencyMs": .int(latencyMs)
             ]
         ))
-        return nil
+        return summary
     }
+
+    /// How many empty summary answers to accept before giving up.
+    private static let maxEmptySummaryAttempts = 3
 
     // MARK: - Memory Consolidation
 

@@ -144,7 +144,16 @@ public enum ToolExecutionOutcome: String, Codable, Sendable {
 
 /// Record of a single security evaluation for inspector display.
 public struct EvaluationRecord: Sendable, Identifiable, Equatable {
+    /// What was judged. Typed so readers never infer it from `toolName`'s display text.
+    public enum Kind: Sendable, Equatable {
+        /// A verdict on one tool call.
+        case toolCall
+        /// The task-start pass that approves a worker's tool set.
+        case toolScoping
+    }
+
     public let id = UUID()
+    public let kind: Kind
     /// When the evaluation occurred.
     public let timestamp: Date
     /// The name of the tool that was evaluated.
@@ -176,8 +185,10 @@ public struct EvaluationRecord: Sendable, Identifiable, Equatable {
         disposition: SecurityDisposition,
         latencyMs: Int,
         executionOutcome: ToolExecutionOutcome = .notExecuted,
-        toolCallID: String = ""
+        toolCallID: String = "",
+        kind: Kind = .toolCall
     ) {
+        self.kind = kind
         self.timestamp = timestamp
         self.toolName = toolName
         self.toolParams = toolParams
@@ -275,8 +286,11 @@ actor SecurityEvaluator {
     /// New tools are therefore evaluated until someone deliberately adds them, which is the safe
     /// direction for the mistake to run.
     ///
-    /// - `.smith` — its orchestration surface: messaging, task lifecycle, scheduling, and read-only
-    ///   inspection. Deliberately EXCLUDES the open-world tools (`web_search`, `web_fetch`,
+    /// - `.smith` — its orchestration surface: messaging, task lifecycle, scheduling, read-only
+    ///   inspection, and its STOP controls (`terminate_agent`, `abort`). The stop controls are
+    ///   destructive to in-flight work, but stopping is the risk-reducing direction: a reviewer that
+    ///   could delay or veto a stop would sit between the orchestrator and halting a misbehaving
+    ///   worker. They stay recorded and visible like every other call. Deliberately EXCLUDES the open-world tools (`web_search`, `web_fetch`,
     ///   `instant_answer`) and `attach_file`, which ingests bytes and ships images to the provider.
     ///   Those are Smith's egress surface and always get a verdict.
     /// - `.brown` — its task-lifecycle calls (so an LLM never sits between a worker and "I'm done"
@@ -434,9 +448,8 @@ actor SecurityEvaluator {
 
     /// Fires after each evaluation is recorded, pushing the record to the UI layer.
     private var onEvaluationRecorded: (@Sendable (EvaluationRecord) -> Void)?
-    /// Fires after each Security Agent LLM call so the inspector's per-agent token/cost view for the
-    /// security agent is populated (Security Agent is a SecurityEvaluator, not an AgentActor, so without
-    /// this it never produced turn records and showed 0 tokens / $0.00).
+    /// Fires after each Security Agent provider call — a turn with the exact request, or a failed
+    /// attempt — so the inspector's Security call log shows every call behind its cost.
     private var onLLMCallRecorded: (@Sendable (LLMCallEvent) -> Void)?
 
     /// Token usage store for persistent analytics.
@@ -553,8 +566,8 @@ actor SecurityEvaluator {
         onEvaluationRecorded = handler
     }
 
-    /// Registers a callback fired after each Security Agent LLM call, carrying a turn record so the
-    /// inspector can show the security agent's per-session token usage and cost.
+    /// Registers a callback fired after each Security Agent provider call — a turn carrying the exact
+    /// request and response, or a failed-attempt record — for the inspector's Security call log.
     public func setOnLLMCallRecorded(_ handler: @escaping @Sendable (LLMCallEvent) -> Void) {
         onLLMCallRecorded = handler
     }
@@ -567,15 +580,20 @@ actor SecurityEvaluator {
     /// request later could describe a different call. Each Security call is self-contained, so the
     /// whole request is recorded once, as the snapshot (see `LLMTurnRecord.isSelfContainedRequest`).
     /// Binary attachment bytes are dropped from the recorded copy.
+    ///
+    /// Stamped with when the response ARRIVED (`callStart + latencyMs`), not when this runs: an
+    /// evidence round executes its tools first, which can take seconds.
     private func emitTurnRecord(
         response: LLMResponse,
         request: [LLMMessage],
+        callStart: Date,
         latencyMs: Int,
         annotation: LLMCallAnnotation
     ) {
         guard let onLLMCallRecorded else { return }
         let inspectedRequest = Self.withoutBinaryAttachments(request)
         onLLMCallRecorded(.completed(LLMTurnRecord(
+            timestamp: callStart.addingTimeInterval(Double(latencyMs) / 1000),
             inputDelta: [],
             response: response,
             totalMessageCount: request.count,
@@ -584,7 +602,7 @@ actor SecurityEvaluator {
             modelID: configuration?.model ?? "",
             providerType: providerType,
             providerID: configuration?.providerID,
-            temperature: configuration?.temperature ?? 0,
+            temperature: configuration?.temperature,
             maxOutputTokens: configuration?.maxTokens ?? 0,
             thinkingBudget: configuration?.thinkingBudget,
             usage: response.usage,
@@ -973,7 +991,7 @@ actor SecurityEvaluator {
                 )
             }
 
-            emitTurnRecord(response: response, request: request, latencyMs: callLatencyMs, annotation: callAnnotation)
+            emitTurnRecord(response: response, request: request, callStart: callStart, latencyMs: callLatencyMs, annotation: callAnnotation)
 
             // The backend answered. Close the breaker here rather than at the verdict — reachability
             // is about the transport, and an unparseable answer is still an answer.
@@ -1201,7 +1219,7 @@ actor SecurityEvaluator {
                 )
             }
 
-            emitTurnRecord(response: response, request: messages, latencyMs: callLatencyMs, annotation: callAnnotation)
+            emitTurnRecord(response: response, request: messages, callStart: callStart, latencyMs: callLatencyMs, annotation: callAnnotation)
 
             let responseText = response.text ?? ""
             guard let approved = Self.parseScopingResponse(responseText, candidateNames: candidateNames) else {
@@ -1466,7 +1484,8 @@ actor SecurityEvaluator {
             prompt: prompt,
             response: response,
             disposition: disposition,
-            startTime: startTime
+            startTime: startTime,
+            kind: .toolScoping
         )
     }
 
@@ -1521,7 +1540,7 @@ actor SecurityEvaluator {
         return String(trimmed[trimmed.startIndex..<firstLineEnd])
     }
 
-    private func recordEvaluation(toolName: String, toolParams: String, taskTitle: String?, prompt: String, response: String, disposition: SecurityDisposition, startTime: Date, executionOutcome: ToolExecutionOutcome = .notExecuted, toolCallID: String = "") {
+    private func recordEvaluation(toolName: String, toolParams: String, taskTitle: String?, prompt: String, response: String, disposition: SecurityDisposition, startTime: Date, executionOutcome: ToolExecutionOutcome = .notExecuted, toolCallID: String = "", kind: EvaluationRecord.Kind = .toolCall) {
         let latency = Int(Date().timeIntervalSince(startTime) * 1000)
         let record = EvaluationRecord(
             timestamp: Date(),
@@ -1533,7 +1552,8 @@ actor SecurityEvaluator {
             disposition: disposition,
             latencyMs: latency,
             executionOutcome: executionOutcome,
-            toolCallID: toolCallID
+            toolCallID: toolCallID,
+            kind: kind
         )
         history.append(record)
         if history.count > Self.maxHistory {
@@ -1732,6 +1752,7 @@ actor SecurityEvaluator {
             Evaluate the following tool request, in the context of the current task and recent tool calls (above) for data integrity, security and safety:
 
             ## Tool call to evaluate:
+            - tool name: \(toolName)
             - parameters: \(toolParams)
 
             """

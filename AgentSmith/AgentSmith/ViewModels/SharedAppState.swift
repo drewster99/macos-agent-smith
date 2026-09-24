@@ -339,7 +339,8 @@ final class SharedAppState {
     private(set) var liveActivitySnapshot = LiveActivityTracker.Snapshot()
 
     /// The Memory activity feed surfaced in the inspector's Memory card: every query (with its
-    /// exact per-corpus results), ordered by the store-assigned sequence. Global because the
+    /// exact per-corpus results) and every committed memory/task-summary change, ordered by the
+    /// store-assigned sequence. Global because the
     /// `MemoryStore` is shared across sessions. Bounded, visibly — the feed counts what it evicted.
     /// Runtime inspection only; never persisted.
     private(set) var memoryActivityFeed = MemoryActivityFeed(capacity: 200)
@@ -1535,10 +1536,25 @@ final class SharedAppState {
         }
     }
 
-    /// Deletes a memory by ID.
-    func deleteMemory(id: UUID) async {
-        guard let store = memoryStore else { return }
-        await store.delete(id: id, origin: .memoryBrowser)
+    /// Why a Memory Browser edit didn't happen — surfaced to the editor rather than swallowed.
+    enum MemoryEditUIError: LocalizedError {
+        case storeUnavailable
+        case memoryNoLongerExists
+
+        var errorDescription: String? {
+            switch self {
+            case .storeUnavailable:
+                return "The memory store is unavailable. Start a session from the toolbar to load memories."
+            case .memoryNoLongerExists:
+                return "This memory no longer exists — it was deleted or changed elsewhere."
+            }
+        }
+    }
+
+    /// Deletes a memory by ID. Throws when there is no store or the memory is already gone.
+    func deleteMemory(id: UUID) async throws {
+        guard let store = memoryStore else { throw MemoryEditUIError.storeUnavailable }
+        guard await store.delete(id: id, origin: .memoryBrowser) else { throw MemoryEditUIError.memoryNoLongerExists }
     }
 
     /// Errors thrown by the memory editor's search helpers, surfaced to the UI.
@@ -1579,15 +1595,17 @@ final class SharedAppState {
     /// Updates a memory's content and/or tags. Marked as a `.user` edit so the entry's
     /// `lastUpdatedBy` reflects who made the change.
     func updateMemory(id: UUID, content: String? = nil, tags: [String]? = nil) async throws {
-        guard let store = memoryStore else { return }
-        try await store.update(id: id, content: content, tags: tags, updatedBy: .user, origin: .memoryBrowser)
+        guard let store = memoryStore else { throw MemoryEditUIError.storeUnavailable }
+        guard try await store.update(id: id, content: content, tags: tags, updatedBy: .user, origin: .memoryBrowser) != nil else {
+            throw MemoryEditUIError.memoryNoLongerExists
+        }
     }
 
     /// Saves a brand-new memory authored by the user from the Memory Browser. Source is
     /// always `.user`; the memory store auto-embeds and triggers the on-change refresh.
     @discardableResult
-    func saveMemory(content: String, tags: [String]) async throws -> MemoryEntry? {
-        guard let store = memoryStore else { return nil }
+    func saveMemory(content: String, tags: [String]) async throws -> MemoryEntry {
+        guard let store = memoryStore else { throw MemoryEditUIError.storeUnavailable }
         return try await store.save(content: content, source: .user, tags: tags, origin: .memoryBrowser)
     }
 

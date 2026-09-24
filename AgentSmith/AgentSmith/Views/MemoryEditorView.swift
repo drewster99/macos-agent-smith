@@ -81,7 +81,13 @@ struct MemoryEditorView: View {
             titleVisibility: .visible, actions: {
             Button("Delete", role: .destructive) {
                 if let id = memoryPendingDeletionID {
-                    Task { await shared.deleteMemory(id: id) }
+                    Task {
+                        do {
+                            try await shared.deleteMemory(id: id)
+                        } catch {
+                            editError = "Failed to delete memory: \(error.localizedDescription)"
+                        }
+                    }
                 }
                 memoryPendingDeletionID = nil
             }

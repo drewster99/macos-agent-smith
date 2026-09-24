@@ -75,14 +75,18 @@ struct ManageTaskDispositionTool: AgentTool {
             guard task.disposition == .archived else {
                 return .failure("Task '\(task.title)' is not archived (current disposition: \(task.disposition.rawValue)).")
             }
-            await context.taskStore.unarchive(id: taskID)
+            guard await context.taskStore.unarchive(id: taskID) else {
+                return .failure("Task '\(task.title)' could not be restored to the active list — it is no longer in the archive, or the change couldn't be saved.")
+            }
             return .success("Task '\(task.title)' restored to active list.")
 
         case "undelete":
             guard task.disposition == .recentlyDeleted else {
                 return .failure("Task '\(task.title)' is not in Recently Deleted (current disposition: \(task.disposition.rawValue)).")
             }
-            await context.taskStore.undelete(id: taskID)
+            guard await context.taskStore.undelete(id: taskID) else {
+                return .failure("Task '\(task.title)' could not be recovered — it is no longer in Recently Deleted, or the change couldn't be saved.")
+            }
             return .success("Task '\(task.title)' recovered to active list.")
 
         default:

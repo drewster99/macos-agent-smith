@@ -131,8 +131,8 @@ struct RunTaskTool: AgentTool {
         // active list before reopening — the reset/reopen paths operate on the active store, and
         // run_task means "redo this one here" (lands in the current session).
         if task.disposition != .active {
-            await context.taskStore.restoreToActive(id: taskID)
-            guard let restored = await context.taskStore.task(id: taskID) else {
+            guard await context.taskStore.restoreToActive(id: taskID),
+                  let restored = await context.taskStore.task(id: taskID) else {
                 return .failure("Could not restore task '\(task.title)' to the active list to run it.")
             }
             task = restored

@@ -84,4 +84,19 @@ struct ValidatorVerdictHistoryTests {
         let titles = ValidatorVerdictHistory.groups(from: [older, emptyLedger, unjudged, newer]).map(\.taskTitle)
         #expect(titles == ["newer", "older"])
     }
+
+    @Test("a Re-validate that restarts round numbering does not interleave the two runs")
+    func separateRunsDoNotInterleave() {
+        let criterion = AcceptanceCriterion(name: "c", origin: .user)
+        var task = AgentTask(title: "T", description: "d")
+        task.acceptanceCriteria = [criterion]
+        // Run A: rounds 1 and 2. Run B (after Re-validate zeroed the round): round 1 again.
+        task.validation = TaskValidationState(round: 1, verdictRecords: [
+            record(criterion.id, round: 1, at: 10, verdict: .rejected(reason: "a1")),
+            record(criterion.id, round: 2, at: 20, verdict: .rejected(reason: "a2")),
+            record(criterion.id, round: 1, at: 30),
+        ])
+        let times = ValidatorVerdictHistory.groups(from: [task])[0].entries.map(\.record.recordedAt.timeIntervalSince1970)
+        #expect(times == [10, 20, 30])
+    }
 }

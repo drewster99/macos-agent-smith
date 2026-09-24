@@ -127,7 +127,19 @@ struct LLMCallFailureRow: View {
         .background(AppColors.inspectorCallFailedBackground)
         .clipShape(RoundedRectangle(cornerRadius: 3))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Turn \(callNumber) failed without a response: \(failure.errorDescription)")
+        .accessibilityLabel(LLMCallFailureRow.accessibilityText(failure: failure, callNumber: callNumber))
+    }
+}
+
+extension LLMCallFailureRow {
+    static func accessibilityText(failure: LLMCallFailureRecord, callNumber: Int) -> String {
+        var parts = ["Turn \(callNumber) failed without a response (\(failure.disposition.displayLabel))"]
+        if let annotation = failure.annotation {
+            parts.append(annotation.operation.displayLabel)
+            if let title = annotation.taskTitle { parts.append("task \(title)") }
+        }
+        parts.append(failure.errorDescription)
+        return parts.joined(separator: ", ")
     }
 }
 

@@ -5,7 +5,7 @@ import Foundation
 /// Smoke tests for the data shapes that `InspectorView` and `AgentInspectorWindow`
 /// hand to the cached single-pass helpers introduced for P1.3.
 ///
-/// The actual `bucketMessagesByRole` and `summarizerStats` helpers live in the app
+/// The actual `bucketMessagesByRole` helper lives in the app
 /// target (not the package), so we can't import them here. What we *can* test is
 /// the message-shape contract those helpers depend on: `ChannelMessage.sender`
 /// distinguishes agents by role, and `metadata?["messageKind"] == "task_summarized"`

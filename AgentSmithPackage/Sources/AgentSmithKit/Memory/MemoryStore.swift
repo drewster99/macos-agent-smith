@@ -206,6 +206,8 @@ public actor MemoryStore {
 
     /// Stamps the next sequence number on `kind` and delivers it. Called only from inside this
     /// actor, after the operation it describes has completed.
+    /// `timestamp` is that completion time, for queries as for mutations, so the times shown agree
+    /// with the sequence order rows are listed in.
     private func publishActivity(_ kind: MemoryActivity.Kind, at timestamp: Date) {
         lastActivitySequence += 1
         onActivityRecorded?(MemoryActivity(sequence: lastActivitySequence, timestamp: timestamp, kind: kind))
@@ -286,6 +288,12 @@ public actor MemoryStore {
     /// Publishes an EDIT activity when content or tags actually changed, or a MERGE activity when
     /// `consolidation` is given (a consolidation outcome is recorded even if the merge happened to
     /// change nothing). `proposed` is what consolidation was asked to merge in.
+    ///
+    /// `onlyIfUnchangedFrom` makes the write conditional: it applies only while the memory still
+    /// holds exactly that content AND tags — checked before embedding and again, atomically, at
+    /// commit. A merge computed from a snapshot must pass it, or an edit that landed while the
+    /// reconciler ran (text or tags) would be silently overwritten by a merge of the stale snapshot.
+    /// Returns nil (writing nothing) when the condition fails, the same as when the memory is gone.
     @discardableResult
     public func update(
         id: UUID,
@@ -294,9 +302,11 @@ public actor MemoryStore {
         updatedBy: MemoryEntry.UpdateSource,
         origin: MemoryActivityOrigin,
         consolidation: MemoryConsolidationContext? = nil,
-        proposed: MemoryContentSnapshot? = nil
+        proposed: MemoryContentSnapshot? = nil,
+        onlyIfUnchangedFrom expected: MemoryContentSnapshot? = nil
     ) async throws -> MemoryEntry? {
         guard let preEmbed = memories[id] else { return nil }
+        if let expected, MemoryContentSnapshot(preEmbed) != expected { return nil }
         let newContent = content ?? preEmbed.content
         let newTags = tags ?? preEmbed.tags
         // The embedding covers content + tags, so a tag-only edit must re-embed too.
@@ -314,6 +324,7 @@ public actor MemoryStore {
         // (createdAt, retrievalCount, lastRetrievedAt, source) so we don't clobber
         // them with stale snapshot values from before the suspend.
         guard let current = memories[id] else { return nil }
+        if let expected, MemoryContentSnapshot(current) != expected { return nil }
         let updated = MemoryEntry(
             id: current.id,
             content: newContent,
@@ -918,7 +929,7 @@ public actor MemoryStore {
             taskScanMs: nil,
             memories: MemoryQueryActivity.memoryOutcome(searched: limit > 0, results: results),
             taskSummaries: .notSearched
-        )), at: start)
+        )), at: Date())
         return results
     }
 
@@ -1077,7 +1088,7 @@ public actor MemoryStore {
             taskScanMs: limit > 0 ? taskSearchMs : nil,
             memories: .notSearched,
             taskSummaries: MemoryQueryActivity.taskOutcome(searched: limit > 0, results: results)
-        )), at: start)
+        )), at: Date())
         return results
     }
 
@@ -1166,6 +1177,7 @@ public actor MemoryStore {
         memoryInstruction: String? = nil,
         taskInstruction: String? = nil,
         excludeDeletedTasks: Bool = true,
+        resultCosineFloor: Double? = nil,
         origin: MemoryActivityOrigin
     ) async throws -> SemanticSearchResults {
         let tracker = activityTracker
@@ -1219,6 +1231,14 @@ public actor MemoryStore {
             taskSearchMs = Int(Date().timeIntervalSince(searchStart) * 1000)
         }
 
+        // A caller's post-ranking floor (`search_memory` keeps top-`limit` by rank, then drops weak
+        // matches): applied HERE, after ranking and the limit, so the results — and the activity
+        // recorded for them — are exactly what the caller receives.
+        if let resultCosineFloor {
+            memoryResults = memoryResults.filter { $0.similarity >= resultCosineFloor }
+            taskResults = taskResults.filter { $0.similarity >= resultCosineFloor }
+        }
+
         // Retrieval-stat bumps for the memories we actually return. Marked dirty (not flushed) so we
         // don't re-serialize the embedding-bearing corpus on every read; persistRetrievalStatsIfNeeded()
         // flushes once at termination. Genuine corpus mutations still fire onChange?() immediately.
@@ -1253,7 +1273,7 @@ public actor MemoryStore {
             taskScanMs: taskSearchMs,
             memories: MemoryQueryActivity.memoryOutcome(searched: memoryQuery != nil, results: memoryResults),
             taskSummaries: MemoryQueryActivity.taskOutcome(searched: taskQuery != nil, results: taskResults)
-        )), at: start)
+        )), at: Date())
         return SemanticSearchResults(memories: memoryResults, taskSummaries: taskResults)
     }
 

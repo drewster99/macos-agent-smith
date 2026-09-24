@@ -1626,7 +1626,7 @@ public actor AgentActor {
                     modelID: configuration.llmConfig.model,
                     providerType: configuration.providerAPIType.rawValue,
                     providerID: configuration.llmConfig.providerID,
-                    temperature: configuration.llmConfig.temperature ?? 0,
+                    temperature: configuration.llmConfig.temperature,
                     maxOutputTokens: configuration.llmConfig.maxTokens,
                     thinkingBudget: configuration.llmConfig.thinkingBudget,
                     usage: response.usage
@@ -1846,10 +1846,12 @@ public actor AgentActor {
                 // The server refused with its own code and reason (an error object — oMLX sends
                 // one on an HTTP 200). That reason is what the user needs, and a short retry streak
                 // would otherwise hide it behind the >=5 gate.
+                // A memory refusal counts however it arrived — oMLX's HTTP-200 error object or an
+                // HTTP error whose body carries the same code.
                 var isServerDeclaredFailure = false
-                if let providerError = error as? LLMProviderError,
-                   case .responseFailed = providerError {
-                    isServerDeclaredFailure = true
+                if let providerError = error as? LLMProviderError {
+                    if case .responseFailed = providerError { isServerDeclaredFailure = true }
+                    if providerError.serverMemoryExhaustion != nil { isServerDeclaredFailure = true }
                 }
 
                 // Honor a server-supplied Retry-After (e.g. on a 429) over our own guess: the
@@ -3021,10 +3023,16 @@ public actor AgentActor {
         let roleName = configuration.role.displayName
         let messageCountBefore = conversationHistory.count
         let reductionMethod: String
-        if configuration.role == .brown, await rebuildContextFromTask() {
+        // Checked first so a Brown with no task falls straight to the prune, instead of the rebuild
+        // posting its own failure notice ahead of this advisory.
+        var brownHasTask = false
+        if configuration.role == .brown {
+            brownHasTask = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) != nil
+        }
+        if brownHasTask, await rebuildContextFromTask(reason: .serverMemoryExhaustion) {
             reductionMethod = "rebuilt from the task record"
         } else {
-            forceAggressivePrune()
+            forceAggressivePrune(reason: .serverMemoryExhaustion)
             reductionMethod = "pruned to its most recent messages"
         }
         let messageCountAfter = conversationHistory.count
@@ -4425,9 +4433,25 @@ public actor AgentActor {
         return false
     }
 
+    /// Why an agent's context is being cut. The model is told the cause, so it must be the true one.
+    enum ContextReductionReason {
+        /// The request exceeded the model's context window.
+        case contextOverflow
+        /// The model server refused requests for lack of memory.
+        case serverMemoryExhaustion
+
+        /// Completes "…because it …" / "…after …" in the note the model reads.
+        var modelFacingCause: String {
+            switch self {
+            case .contextOverflow: return "a context overflow error"
+            case .serverMemoryExhaustion: return "the model server repeatedly ran out of memory processing the request"
+            }
+        }
+    }
+
     /// Emergency prune for non-Brown agents: keeps system prompt and the most recent 20%
     /// of messages. Brown uses `rebuildContextFromTask` instead.
-    private func forceAggressivePrune() {
+    private func forceAggressivePrune(reason: ContextReductionReason = .contextOverflow) {
         guard conversationHistory.count > 3 else { return }
 
         // Keep only the most recent ~20% of messages (by count, not tokens)
@@ -4444,7 +4468,7 @@ public actor AgentActor {
         guard prunedCount > 0 else { return }
 
         var newHistory = [conversationHistory[0]]  // System prompt
-        newHistory.append(.user("[System: \(prunedCount) earlier messages were aggressively pruned after a context overflow error. Continue from the recent context below.]"))
+        newHistory.append(.user("[System: \(prunedCount) earlier messages were aggressively pruned after \(reason.modelFacingCause). Continue from the recent context below.]"))
         newHistory.append(contentsOf: conversationHistory[keepFromIndex...])
         conversationHistory = newHistory
         lastTurnMessageCount = conversationHistory.count
@@ -4521,7 +4545,7 @@ public actor AgentActor {
     /// more dangerous than a truncated one belonging to nobody.
     ///
     /// - Returns: `true` if this agent's task was found and context was rebuilt; `false` otherwise.
-    private func rebuildContextFromTask() async -> Bool {
+    private func rebuildContextFromTask(reason: ContextReductionReason = .contextOverflow) async -> Bool {
         guard let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) else {
             await postRebuildFailure("it has no assigned task to rebuild from")
             return false
@@ -4537,7 +4561,7 @@ public actor AgentActor {
         let instruction = """
             \(briefing)
 
-            Your conversation history was cleared because it exceeded the model's context window. \
+            Your conversation history was cleared after \(reason.modelFacingCause). \
             The briefing above is your task's CURRENT state, re-read from the task store just now — \
             its progress log reflects your work so far. Continue working on this task from where you \
             left off. Do not repeat work that the progress updates show is already done, and do not \

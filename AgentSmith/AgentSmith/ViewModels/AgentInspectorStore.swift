@@ -165,15 +165,25 @@ final class AgentInspectorStore {
         callLogsByRole[role]?.retainedTurns ?? []
     }
 
-    /// Returns the live conversation history for a role, falling back to the latest turn snapshot.
+    /// Returns the live conversation history for a role. For a resident agent (Smith / Brown) it
+    /// falls back to the latest turn's snapshot — that IS its conversation. Other roles make
+    /// self-contained calls, whose snapshots are one operation's request, not a conversation; the
+    /// Summarizer's config sheet would otherwise present, say, a web-extraction prompt as "its"
+    /// system prompt.
     func contextMessages(for role: AgentRole) -> [LLMMessage] {
-        liveContexts[role] ?? callLogsByRole[role]?.retainedTurns.last?.contextSnapshot ?? []
+        if let live = liveContexts[role] { return live }
+        guard role == .smith || role == .brown else { return [] }
+        return callLogsByRole[role]?.retainedTurns.last(where: \.isConversationTurn)?.contextSnapshot ?? []
     }
 
     /// Extracts the current system prompt for a role from its context.
     func systemPrompt(for role: AgentRole) -> String {
-        contextMessages(for: role)
-            .first { $0.role == .system }
-            .flatMap { $0.content.textValue } ?? ""
+        // The Security Agent has no conversation, but every review sends the same system prompt,
+        // so its latest retained request is a faithful source for it. (The Summarizer's calls each
+        // carry a different operation's prompt, so none of them is "its" system prompt.)
+        let messages = role == .securityAgent
+            ? callLogsByRole[role]?.retainedTurns.last(where: { !$0.contextSnapshot.isEmpty })?.contextSnapshot ?? []
+            : contextMessages(for: role)
+        return messages.first { $0.role == .system }.flatMap { $0.content.textValue } ?? ""
     }
 }

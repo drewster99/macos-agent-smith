@@ -1,16 +1,30 @@
 import SwiftUI
 import AgentSmithKit
 
-/// The Validator inspector: every verdict recorded on tasks that originated in this session,
-/// grouped by task, then criterion, round, and time.
+/// The Validator inspector: the verdicts in the ledgers of this session's tasks — every task in its
+/// active list (including ones restored here from another session), plus archived and deleted
+/// tasks that originated here — grouped by task, then criterion and time.
 ///
 /// Reads the task verdict ledgers directly through `ValidatorVerdictHistory` — there is no
 /// separate validator history to drift from what Task Detail shows. The grouping is cached and
-/// rebuilt only when the task lists change, not on every render.
+/// rebuilt only when some ledger actually changed, not on every task-store write.
 struct ValidatorInspectorSections: View {
     let viewModel: AppViewModel
 
     @State private var groups: [ValidatorVerdictHistory.TaskGroup] = []
+    /// What the cached `groups` were built from; a rebuild is skipped while it still matches.
+    @State private var builtFrom: [LedgerFingerprint] = []
+
+    /// Identifies a ledger's contents cheaply — its task, record count, newest record, and the
+    /// contract it is labelled against — so an unrelated task write doesn't regroup everything.
+    fileprivate struct LedgerFingerprint: Equatable {
+        let taskID: UUID
+        let recordCount: Int
+        let newestRecordID: UUID?
+        let contractVersion: Int
+        let criteriaCount: Int
+        let title: String
+    }
 
     var body: some View {
         ScrollView {
@@ -30,17 +44,32 @@ struct ValidatorInspectorSections: View {
 
     private func scheduleRebuild() {
         let sessionID = viewModel.session.id
-        let candidates = viewModel.tasks + viewModel.shared.archivedTasks + viewModel.shared.deletedTasks
+        // The active list is this session's by definition — a task restored here keeps its
+        // original `sessionID`, so filtering it would hide verdicts for work running right here.
+        // Only the global archived/deleted lists are narrowed to tasks that originated here.
+        let inactiveHere = (viewModel.shared.archivedTasks + viewModel.shared.deletedTasks)
+            .filter { $0.sessionID == sessionID }
         // A task can appear in more than one list during a move; keep its first occurrence.
         var seen: Set<UUID> = []
-        let sessionTasks = candidates.filter { task in
-            task.sessionID == sessionID && seen.insert(task.id).inserted
-        }
+        let sessionTasks = (viewModel.tasks + inactiveHere).filter { seen.insert($0.id).inserted }
+        let fingerprint = sessionTasks.compactMap(LedgerFingerprint.init)
+        guard fingerprint != builtFrom else { return }
         let next = ValidatorVerdictHistory.groups(from: sessionTasks)
         // Project rule: defer @State mutations out of lifecycle / onChange closures.
         DispatchQueue.main.async {
-            if groups != next { groups = next }
+            builtFrom = fingerprint
+            groups = next
         }
+    }
+}
+
+fileprivate extension ValidatorInspectorSections.LedgerFingerprint {
+    /// Nil for a task with no verdicts — it contributes nothing to the view.
+    init?(_ task: AgentTask) {
+        guard let records = task.validation?.verdictRecords, !records.isEmpty else { return nil }
+        self.init(taskID: task.id, recordCount: records.count, newestRecordID: records.last?.id,
+                  contractVersion: task.validation?.contractVersion ?? 0,
+                  criteriaCount: task.acceptanceCriteria.count, title: task.title)
     }
 }
 
@@ -51,7 +80,7 @@ private struct ValidatorHistorySummary: View {
         let verdictCount = groups.reduce(0) { $0 + $1.entries.count }
         Text(verdictCount == 0
              ? "No validator verdicts are recorded on tasks from this session."
-             : "\(verdictCount) verdict\(verdictCount == 1 ? "" : "s") across \(groups.count) task\(groups.count == 1 ? "" : "s") from this session, read from each task's verdict ledger.")
+             : "\(verdictCount) verdict\(verdictCount == 1 ? "" : "s") across \(groups.count) task\(groups.count == 1 ? "" : "s") in this session, read from each task's current verdict ledger (retry, reopen, and criteria edits clear or trim a ledger).")
             .font(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -94,7 +123,8 @@ private struct ValidatorVerdictEntryRow: View {
                 ValidatorVerdictDetailText(text: detail)
             }
             if showsTranscripts {
-                VerdictTranscripts(record: entry.record)
+                VerdictTranscripts(record: entry.record,
+                                   inputKind: VerdictInputKind(usesInputEnumerator: entry.usesInputEnumerator))
                     .padding(.leading, 18)
             }
         }
@@ -135,7 +165,7 @@ private struct ValidatorVerdictEntryHeader: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text(entry.record.recordedAt, style: .time)
+            Text(entry.record.recordedAt.formatted(date: .abbreviated, time: .shortened))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }

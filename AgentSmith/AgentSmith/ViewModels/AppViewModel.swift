@@ -367,10 +367,12 @@ final class AppViewModel {
     /// `resolveInjectionCapabilities` doesn't repeat on every provider refresh.
     private var capabilityCatalogMissNoticeShown: Set<String> = []
     private var runtime: OrchestrationRuntime?
-    /// The id `runtime` stamps on every `UsageRecord` of its current run — the key the per-role
-    /// session cost reads. Pushed by the runtime whenever a run begins (it restarts runs on its
-    /// own); nil while no run is live.
-    private(set) var runtimeSessionID: UUID?
+    /// The run ids (`UsageRecord.sessionID`) whose spend the per-role session cost covers: every run
+    /// begun since the inspector was last cleared. Pushed by the runtime whenever a run begins — it
+    /// starts runs on its own (a cold `restartForNewTask`), and a restart preserves the inspector's
+    /// call logs — and cleared with the inspector on stop/abort, so the cost and the call logs
+    /// always describe the same span of work.
+    private(set) var inspectedRunIDs: [UUID] = []
     /// Debounces provider rebuilds so a burst of Settings edits (every model field commits) results
     /// in a single `makeProvider`/keychain pass once editing settles, not one per keystroke.
     private var providerRefreshTask: Task<Void, Never>?
@@ -1071,14 +1073,16 @@ final class AppViewModel {
                 self.agentToolNames.removeAll()
                 self.agentToolNamesByInstance.removeAll()
                 self.inspectorStore.clearAll()
-                self.runtimeSessionID = nil
+                self.inspectedRunIDs = []
                 self.runtime = nil
             }
         }
 
-        await newRuntime.setOnProcessingStateChange { [weak self] ref, isProcessing in
+        // Like the inspector feeds below, these drop events from a runtime that is no longer the
+        // live one — a late "processing" from a stopped agent must not relight a cleared card.
+        await newRuntime.setOnProcessingStateChange { [weak self, weak newRuntime] ref, isProcessing in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
                 if isProcessing {
                     self.processingInstances.insert(ref)
                 } else {
@@ -1095,9 +1099,9 @@ final class AppViewModel {
             }
         }
 
-        await newRuntime.setOnToolExecutionStateChange { [weak self] ref, toolName, started in
+        await newRuntime.setOnToolExecutionStateChange { [weak self, weak newRuntime] ref, toolName, started in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
                 // Role-collapsed view (legacy cards).
                 var counts = self.toolExecutingByRole[ref.role] ?? [:]
                 if started {
@@ -1125,10 +1129,11 @@ final class AppViewModel {
             }
         }
 
-        await newRuntime.setOnAgentStarted { [weak self] ref, toolNames in
+        await newRuntime.setOnAgentStarted { [weak self, weak newRuntime] ref, toolNames in
             Task { @MainActor [weak self] in
-                self?.agentToolNames[ref.role] = toolNames
-                self?.agentToolNamesByInstance[ref] = toolNames
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                self.agentToolNames[ref.role] = toolNames
+                self.agentToolNamesByInstance[ref] = toolNames
             }
         }
 
@@ -1196,33 +1201,42 @@ final class AppViewModel {
         )
         await liveTaskStore.autoArchiveStaleCompletedIfEnabled()
 
-        await newRuntime.setOnRunSessionChanged { [weak self] sessionID in
+        // Every inspector feed below checks it still belongs to the live runtime. Agents and
+        // evaluators hold these closures past a stop (an in-flight review can finish afterwards);
+        // without the check a late event would repopulate an inspector that stop just cleared.
+        await newRuntime.setOnRunSessionChanged { [weak self, weak newRuntime] sessionID in
             Task { @MainActor [weak self] in
-                self?.runtimeSessionID = sessionID
+                guard let self, let newRuntime, self.runtime === newRuntime,
+                      let sessionID, !self.inspectedRunIDs.contains(sessionID) else { return }
+                self.inspectedRunIDs.append(sessionID)
             }
         }
 
-        await newRuntime.setOnLLMCallRecorded { [weak self] ref, event in
+        await newRuntime.setOnLLMCallRecorded { [weak self, weak newRuntime] ref, event in
             Task { @MainActor [weak self] in
-                self?.inspectorStore.appendCall(event, for: ref)
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                self.inspectorStore.appendCall(event, for: ref)
             }
         }
 
-        await newRuntime.setOnContextChanged { [weak self] ref, messages in
+        await newRuntime.setOnContextChanged { [weak self, weak newRuntime] ref, messages in
             Task { @MainActor [weak self] in
-                self?.inspectorStore.updateLiveContext(messages, for: ref)
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                self.inspectorStore.updateLiveContext(messages, for: ref)
             }
         }
 
-        await newRuntime.setOnEvaluationRecorded { [weak self] record in
+        await newRuntime.setOnEvaluationRecorded { [weak self, weak newRuntime] record in
             Task { @MainActor [weak self] in
-                self?.inspectorStore.appendEvaluation(record)
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                self.inspectorStore.appendEvaluation(record)
             }
         }
 
-        await newRuntime.setOnCompactionCaptured { [weak self] capture in
+        await newRuntime.setOnCompactionCaptured { [weak self, weak newRuntime] capture in
             Task { @MainActor [weak self] in
-                self?.appendCompactionCapture(capture)
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                self.appendCompactionCapture(capture)
             }
         }
 
@@ -1683,7 +1697,18 @@ final class AppViewModel {
     }
 
     func undeleteTask(id: UUID) async {
-        await taskStore?.undelete(id: id)
+        guard let taskStore else { return }
+        let task = anyTask(id: id)
+        let title = task?.title ?? "(unknown)"
+        guard await taskStore.undelete(id: id) else {
+            taskActionError = "Couldn't recover \"\(title)\" — it's no longer in Recently Deleted, or the change couldn't be saved."
+            return
+        }
+        // Smith was last told this task was deleted and must not be worked on; without this it
+        // keeps treating the recovered task as gone.
+        // A template restores to the Library, not the active list.
+        let destination = task?.isTemplate == true ? "the template Library" : "the active list"
+        await notifySmithTaskStateChanged(.undeleted, taskID: id, title: title, message: "The user recovered this task from Recently Deleted. It is back in \(destination); it has not been started.")
     }
 
     func permanentlyDeleteTask(id: UUID) async {
@@ -1926,12 +1951,20 @@ final class AppViewModel {
     }
 
     func retryTask(_ task: AgentTask) async {
-        await taskStore?.softDelete(id: task.id)
-        await runtime?.notifySmithOfUserTaskAction(
+        // Ask Smith FIRST: the retry is Smith re-creating the task, so with no Smith to receive the
+        // request, soft-deleting the failed task would make it vanish with nothing replacing it.
+        let delivered = await runtime?.notifySmithOfUserTaskAction(
             .retryRequested,
             taskID: task.id,
             text: "User action in the app: the user chose Retry on a failed task. Please retry it:\nTitle: \(task.title)\nDescription: \(task.description)\nID: \(task.id.uuidString)"
-        )
+        ) ?? false
+        guard delivered else {
+            taskActionError = "Agent Smith isn't running, so the retry can't be requested. Start the session and try again."
+            return
+        }
+        if await taskStore?.softDelete(id: task.id) != true {
+            taskActionError = "Retry was requested, but the failed task \"\(task.title)\" couldn't be moved to Recently Deleted — you may see it alongside the retried copy."
+        }
     }
 
     /// The inline control a user-task-action notice offers, resolved against LIVE task state so the
@@ -1945,7 +1978,7 @@ final class AppViewModel {
             return .resume
         case .deleted:
             return shared.deletedTasks.contains { $0.id == taskID } ? .undelete : nil
-        case .retryRequested, .runAgainRequested:
+        case .retryRequested, .runAgainRequested, .undeleted:
             return nil
         }
     }
@@ -2101,7 +2134,7 @@ final class AppViewModel {
     /// message is phrased to override Smith's usual reuse bias (it would otherwise treat
     /// "run again" as a `run_task` on the existing id).
     func runTaskAgain(_ task: AgentTask) async {
-        await runtime?.notifySmithOfUserTaskAction(
+        let delivered = await runtime?.notifySmithOfUserTaskAction(
             .runAgainRequested,
             taskID: task.id,
             text: """
@@ -2109,7 +2142,10 @@ final class AppViewModel {
             Title: \(task.title)
             Description: \(task.description)
             """
-        )
+        ) ?? false
+        if !delivered {
+            taskActionError = "Agent Smith isn't running, so Run Again can't be requested. Start the session and try again."
+        }
     }
 
     // MARK: - Task overlay bar
@@ -2229,6 +2265,8 @@ final class AppViewModel {
             taskActionError = "All \(capacity) task slot(s) are busy (\(names)). Wait for one to finish — or raise “Max simultaneous tasks” in Settings."
             return
         }
+        // No separate "resumed" notice: the runtime tells Smith "has been started" once the worker
+        // is actually claimed and spawned, which is the only point it is true.
         await runtime?.restartForNewTask(taskID: task.id, templateInputValues: templateInputValues)
     }
 
@@ -2323,7 +2361,7 @@ final class AppViewModel {
         agentToolNames.removeAll()
         agentToolNamesByInstance.removeAll()
         inspectorStore.clearAll()
-        runtimeSessionID = nil
+        inspectedRunIDs = []
         // The channel stream is cancelled + awaited inside flushPersistence() below
         // (quiesceChannelStream), so any messages still buffered in the channel are drained
         // and persisted before we tear down rather than dropped here.
@@ -2832,14 +2870,15 @@ final class AppViewModel {
 
     // MARK: - Cost helpers
 
-    /// Estimated cost in USD for `role` over the **current session** (since the last
-    /// `OrchestrationRuntime.start()`), read from `SharedAppState.runRoleUsage` — the
-    /// `UsageRecord`-backed rollup. It used to sum the inspector's retained turns, which
-    /// undercounted once the 100-turn bound evicted any and read zero for the Validator and
-    /// Summarizer, neither of which produces resident-agent turns.
+    /// Estimated cost in USD for `role` over the runs the inspector currently covers
+    /// (`inspectedRunIDs`), read from `SharedAppState.runRoleUsage` — the `UsageRecord`-backed
+    /// rollup. It used to sum the inspector's retained turns, which undercounted once the 100-turn
+    /// bound evicted any and read zero for the Validator and Summarizer, neither of which produces
+    /// resident-agent turns.
     func sessionCost(for role: AgentRole) -> Double {
-        guard let runtimeSessionID else { return 0 }
-        return shared.runRoleUsage[CostBoard.RunRoleKey(sessionID: runtimeSessionID, role: role)]?.cost ?? 0
+        inspectedRunIDs.reduce(0) { total, runID in
+            total + (shared.runRoleUsage[CostBoard.RunRoleKey(sessionID: runID, role: role)]?.cost ?? 0)
+        }
     }
 
     /// Total estimated cost for a task, or `nil` if it has no usage records at all.

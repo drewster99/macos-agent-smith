@@ -46,7 +46,7 @@ struct SecurityEvaluatorTurnCaptureTests {
                                             arguments: #"{"path":"/nonexistent/agent-smith-test"}"#)])
     }
 
-    @Test("first call: the turn carries the exact request, as outgoing input and full snapshot")
+    @Test("first call: the turn carries the exact request, recorded once as the snapshot")
     func firstCallCapturesExactRequest() async {
         let provider = ScriptedProvider([.respond(LLMResponse(text: "SAFE listing a directory"))])
         let (evaluator, collector) = await makeEvaluator(provider)

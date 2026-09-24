@@ -32,7 +32,8 @@ public struct TranscriptFilter: Sendable, Equatable {
         case any
         /// Only messages stamped with this task's id.
         case task(UUID)
-        /// Only messages NOT tied to a task (`taskID == nil`) — Smith planning/replying overhead.
+        /// Only messages NOT tied to a task (`taskID == nil`) — Smith planning/replying overhead —
+        /// plus user task-action notices, which are addressed to Smith though they name a task.
         case orchestration
         /// Nothing matches. The empty-selection state for a pane that shows one task at a time — its
         /// provider stays subscribed but delivers no rows until a task is picked.
@@ -146,7 +147,9 @@ public struct TranscriptFilter: Sendable, Equatable {
         case .task(let id):
             if message.taskID != id { return false }
         case .orchestration:
-            if message.taskID != nil { return false }
+            // A user's task action is a notice TO Smith, so it belongs to the orchestration layer
+            // even though it names its task (the task id is what its inline Resume/Undelete acts on).
+            if message.taskID != nil, message.kind != .userTaskAction { return false }
         case .matchNone:
             return false
         }

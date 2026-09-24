@@ -12,7 +12,7 @@ enum EvaluationRecordDetail {
 extension EvaluationRecord {
     /// Per-task tool-scoping records aren't a SAFE/UNSAFE verdict on one call — they're a
     /// "here's the approved tool set" decision — so they get their own label/color.
-    var isToolScoping: Bool { toolName == "(tool scoping)" }
+    var isToolScoping: Bool { kind == .toolScoping }
 
     var dispositionLabel: String {
         if isToolScoping, disposition.wasJudged {
@@ -61,7 +61,9 @@ struct EvaluationRecordRow: View {
             })
             .buttonStyle(.plain)
             .help(expanded ? "Hide evaluation detail" : "Show evaluation detail")
-            .accessibilityLabel("\(record.dispositionLabel) evaluation of \(record.toolName)")
+            .accessibilityLabel("\(record.dispositionLabel) evaluation of \(record.toolName), \(record.latencyMs) milliseconds, \(record.timestamp.formatted(date: .omitted, time: .shortened))")
+            .accessibilityValue(expanded ? "expanded" : "collapsed")
+            .accessibilityHint(expanded ? "Hides the evaluation detail" : "Shows the evaluation detail")
             if expanded {
                 EvaluationRecordExpandedDetail(record: record, detail: detail)
             }

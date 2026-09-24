@@ -4,6 +4,7 @@ import Synchronization
 import os
 
 private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
+private let retrievalLogger = Logger(subsystem: "com.agentsmith", category: "Retrieval")
 
 /// Cached date formatters for status/digest lines. `DateFormatter` is expensive to
 /// construct, so we build these once instead of per status fire. Safe to share: each is
@@ -122,6 +123,9 @@ public actor OrchestrationRuntime {
     /// The inspector subject for Summarizer-billed calls this run — the summarizer instance's own
     /// calls and Smith's context compaction share it, so they form one Summarizer call log.
     private var summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
+    /// True once the current streak of retrieval failures has been announced; cleared when a
+    /// retrieval succeeds, so each new streak is announced once rather than on every call.
+    private var retrievalFailureStreakReported = false
 
     var llmProviders: [AgentRole: any LLMProvider]
     var llmConfigs: [AgentRole: ModelConfiguration]
@@ -179,7 +183,8 @@ public actor OrchestrationRuntime {
     private var onToolExecutionStateChange: (@Sendable (AgentInstanceRef, String, Bool) -> Void)?
     /// Callback fired when an agent comes online, passing its role and configured tool names.
     private var onAgentStarted: (@Sendable (AgentInstanceRef, [String]) -> Void)?
-    /// Callback fired when an agent records a new LLM turn, for incremental UI updates.
+    /// Callback fired after every inspector-visible provider call (completed or failed), for
+    /// incremental UI updates.
     private var onLLMCallRecorded: (@Sendable (AgentInstanceRef, LLMCallEvent) -> Void)?
     /// Fires with the new run's session id whenever a run begins, and with nil when a start is
     /// abandoned. A runtime begins new runs on its own (a cold `restartForNewTask`, a start
@@ -609,9 +614,10 @@ public actor OrchestrationRuntime {
     /// compaction-diff capture is enabled (or the trigger is `.forcedDebug`), the exact
     /// pre-/post-splice histories are emitted through `onCompactionCaptured`.
     public func compactSmithContext(trigger: CompactionDiffCapture.Trigger = .manual) async -> String {
-        guard let smith = supervisor.firstHandle(role: .smith)?.agent else {
+        guard let smithHandle = supervisor.firstHandle(role: .smith) else {
             return "System is not running — there is no agent context to compact."
         }
+        let smith = smithHandle.agent
         // LLM compaction disabled: Smith's context is bounded by the deterministic run-loop prune
         // (`pruneNonBrownHistory`) instead. Do no summarization work here.
         guard orchestrationSettings.summarizeForContextCompaction else {
@@ -649,7 +655,7 @@ public actor OrchestrationRuntime {
         // Billed to whichever role's model made the call, so it is inspected under that role too.
         let inspectorRef: AgentInstanceRef = summarizerRole == .summarizer
             ? summarizerInspectorRef
-            : AgentInstanceRef(role: .smith, instanceID: agentIDForRole(.smith) ?? UUID())
+            : AgentInstanceRef(role: .smith, instanceID: smithHandle.id)
         let annotation = LLMCallAnnotation(operation: .contextCompaction)
         let response: LLMResponse
         let callStart = Date()
@@ -675,7 +681,7 @@ public actor OrchestrationRuntime {
             modelID: config.model,
             providerType: providerAPITypes[summarizerRole]?.rawValue ?? "",
             providerID: config.providerID,
-            temperature: config.temperature ?? 0,
+            temperature: config.temperature,
             maxOutputTokens: 5000,
             thinkingBudget: config.thinkingBudget,
             usage: response.usage,
@@ -1789,7 +1795,7 @@ public actor OrchestrationRuntime {
             return SemanticSearchResults(memories: [], taskSummaries: [])
         }
         do {
-            return try await memoryStore.searchAll(
+            let results = try await memoryStore.searchAll(
                 query: query,
                 memoryLimit: memoryLimit,
                 taskLimit: taskLimit,
@@ -1799,7 +1805,26 @@ public actor OrchestrationRuntime {
                 taskInstruction: MemoryStore.taskRetrievalInstruction,
                 origin: .retrieval(source)
             )
+            retrievalFailureStreakReported = false
+            return results
         } catch {
+            // Retrieval is enrichment, so the caller proceeds without it — but never silently: a
+            // broken embedding model would otherwise make every retrieval point look like "nothing
+            // relevant". Logged every time; posted once per streak of the same failure.
+            // A stop cancels in-flight retrieval; that is not a failure to report.
+            if error is CancellationError || Task.isCancelled {
+                return SemanticSearchResults(memories: [], taskSummaries: [])
+            }
+            let description = error.localizedDescription
+            retrievalLogger.error("retrieval \(source.rawValue, privacy: .public) failed: \(description, privacy: .public)")
+            if !retrievalFailureStreakReported {
+                retrievalFailureStreakReported = true
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Memory retrieval failed, so agents are continuing without retrieved memories or prior-task context: \(description)",
+                    metadata: ["messageKind": .kind(.advisory), "severity": .severity(.warning)]
+                ))
+            }
             return SemanticSearchResults(memories: [], taskSummaries: [])
         }
     }
@@ -1844,7 +1869,8 @@ public actor OrchestrationRuntime {
     }
 
     /// Registers a callback fired after every provider call made on behalf of an inspector
-    /// subject — a completed turn or a failed attempt.
+    /// subject — agents, Security evaluators, the Summarizer, and context compaction — as a
+    /// completed turn or a failed attempt.
     public func setOnLLMCallRecorded(_ handler: @escaping @Sendable (AgentInstanceRef, LLMCallEvent) -> Void) {
         onLLMCallRecorded = handler
     }
@@ -2181,8 +2207,9 @@ public actor OrchestrationRuntime {
                 (Brown) was spawned and briefed automatically. Do NOT call `run_task`, `create_task`, or \
                 `notify_brown` FOR THIS task — Brown will signal progress via task_update / task_complete, \
                 and you'll get the periodic Brown-activity digest; do NOT poll. This start came from your own \
-                run_task call or a scheduled timer: if the user doesn't already know it started, tell them in \
-                one short line. Handle any NEW user message normally.]
+                run_task call, a scheduled timer, auto-advance, or the user's Play/Resume control; if it \
+                resumes a task you were told was paused or stopped, it is in progress again. If the user \
+                doesn't already know it started, tell them in one short line. Handle any NEW user message normally.]
                 """)
         }
     }
@@ -3974,8 +4001,10 @@ public actor OrchestrationRuntime {
     /// Posted as `.system`, not `.user`: the text is composed by the app, and attributing it to
     /// the user put words in their mouth in the transcript and in Smith's context. `action` is the
     /// typed fact the transcript keys its inline control on; `text` is for Smith only.
-    public func notifySmithOfUserTaskAction(_ action: UserTaskAction, taskID: UUID, text: String) async {
-        guard let agentID = agentIDForRole(.smith) else { return }
+    /// Returns false — posting nothing — when no Smith is running to receive it.
+    @discardableResult
+    public func notifySmithOfUserTaskAction(_ action: UserTaskAction, taskID: UUID, text: String) async -> Bool {
+        guard let agentID = agentIDForRole(.smith) else { return false }
         await channel.post(ChannelMessage(
             sender: .system,
             recipientID: agentID,
@@ -3984,6 +4013,7 @@ public actor OrchestrationRuntime {
             metadata: ["messageKind": .kind(.userTaskAction), "userTaskAction": .userTaskAction(action)],
             taskID: taskID
         ))
+        return true
     }
 
     /// Posts a private message from the user directly to the agent with the given role.
@@ -4077,8 +4107,8 @@ public actor OrchestrationRuntime {
         if case .agent(let role) = message.sender, role == .smith {
             return false
         }
-        // Drop all public messages from Brown, Security Agent, or Summarizer, except online
-        // announcements which Smith needs for coordination. Summarizer results are
+        // Drop all public messages from Brown, Security Agent, or Summarizer — no exceptions.
+        // Summarizer results are
         // persisted to the memory store and task record — Smith doesn't need them
         // in its conversation history (and they can distract from pending user messages).
         if case .agent(let role) = message.sender, message.recipientID == nil,
@@ -4246,7 +4276,10 @@ public actor OrchestrationRuntime {
                 await self.summarizeAndEmbedTask(taskID: taskID)
             },
             reconcileMemory: { [weak self] request in
-                guard let self, let summarizer = await self.taskSummarizer else {
+                guard let self else {
+                    return .unavailable(errorDescription: "the orchestration runtime has shut down")
+                }
+                guard let summarizer = await self.taskSummarizer else {
                     return .unavailable(errorDescription: "no Summarizer model is assigned")
                 }
                 let task = await self.inspectorTaskAssociation(agentID: agentID, role: role)
