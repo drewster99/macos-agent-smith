@@ -422,9 +422,73 @@ public actor OrchestrationRuntime {
     /// The user-configurable ceiling for `setWorkerCapacity`.
     public static let maxWorkerCapacity = 10
 
-    /// Sets the worker-pool capacity (clamped to 1...maxWorkerCapacity).
-    public func setWorkerCapacity(_ capacity: Int) {
-        maxConcurrentWorkers = min(max(1, capacity), Self.maxWorkerCapacity)
+    /// Sets the worker-pool capacity (clamped to 1...maxWorkerCapacity), taking effect on the live
+    /// run at once:
+    ///
+    /// - **Raised** — queued work fills the new slots immediately (the same drain a freed slot
+    ///   runs), instead of waiting for some worker to finish.
+    /// - **Lowered** — the newest workers above the new capacity are stopped (least work lost) and
+    ///   their tasks go `.interrupted` onto `capacityDeferredQueue`, which resumes them ahead of all
+    ///   other queued work as slots free. The user lowered a limit; they did not ask for that work
+    ///   to halt, so resuming does not depend on the auto-run settings.
+    ///
+    /// Before a run starts (the app pushes the saved setting ahead of `start()`), only the number
+    /// changes: nothing is shed or started without a live generation.
+    public func setWorkerCapacity(_ capacity: Int) async {
+        let newCapacity = min(max(1, capacity), Self.maxWorkerCapacity)
+        let raised = await lifecycleQueue.run { [weak self] () -> Bool in
+            guard let self else { return false }
+            return await self.performSetWorkerCapacity(newCapacity)
+        }
+        // Outside the lifecycle queue: the drain schedules starts onto it.
+        if raised, supervisor.currentGeneration != nil {
+            await advanceAfterFreedWorkerSlot()
+        }
+    }
+
+    /// Applies the new capacity and sheds workers above it. Returns whether capacity was raised.
+    /// Runs on the lifecycle queue, so it serializes with every start: the capacity is lowered
+    /// BEFORE any worker is torn down, so the slot a teardown frees can't be refilled from the queue.
+    private func performSetWorkerCapacity(_ newCapacity: Int) async -> Bool {
+        let previous = maxConcurrentWorkers
+        maxConcurrentWorkers = newCapacity
+        if newCapacity < previous, supervisor.currentGeneration != nil {
+            await shedWorkersAboveCapacity()
+        }
+        return newCapacity > previous
+    }
+
+    /// Stops the newest workers until the live count fits `maxConcurrentWorkers`, deferring their
+    /// tasks for automatic resume. Newest first: they have done the least work, and a resumed task
+    /// is re-briefed from its progress log, so what they did is not lost.
+    private func shedWorkersAboveCapacity() async {
+        let workers = supervisor.handles(role: .brown)   // oldest first
+        let excess = workers.count - maxConcurrentWorkers
+        guard excess > 0 else { return }
+        var deferred: [(task: AgentTask, sequence: UInt64)] = []
+        for handle in workers.suffix(excess).reversed() {
+            guard let task = await taskStore.taskForAgent(agentID: handle.id) else {
+                // A worker bound to no task holds a slot for nothing; stop it all the same.
+                _ = await performTerminateAgent(id: handle.id)
+                continue
+            }
+            await performTerminateTaskAgents(taskID: task.id)
+            // CAS: a task that reached a terminal status in the meantime keeps it.
+            guard await taskStore.updateStatus(
+                id: task.id, to: .interrupted,
+                ifCurrentlyIn: [.starting, .running, .validating, .awaitingHelp, .awaitingReview]
+            ) else { continue }
+            deferred.append((task, handle.sequence))
+        }
+        // Resume in the order they originally started.
+        for entry in deferred.sorted(by: { $0.sequence < $1.sequence }) {
+            capacityDeferredQueue.append(entry.task.id)
+            await notifySmithOfUserTaskAction(
+                .deferredForCapacity,
+                taskID: entry.task.id,
+                text: "User action in the app: the user lowered the maximum number of simultaneous tasks to \(maxConcurrentWorkers). This task's worker was stopped to free a slot; the task is interrupted and will resume automatically (re-briefed from its progress log) as soon as a slot frees. Do not restart it yourself. Task: \"\(entry.task.title)\" (ID: \(entry.task.id.uuidString))."
+            )
+        }
     }
 
     /// Live worker count vs. capacity — the slot arithmetic tools and UI gate on.
@@ -455,6 +519,13 @@ public actor OrchestrationRuntime {
     /// user Stops MID-session (which also lands `.interrupted`) is never on this queue and
     /// stays stopped until the next launch. Governed by `autoRunInterruptedTasks`.
     private var launchResumeQueue: [UUID] = []
+
+    /// Tasks whose workers were stopped because the user LOWERED the worker capacity, oldest-started
+    /// first. Resumed ahead of every other queued task as slots free, regardless of the auto-run
+    /// settings — the user shrank a limit, they did not ask for the work to stop. An ID leaves the
+    /// queue when its resume starts, or when the task is no longer `.interrupted` (the user paused,
+    /// resumed, or deleted it).
+    private var capacityDeferredQueue: [UUID] = []
 
     private func armBreakerRedrainIfNeeded() {
         // `lastScopingFailureAt` is always set when the breaker is open (the only callers
@@ -1138,7 +1209,9 @@ public actor OrchestrationRuntime {
         // Two queues share the pool: the launch-scoped interrupted-resume queue
         // (autoRunInterruptedTasks) and pending auto-advance (autoAdvanceEnabled). Run if
         // either could place work.
-        guard autoAdvanceEnabled || (autoRunInterruptedTasks && !launchResumeQueue.isEmpty) else { return }
+        guard autoAdvanceEnabled
+                || (autoRunInterruptedTasks && !launchResumeQueue.isEmpty)
+                || !capacityDeferredQueue.isEmpty else { return }
         guard !isDrainingTaskQueues else { drainRequestedWhileBusy = true; return }
         isDrainingTaskQueues = true
         defer { isDrainingTaskQueues = false }
@@ -1163,11 +1236,13 @@ public actor OrchestrationRuntime {
         // Prune the resume queue to IDs still present AND still interrupted (a task that
         // completed, was manually run, or was archived drops off).
         launchResumeQueue = launchResumeQueue.filter { byID[$0]?.status == .interrupted }
+        capacityDeferredQueue = capacityDeferredQueue.filter { byID[$0]?.status == .interrupted }
 
         // Launch-interrupted work (in-flight when the session came up) resumes before pending
         // (never-started) work; each oldest-first. `restartForNewTask` resumes an interrupted
         // task WITH its prior context (the briefing draws on task.updates), so nothing is lost.
-        var runnable: [AgentTask] = []
+        // Capacity-deferred work first: it was already running before the user shrank the pool.
+        var runnable: [AgentTask] = capacityDeferredQueue.compactMap { byID[$0] }
         if autoRunInterruptedTasks {
             runnable += launchResumeQueue.compactMap { byID[$0] }
         }
@@ -1180,11 +1255,15 @@ public actor OrchestrationRuntime {
                 .filter { $0.status == .pending && !$0.isTemplate }
                 .sorted { $0.createdAt < $1.createdAt }
         }
+        // One start per task even if it sits on more than one queue.
+        var queued: Set<UUID> = []
+        runnable = runnable.filter { queued.insert($0.id).inserted }
         let toStart = Array(runnable.prefix(freeSlots))
         // Drop resumed IDs from the queue immediately, so a later mid-session Stop of the same
         // task can't put it back on the auto-resume path.
         let startedIDs = Set(toStart.map(\.id))
         launchResumeQueue.removeAll { startedIDs.contains($0) }
+        capacityDeferredQueue.removeAll { startedIDs.contains($0) }
         for task in toStart {
             restartForNewTask(taskID: task.id)
         }

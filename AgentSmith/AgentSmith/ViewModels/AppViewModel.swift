@@ -1978,7 +1978,7 @@ final class AppViewModel {
             return .resume
         case .deleted:
             return shared.deletedTasks.contains { $0.id == taskID } ? .undelete : nil
-        case .retryRequested, .runAgainRequested, .undeleted:
+        case .retryRequested, .runAgainRequested, .undeleted, .deferredForCapacity:
             return nil
         }
     }

@@ -123,7 +123,7 @@ struct SettingsView: View {
                 Text("Max simultaneous tasks: \(shared.maxSimultaneousTasks)")
             }
 
-            Text("How many tasks may run at the same time, each with its own worker agent. Starting beyond this limit never interrupts a running task — extra tasks queue as pending and auto-run starts them as slots free. Applies immediately to active sessions.")
+            Text("How many tasks may run at the same time, each with its own worker agent. Extra tasks queue as pending and auto-run starts them as slots free. Applies immediately to active sessions: raising it starts queued tasks right away; lowering it stops the most recently started tasks above the new limit, and they resume on their own as slots free.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
