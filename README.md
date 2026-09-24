@@ -4,6 +4,13 @@
 
 # Agent Smith
 
+[![Latest release](https://img.shields.io/github/v/release/drewster99/macos-agent-smith)](https://github.com/drewster99/macos-agent-smith/releases/latest)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+![macOS 26.2+](https://img.shields.io/badge/macOS-26.2%2B-black?logo=apple)
+![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-black)
+![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
+[![Good first issues](https://img.shields.io/github/issues/drewster99/macos-agent-smith/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/drewster99/macos-agent-smith/labels/good%20first%20issue)
+
 **A safety-focused multi-agent workforce for your Mac.** You hand it a task; a team of LLM agents plans it, does the work in a real shell, and reviews itself — with a dedicated security agent watching every move.
 
 A native macOS app. Swift 6, SwiftUI, on-device. Your API keys, your machine.
