@@ -25,7 +25,8 @@ The full design history, rationale, and completed/planned features live in `ROAD
 - `SafetySystemTesting/` — isolated harness and scripts for exercising the safety/gatekeeper system. Self-contained; has its own README.
 - `scripts/` — one-off Python utilities (e.g. `backfill_tool_calls.py`).
 - `ROADMAP.md` — long-form plan + completed-work log. Authoritative source for "why is it this way."
-- `ROADMAP_implement_tabs.md` — historical sub-plan for the multi-session tab work.
+- `docs/plans/` — historical sub-plans (`ROADMAP_implement_tabs.md`, `InspectorImprovements.md`, …).
+- `docs/audits/` — past code-review and SwiftUI audit reports.
 
 ## Package dependencies (versioned git)
 
@@ -413,7 +414,7 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
 
 **Architecture decision (2026-07-26): the inspector becomes a live "Now" panel, telemetry re-keyed by instance.** The role-keyed inspector described above is the PRE-MIGRATION state. The agreed direction rebuilds the right inspector as a live "Now" panel (agent states, live task stages, a tool-call lifecycle tree with inline security), driven by **per-instance** telemetry (`AgentInstanceRef`) rather than the fixed four `AgentRole` buckets; per-agent config moves to Settings, per-task detail to a click-into-a-task view, durable money to the cost panel. This is the long-deferred "M2 inspector re-key." The full phased build plan + settled UI rules live in `ROADMAP.md` ("Inspector 'Now' panel + M2 telemetry re-key"). Until those phases land, the role-keyed surfaces (`turnsByRole`, `processingRoles`, `toolExecutingByRole`, role-keyed `terminatedAgentArchive`, `AgentInspectorTarget(sessionID, role)`) are still current — do not assume the instance-keyed model exists in code yet.
 
-### Inspector data sources (built 2026-09-23 — see InspectorImprovements.md)
+### Inspector data sources (built 2026-09-23 — see docs/plans/InspectorImprovements.md)
 
 - **Provider calls reach the inspector as `LLMCallEvent` (`completed` turn | `failed` attempt)**
   through `OrchestrationRuntime.setOnLLMCallRecorded`. Every caller that bills a role emits them:

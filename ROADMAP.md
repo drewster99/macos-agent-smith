@@ -87,7 +87,7 @@ contributor.
 ### Decisions needed (product/architecture — the maintainer's call)
 
 - **Inspector "Now" panel.** Finish the remaining M2 re-key (instance-keyed archive and windows,
-  multiple Brown windows), or declare it superseded by `InspectorImprovements.md`? Parallel
+  multiple Brown windows), or declare it superseded by `docs/plans/InspectorImprovements.md`? Parallel
   Browns still share role-keyed UI state.
 - **Skills.** Drop it, or extend templates with embedded `bash`/`file_read` expansion and a `/`
   command?
@@ -2724,7 +2724,7 @@ Overlaps with the holistic-oversized-input item above (the char/token caps) — 
 
 ### Inspector "Now" panel + M2 telemetry re-key (design settled 2026-07-26; full phased plan)
 
-**Status (audit 2026-09-24):** Phases 1–3 PARTIAL, Phase 4 mostly superseded. Built: `AgentInstanceRef` (role/instanceID/taskID only), instance-keyed callbacks, `callLogsByInstance`/`liveContextsByInstance`, per-instance maps in `AppViewModel` alongside the role maps, and `NowLiveSection` ABOVE the role cards. `InspectorImprovements.md` (phases 1–7, 2026-09-23) then took a different route — kept role cards, added pop-out windows, `LLMCallEvent` for summarizer/compaction. **Not built:** `terminatedAgentArchive` + `AgentInspectorTarget` re-keyed by instance (multiple Brown windows), `EvaluationRecord` attribution, Orchestration group / per-criterion validator rows / attention sort, retiring the gear sheets. **Needs a decision:** finish this plan or declare it superseded by InspectorImprovements.md. Original status: Phase 0 complete (this plan + the CLAUDE.md architecture-decision note). Phases 1–4 below build in order, each an independently build-green commit, reviewed between. UI settled through sketch iteration — the reference render is the artifact "Now panel — outline v7".
+**Status (audit 2026-09-24):** Phases 1–3 PARTIAL, Phase 4 mostly superseded. Built: `AgentInstanceRef` (role/instanceID/taskID only), instance-keyed callbacks, `callLogsByInstance`/`liveContextsByInstance`, per-instance maps in `AppViewModel` alongside the role maps, and `NowLiveSection` ABOVE the role cards. `docs/plans/InspectorImprovements.md` (phases 1–7, 2026-09-23) then took a different route — kept role cards, added pop-out windows, `LLMCallEvent` for summarizer/compaction. **Not built:** `terminatedAgentArchive` + `AgentInspectorTarget` re-keyed by instance (multiple Brown windows), `EvaluationRecord` attribution, Orchestration group / per-criterion validator rows / attention sort, retiring the gear sheets. **Needs a decision:** finish this plan or declare it superseded by InspectorImprovements.md. Original status: Phase 0 complete (this plan + the CLAUDE.md architecture-decision note). Phases 1–4 below build in order, each an independently build-green commit, reviewed between. UI settled through sketch iteration — the reference render is the artifact "Now panel — outline v7".
 
 #### Decision
 
