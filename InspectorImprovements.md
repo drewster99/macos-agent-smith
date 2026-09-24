@@ -838,31 +838,38 @@ infer corpus state from hit counts or elapsed milliseconds.
 
 ## Acceptance criteria
 
-- [ ] Smith and Brown still open the same shared inspector window with no regression.
-- [ ] Security retains inline expansion showing only the newest 10 evaluations.
-- [ ] Security has the requested pop-out control between expansion and speaker controls.
-- [ ] Security pop-out shows exact outgoing and response content for every successful retained call.
-- [ ] Security transport failures are visible and not represented as fake responses.
-- [ ] Security pop-out has no Direct Message UI.
-- [ ] Validator has a pop-out-only inspector backed by task verdict ledgers.
-- [ ] Validator detail shows task, criterion, round, prompt, evidence, result, and truncation state.
-- [ ] Summarizer is pop-out-only.
-- [ ] Summarizer turns cover task summaries, memory consolidation, and web extraction.
-- [ ] LLM retention limits and missing snapshots are explicit.
-- [ ] Retained turns keep stable lifetime ordinals after eviction.
-- [ ] Memory distinguishes not searched from searched with zero hits.
-- [ ] Every Memory query shows the exact returned memories and prior-task summaries.
-- [ ] `auto-context` and `security-tool-review` still default to memory-only retrieval.
-- [ ] App-generated task-action system notices do not trigger auto-context.
-- [ ] The Memory feed includes creates, edits, deletes, consolidations, and task-summary writes.
-- [ ] Memory consolidation rows show existing, proposed, decision, and final content.
-- [ ] Candidate query, Summarizer turn, and final mutation share a correlation ID.
-- [ ] Manual Memory Browser mutations and agent mutations use the same authoritative event path.
-- [ ] Internal retrieval/injection/statistics maintenance does not pollute the activity feed.
-- [ ] Sidebar rendering remains compact and responsive during concurrent activity.
-- [ ] All new controls have help and accessibility labels.
-- [ ] All affected tests pass.
-- [ ] The full project builds without errors or new warnings.
+Status as of 2026-09-23 (phases 1–7 committed).
+
+- [x] Smith and Brown still open the same shared inspector window with no regression.
+- [x] Security retains inline expansion showing only the newest 10 evaluations.
+- [x] Security has the requested pop-out control between expansion and speaker controls.
+- [x] Security pop-out shows exact outgoing and response content for every successful retained call
+      (including the validation evaluator's calls — wired in phase 7 after the live run exposed it).
+- [x] Security transport failures are visible and not represented as fake responses.
+- [x] Security pop-out has no Direct Message UI.
+- [x] Validator has a pop-out-only inspector backed by task verdict ledgers.
+- [x] Validator detail shows task, criterion, round, prompt, evidence, result, and truncation state.
+- [x] Summarizer is pop-out-only.
+- [x] Summarizer turns cover task summaries, memory consolidation, web extraction, and Smith context
+      compaction (the fourth Summarizer-billed call, found in review).
+- [x] LLM retention limits and missing snapshots are explicit.
+- [x] Retained turns keep stable lifetime ordinals after eviction.
+- [x] Memory distinguishes not searched from searched with zero hits.
+- [x] Every Memory query shows the exact returned memories and prior-task summaries.
+- [x] `auto-context` and `security-tool-review` still default to memory-only retrieval.
+- [x] App-generated task-action system notices do not trigger auto-context.
+- [x] The Memory feed includes creates, edits, deletes, consolidations, and task-summary writes.
+- [x] Memory consolidation rows show existing, proposed, decision, and final content.
+- [x] Candidate query, Summarizer turn, and final mutation share a correlation ID.
+- [x] Manual Memory Browser mutations and agent mutations use the same authoritative event path.
+- [x] Internal retrieval/injection/statistics maintenance does not pollute the activity feed.
+- [ ] Sidebar rendering remains compact and responsive during concurrent activity — responsive in
+      live runs, but SwiftUI logged "onChange … tried to update multiple times per frame" faults from
+      the role-card watchers; no pre-change baseline run exists to say whether any are new.
+- [x] All new controls have help and accessibility labels.
+- [ ] All affected tests pass — the full `swift test` suite passes (1,288 tests); the MLX-gated
+      `MemoryStoreIntegrationTests` additions have not been run (needs the `xcodebuild` invocation).
+- [x] The full project builds without errors or new warnings.
 
 ## Non-goals
 

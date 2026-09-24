@@ -413,6 +413,27 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
 
 **Architecture decision (2026-07-26): the inspector becomes a live "Now" panel, telemetry re-keyed by instance.** The role-keyed inspector described above is the PRE-MIGRATION state. The agreed direction rebuilds the right inspector as a live "Now" panel (agent states, live task stages, a tool-call lifecycle tree with inline security), driven by **per-instance** telemetry (`AgentInstanceRef`) rather than the fixed four `AgentRole` buckets; per-agent config moves to Settings, per-task detail to a click-into-a-task view, durable money to the cost panel. This is the long-deferred "M2 inspector re-key." The full phased build plan + settled UI rules live in `ROADMAP.md` ("Inspector 'Now' panel + M2 telemetry re-key"). Until those phases land, the role-keyed surfaces (`turnsByRole`, `processingRoles`, `toolExecutingByRole`, role-keyed `terminatedAgentArchive`, `AgentInspectorTarget(sessionID, role)`) are still current — do not assume the instance-keyed model exists in code yet.
 
+### Inspector data sources (built 2026-09-23 — see InspectorImprovements.md)
+
+- **Provider calls reach the inspector as `LLMCallEvent` (`completed` turn | `failed` attempt)**
+  through `OrchestrationRuntime.setOnLLMCallRecorded`. Every caller that bills a role emits them:
+  `AgentActor`, every `SecurityEvaluator` (Smith's, each Brown's, and the validation evaluator),
+  `TaskSummarizer.sendRecorded`, and `compactSmithContext`. A new LLM call site that records usage
+  must emit here too, or its cost shows with no call behind it. A thrown call is a
+  `LLMCallFailureRecord`, never a fabricated empty turn.
+- **`InspectorCallLog` owns retention honesty**: stable lifetime ordinals, `lifetimeCount`, and why a
+  snapshot is absent. Never number rows by retained-array index.
+- **Self-contained calls** (`LLMTurnRecord.isSelfContainedRequest`) keep the request ONLY in
+  `contextSnapshot`; putting it in `inputDelta` too would defeat the snapshot window.
+- **Per-role session cost reads `CostBoard.runRoleUsage`** (UsageRecords keyed by the run's session
+  id, pushed via `setOnRunSessionChanged`), never the retained turns.
+- **Validator inspector reads task verdict ledgers** (`ValidatorVerdictHistory`); there is no
+  second validator history.
+- **Memory activity feed**: `MemoryStore` is its single publisher (`setOnActivityRecorded`),
+  stamping a sequence before delivery. Queries carry per-corpus `CorpusSearchOutcome` and hit
+  snapshots; mutations are published only after commit, with typed `MemoryActivityOrigin`. Callers
+  never synthesize memory events.
+
 ## Conventions specific to this repo
 
 ### Local model metadata mapping
