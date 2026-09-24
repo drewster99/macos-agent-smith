@@ -122,6 +122,8 @@ public actor OrchestrationRuntime {
     private var taskSummarizer: TaskSummarizer?
     /// Long-lived evaluator attached to Smith (open-world tool-call reviews).
     private var smithSecurityEvaluator: SecurityEvaluator?
+    /// Inspector identity for Smith's long-lived security evaluator.
+    private var smithSecurityInspectorRef = AgentInstanceRef(role: .securityAgent, instanceID: UUID())
     /// The inspector subject for Summarizer-billed calls this run — the summarizer instance's own
     /// calls and Smith's context compaction share it, so they form one Summarizer call log.
     private var summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
@@ -1683,7 +1685,14 @@ public actor OrchestrationRuntime {
         supportsVisionByRole: [AgentRole: Bool] = [:],
         supportsDocumentsByRole: [AgentRole: Bool] = [:]
     ) async {
-        let changedRoles = Set(configurations.keys)
+        let summarizerConfigOnlyRequestWithoutProvider =
+            configurations[.summarizer] != nil
+            && providers[.summarizer] == nil
+            && llmProviders[.summarizer] == nil
+        let securityConfigOnlyRequestWithoutProvider =
+            configurations[.securityAgent] != nil
+            && providers[.securityAgent] == nil
+            && llmProviders[.securityAgent] == nil
         // Decide what is a RETUNE before the merge overwrites the configs being compared against.
         // Three conditions, all required: the role already had a config (nothing live otherwise),
         // the model identity is unchanged,
@@ -1731,7 +1740,8 @@ public actor OrchestrationRuntime {
             releaseTasksBlockedOnValidatorModel()
         }
 
-        await refreshLongLivedProviderHolders(changedRoles: changedRoles)
+        await refreshTaskSummarizerHolder(keepExistingOnMissing: summarizerConfigOnlyRequestWithoutProvider)
+        await refreshLongLivedSecurityEvaluators(keepExistingOnMissing: securityConfigOnlyRequestWithoutProvider)
 
         // Push retunes AFTER the merge, so a spawn racing this call reads the same configuration
         // the live agents just received.
@@ -1747,6 +1757,9 @@ public actor OrchestrationRuntime {
                 let orientation = await composeContextResetOrientation()
                 await smith.scheduleModelSwap(update, orientation: orientation)
             case .brown:
+                // `.brown` assignment is role-scoped, not worker-scoped: every live worker should
+                // converge to the same updated identity. Each worker gets its own task briefing so
+                // the swap reset preserves that worker's task context independently.
                 for workerHandle in supervisor.handles(role: .brown) {
                     let orientation: String?
                     if let task = await taskStore.taskForAgent(agentID: workerHandle.id) {
@@ -1762,35 +1775,66 @@ public actor OrchestrationRuntime {
         }
     }
 
-    private func refreshLongLivedProviderHolders(changedRoles: Set<AgentRole>) async {
-        if changedRoles.contains(.summarizer) {
-            await refreshTaskSummarizerHolder()
+    private func refreshLongLivedSecurityEvaluators(keepExistingOnMissing: Bool = false) async {
+        guard let provider = llmProviders[.securityAgent],
+              let config = llmConfigs[.securityAgent] else {
+            if !keepExistingOnMissing {
+                smithSecurityEvaluator = nil
+                validationSecurityEvaluator = nil
+            }
+            return
         }
-        if changedRoles.contains(.securityAgent),
-           let provider = llmProviders[.securityAgent] {
-            let providerType = providerAPITypes[.securityAgent]?.rawValue ?? ""
-            let supportsVision = supportsVisionByRole[.securityAgent] ?? true
-            let supportsDocuments = supportsDocumentsByRole[.securityAgent] ?? false
-            await smithSecurityEvaluator?.setModel(
-                provider: provider,
-                configuration: llmConfigs[.securityAgent],
-                providerType: providerType,
-                supportsVision: supportsVision,
-                supportsDocuments: supportsDocuments
-            )
-            await validationSecurityEvaluator?.setModel(
-                provider: provider,
-                configuration: llmConfigs[.securityAgent],
-                providerType: providerType,
-                supportsVision: supportsVision,
-                supportsDocuments: supportsDocuments
-            )
+        if smithSecurityEvaluator == nil {
+            let evaluator = makeSecurityEvaluator(provider: provider, executionTracker: ToolExecutionTracker())
+            if let evalCallback = onEvaluationRecorded {
+                await evaluator.setOnEvaluationRecorded(evalCallback)
+            }
+            if let callCallback = onLLMCallRecorded {
+                let securityRef = smithSecurityInspectorRef
+                await evaluator.setOnLLMCallRecorded { event in
+                    callCallback(securityRef, event)
+                }
+            }
+            smithSecurityEvaluator = evaluator
+            if let smith = supervisor.firstHandle(role: .smith)?.agent {
+                await smith.setSecurityEvaluator(evaluator)
+            }
         }
+        if validationSecurityEvaluator == nil {
+            let evaluator = makeSecurityEvaluator(provider: provider, executionTracker: ToolExecutionTracker())
+            if let evalCallback = onEvaluationRecorded {
+                await evaluator.setOnEvaluationRecorded(evalCallback)
+            }
+            if let callCallback = onLLMCallRecorded {
+                let validationSecurityRef = AgentInstanceRef(role: .securityAgent, instanceID: UUID())
+                await evaluator.setOnLLMCallRecorded { event in callCallback(validationSecurityRef, event) }
+            }
+            validationSecurityEvaluator = evaluator
+        }
+        let providerType = providerAPITypes[.securityAgent]?.rawValue ?? ""
+        let supportsVision = supportsVisionByRole[.securityAgent] ?? true
+        let supportsDocuments = supportsDocumentsByRole[.securityAgent] ?? false
+        await smithSecurityEvaluator?.setModel(
+            provider: provider,
+            configuration: config,
+            providerType: providerType,
+            supportsVision: supportsVision,
+            supportsDocuments: supportsDocuments
+        )
+        await validationSecurityEvaluator?.setModel(
+            provider: provider,
+            configuration: config,
+            providerType: providerType,
+            supportsVision: supportsVision,
+            supportsDocuments: supportsDocuments
+        )
     }
 
-    private func refreshTaskSummarizerHolder() async {
+    private func refreshTaskSummarizerHolder(keepExistingOnMissing: Bool = false) async {
         guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else {
-            taskSummarizer = nil
+            if !keepExistingOnMissing {
+                taskSummarizer = nil
+            }
             return
         }
         let providerType = providerAPITypes[.summarizer]?.rawValue ?? ""
@@ -1798,7 +1842,6 @@ public actor OrchestrationRuntime {
             await summarizer.setModel(provider: provider, configuration: config, providerType: providerType)
             return
         }
-        guard let sessionID = currentSessionID else { return }
         let summarizer = TaskSummarizer(
             provider: provider,
             memoryStore: memoryStore,
@@ -1808,7 +1851,7 @@ public actor OrchestrationRuntime {
             usageStore: usageStore,
             configuration: config,
             providerType: providerType,
-            sessionID: sessionID,
+            sessionID: currentSessionID,
             activityTracker: liveActivityTracker
         )
         if let callCallback = onLLMCallRecorded {
@@ -2494,12 +2537,14 @@ public actor OrchestrationRuntime {
         // through its own Security Agent evaluator — local read-only and messaging tools stay
         // un-reviewed. The provider is guaranteed present; start refuses without it.
         let smithEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
+        smithSecurityInspectorRef = AgentInstanceRef(role: .securityAgent, instanceID: UUID())
         smithSecurityEvaluator = smithEvaluator
         if let evalCallback = onEvaluationRecorded {
             await smithEvaluator.setOnEvaluationRecorded(evalCallback)
         }
         if let callCallback = onLLMCallRecorded {
-            await smithEvaluator.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .securityAgent, instanceID: id), event) }
+            let securityRef = smithSecurityInspectorRef
+            await smithEvaluator.setOnLLMCallRecorded { event in callCallback(securityRef, event) }
         }
         await smithAgent.setSecurityEvaluator(smithEvaluator)
 
@@ -4158,7 +4203,8 @@ public actor OrchestrationRuntime {
             }
             return llmConfigs[.smith]
         case .brown:
-            if let brown = supervisor.firstHandle(role: .brown)?.agent {
+            let brownHandles = supervisor.handles(role: .brown)
+            if brownHandles.count == 1, let brown = brownHandles.first?.agent {
                 return await brown.currentModelConfiguration()
             }
             return llmConfigs[.brown]
@@ -4172,6 +4218,18 @@ public actor OrchestrationRuntime {
         case .validator:
             return llmConfigs[.validator]
         }
+    }
+
+    /// Test/diagnostic surface for the two long-lived Security evaluators.
+    func longLivedSecurityEvaluatorConfigurations() async -> (smith: ModelConfiguration?, validation: ModelConfiguration?) {
+        let smith = await smithSecurityEvaluator?.currentConfiguration()
+        let validation = await validationSecurityEvaluator?.currentConfiguration()
+        return (smith, validation)
+    }
+
+    /// Test/diagnostic surface for the live summarizer holder (if currently instantiated).
+    func summarizerHolderConfiguration() async -> ModelConfiguration? {
+        await taskSummarizer?.currentConfiguration()
     }
 
     // MARK: - Agent Archive

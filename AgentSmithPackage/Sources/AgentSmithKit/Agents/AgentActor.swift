@@ -568,18 +568,29 @@ public actor AgentActor {
             Self.agentLogger.error("Agent \(roleName, privacy: .public): refused a model retune changing identity from \(current.providerID, privacy: .public)/\(current.modelID, privacy: .public) to \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public) — a model change requires a fresh agent.")
             return false
         }
-        pendingModelRetune = retune
-        pendingModelSwapResetRequired = false
-        pendingModelSwapOrientation = nil
+        stagePendingModelUpdate(retune, requiresReset: false, orientation: nil)
         return true
     }
 
     /// Stages a provider/model identity swap. Unlike `scheduleModelRetune`, this allows identity
     /// change and pairs it with an explicit history reset at the same run-loop boundary.
     func scheduleModelSwap(_ update: ModelRetune, orientation: String?) {
+        stagePendingModelUpdate(update, requiresReset: true, orientation: orientation)
+    }
+
+    private func stagePendingModelUpdate(
+        _ update: ModelRetune,
+        requiresReset: Bool,
+        orientation: String?
+    ) {
+        let hadPendingReset = pendingModelSwapResetRequired
         pendingModelRetune = update
-        pendingModelSwapResetRequired = true
-        pendingModelSwapOrientation = orientation
+        pendingModelSwapResetRequired = hadPendingReset || requiresReset
+        if requiresReset {
+            pendingModelSwapOrientation = orientation
+        } else if !hadPendingReset {
+            pendingModelSwapOrientation = nil
+        }
     }
 
     /// Applies a staged retune. Called at the top of the run-loop iteration, BEFORE this

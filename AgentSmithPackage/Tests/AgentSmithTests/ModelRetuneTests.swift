@@ -22,10 +22,14 @@ struct ModelRetuneTests {
 
     private static let sharedEngine = SemanticSearchEngine()
 
-    private static func config(temperature: Double, modelID: String = "test-model") -> ModelConfiguration {
+    private static func config(
+        temperature: Double,
+        modelID: String = "test-model",
+        providerID: String = "test"
+    ) -> ModelConfiguration {
         ModelConfiguration(
             name: "test",
-            providerID: "test",
+            providerID: providerID,
             modelID: modelID,
             temperature: temperature,
             maxOutputTokens: 1024,
@@ -244,6 +248,35 @@ struct ModelRetuneTests {
         )
     }
 
+    private func makeRuntimeWithBrown() -> OrchestrationRuntime {
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-retune-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        return OrchestrationRuntime(
+            providers: [
+                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")])
+            ],
+            configurations: [
+                .smith: Self.config(temperature: 0.2, modelID: "smith-old"),
+                .brown: Self.config(temperature: 0.2, modelID: "brown-old"),
+                .securityAgent: Self.config(temperature: 0.2, modelID: "security-old")
+            ],
+            providerAPITypes: [:],
+            agentTuning: [
+                .smith: AgentTuningConfig(pollInterval: 0.5, messageDebounceInterval: 0),
+                .brown: AgentTuningConfig(pollInterval: 0.5, messageDebounceInterval: 0)
+            ],
+            semanticSearchEngine: Self.sharedEngine,
+            usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
+            autoAdvanceEnabled: false,
+            autoRunInterruptedTasks: false,
+            memoryStore: nil
+        )
+    }
+
     /// Reads the live Smith's temperature, after giving its loop a chance to reach the boundary
     /// where a staged retune is applied.
     private func smithTemperature(_ runtime: OrchestrationRuntime) async -> Double? {
@@ -274,8 +307,8 @@ struct ModelRetuneTests {
         #expect(await smithTemperature(runtime) == 0.9, "a retune never reached the live Smith")
     }
 
-    @Test("A model change swaps live Smith and clears pre-swap history")
-    func modelChangeSwapsLiveSmithWithHistoryReset() async {
+    @Test("A provider/model identity swap rebuilds Smith from clear-orientation context")
+    func identitySwapRebuildsSmithWithOrientation() async {
         let runtime = makeRuntime()
         await runtime.start()
         defer { Task { await runtime.stopAll() } }
@@ -288,7 +321,7 @@ struct ModelRetuneTests {
 
         await runtime.setProviders(
             providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
-            configurations: [.smith: Self.config(temperature: 0.9, modelID: "a-different-model")],
+            configurations: [.smith: Self.config(temperature: 0.9, modelID: "a-different-model", providerID: "alt-provider")],
             apiTypes: [:]
         )
 
@@ -303,9 +336,11 @@ struct ModelRetuneTests {
         #expect(modelID == "a-different-model", "live Smith never adopted the swapped model")
         let swappedConfig = await smith.currentModelConfiguration()
         #expect(swappedConfig.temperature == 0.9)
+        #expect(swappedConfig.providerID == "alt-provider")
         let context = await smith.contextSnapshot()
         let fullText = context.compactMap { $0.content.textValue }.joined(separator: "\n")
         #expect(!fullText.contains("pre-swap marker"), "model/provider swap must reset history before replaying")
+        #expect(fullText.contains("[The user cleared your conversation context."), "smith swap should rebuild from clear-orientation context")
     }
 
     @Test("Long-lived summarizer and security evaluator refresh on setProviders")
@@ -316,6 +351,10 @@ struct ModelRetuneTests {
 
         #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.modelID == "security-old")
         #expect(await runtime.liveModelConfiguration(for: .summarizer)?.modelID == "summarizer-old")
+        let initialEvaluators = await runtime.longLivedSecurityEvaluatorConfigurations()
+        #expect(initialEvaluators.smith?.modelID == "security-old")
+        #expect(initialEvaluators.validation?.modelID == "security-old")
+        #expect(await runtime.summarizerHolderConfiguration()?.modelID == "summarizer-old")
 
         await runtime.setProviders(
             providers: [
@@ -333,5 +372,77 @@ struct ModelRetuneTests {
         #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.temperature == 0.4)
         #expect(await runtime.liveModelConfiguration(for: .summarizer)?.modelID == "summarizer-new")
         #expect(await runtime.liveModelConfiguration(for: .summarizer)?.temperature == 0.6)
+        let refreshedEvaluators = await runtime.longLivedSecurityEvaluatorConfigurations()
+        #expect(refreshedEvaluators.smith?.modelID == "security-new")
+        #expect(refreshedEvaluators.smith?.temperature == 0.4)
+        #expect(refreshedEvaluators.validation?.modelID == "security-new")
+        #expect(refreshedEvaluators.validation?.temperature == 0.4)
+        #expect(await runtime.summarizerHolderConfiguration()?.modelID == "summarizer-new")
+    }
+
+    @Test("Config-only update without provider keeps long-lived holders on prior live config")
+    func configOnlyUpdateWithoutProviderKeepsLongLivedHoldersStable() async {
+        let runtime = makeRuntimeWithSummarizer()
+        await runtime.start()
+        defer { Task { await runtime.stopAll() } }
+
+        #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.modelID == "security-old")
+        #expect(await runtime.liveModelConfiguration(for: .summarizer)?.modelID == "summarizer-old")
+
+        await runtime.setProviders(
+            providers: [:],
+            configurations: [
+                .securityAgent: Self.config(temperature: 0.8, modelID: "security-missing-provider"),
+                .summarizer: Self.config(temperature: 0.9, modelID: "summarizer-missing-provider")
+            ],
+            apiTypes: [:]
+        )
+
+        #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.modelID == "security-old")
+        #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.temperature == 0.2)
+        #expect(await runtime.longLivedSecurityEvaluatorConfigurations().validation?.modelID == "security-old")
+        #expect(await runtime.longLivedSecurityEvaluatorConfigurations().validation?.temperature == 0.2)
+        #expect(await runtime.liveModelConfiguration(for: .summarizer)?.modelID == "summarizer-old")
+        #expect(await runtime.liveModelConfiguration(for: .summarizer)?.temperature == 0.2)
+        #expect(await runtime.summarizerHolderConfiguration()?.modelID == "summarizer-old")
+    }
+
+    @Test("A Brown model change swaps live worker and rebuilds task briefing")
+    func brownModelSwapResetsToFreshBriefing() async {
+        let runtime = makeRuntimeWithBrown()
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(scopeToolSetOnTaskStart: false)))
+        await runtime.start()
+        defer { Task { await runtime.stopAll() } }
+
+        let task = AgentTask(title: "Brown swap task", description: "Perform work.")
+        await runtime.taskStore.addTask(task)
+        guard let brownID = await runtime.spawnBrown(for: task),
+              let brown = await runtime.liveAgent(id: brownID) else {
+            Issue.record("missing live Brown")
+            return
+        }
+
+        await brown.appendUserMessage("brown pre-swap marker")
+        await runtime.setProviders(
+            providers: [.brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")])],
+            configurations: [.brown: Self.config(temperature: 0.7, modelID: "brown-new")],
+            apiTypes: [:]
+        )
+
+        let deadline = Date().addingTimeInterval(3.0)
+        var modelID: String?
+        while Date() < deadline {
+            let liveConfig = await brown.currentModelConfiguration()
+            modelID = liveConfig.modelID
+            if modelID == "brown-new" { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(modelID == "brown-new")
+        #expect((await brown.currentModelConfiguration()).temperature == 0.7)
+
+        let context = await brown.contextSnapshot()
+        let fullText = context.compactMap { $0.content.textValue }.joined(separator: "\n")
+        #expect(!fullText.contains("brown pre-swap marker"))
+        #expect(fullText.contains("## Your working directories"))
     }
 }
