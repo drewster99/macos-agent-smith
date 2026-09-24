@@ -40,6 +40,34 @@ phase, build and test it, and commit each completed phase before continuing.
 - Do not change which retrieval corpora are enabled by default as part of this work. This is an
   observability/UI project, not a retrieval-policy change.
 
+## Review decisions (2026-09-23)
+
+Decided with the user after verifying this plan against the code:
+
+1. **Memory tests stay MLX-gated.** `MemoryStore` keeps its concrete `SemanticSearchEngine`; no
+   embedding protocol seam is added. Memory-store behavior tests live in
+   `MemoryStoreIntegrationTests` and run only via the documented `AGENT_SMITH_RUN_MLX_TESTS=1`
+   `xcodebuild` invocation, with the user's approval each time. Pure logic (labels, outcome types,
+   reconciliation parsing) is tested in the normal `swift test` pass.
+2. **Typed Memory origins wrap `RetrievalSource`.** The retrieval-point origins are
+   `.retrieval(RetrievalSource)` alongside explicit non-retrieval cases; no parallel enum restates
+   the five retrieval points.
+3. **`MemoryQueryRecord.phaseBreakdown`'s claim that a zero timing identifies a skipped corpus is
+   removed** along with the zero-ms inference.
+4. **Reconciliation cancellation is its own typed outcome**, distinct from affirmative `DIFFERENT`,
+   malformed, empty-body, and transport failure. All still save separately.
+5. **`ToolContext.reconcileMemoryTexts` / `extractWebContent` closure signatures change** to carry
+   task/correlation context.
+6. **Security turns are numbered per role** across Smith's, each Brown's, and the validation
+   evaluator; both tool-scoping call sites are captured.
+7. **Validator records with no stored system prompt** (enumerator path) render that absence
+   explicitly.
+8. The `.userTaskAction` / auto-context regression test is new work, not already present.
+
+Found during Phase 1: the per-role inspector "session cost" summed the retained turns, so it
+undercounted after eviction and read $0 for Validator and Summarizer. It now reads a
+`UsageRecord`-backed per-(run, role) rollup in `CostBoard` (`runRoleUsage`).
+
 ## Important recent correction: do not redo it
 
 Task pause/stop/delete notices were previously sent through the direct-user-message path with text

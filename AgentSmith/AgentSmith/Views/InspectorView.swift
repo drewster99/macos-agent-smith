@@ -16,11 +16,11 @@ import AgentSmithKit
 ///    The card body reads only the cached `@State` — never `viewModel.inspectorStore.*`
 ///    or `viewModel.*` directly. SwiftUI's view-diff short-circuits AgentCard's body when
 ///    the cached struct hasn't changed.
-/// 3. Cross-role keys (e.g. `turnsByRole`) still cause every card's outer body to
+/// 3. Cross-role keys (e.g. `callLogsByRole`) still cause every card's outer body to
 ///    re-evaluate (the Observation framework propagates whole-property changes), but the
 ///    only work is "read 1 stable @State, hand to child View, SwiftUI diffs and skips."
 ///    The heavy AgentCard body re-eval is avoided when the per-role narrowing
-///    (`turnsByRole[role]`) didn't change.
+///    (`callLogsByRole[role]`) didn't change.
 struct InspectorView: View {
     let viewModel: AppViewModel
 
@@ -124,7 +124,7 @@ private struct AgentRoleData: Equatable {
     let recentMessages: [ChannelMessage]
     let recentToolUses: [ChannelMessage]
     let contextMessages: [LLMMessage]
-    let llmTurns: [LLMTurnRecord]
+    let callLog: InspectorCallLog?
     let pollInterval: TimeInterval
     let maxToolCalls: Int
     let currentSystemPrompt: String
@@ -179,7 +179,7 @@ private struct RoleAgentCard: View {
             }
         }
         // Each .onChange watcher narrows to a per-role key where possible. Cross-role
-        // dictionaries (`turnsByRole`, `liveContexts`) still cause every card's outer body
+        // dictionaries (`callLogsByRole`, `liveContexts`) still cause every card's outer body
         // to re-evaluate when any role changes (Observation propagates whole-property
         // changes), but the `[role]` subscript narrows the *callback* — recompute() fires
         // only when this role's entry differs.
@@ -258,7 +258,7 @@ private struct RoleAgentCard: View {
             recentMessages: Array(roleMessages.suffix(5).reversed()),
             recentToolUses: Array(roleMessages.filter { $0.toolName != nil }.suffix(3).reversed()),
             contextMessages: store.contextMessages(for: role),
-            llmTurns: store.turnsByRole[role] ?? [],
+            callLog: store.callLogsByRole[role],
             pollInterval: viewModel.agentPollIntervals[role] ?? 5,
             maxToolCalls: viewModel.agentMaxToolCalls[role] ?? 100,
             currentSystemPrompt: store.systemPrompt(for: role),
@@ -403,7 +403,8 @@ private struct AgentCard: View {
     private var recentMessages: [ChannelMessage] { data.recentMessages }
     private var recentToolUses: [ChannelMessage] { data.recentToolUses }
     private var contextMessages: [LLMMessage] { data.contextMessages }
-    private var llmTurns: [LLMTurnRecord] { data.llmTurns }
+    private var callLog: InspectorCallLog? { data.callLog }
+    private var llmTurns: [LLMTurnRecord] { data.callLog?.retainedTurns ?? [] }
     private var modelConfig: ModelConfiguration? { data.modelConfig }
     private var evaluationRecords: [EvaluationRecord] { data.evaluationRecords }
     private var currentSystemPrompt: String { data.currentSystemPrompt }
@@ -480,7 +481,7 @@ private struct AgentCard: View {
                     role: role, availableTools: availableTools,
                     evaluationRecords: evaluationRecords, recentToolUses: recentToolUses,
                     recentMessages: recentMessages, contextMessages: contextMessages,
-                    llmTurns: llmTurns, expandedTurnIDs: $expandedTurnIDs,
+                    callLog: callLog, expandedTurnIDs: $expandedTurnIDs,
                     onSendDirectMessage: onSendDirectMessage)
             }
             Divider()
@@ -683,7 +684,7 @@ private struct RoleAgentCardWatchers: ViewModifier {
                 }
             }
             .onChange(of: roleMessages) { _, _ in onRecompute() }
-            .onChange(of: viewModel.inspectorStore.turnsByRole[role]) { _, _ in onRecompute() }
+            .onChange(of: viewModel.inspectorStore.callLogsByRole[role]) { _, _ in onRecompute() }
             .onChange(of: viewModel.inspectorStore.liveContexts[role]) { _, _ in onRecompute() }
             .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationRecords.count : 0) { _, _ in onRecompute() }
             .onChange(of: viewModel.processingRoles.contains(role)) { _, _ in onRecompute() }

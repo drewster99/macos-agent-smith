@@ -36,7 +36,7 @@ struct AgentInspectorWindow: View {
     }
     private var availableTools: [String] { viewModel.agentToolNames[role] ?? [] }
     private var contextMessages: [LLMMessage] { viewModel.inspectorStore.contextMessages(for: role) }
-    private var llmTurns: [LLMTurnRecord] { viewModel.inspectorStore.turnsByRole[role] ?? [] }
+    private var callLog: InspectorCallLog? { viewModel.inspectorStore.callLogsByRole[role] }
 
     /// True when the agent has activity history but no live tools — i.e. terminated.
     private var isTerminated: Bool {
@@ -74,7 +74,7 @@ struct AgentInspectorWindow: View {
                 recentToolUses: recentToolUses,
                 recentMessages: recentMessages,
                 contextMessages: contextMessages,
-                llmTurns: llmTurns,
+                callLog: callLog,
                 expandedTurnIDs: $expandedTurnIDs,
                 onSendDirectMessage: { [viewModel] text in
                     Task { await viewModel.sendDirectMessage(to: role, text: text) }

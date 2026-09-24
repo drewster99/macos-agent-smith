@@ -105,6 +105,25 @@ public actor CostBoard {
     /// once per `taskUsageRecomputeInterval` and is self-correcting by construction.
     private(set) public var taskUsage: [UUID: TaskUsage] = [:]
     private var onTaskUsageUpdate: (@Sendable ([UUID: TaskUsage]) async -> Void)?
+
+    /// Cost and token totals per (runtime run, role), keyed by `UsageRecord.sessionID` — the id
+    /// minted by each `OrchestrationRuntime.start()` — and `agentRole`. The inspector's per-role
+    /// "session cost" reads this. It used to sum the inspector's RETAINED turns, which silently
+    /// undercounted once the 100-turn bound evicted any, and read zero for every role that
+    /// emits no turns at all. Built in the same pass as `taskUsage`, for the same reasons.
+    private(set) public var runRoleUsage: [RunRoleKey: TaskUsage] = [:]
+    private var onRunRoleUsageUpdate: (@Sendable ([RunRoleKey: TaskUsage]) async -> Void)?
+
+    /// Identifies one role's spend within one runtime run.
+    public struct RunRoleKey: Hashable, Sendable {
+        public let sessionID: UUID
+        public let role: AgentRole
+
+        public init(sessionID: UUID, role: AgentRole) {
+            self.sessionID = sessionID
+            self.role = role
+        }
+    }
     /// The pending coalesced recompute, or `nil` when none is scheduled.
     private var taskUsageRecomputeTask: Task<Void, Never>?
     /// Upper bound on how often the per-task map is rebuilt and republished. A figure
@@ -112,7 +131,8 @@ public actor CostBoard {
     /// across every live worker is not.
     private static let taskUsageRecomputeInterval: Duration = .milliseconds(750)
 
-    /// One task's accumulated spend and token counts.
+    /// Accumulated spend and token counts for one rollup key — a task in `taskUsage`, a run's
+    /// role in `runRoleUsage`.
     public struct TaskUsage: Sendable, Equatable {
         public var cost: Double = 0
         public var inputTokens: Int = 0
@@ -157,6 +177,13 @@ public actor CostBoard {
     public func setOnTaskUsageUpdate(_ handler: @escaping @Sendable ([UUID: TaskUsage]) async -> Void) async {
         onTaskUsageUpdate = handler
         await handler(taskUsage)
+    }
+
+    /// Registers a callback fired on every change to the per-run-role usage map. The current
+    /// map is delivered immediately.
+    public func setOnRunRoleUsageUpdate(_ handler: @escaping @Sendable ([RunRoleKey: TaskUsage]) async -> Void) async {
+        onRunRoleUsageUpdate = handler
+        await handler(runRoleUsage)
     }
 
     /// One-time initial scan. Builds the eight totals from the full `UsageStore`,
@@ -361,7 +388,7 @@ public actor CostBoard {
         await recomputeTaskUsage()
     }
 
-    /// Rebuilds `taskUsage` from the full record set and republishes if it moved.
+    /// Rebuilds `taskUsage` and `runRoleUsage` from the full record set and republishes each that moved.
     /// Not `private` so tests can drive a pass without waiting out the coalescing window.
     ///
     /// The pending handle is already released by the time we get here (see
@@ -371,15 +398,27 @@ public actor CostBoard {
     func recomputeTaskUsage() async {
         let records = await usageStore.allRecords()
         var totals: [UUID: TaskUsage] = [:]
+        var runRoleTotals: [RunRoleKey: TaskUsage] = [:]
         for record in records {
-            guard let taskID = record.taskID else { continue }
-            totals[taskID, default: TaskUsage()].add(record, cost: costOf(record))
+            let cost = costOf(record)
+            if let taskID = record.taskID {
+                totals[taskID, default: TaskUsage()].add(record, cost: cost)
+            }
+            if let sessionID = record.sessionID {
+                runRoleTotals[RunRoleKey(sessionID: sessionID, role: record.agentRole), default: TaskUsage()]
+                    .add(record, cost: cost)
+            }
         }
         // Republish only on an actual change, since every publish invalidates every view
         // observing the map.
-        guard totals != taskUsage else { return }
-        taskUsage = totals
-        await onTaskUsageUpdate?(totals)
+        if totals != taskUsage {
+            taskUsage = totals
+            await onTaskUsageUpdate?(totals)
+        }
+        if runRoleTotals != runRoleUsage {
+            runRoleUsage = runRoleTotals
+            await onRunRoleUsageUpdate?(runRoleTotals)
+        }
     }
 
     // MARK: - Cost math

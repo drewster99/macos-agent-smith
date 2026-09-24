@@ -367,6 +367,9 @@ final class AppViewModel {
     /// `resolveInjectionCapabilities` doesn't repeat on every provider refresh.
     private var capabilityCatalogMissNoticeShown: Set<String> = []
     private var runtime: OrchestrationRuntime?
+    /// The id `runtime` stamps on every `UsageRecord` of its current run — the key the per-role
+    /// session cost reads. Nil while no run is live.
+    private(set) var runtimeSessionID: UUID?
     /// Debounces provider rebuilds so a burst of Settings edits (every model field commits) results
     /// in a single `makeProvider`/keychain pass once editing settles, not one per keystroke.
     private var providerRefreshTask: Task<Void, Never>?
@@ -1067,6 +1070,7 @@ final class AppViewModel {
                 self.agentToolNames.removeAll()
                 self.agentToolNamesByInstance.removeAll()
                 self.inspectorStore.clearAll()
+                self.runtimeSessionID = nil
                 self.runtime = nil
             }
         }
@@ -1191,9 +1195,9 @@ final class AppViewModel {
         )
         await liveTaskStore.autoArchiveStaleCompletedIfEnabled()
 
-        await newRuntime.setOnTurnRecorded { [weak self] ref, turn in
+        await newRuntime.setOnLLMCallRecorded { [weak self] ref, event in
             Task { @MainActor [weak self] in
-                self?.inspectorStore.appendTurn(turn, for: ref)
+                self?.inspectorStore.appendCall(event, for: ref)
             }
         }
 
@@ -1380,6 +1384,7 @@ final class AppViewModel {
         )
 
         await newRuntime.start()
+        runtimeSessionID = await newRuntime.currentSessionID
 
         // After Smith starts the active-timers list may already contain restored wakes for
         // .scheduled tasks — refresh once so the View → Timers panel shows them.
@@ -2312,6 +2317,7 @@ final class AppViewModel {
         agentToolNames.removeAll()
         agentToolNamesByInstance.removeAll()
         inspectorStore.clearAll()
+        runtimeSessionID = nil
         // The channel stream is cancelled + awaited inside flushPersistence() below
         // (quiesceChannelStream), so any messages still buffered in the channel are drained
         // and persisted before we tear down rather than dropped here.
@@ -2814,37 +2820,20 @@ final class AppViewModel {
     /// spawned but hasn't posted to the channel yet is still active.
     func hasAgentActivity(_ role: AgentRole) -> Bool {
         if !(agentToolNames[role] ?? []).isEmpty { return true }
-        if !(inspectorStore.turnsByRole[role] ?? []).isEmpty { return true }
+        if (inspectorStore.callLogsByRole[role]?.lifetimeCount ?? 0) > 0 { return true }
         return !inspectorStore.contextMessages(for: role).isEmpty
     }
 
     // MARK: - Cost helpers
 
-    /// Estimated cost in USD for `role` over the **current session** (since the
-    /// last `OrchestrationRuntime.start()`). Walks `inspectorStore.turnsByRole[role]`
-    /// summing per-turn costs via the shared pricing snapshot. Memoized by turn
-    /// count — subsequent reads return the cached value until a new turn arrives,
-    /// so this is safe to call from a SwiftUI `body`.
+    /// Estimated cost in USD for `role` over the **current session** (since the last
+    /// `OrchestrationRuntime.start()`), read from `SharedAppState.runRoleUsage` — the
+    /// `UsageRecord`-backed rollup. It used to sum the inspector's retained turns, which
+    /// undercounted once the 100-turn bound evicted any and read zero for the Validator and
+    /// Summarizer, neither of which produces resident-agent turns.
     func sessionCost(for role: AgentRole) -> Double {
-        // Caching by `turnsByRole[role].count` is unsafe — `AgentInspectorStore`
-        // caps the array at 100 turns and drops the oldest when over, so a count
-        // that stays at 100 hides changing contents. SwiftUI already gates the
-        // surrounding card's body re-eval on `turnsByRole[role]` actually changing,
-        // so a 100-iteration walk per change is cheap and always correct.
-        let turns = inspectorStore.turnsByRole[role] ?? []
-        let lookup = shared.pricingLookup
-        var total: Double = 0
-        for turn in turns {
-            guard let usage = turn.usage else { continue }
-            guard let pricing = lookup(turn.providerID, turn.modelID) else { continue }
-            let rates = pricing.effectiveRates(totalInputTokens: usage.inputTokens)
-            let uncachedInput = max(0, usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens)
-            total += Double(uncachedInput) * (rates.input ?? 0)
-            total += Double(usage.outputTokens) * (rates.output ?? 0)
-            total += Double(usage.cacheReadTokens) * (rates.cacheRead ?? 0)
-            total += Double(usage.cacheWriteTokens) * (rates.cacheWrite ?? 0)
-        }
-        return total
+        guard let runtimeSessionID else { return 0 }
+        return shared.runRoleUsage[CostBoard.RunRoleKey(sessionID: runtimeSessionID, role: role)]?.cost ?? 0
     }
 
     /// Total estimated cost for a task, or `nil` if it has no usage records at all.

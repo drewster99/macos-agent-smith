@@ -15,7 +15,12 @@ private let inspectorTimestampFormatter: DateFormatter = {
 /// with latency timing.
 struct LLMTurnDisclosureRow: View, Equatable {
     let turn: LLMTurnRecord
+    /// The turn's stable lifetime ordinal — never its index in a retained array.
     let turnNumber: Int
+    /// Whether `turn.contextSnapshot` is present, and if not, why.
+    let snapshotRetention: InspectorCallLog.SnapshotRetention
+    /// How many recent turns keep their full context — named in the released-snapshot notice.
+    let snapshotWindow: Int
     /// Plain Bool (not a `@Binding`) so the nonisolated `==` below can read it — a `@Binding`'s
     /// wrapped value is main-actor-isolated and can't be touched from a nonisolated comparison.
     let isExpanded: Bool
@@ -38,6 +43,8 @@ struct LLMTurnDisclosureRow: View, Equatable {
     nonisolated static func == (lhs: LLMTurnDisclosureRow, rhs: LLMTurnDisclosureRow) -> Bool {
         lhs.turn == rhs.turn
         && lhs.turnNumber == rhs.turnNumber
+        && lhs.snapshotRetention == rhs.snapshotRetention
+        && lhs.snapshotWindow == rhs.snapshotWindow
         && lhs.isExpanded == rhs.isExpanded
     }
 
@@ -47,6 +54,10 @@ struct LLMTurnDisclosureRow: View, Equatable {
         // thunk that crashes IRGen in Swift 6.3.3 (assertion in SyncCallEmission::setArgs).
         DisclosureGroup(isExpanded: Binding(get: { isExpanded }, set: { onExpandedChange($0) }), content: {
             VStack(alignment: .leading, spacing: 8) {
+                if let annotation = turn.annotation {
+                    LLMCallAnnotationLine(annotation: annotation)
+                }
+
                 // --- Outgoing ---
                 if !turn.inputDelta.isEmpty {
                     turnSectionHeader("Outgoing", icon: "arrow.up.circle.fill", color: AppColors.inspectorOutgoing)
@@ -94,7 +105,11 @@ struct LLMTurnDisclosureRow: View, Equatable {
                         .padding(.leading, 4)
                 }
 
-                // Full context link
+                // Full context link, or why there is none.
+                if snapshotRetention != .retained {
+                    LLMTurnSnapshotNotice(retention: snapshotRetention, snapshotWindow: snapshotWindow)
+                        .padding(.top, 2)
+                }
                 if !turn.contextSnapshot.isEmpty {
                     Button(action: { showingFullContext = true }) {
                         Label("Full Context (\(turn.contextSnapshot.count) messages)", systemImage: "doc.text.magnifyingglass")

@@ -10,7 +10,7 @@ struct AgentInspectorWindowSections: View {
     let recentToolUses: [ChannelMessage]
     let recentMessages: [ChannelMessage]
     let contextMessages: [LLMMessage]
-    let llmTurns: [LLMTurnRecord]
+    let callLog: InspectorCallLog?
     @Binding var expandedTurnIDs: Set<UUID>
     let onSendDirectMessage: (String) -> Void
 
@@ -52,35 +52,8 @@ struct AgentInspectorWindowSections: View {
                     }
                 }
 
-                if !llmTurns.isEmpty {
-                    InspectorSection(title: "LLM Turns (\(llmTurns.count))") {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(llmTurns.enumerated()), id: \.element.id) { i, turn in
-                                LLMTurnDisclosureRow(
-                                    turn: turn,
-                                    turnNumber: i + 1,
-                                    isExpanded: expandedTurnIDs.contains(turn.id),
-                                    onExpandedChange: { expand in
-                                        if expand { expandedTurnIDs.insert(turn.id) }
-                                        else { expandedTurnIDs.remove(turn.id) }
-                                    }
-                                )
-                                .equatable()
-                            }
-                        }
-                    }
-                    .onAppear {
-                        // Project rule: defer @State / @Binding mutations out of SwiftUI
-                        // lifecycle closures so they can't race the active render pass.
-                        if let last = llmTurns.last {
-                            DispatchQueue.main.async { expandedTurnIDs.insert(last.id) }
-                        }
-                    }
-                    .onChange(of: llmTurns.count) {
-                        if let last = llmTurns.last {
-                            DispatchQueue.main.async { expandedTurnIDs.insert(last.id) }
-                        }
-                    }
+                if let callLog, callLog.lifetimeCount > 0 {
+                    LLMCallLogSection(log: callLog, expandedCallIDs: $expandedTurnIDs, expandsNewestCall: true)
                 }
 
                 InspectorSection(title: "Direct Message") {

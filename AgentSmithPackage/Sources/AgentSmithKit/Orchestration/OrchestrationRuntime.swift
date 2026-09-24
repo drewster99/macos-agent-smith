@@ -177,7 +177,7 @@ public actor OrchestrationRuntime {
     /// Callback fired when an agent comes online, passing its role and configured tool names.
     private var onAgentStarted: (@Sendable (AgentInstanceRef, [String]) -> Void)?
     /// Callback fired when an agent records a new LLM turn, for incremental UI updates.
-    private var onTurnRecorded: (@Sendable (AgentInstanceRef, LLMTurnRecord) -> Void)?
+    private var onLLMCallRecorded: (@Sendable (AgentInstanceRef, LLMCallEvent) -> Void)?
     /// Fired when an agent learns a model's true maximum output-token limit from a backend
     /// rejection. Args: `(providerID, modelID, limit)`. The app layer persists the limit as
     /// a catalog override so future provider builds clamp to it.
@@ -1811,9 +1811,10 @@ public actor OrchestrationRuntime {
         onAgentStarted = handler
     }
 
-    /// Registers a callback fired when any agent records a new LLM turn.
-    public func setOnTurnRecorded(_ handler: @escaping @Sendable (AgentInstanceRef, LLMTurnRecord) -> Void) {
-        onTurnRecorded = handler
+    /// Registers a callback fired after every provider call made on behalf of an inspector
+    /// subject — a completed turn or a failed attempt.
+    public func setOnLLMCallRecorded(_ handler: @escaping @Sendable (AgentInstanceRef, LLMCallEvent) -> Void) {
+        onLLMCallRecorded = handler
     }
 
     public func setOnLearnedModelOutputLimit(_ handler: @escaping @Sendable (String, String, Int) -> Void) {
@@ -2384,8 +2385,8 @@ public actor OrchestrationRuntime {
         if let evalCallback = onEvaluationRecorded {
             await smithEvaluator.setOnEvaluationRecorded(evalCallback)
         }
-        if let turnCallback = onTurnRecorded {
-            await smithEvaluator.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .securityAgent, instanceID: id), turn) }
+        if let callCallback = onLLMCallRecorded {
+            await smithEvaluator.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .securityAgent, instanceID: id), event) }
         }
         await smithAgent.setSecurityEvaluator(smithEvaluator)
 
@@ -2420,8 +2421,8 @@ public actor OrchestrationRuntime {
             guard let broker else { return [] }
             return await broker.drainPendingDeliveries(for: .smith).map(\.text)
         }
-        if let turnCallback = onTurnRecorded {
-            await smithAgent.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .smith, instanceID: id), turn) }
+        if let callCallback = onLLMCallRecorded {
+            await smithAgent.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .smith, instanceID: id), event) }
         }
         if let contextCallback = onContextChanged {
             await smithAgent.setOnContextChanged { messages in contextCallback(AgentInstanceRef(role: .smith, instanceID: id), messages) }
@@ -3250,7 +3251,7 @@ public actor OrchestrationRuntime {
     /// Stops all agents and the monitoring timer.
     ///
     /// `preserveObserverCallbacks: true` keeps the AppViewModel-set observer closures
-    /// (`onTurnRecorded`, `onEvaluationRecorded`, `onContextChanged`, `onAgentStarted`,
+    /// (`onLLMCallRecorded`, `onEvaluationRecorded`, `onContextChanged`, `onAgentStarted`,
     /// `onAbort`, `onTimerEventForChannel`) alive across the stop. Used by
     /// `restartForNewTask`, which calls `stopAll` then `start` on the SAME runtime
     /// instance — clearing the callbacks left every subsequent run blind to inspector
@@ -3386,7 +3387,7 @@ public actor OrchestrationRuntime {
         onProcessingStateChange = nil
         onToolExecutionStateChange = nil
         onAgentStarted = nil
-        onTurnRecorded = nil
+        onLLMCallRecorded = nil
         onEvaluationRecorded = nil
         onContextChanged = nil
         onTimerEventForChannel = nil
@@ -3401,7 +3402,7 @@ public actor OrchestrationRuntime {
             && onProcessingStateChange == nil
             && onToolExecutionStateChange == nil
             && onAgentStarted == nil
-            && onTurnRecorded == nil
+            && onLLMCallRecorded == nil
             && onEvaluationRecorded == nil
             && onContextChanged == nil
             && onTimerEventForChannel == nil
@@ -3573,8 +3574,8 @@ public actor OrchestrationRuntime {
         // Forward Security Agent's LLM turn records so the inspector shows the security agent's per-session
         // token usage and cost (previously empty — Security Agent produced no turn records, so its card
         // always read 0 tokens / $0.00 even though its usage was in the global UsageStore).
-        if let turnCallback = onTurnRecorded {
-            await evaluator.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .securityAgent, instanceID: brownID), turn) }
+        if let callCallback = onLLMCallRecorded {
+            await evaluator.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .securityAgent, instanceID: brownID), event) }
         }
 
         // Brown's message filter: drop security review messages and tool execution trace messages.
@@ -3755,8 +3756,8 @@ public actor OrchestrationRuntime {
         }
         await brownAgent.setUsageStore(usageStore)
         await brownAgent.setSessionID(currentSessionID)
-        if let turnCallback = onTurnRecorded {
-            await brownAgent.setOnTurnRecorded { turn in turnCallback(AgentInstanceRef(role: .brown, instanceID: brownID), turn) }
+        if let callCallback = onLLMCallRecorded {
+            await brownAgent.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .brown, instanceID: brownID), event) }
         }
         if let contextCallback = onContextChanged {
             await brownAgent.setOnContextChanged { messages in contextCallback(AgentInstanceRef(role: .brown, instanceID: brownID), messages) }
@@ -4259,7 +4260,7 @@ public actor OrchestrationRuntime {
             },
             // Capture the runtime callback by value (not `self`) so this @Sendable closure
             // can fire from the agent's context without an actor hop — mirrors how
-            // `onTurnRecorded` is threaded to agents.
+            // `onLLMCallRecorded` is threaded to agents.
             onLearnedModelOutputLimit: { providerID, modelID, limit in
                 learnedLimitCallback?(providerID, modelID, limit)
             }

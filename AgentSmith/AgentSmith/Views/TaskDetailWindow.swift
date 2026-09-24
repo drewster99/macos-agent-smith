@@ -1492,25 +1492,7 @@ private struct TaskDetailDebugTextBox: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                TaskDetailCopyButton(text: text)
-            }
-            ScrollView(.vertical) {
-                Text(text)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
-            }
-            .frame(maxHeight: 220)
-            .background(AppColors.secondaryBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
+        TranscriptTextBox(title: title, text: text, accessory: TaskDetailCopyButton(text: text))
     }
 }
 

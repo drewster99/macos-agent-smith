@@ -9,21 +9,23 @@ import SwiftLLMKit
 @Observable
 @MainActor
 final class AgentInspectorStore {
-    /// Per-turn LLM call records, pushed incrementally as each turn completes.
-    /// Old turns beyond `recentSnapshotWindow` have their contextSnapshot stripped
-    /// to prevent O(n^2) memory growth on long sessions.
-    var turnsByRole: [AgentRole: [LLMTurnRecord]] = [:]
+    /// Per-role provider-call logs: completed turns and failed attempts, with stable lifetime
+    /// ordinals and explicit eviction/snapshot-release facts (see `InspectorCallLog`).
+    var callLogsByRole: [AgentRole: InspectorCallLog] = [:]
 
-    /// Per-INSTANCE turn records (the M2 re-key): keyed by `AgentInstanceRef` so concurrent
-    /// workers of the same role stay distinct. Populated alongside `turnsByRole`, which
-    /// remains the role-collapsed view the current inspector cards read.
-    var turnsByInstance: [AgentInstanceRef: [LLMTurnRecord]] = [:]
+    /// Per-INSTANCE call logs (the M2 re-key): keyed by `AgentInstanceRef` so concurrent
+    /// workers of the same role stay distinct. Populated alongside `callLogsByRole`, which
+    /// remains the role-collapsed view the current inspector cards read. Keeps no full context
+    /// snapshots — the live context is available via `liveContextsByInstance`.
+    var callLogsByInstance: [AgentInstanceRef: InspectorCallLog] = [:]
 
-    /// Maximum number of turn records kept per role. Oldest are dropped when exceeded.
-    private static let maxTurnRecords = 100
+    /// Maximum number of calls retained per role/instance. Oldest are evicted when exceeded —
+    /// visibly, via `InspectorCallLog.evictedCount`.
+    static let maxRetainedCalls = 100
 
-    /// Only the most recent N turns per role retain their full contextSnapshot.
-    private static let recentSnapshotWindow = 10
+    /// Only the most recent N completed turns per role retain their full contextSnapshot, to
+    /// prevent O(n^2) memory growth on long sessions.
+    static let recentSnapshotWindow = 10
 
     /// Live conversation history for each agent, pushed on every material change.
     var liveContexts: [AgentRole: [LLMMessage]] = [:]
@@ -43,33 +45,28 @@ final class AgentInspectorStore {
 
     // MARK: - Push API (called from runtime callbacks)
 
-    /// Appends a newly completed LLM turn for the given agent role.
+    /// Appends one provider call — a completed turn or a failed attempt — for the given agent.
     ///
     /// Reassigns through the dictionary key rather than mutating in place via
-    /// `[key, default: []].append(...)`. The Observation framework's per-property
+    /// `[key, default: ...].append(...)`. The Observation framework's per-property
     /// change tracking on @Observable types reliably fires on subscript-assignment
     /// (`dict[key] = newValue`) but not always on chained mutating-method calls
-    /// through a default subscript, so SwiftUI views observing `turnsByRole`
+    /// through a default subscript, so SwiftUI views observing `callLogsByRole`
     /// would otherwise miss appends and never re-render the LLM Turns section.
-    func appendTurn(_ turn: LLMTurnRecord, for ref: AgentInstanceRef) {
-        var turns = turnsByRole[ref.role] ?? []
-        turns.append(turn)
-        turnsByRole[ref.role] = turns
-        pruneOldTurnSnapshots(for: ref.role)
+    func appendCall(_ event: LLMCallEvent, for ref: AgentInstanceRef) {
+        var roleLog = callLogsByRole[ref.role] ?? Self.makeRoleLog()
+        roleLog.append(event)
+        callLogsByRole[ref.role] = roleLog
 
-        // Per-instance mirror (the re-key), bounded so a long run with many workers can't
-        // grow it without limit: capped per instance, LRU-evicted by instance count (see
-        // touchInstance), and each stored copy has its heavy contextSnapshot stripped — the
-        // live context is available via liveContextsByInstance.
-        var lightweight = turn
-        lightweight.stripContextSnapshot()
-        var instanceTurns = turnsByInstance[ref] ?? []
-        instanceTurns.append(lightweight)
-        if instanceTurns.count > Self.maxTurnRecords {
-            instanceTurns.removeFirst(instanceTurns.count - Self.maxTurnRecords)
-        }
-        turnsByInstance[ref] = instanceTurns
+        var instanceLog = callLogsByInstance[ref]
+            ?? InspectorCallLog(capacity: Self.maxRetainedCalls, snapshotWindow: 0)
+        instanceLog.append(event)
+        callLogsByInstance[ref] = instanceLog
         touchInstance(ref)
+    }
+
+    private static func makeRoleLog() -> InspectorCallLog {
+        InspectorCallLog(capacity: maxRetainedCalls, snapshotWindow: recentSnapshotWindow)
     }
 
     /// Records the most-recent touch for `ref` and evicts the least-recently-updated
@@ -81,33 +78,8 @@ final class AgentInspectorStore {
         instanceTouchOrder.append(ref)
         while instanceTouchOrder.count > Self.maxTrackedInstances {
             let evicted = instanceTouchOrder.removeFirst()
-            turnsByInstance[evicted] = nil
+            callLogsByInstance[evicted] = nil
             liveContextsByInstance[evicted] = nil
-        }
-    }
-
-    /// Caps turn record count and strips contextSnapshot from older turns for a given role.
-    private func pruneOldTurnSnapshots(for role: AgentRole) {
-        guard var turns = turnsByRole[role] else { return }
-        var modified = false
-
-        // Drop oldest records when exceeding the hard cap.
-        if turns.count > Self.maxTurnRecords {
-            turns.removeFirst(turns.count - Self.maxTurnRecords)
-            modified = true
-        }
-
-        // Strip heavy snapshots from turns outside the recent window.
-        let stripCount = turns.count - Self.recentSnapshotWindow
-        if stripCount > 0 {
-            for i in 0..<stripCount where !turns[i].contextSnapshot.isEmpty {
-                turns[i].stripContextSnapshot()
-                modified = true
-            }
-        }
-
-        if modified {
-            turnsByRole[role] = turns
         }
     }
 
@@ -165,14 +137,14 @@ final class AgentInspectorStore {
 
     /// Clears all data for a specific agent role (e.g. when agent is replaced).
     func clear(for role: AgentRole) {
-        turnsByRole[role] = nil
+        callLogsByRole[role] = nil
         liveContexts[role] = nil
     }
 
     /// Clears all inspector data (e.g. on full stop/reset).
     func clearAll() {
-        turnsByRole.removeAll()
-        turnsByInstance.removeAll()
+        callLogsByRole.removeAll()
+        callLogsByInstance.removeAll()
         liveContexts.removeAll()
         liveContextsByInstance.removeAll()
         instanceTouchOrder.removeAll()
@@ -181,9 +153,14 @@ final class AgentInspectorStore {
 
     // MARK: - Derived accessors
 
+    /// Retained completed turns for a role, oldest first.
+    func retainedTurns(for role: AgentRole) -> [LLMTurnRecord] {
+        callLogsByRole[role]?.retainedTurns ?? []
+    }
+
     /// Returns the live conversation history for a role, falling back to the latest turn snapshot.
     func contextMessages(for role: AgentRole) -> [LLMMessage] {
-        liveContexts[role] ?? turnsByRole[role]?.last?.contextSnapshot ?? []
+        liveContexts[role] ?? callLogsByRole[role]?.retainedTurns.last?.contextSnapshot ?? []
     }
 
     /// Extracts the current system prompt for a role from its context.

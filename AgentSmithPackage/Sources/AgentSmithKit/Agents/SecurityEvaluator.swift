@@ -437,7 +437,7 @@ actor SecurityEvaluator {
     /// Fires after each Security Agent LLM call so the inspector's per-agent token/cost view for the
     /// security agent is populated (Security Agent is a SecurityEvaluator, not an AgentActor, so without
     /// this it never produced turn records and showed 0 tokens / $0.00).
-    private var onTurnRecorded: (@Sendable (LLMTurnRecord) -> Void)?
+    private var onLLMCallRecorded: (@Sendable (LLMCallEvent) -> Void)?
 
     /// Token usage store for persistent analytics.
     private let usageStore: UsageStore?
@@ -555,14 +555,14 @@ actor SecurityEvaluator {
 
     /// Registers a callback fired after each Security Agent LLM call, carrying a turn record so the
     /// inspector can show the security agent's per-session token usage and cost.
-    public func setOnTurnRecorded(_ handler: @escaping @Sendable (LLMTurnRecord) -> Void) {
-        onTurnRecorded = handler
+    public func setOnLLMCallRecorded(_ handler: @escaping @Sendable (LLMCallEvent) -> Void) {
+        onLLMCallRecorded = handler
     }
 
     /// Builds and emits a turn record for one Security Agent LLM call.
     private func emitTurnRecord(response: LLMResponse, latencyMs: Int, messageCount: Int) {
-        guard let onTurnRecorded else { return }
-        onTurnRecorded(LLMTurnRecord(
+        guard let onLLMCallRecorded else { return }
+        onLLMCallRecorded(.completed(LLMTurnRecord(
             inputDelta: [],
             response: response,
             totalMessageCount: messageCount,
@@ -574,7 +574,7 @@ actor SecurityEvaluator {
             maxOutputTokens: configuration?.maxTokens ?? 0,
             thinkingBudget: configuration?.thinkingBudget,
             usage: response.usage
-        ))
+        )))
     }
 
     /// Drops any evaluations still registered for an agent that is shutting down.

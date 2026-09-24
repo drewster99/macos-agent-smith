@@ -488,8 +488,9 @@ public actor AgentActor {
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     )
 
-    /// Fires after each LLM turn is recorded, pushing the turn to the UI layer.
-    private var onTurnRecorded: (@Sendable (LLMTurnRecord) -> Void)?
+    /// Fires after each provider call — a recorded turn or a failed attempt — pushing it to the
+    /// UI layer.
+    private var onLLMCallRecorded: (@Sendable (LLMCallEvent) -> Void)?
 
     /// Fires when the conversation history changes, pushing a live snapshot to the UI layer.
     private var onContextChanged: (@Sendable ([LLMMessage]) -> Void)?
@@ -608,9 +609,9 @@ public actor AgentActor {
         sessionID = id
     }
 
-    /// Registers a callback fired after each LLM turn is recorded.
-    public func setOnTurnRecorded(_ handler: @escaping @Sendable (LLMTurnRecord) -> Void) {
-        onTurnRecorded = handler
+    /// Registers a callback fired after each provider call, completed or failed.
+    public func setOnLLMCallRecorded(_ handler: @escaping @Sendable (LLMCallEvent) -> Void) {
+        onLLMCallRecorded = handler
     }
 
     /// Registers a callback fired when the conversation history changes materially.
@@ -971,7 +972,7 @@ public actor AgentActor {
         // Drop UI/runtime observer callbacks now that the agent has shut down.
         // Releases the strong references those closures hold against the app
         // layer's view model so a stopped agent can be deinitialized cleanly.
-        onTurnRecorded = nil
+        onLLMCallRecorded = nil
         onContextChanged = nil
         smithDigestProvider = nil
         drainNotifications = nil
@@ -1576,11 +1577,24 @@ public actor AgentActor {
                 let outputCapOverride = learnedMaxOutputCeiling.map {
                     min(configuration.llmConfig.maxTokens, $0)
                 }
-                let response = try await provider.send(
-                    messages: messagesForLLM,
-                    tools: toolDefinitions,
-                    overrides: LLMCallOverrides(maxOutputTokens: outputCapOverride)
-                )
+                let response: LLMResponse
+                do {
+                    response = try await provider.send(
+                        messages: messagesForLLM,
+                        tools: toolDefinitions,
+                        overrides: LLMCallOverrides(maxOutputTokens: outputCapOverride)
+                    )
+                } catch {
+                    // Reported here, not in the outer catch: that one also receives tool errors
+                    // from `handleResponse`, which are not failed provider calls.
+                    onLLMCallRecorded?(.failed(LLMCallFailureRecord(
+                        error: error,
+                        startedAt: llmStartTime,
+                        modelID: configuration.llmConfig.model,
+                        providerID: configuration.llmConfig.providerID
+                    )))
+                    throw error
+                }
                 let llmLatencyMs = Int(Date().timeIntervalSince(llmStartTime) * 1000)
                 guard isRunning else { break }
                 // Re-check the lease after the (possibly minutes-long) LLM call, BEFORE any
@@ -1619,7 +1633,7 @@ public actor AgentActor {
                 )
                 llmTurns.append(turnRecord)
                 pruneOldTurnSnapshots()
-                onTurnRecorded?(turnRecord)
+                onLLMCallRecorded?(.completed(turnRecord))
 
                 // Capture task context at the moment of the LLM call, before
                 // handleResponse runs any tools that might change it (e.g. task_complete).

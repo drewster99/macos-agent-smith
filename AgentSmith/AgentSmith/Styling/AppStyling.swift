@@ -107,6 +107,14 @@ enum AppColors {
     static let inspectorReasoning = Color.purple
     /// Tool-call arg label color in the per-turn inspector.
     static let inspectorToolCallArg = Color.orange
+    /// A provider call that failed before any response existed.
+    static let inspectorCallFailed = Color.red
+    /// Row background behind a failed provider call.
+    static let inspectorCallFailedBackground = Color.red.opacity(0.08)
+    /// Badge naming the typed operation that issued a provider call.
+    static let inspectorOperationBadge = Color.teal
+    /// Notice that part of a record was released or never captured.
+    static let inspectorRetentionNotice = Color.secondary
 
     // MARK: - Diff view
 

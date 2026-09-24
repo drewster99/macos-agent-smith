@@ -230,7 +230,7 @@ struct CallbackClearingTests {
         await runtime.setOnAbort { _ in }
         await runtime.setOnProcessingStateChange { _, _ in }
         await runtime.setOnAgentStarted { _, _ in }
-        await runtime.setOnTurnRecorded { _, _ in }
+        await runtime.setOnLLMCallRecorded { _, _ in }
         await runtime.setOnEvaluationRecorded { _ in }
         await runtime.setOnContextChanged { _, _ in }
         await runtime.setOnTimerEventForChannel { _ in }
@@ -255,7 +255,7 @@ struct CallbackClearingTests {
         await runtime.setOnAbort { _ in }
         await runtime.setOnProcessingStateChange { _, _ in }
         await runtime.setOnAgentStarted { _, _ in }
-        await runtime.setOnTurnRecorded { _, _ in }
+        await runtime.setOnLLMCallRecorded { _, _ in }
         await runtime.setOnEvaluationRecorded { _ in }
         await runtime.setOnContextChanged { _, _ in }
         await runtime.setOnTimerEventForChannel { _ in }

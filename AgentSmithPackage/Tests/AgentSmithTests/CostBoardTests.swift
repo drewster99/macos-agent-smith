@@ -60,11 +60,12 @@ struct CostBoardTests {
         input: Int = 100,
         output: Int = 50,
         taskID: UUID? = nil,
-        sessionID: UUID? = nil
+        sessionID: UUID? = nil,
+        role: AgentRole = .brown
     ) -> UsageRecord {
         UsageRecord(
             timestamp: timestamp,
-            agentRole: .brown,
+            agentRole: role,
             taskID: taskID,
             modelID: "test-model",
             providerType: "test",
@@ -310,6 +311,34 @@ struct CostBoardTests {
         let costs = await board.taskUsage
         #expect(abs((costs[taskID]?.cost ?? 0) - expectedCost(input: 500, output: 500)) < 0.0001,
                 "the backfilled records should now be charged to the task")
+        await board.stop()
+    }
+
+    @Test("run-role rollup groups by run and role, independent of task attribution")
+    func runRoleUsageGroupsByRunAndRole() async throws {
+        let (store, _) = await makeStore()
+        let currentRun = UUID()
+        let priorRun = UUID()
+        // Every role's spend counts, including roles that produce no inspector turns
+        // (validator, summarizer) and calls attributed to no task.
+        await store.append(record(at: Date(), input: 100, output: 0, taskID: UUID(), sessionID: currentRun, role: .validator))
+        await store.append(record(at: Date(), input: 200, output: 0, taskID: nil, sessionID: currentRun, role: .validator))
+        await store.append(record(at: Date(), input: 300, output: 0, taskID: nil, sessionID: currentRun, role: .summarizer))
+        await store.append(record(at: Date(), input: 400, output: 0, taskID: nil, sessionID: priorRun, role: .validator))
+        await store.append(record(at: Date(), input: 500, output: 0, taskID: nil, sessionID: nil, role: .validator))
+
+        let board = CostBoard(usageStore: store, pricingLookup: Self.lookup)
+        await board.bootstrap()
+        let usage = await board.runRoleUsage
+
+        let currentValidator = usage[CostBoard.RunRoleKey(sessionID: currentRun, role: .validator)]
+        #expect(currentValidator?.inputTokens == 300)
+        #expect(abs((currentValidator?.cost ?? 0) - expectedCost(input: 300, output: 0)) < 0.0001)
+        #expect(usage[CostBoard.RunRoleKey(sessionID: currentRun, role: .summarizer)]?.inputTokens == 300)
+        #expect(usage[CostBoard.RunRoleKey(sessionID: priorRun, role: .validator)]?.inputTokens == 400)
+        #expect(usage[CostBoard.RunRoleKey(sessionID: currentRun, role: .smith)] == nil)
+        // A record with no run id belongs to no run.
+        #expect(usage.values.reduce(0) { $0 + $1.inputTokens } == 1000)
         await board.stop()
     }
 

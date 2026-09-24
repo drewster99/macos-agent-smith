@@ -360,6 +360,10 @@ final class SharedAppState {
     /// task's numbers climb while it runs instead of freezing at view-appear time.
     private(set) var taskUsage: [UUID: CostBoard.TaskUsage] = [:]
 
+    /// Live cost and token totals per (runtime run, role) — the main-thread mirror of
+    /// `CostBoard.runRoleUsage`, and the only source the inspector's per-role session cost reads.
+    private(set) var runRoleUsage: [CostBoard.RunRoleKey: CostBoard.TaskUsage] = [:]
+
     /// Snapshot of LiteLLM pricing keyed by `"providerID/modelID"`. Built once
     /// after the model catalog refresh completes. Handed to `CostBoard` and to
     /// any per-session cost helpers via the `pricingLookup` closure.
@@ -827,6 +831,9 @@ final class SharedAppState {
         }
         await board.setOnTaskUsageUpdate { [weak self] totals in
             await MainActor.run { self?.taskUsage = totals }
+        }
+        await board.setOnRunRoleUsageUpdate { [weak self] totals in
+            await MainActor.run { self?.runRoleUsage = totals }
         }
         await board.bootstrap()
         costBoard = board

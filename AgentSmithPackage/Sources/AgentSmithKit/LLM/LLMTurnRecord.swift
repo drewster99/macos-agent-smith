@@ -36,6 +36,9 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
     public let thinkingBudget: Int?
     /// Token usage reported by the provider for this turn, if available.
     public let usage: TokenUsage?
+    /// Why the call was made, for callers whose calls are not turns of a resident agent's
+    /// conversation. Nil for Smith/Brown turns, whose conversation is its own explanation.
+    public let annotation: LLMCallAnnotation?
 
     public init(
         id: UUID = UUID(),
@@ -51,7 +54,8 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         temperature: Double = 0,
         maxOutputTokens: Int = 0,
         thinkingBudget: Int? = nil,
-        usage: TokenUsage? = nil
+        usage: TokenUsage? = nil,
+        annotation: LLMCallAnnotation? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -67,6 +71,7 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         self.maxOutputTokens = maxOutputTokens
         self.thinkingBudget = thinkingBudget
         self.usage = usage
+        self.annotation = annotation
     }
 
     /// Releases the heavy context snapshot to reclaim memory on older turn records.
