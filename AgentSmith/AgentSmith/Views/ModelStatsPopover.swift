@@ -77,6 +77,15 @@ struct ModelStatsPopover: View {
     let turns: [LLMTurnRecord]
     let modelID: String
     let role: AgentRole
+    /// Every call this run, completed or failed, including those no longer retained; nil when
+    /// unknown. When `turns` covers fewer, the figures describe only the retained turns and the
+    /// popover says so rather than presenting them as session totals.
+    var lifetimeCallCount: Int?
+
+    private var coverageNote: String? {
+        guard let lifetimeCallCount, lifetimeCallCount > turns.count else { return nil }
+        return "Figures cover the latest \(turns.count) completed calls of \(lifetimeCallCount) this run (older calls are no longer retained; failed calls carry no usage)."
+    }
 
     var body: some View {
         // Compute once per body. The earlier `private var stats: ModelStats` was rebuilt
@@ -90,6 +99,13 @@ struct ModelStatsPopover: View {
             Text(modelID)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if let coverageNote {
+                Text(coverageNote)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Divider()
 

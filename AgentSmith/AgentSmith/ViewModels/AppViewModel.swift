@@ -368,7 +368,8 @@ final class AppViewModel {
     private var capabilityCatalogMissNoticeShown: Set<String> = []
     private var runtime: OrchestrationRuntime?
     /// The id `runtime` stamps on every `UsageRecord` of its current run — the key the per-role
-    /// session cost reads. Nil while no run is live.
+    /// session cost reads. Pushed by the runtime whenever a run begins (it restarts runs on its
+    /// own); nil while no run is live.
     private(set) var runtimeSessionID: UUID?
     /// Debounces provider rebuilds so a burst of Settings edits (every model field commits) results
     /// in a single `makeProvider`/keychain pass once editing settles, not one per keystroke.
@@ -1195,6 +1196,12 @@ final class AppViewModel {
         )
         await liveTaskStore.autoArchiveStaleCompletedIfEnabled()
 
+        await newRuntime.setOnRunSessionChanged { [weak self] sessionID in
+            Task { @MainActor [weak self] in
+                self?.runtimeSessionID = sessionID
+            }
+        }
+
         await newRuntime.setOnLLMCallRecorded { [weak self] ref, event in
             Task { @MainActor [weak self] in
                 self?.inspectorStore.appendCall(event, for: ref)
@@ -1384,7 +1391,6 @@ final class AppViewModel {
         )
 
         await newRuntime.start()
-        runtimeSessionID = await newRuntime.currentSessionID
 
         // After Smith starts the active-timers list may already contain restored wakes for
         // .scheduled tasks — refresh once so the View → Timers panel shows them.

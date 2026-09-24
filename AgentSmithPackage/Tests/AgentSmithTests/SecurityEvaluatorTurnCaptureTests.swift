@@ -55,9 +55,11 @@ struct SecurityEvaluatorTurnCaptureTests {
 
         let turns = collector.turns
         #expect(turns.count == 1)
-        #expect(turns.first?.inputDelta == provider.receivedRequests.first)
+        #expect(turns.first?.outgoingMessages == provider.receivedRequests.first)
         #expect(turns.first?.contextSnapshot == provider.receivedRequests.first)
-        #expect(turns.first?.inputDelta.first?.role == .system)
+        #expect(turns.first?.outgoingMessages.first?.role == .system)
+        #expect(turns.first?.isSelfContainedRequest == true)
+        #expect(turns.first?.inputDelta.isEmpty == true, "the request is recorded once, as the snapshot")
         #expect(turns.first?.annotation?.operation == .securityToolReview(toolName: "bash"))
         #expect(turns.first?.annotation?.taskID == taskID)
         #expect(turns.first?.annotation?.taskTitle == "Capture task")
@@ -77,7 +79,7 @@ struct SecurityEvaluatorTurnCaptureTests {
         let turns = collector.turns
         #expect(turns.count == 2)
         #expect(turns.first?.response.text == "I am not sure what to say")
-        #expect(turns.map(\.inputDelta) == provider.receivedRequests)
+        #expect(turns.map(\.outgoingMessages) == provider.receivedRequests)
         #expect(turns.map { $0.annotation?.callNumberWithinOperation } == [1, 2])
         #expect(collector.failures.isEmpty)
     }
@@ -94,14 +96,14 @@ struct SecurityEvaluatorTurnCaptureTests {
         let turns = collector.turns
         let requests = provider.receivedRequests
         #expect(turns.count == 2)
-        #expect(turns.map(\.inputDelta) == requests)
+        #expect(turns.map(\.outgoingMessages) == requests)
         // The first request precedes the tool round; the second includes the assistant tool call
         // and its tool result.
         #expect(requests.count == 2)
         #expect(requests[0].count == 2)
         #expect(requests[1].count == 4)
         #expect(requests[1][2].role == .assistant)
-        #expect(turns[0].inputDelta.count == 2, "the first turn must not absorb the later tool round")
+        #expect(turns[0].outgoingMessages.count == 2, "the first turn must not absorb the later tool round")
     }
 
     @Test("the forced-verdict instruction appears in the request that carried it")
@@ -114,9 +116,9 @@ struct SecurityEvaluatorTurnCaptureTests {
 
         let turns = collector.turns
         #expect(turns.count == 17)
-        let lastRequestText = turns.last?.inputDelta.last?.content.textValue ?? ""
+        let lastRequestText = turns.last?.outgoingMessages.last?.content.textValue ?? ""
         #expect(lastRequestText.contains("reached the evidence-gathering limit"))
-        #expect(turns.map(\.inputDelta) == provider.receivedRequests)
+        #expect(turns.map(\.outgoingMessages) == provider.receivedRequests)
     }
 
     @Test("a thrown provider call is a failure record, never a turn")
@@ -149,7 +151,7 @@ struct SecurityEvaluatorTurnCaptureTests {
         #expect(result.succeeded)
         let turns = collector.turns
         #expect(turns.count == 1)
-        #expect(turns.first?.inputDelta == provider.receivedRequests.first)
+        #expect(turns.first?.outgoingMessages == provider.receivedRequests.first)
         #expect(turns.first?.annotation?.operation == .securityToolScoping)
         #expect(turns.first?.annotation?.taskID == taskID)
     }

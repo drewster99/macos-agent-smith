@@ -914,7 +914,7 @@ public actor MemoryStore {
             correlationID: correlationID,
             latencyMs: ms,
             embedMs: embedMs,
-            memoryScanMs: memorySearchMs,
+            memoryScanMs: limit > 0 ? memorySearchMs : nil,
             taskScanMs: nil,
             memories: MemoryQueryActivity.memoryOutcome(searched: limit > 0, results: results),
             taskSummaries: .notSearched
@@ -1074,7 +1074,7 @@ public actor MemoryStore {
             latencyMs: ms,
             embedMs: embedMs,
             memoryScanMs: nil,
-            taskScanMs: taskSearchMs,
+            taskScanMs: limit > 0 ? taskSearchMs : nil,
             memories: .notSearched,
             taskSummaries: MemoryQueryActivity.taskOutcome(searched: limit > 0, results: results)
         )), at: start)

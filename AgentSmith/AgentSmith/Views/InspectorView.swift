@@ -464,7 +464,8 @@ private struct AgentCard: View {
             // 28 = 12 (container) + 8 (dot) + 8 (spacing), so this aligns with the agent's name.
             if let config = modelConfig {
                 AgentCardModelInfoLine(modelConfig: config, llmTurns: llmTurns,
-                                       role: role, shared: viewModel.shared)
+                                       role: role, shared: viewModel.shared,
+                                       lifetimeCallCount: data.callLog?.lifetimeCount)
                     .padding(.leading, 28).padding(.trailing, 12).padding(.bottom, 2)
             }
             AgentCardSessionCostLine(cost: viewModel.sessionCost(for: role))
@@ -688,7 +689,7 @@ private struct RoleAgentCardWatchers: ViewModifier {
             .onChange(of: roleMessages) { _, _ in onRecompute() }
             .onChange(of: viewModel.inspectorStore.callLogsByRole[role]) { _, _ in onRecompute() }
             .onChange(of: viewModel.inspectorStore.liveContexts[role]) { _, _ in onRecompute() }
-            .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationRecords.count : 0) { _, _ in onRecompute() }
+            .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationLifetimeCount : 0) { _, _ in onRecompute() }
             .onChange(of: viewModel.processingRoles.contains(role)) { _, _ in onRecompute() }
             // The Security Agent's busy state also comes from the evaluation registry, so that has
             // to wake the recompute too or its card stays dark through every per-call review.

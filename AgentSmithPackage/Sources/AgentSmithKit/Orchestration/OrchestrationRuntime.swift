@@ -119,6 +119,9 @@ public actor OrchestrationRuntime {
 
     /// Summarizer for generating task summaries after completion/failure.
     private var taskSummarizer: TaskSummarizer?
+    /// The inspector subject for Summarizer-billed calls this run — the summarizer instance's own
+    /// calls and Smith's context compaction share it, so they form one Summarizer call log.
+    private var summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
 
     var llmProviders: [AgentRole: any LLMProvider]
     var llmConfigs: [AgentRole: ModelConfiguration]
@@ -178,6 +181,10 @@ public actor OrchestrationRuntime {
     private var onAgentStarted: (@Sendable (AgentInstanceRef, [String]) -> Void)?
     /// Callback fired when an agent records a new LLM turn, for incremental UI updates.
     private var onLLMCallRecorded: (@Sendable (AgentInstanceRef, LLMCallEvent) -> Void)?
+    /// Fires with the new run's session id whenever a run begins, and with nil when a start is
+    /// abandoned. A runtime begins new runs on its own (a cold `restartForNewTask`, a start
+    /// scheduled by a pending user message), so observers cannot learn the id once at `start()`.
+    private var onRunSessionChanged: (@Sendable (UUID?) -> Void)?
     /// Fired when an agent learns a model's true maximum output-token limit from a backend
     /// rejection. Args: `(providerID, modelID, limit)`. The app layer persists the limit as
     /// a catalog override so future provider builds clamp to it.
@@ -639,6 +646,11 @@ public actor OrchestrationRuntime {
             .user(transcript)
         ]
 
+        // Billed to whichever role's model made the call, so it is inspected under that role too.
+        let inspectorRef: AgentInstanceRef = summarizerRole == .summarizer
+            ? summarizerInspectorRef
+            : AgentInstanceRef(role: .smith, instanceID: agentIDForRole(.smith) ?? UUID())
+        let annotation = LLMCallAnnotation(operation: .contextCompaction)
         let response: LLMResponse
         let callStart = Date()
         do {
@@ -648,8 +660,28 @@ public actor OrchestrationRuntime {
                 overrides: LLMCallOverrides(maxOutputTokens: 5000)
             )
         } catch {
+            onLLMCallRecorded?(inspectorRef, .failed(LLMCallFailureRecord(
+                error: error, startedAt: callStart, modelID: config.model, providerID: config.providerID,
+                annotation: annotation)))
             return "Compaction failed — the summary call errored: \(error.localizedDescription). Smith's context is unchanged."
         }
+        let compactionLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
+        onLLMCallRecorded?(inspectorRef, .completed(LLMTurnRecord(
+            inputDelta: [],
+            response: response,
+            totalMessageCount: messages.count,
+            contextSnapshot: messages,
+            latencyMs: compactionLatencyMs,
+            modelID: config.model,
+            providerType: providerAPITypes[summarizerRole]?.rawValue ?? "",
+            providerID: config.providerID,
+            temperature: config.temperature ?? 0,
+            maxOutputTokens: 5000,
+            thinkingBudget: config.thinkingBudget,
+            usage: response.usage,
+            annotation: annotation,
+            isSelfContainedRequest: true
+        )))
         await UsageRecorder.record(
             response: response,
             context: LLMCallContext(
@@ -661,7 +693,7 @@ public actor OrchestrationRuntime {
                 configuration: config,
                 sessionID: currentSessionID
             ),
-            latencyMs: Int(Date().timeIntervalSince(callStart) * 1000),
+            latencyMs: compactionLatencyMs,
             to: usageStore
         )
 
@@ -1817,6 +1849,11 @@ public actor OrchestrationRuntime {
         onLLMCallRecorded = handler
     }
 
+    /// Registers the observer of run session ids — see `onRunSessionChanged`.
+    public func setOnRunSessionChanged(_ handler: @escaping @Sendable (UUID?) -> Void) {
+        onRunSessionChanged = handler
+    }
+
     public func setOnLearnedModelOutputLimit(_ handler: @escaping @Sendable (String, String, Int) -> Void) {
         onLearnedModelOutputLimit = handler
     }
@@ -2216,6 +2253,7 @@ public actor OrchestrationRuntime {
         _ = supervisor.endGeneration()
         refreshBrownWorkerActivityCount()
         await channel.setCurrentSessionID(nil)
+        onRunSessionChanged?(nil)
     }
 
     /// The actual start implementation. Runs ONLY as a lifecycle-queue item (or from
@@ -2241,6 +2279,7 @@ public actor OrchestrationRuntime {
         let generation = supervisor.beginGeneration()
         let sessionID = generation.sessionID
         await channel.setCurrentSessionID(sessionID)
+        onRunSessionChanged?(sessionID)
 
         // Delivery tracking is per-Smith by definition (a fresh Smith has incorporated
         // nothing), so reset it at generation start. Without this, a drain suspended in
@@ -2271,8 +2310,9 @@ public actor OrchestrationRuntime {
             )
             // One inspector identity per summarizer instance, so its calls form one stable
             // subject in the inspector for the life of this run.
+            summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
             if let callCallback = onLLMCallRecorded, let summarizer = taskSummarizer {
-                let summarizerRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
+                let summarizerRef = summarizerInspectorRef
                 await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
             }
         } else {
@@ -2355,6 +2395,12 @@ public actor OrchestrationRuntime {
         validationSecurityEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
         if let evalCallback = onEvaluationRecorded {
             await validationSecurityEvaluator?.setOnEvaluationRecorded(evalCallback)
+        }
+        // Validator evidence reads are real Security LLM calls (billed to the Security Agent), so
+        // they must reach the inspector's call log like Smith's and every Brown's reviews do.
+        if let callCallback = onLLMCallRecorded {
+            let validationSecurityRef = AgentInstanceRef(role: .securityAgent, instanceID: UUID())
+            await validationSecurityEvaluator?.setOnLLMCallRecorded { event in callCallback(validationSecurityRef, event) }
         }
 
         // The notification broker (delivery + persistence-until-delivery) and the WakeScheduler
@@ -3350,6 +3396,7 @@ public actor OrchestrationRuntime {
         onToolExecutionStateChange = nil
         onAgentStarted = nil
         onLLMCallRecorded = nil
+        onRunSessionChanged = nil
         onEvaluationRecorded = nil
         onContextChanged = nil
         onTimerEventForChannel = nil
@@ -3365,6 +3412,7 @@ public actor OrchestrationRuntime {
             && onToolExecutionStateChange == nil
             && onAgentStarted == nil
             && onLLMCallRecorded == nil
+            && onRunSessionChanged == nil
             && onEvaluationRecorded == nil
             && onContextChanged == nil
             && onTimerEventForChannel == nil

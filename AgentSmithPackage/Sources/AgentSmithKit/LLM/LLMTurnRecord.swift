@@ -39,6 +39,18 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
     /// Why the call was made, for callers whose calls are not turns of a resident agent's
     /// conversation. Nil for Smith/Brown turns, whose conversation is its own explanation.
     public let annotation: LLMCallAnnotation?
+    /// True when the call was a single self-contained request (a Security review, a Summarizer
+    /// operation) rather than a turn of a growing conversation. Its whole request is then the
+    /// outgoing input and lives ONLY in `contextSnapshot` — never duplicated into `inputDelta` —
+    /// so releasing the snapshot really releases the request.
+    public let isSelfContainedRequest: Bool
+
+    /// The messages to show as this call's outgoing input: the whole request for a
+    /// self-contained call (empty once its snapshot is released), otherwise the new messages
+    /// since the previous turn.
+    public var outgoingMessages: [LLMMessage] {
+        isSelfContainedRequest ? contextSnapshot : inputDelta
+    }
 
     public init(
         id: UUID = UUID(),
@@ -55,7 +67,8 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         maxOutputTokens: Int = 0,
         thinkingBudget: Int? = nil,
         usage: TokenUsage? = nil,
-        annotation: LLMCallAnnotation? = nil
+        annotation: LLMCallAnnotation? = nil,
+        isSelfContainedRequest: Bool = false
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -72,6 +85,7 @@ public struct LLMTurnRecord: Identifiable, Sendable, Equatable {
         self.thinkingBudget = thinkingBudget
         self.usage = usage
         self.annotation = annotation
+        self.isSelfContainedRequest = isSelfContainedRequest
     }
 
     /// Releases the heavy context snapshot to reclaim memory on older turn records.

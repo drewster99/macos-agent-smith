@@ -565,8 +565,8 @@ actor SecurityEvaluator {
     /// the evaluator keeps appending to its working conversation afterwards (assistant tool calls,
     /// tool results, staged attachments), and this actor is re-entrant, so reconstructing the
     /// request later could describe a different call. Each Security call is self-contained, so the
-    /// whole request is the outgoing input; it is also the full-context snapshot (the two share
-    /// storage). Binary attachment bytes are dropped from the recorded copy.
+    /// whole request is recorded once, as the snapshot (see `LLMTurnRecord.isSelfContainedRequest`).
+    /// Binary attachment bytes are dropped from the recorded copy.
     private func emitTurnRecord(
         response: LLMResponse,
         request: [LLMMessage],
@@ -576,7 +576,7 @@ actor SecurityEvaluator {
         guard let onLLMCallRecorded else { return }
         let inspectedRequest = Self.withoutBinaryAttachments(request)
         onLLMCallRecorded(.completed(LLMTurnRecord(
-            inputDelta: inspectedRequest,
+            inputDelta: [],
             response: response,
             totalMessageCount: request.count,
             contextSnapshot: inspectedRequest,
@@ -588,7 +588,8 @@ actor SecurityEvaluator {
             maxOutputTokens: configuration?.maxTokens ?? 0,
             thinkingBudget: configuration?.thinkingBudget,
             usage: response.usage,
-            annotation: annotation
+            annotation: annotation,
+            isSelfContainedRequest: true
         )))
     }
 

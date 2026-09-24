@@ -29,6 +29,7 @@ extension LLMCallAnnotation.Operation {
         case .taskSummary: return "Task summary"
         case .memoryReconciliation: return "Memory consolidation"
         case .webContentExtraction: return "Web extraction"
+        case .contextCompaction: return "Context compaction"
         }
     }
 }
@@ -220,6 +221,8 @@ struct LLMCallOperationBadge: View {
 struct LLMTurnSnapshotNotice: View {
     let retention: InspectorCallLog.SnapshotRetention
     let snapshotWindow: Int
+    /// For a self-contained call the released snapshot WAS the outgoing request.
+    let isSelfContainedRequest: Bool
 
     var body: some View {
         Label(message, systemImage: "doc.badge.ellipsis")
@@ -231,6 +234,8 @@ struct LLMTurnSnapshotNotice: View {
         switch retention {
         case .retained:
             return ""
+        case .discardedByRetention where isSelfContainedRequest:
+            return "Request released — only the latest \(snapshotWindow) turns keep it"
         case .discardedByRetention:
             return "Full context released — only the latest \(snapshotWindow) turns keep it"
         case .notCaptured:

@@ -134,4 +134,18 @@ struct InspectorCallLogTests {
             startedAt: start, modelID: "m", providerID: nil, now: now)
         #expect(transient.disposition == .transient)
     }
+
+    @Test("releasing a self-contained call's snapshot releases its outgoing request too")
+    func selfContainedReleaseFreesTheRequest() {
+        var log = InspectorCallLog(capacity: 10, snapshotWindow: 1)
+        let request: [LLMMessage] = [.system("s"), .user("review this")]
+        let selfContained = LLMTurnRecord(inputDelta: [], response: LLMResponse(text: "SAFE"), totalMessageCount: 2,
+                                          contextSnapshot: request, isSelfContainedRequest: true)
+        log.append(.completed(selfContained))
+        #expect(log.retainedTurns.first?.outgoingMessages == request)
+        log.append(.completed(turn("newer")))
+        #expect(log.entries.first.flatMap(snapshot) == .discardedByRetention)
+        #expect(log.retainedTurns.first?.outgoingMessages.isEmpty == true,
+                "nothing may keep the released request alive")
+    }
 }

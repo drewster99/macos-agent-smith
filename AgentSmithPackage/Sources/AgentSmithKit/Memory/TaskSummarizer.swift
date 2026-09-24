@@ -150,7 +150,7 @@ actor TaskSummarizer {
         }
 
         onLLMCallRecorded?(.completed(LLMTurnRecord(
-            inputDelta: messages,
+            inputDelta: [],
             response: response,
             totalMessageCount: messages.count,
             contextSnapshot: messages,
@@ -162,7 +162,8 @@ actor TaskSummarizer {
             maxOutputTokens: configuration?.maxTokens ?? 0,
             thinkingBudget: configuration?.thinkingBudget,
             usage: response.usage,
-            annotation: annotation
+            annotation: annotation,
+            isSelfContainedRequest: true
         )))
         return response
     }

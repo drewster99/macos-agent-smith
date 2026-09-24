@@ -34,7 +34,7 @@ struct TaskSummarizerInspectorTests {
         #expect(result == .merged("merged text"))
         let turns = collector.turns
         #expect(turns.count == 1)
-        #expect(turns.first?.inputDelta == provider.receivedRequests.first)
+        #expect(turns.first?.outgoingMessages == provider.receivedRequests.first)
         #expect(turns.first?.contextSnapshot == provider.receivedRequests.first)
         #expect(turns.first?.annotation?.operation == .memoryReconciliation)
         #expect(turns.first?.annotation?.correlationID == correlationID)
@@ -50,7 +50,7 @@ struct TaskSummarizerInspectorTests {
         let answer = await summarizer.extractWebContent(content: "page", prompt: "what?", taskID: taskID, taskTitle: "W")
 
         #expect(answer == "the answer")
-        #expect(collector.turns.first?.inputDelta == provider.receivedRequests.first)
+        #expect(collector.turns.first?.outgoingMessages == provider.receivedRequests.first)
         #expect(collector.turns.first?.annotation?.operation == .webContentExtraction)
         #expect(collector.turns.first?.annotation?.taskID == taskID)
     }
@@ -65,7 +65,7 @@ struct TaskSummarizerInspectorTests {
         let summary = try await summarizer.generateSummary(for: task, annotation: annotation)
 
         #expect(summary == "It was done.")
-        #expect(collector.turns.first?.inputDelta == provider.receivedRequests.first)
+        #expect(collector.turns.first?.outgoingMessages == provider.receivedRequests.first)
         #expect(collector.turns.first?.annotation == annotation)
     }
 

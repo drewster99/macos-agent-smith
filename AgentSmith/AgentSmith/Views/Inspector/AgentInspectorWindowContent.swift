@@ -119,19 +119,28 @@ struct InspectorModelCostLine: View {
                     modelConfig: config,
                     llmTurns: viewModel.inspectorStore.retainedTurns(for: role),
                     role: role,
-                    shared: viewModel.shared
+                    shared: viewModel.shared,
+                    lifetimeCallCount: viewModel.inspectorStore.callLogsByRole[role]?.lifetimeCount
                 )
             }
-            HStack(spacing: 6) {
-                Text("Session cost")
-                Spacer()
-                Text(String(format: "$%.2f", viewModel.sessionCost(for: role)))
-                    .monospacedDigit()
-            }
-            .foregroundStyle(.secondary)
+            InspectorSessionCostRow(cost: viewModel.sessionCost(for: role))
         }
         .font(AppFonts.inspectorLabel)
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
+    }
+}
+
+private struct InspectorSessionCostRow: View {
+    let cost: Double
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Session cost")
+            Spacer()
+            Text(String(format: "$%.2f", cost))
+                .monospacedDigit()
+        }
+        .foregroundStyle(.secondary)
     }
 }

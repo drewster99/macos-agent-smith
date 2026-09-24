@@ -18,6 +18,8 @@ public struct LLMCallAnnotation: Sendable, Equatable {
         case memoryReconciliation
         /// Extracting an answer from a fetched web page for a prompted `web_fetch`.
         case webContentExtraction
+        /// Summarizing Smith's working conversation so it can continue in a smaller context.
+        case contextCompaction
     }
 
     public let operation: Operation

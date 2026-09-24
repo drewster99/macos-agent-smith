@@ -15,6 +15,8 @@ struct AgentCardModelInfoLine: View {
     let llmTurns: [LLMTurnRecord]
     let role: AgentRole
     var shared: SharedAppState?
+    /// Every call this run, including evicted ones — see `ModelStatsPopover.lifetimeCallCount`.
+    var lifetimeCallCount: Int?
 
     @Environment(\.openSettings) private var openSettings
 
@@ -38,7 +40,8 @@ struct AgentCardModelInfoLine: View {
             })
             .buttonStyle(.plain)
             .popover(isPresented: $showingModelStats, arrowEdge: .bottom) {
-                ModelStatsPopover(turns: llmTurns, modelID: modelConfig.modelID, role: role)
+                ModelStatsPopover(turns: llmTurns, modelID: modelConfig.modelID, role: role,
+                                  lifetimeCallCount: lifetimeCallCount)
             }
             if let resolution, resolution != .resolved {
                 Button(action: { showingMetadataWarning = true }, label: {

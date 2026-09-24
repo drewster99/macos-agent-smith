@@ -37,9 +37,11 @@ struct AgentInspectorWindow: View {
     }
     private var availableTools: [String] { viewModel.agentToolNames[role] ?? [] }
 
-    /// True when the agent has activity history but no live tools — i.e. terminated.
+    /// True when a resident agent (Smith / Brown) has activity history but no live tools — i.e.
+    /// terminated. The other roles never hold tools, so the test would misread them as terminated.
     private var isTerminated: Bool {
-        availableTools.isEmpty && !viewModel.inspectorStore.contextMessages(for: role).isEmpty
+        guard role == .smith || role == .brown else { return false }
+        return availableTools.isEmpty && !viewModel.inspectorStore.contextMessages(for: role).isEmpty
     }
 
     var body: some View {
@@ -56,7 +58,7 @@ struct AgentInspectorWindow: View {
                 roleColor: roleColor,
                 hasActivity: hasActivity,
                 isProcessing: isProcessing,
-                isTerminated: role != .securityAgent && isTerminated,
+                isTerminated: isTerminated,
                 executingTools: executingTools,
                 processingStartDate: processingStartDate,
                 toolExecutingStartDate: toolExecutingStartDate,

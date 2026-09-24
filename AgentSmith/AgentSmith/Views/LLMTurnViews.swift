@@ -59,11 +59,12 @@ struct LLMTurnDisclosureRow: View, Equatable {
                 }
 
                 // --- Outgoing ---
-                if !turn.inputDelta.isEmpty {
-                    turnSectionHeader("Outgoing", icon: "arrow.up.circle.fill", color: AppColors.inspectorOutgoing)
+                if !turn.outgoingMessages.isEmpty {
+                    turnSectionHeader(turn.isSelfContainedRequest ? "Outgoing (full request)" : "Outgoing",
+                                      icon: "arrow.up.circle.fill", color: AppColors.inspectorOutgoing)
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(turn.inputDelta.indices, id: \.self) { i in
-                            ContextMessageRow(message: turn.inputDelta[i])
+                        ForEach(turn.outgoingMessages.indices, id: \.self) { i in
+                            ContextMessageRow(message: turn.outgoingMessages[i])
                         }
                     }
                 }
@@ -107,7 +108,8 @@ struct LLMTurnDisclosureRow: View, Equatable {
 
                 // Full context link, or why there is none.
                 if snapshotRetention != .retained {
-                    LLMTurnSnapshotNotice(retention: snapshotRetention, snapshotWindow: snapshotWindow)
+                    LLMTurnSnapshotNotice(retention: snapshotRetention, snapshotWindow: snapshotWindow,
+                                          isSelfContainedRequest: turn.isSelfContainedRequest)
                         .padding(.top, 2)
                 }
                 if !turn.contextSnapshot.isEmpty {
