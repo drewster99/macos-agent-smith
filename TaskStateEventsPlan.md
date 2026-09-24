@@ -127,10 +127,11 @@ public struct TaskStatusTransition: Sendable, Equatable {
 
 - One `SmithTaskBriefing` maps `(to, cause)` → the note Smith receives, or nothing. It replaces the
   scattered per-site notes for STATUS transitions; the wording of today's notes is preserved.
-- Behavior-preserving in its first commit: same transitions notified, same text, same channel
-  (`appendUserMessage` vs `.userTaskAction` row). Gaps and delivery durability are follow-up
-  decisions ([CONFIRM 1], [CONFIRM 2]) — changing what Smith is told is a behavior change, kept out of
-  the refactor commit.
+- Same transitions notified, same text (decision 1 — widening the set is a later decision). Two
+  commits: first the move (same delivery as today, so the refactor is checkable on its own), then
+  durable delivery (decision 2): notes that were injected with `appendUserMessage` go to the broker's
+  durable Smith queue instead, so a note survives a Smith restart. `.userTaskAction` rows stay
+  channel rows (they carry the transcript's inline controls).
 - Disposition notices (delete, undelete, Retry, Run Again) stay where they are — they are not status
   transitions.
 
@@ -213,8 +214,9 @@ touched) → commit → push.
    `cause:` at every call site, truthful CAS returns, no-op suppression, load-time exclusions,
    `onTaskTerminated` derived from the stream. Tests: every writer emits exactly once, no-ops and
    restore emit nothing, CAS returns false on refusal, per-store ordering, cold-boot causes tagged.
-2. **Smith briefing subscriber.** Move the status-transition notes into `SmithTaskBriefing`,
-   behavior-preserving. Tests: each cause → exact note (or none), parity with today's set.
+2. **Smith briefing subscriber.** Move the status-transition notes into `SmithTaskBriefing`
+   (parity commit), then switch them to the durable Smith queue. Tests: each cause → exact note (or
+   none), parity with today's set, a note queued while no Smith is live is delivered after restart.
 3. **Watch model + firing.** `TaskWatch` on `AgentTask` (Codable in all four places + round trip),
    firing inside `applyStatus`, `TriggerSource.taskWatch`, handlers, cold-boot re-submission, the
    startup handler guard (every `KnownNotificationType` has a handler). Tests: firing is atomic with
