@@ -55,13 +55,15 @@ contributor.
 - 🌱 Settled-criteria chip on task list rows; criteria and steps in the task PDF export
 - 🌱 Recursive evidence sweep in `task_complete`
 - 🌱 `.gitignore`-aware `glob`
-- 🌱 Accessibility identifiers and the remaining labels
+- 🌱 Accessibility identifiers and the remaining labels — [#19](https://github.com/drewster99/macos-agent-smith/issues/19)
 - 🌱 Per-tool tests for the 10 untested tools (Abort, CancelWake, ListScheduledWakes,
   RescheduleWake, ScheduleTaskAction, ManageTaskDisposition, RunAppleScript,
   ListScriptableApps, GetAppScriptingSchema, SearchMemory)
 - 🌱 `Phase2LongLivedSmithTests`: look up the worker by task, not by role
-- 🌱 `setAcceptanceCriteria` duplicate-name guard; stale "BY NAME" comment; `amend_task`
-  template guard
+- 🌱 Stale "BY NAME" comment — [#20](https://github.com/drewster99/macos-agent-smith/issues/20)
+- 🌱 Comments still describing the retired `review_work` as current — [#21](https://github.com/drewster99/macos-agent-smith/issues/21)
+- 🌱 Unit tests for `ToolResultCap` — [#22](https://github.com/drewster99/macos-agent-smith/issues/22)
+- `setAcceptanceCriteria` duplicate-name guard; `amend_task` template guard
 - 🌱 Apply attachment caps live, without a restart
 - 🌱 `ChannelBannerKind` rawValue bridge; `.scrollPosition` modernization
 - Badge attachments the worker's model can't see; model-menu sorting and benchmark chips;
