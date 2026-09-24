@@ -1,0 +1,21 @@
+name: Feature request
+description: An idea, a missing capability, or something you went looking for and couldn't find.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the problem or workflow before the solution. It helps us find the right fit.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help?
+      description: How you imagine it working, if you have an idea.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything else?
+      description: Workarounds you've tried, related tools, screenshots.

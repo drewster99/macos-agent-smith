@@ -1,5 +1,108 @@
 # Agent Smith — Roadmap
 
+## Where things stand — audit of 2026-09-24
+
+Every entry below was checked against the code and git history on 2026-09-24. Entries that had
+shipped without being marked now carry ✅. Designs that were replaced carry **SUPERSEDED**, and
+partial work carries ⚠️. Each has an `(audit 2026-09-24)` note saying what's true now.
+
+Size: **S** = hours, **M** = a day or two, **L** = multi-day. 🌱 = good first issue for a new
+contributor.
+
+### P0 — correctness bugs (small, fix first)
+
+1. **`grep` can crash the app on model-supplied numbers.** `GrepTool.positiveInt` does
+   `Int(double)` with no bound (traps on `1e300`/NaN), and `UInt64(maxFileSizeMB) * 1024 * 1024`
+   overflow-traps. Clamp all three caps to hard ceilings. — S
+2. **Costs are under-reported for 1-hour cache writes.** `AnthropicProvider` sends `ttl: "1h"`,
+   but every `effectiveRates(...)` call (`CostBoard`, `UsageAggregator`, `AppViewModel`,
+   `TaskCostDetailSheet`) omits `extendedCache:`, so 1h writes are billed at the 5-minute rate.
+   There are four copies of the cost formula; fold them into one helper. — S
+3. **"Free" models show as "Unpriced"** in usage (`UsageAggregator` ignores `isFree`). — S
+4. **`provide_help` auto-respawn runs unscoped.** It calls the task-less `spawnBrown()`, so the
+   respawned worker gets the full tool set without Security Agent scoping. — S
+5. **A task restored from another session can run in place**, breaking "one task id ↔ one
+   session's transcript". The planned clone guard was never added. — S
+6. **Codex credits-depleted fails the task permanently.** The settled design was park + slow
+   re-check, so a top-up resumes the work (see ChatGPT-subscription Phase 5). — M
+
+### P1 — high-value work
+
+7. **Validation economics.** (a) Force a verdict on the final turn instead of discarding a paid
+   judgment as "exhausted turns" — S. (b) Seed re-judgments with the criterion's rejection
+   history (`criterionRejections` is write-only today) — M. (c) Identical-rejection convergence
+   signal — S. (d) Show unjudged vs rejected in "N of M settled" — S.
+8. **Replace the DuckDuckGo scrape with Brave.** `BraveSearchBackend` is already written; it
+   needs a Keychain key, a Settings field, and the default swap. — S
+9. **Task preconditions / fail-fast `.blocked` outcome.** — M
+10. **Hard wall-clock tool timeout.** It's cooperative today, so a non-cooperative tool can
+    wedge Brown. — M
+11. **Evaluator concurrency cap.** A global semaphore plus a per-attempt validator call cap, so
+    validation can't starve workers or overspend. — M
+12. **Guard against Smith loosening criteria after a failure.** The data is captured; nothing
+    reads it. — M
+13. **Parse OpenRouter's response `provider` field into usage records.** The recorded price can
+    be ~48% below the real route cost under `:nitro`. Needs a swift-llm-kit release. — M
+14. **Path-safety layer 3.** A per-role allowlist, including scoping the validator's
+    `attach_file` to the evidence directory. — L
+
+### P2 — worthwhile, not urgent
+
+- Codex low-balance warning in the UI — S–M
+- Worker-pool daily spend guard — L
+- Smith parallel tool execution (N serial security round-trips per multi-call turn) — M
+- Unify the three loop breakers that reset each other — M
+- Stringly-typed tool names (safety rosters can silently lose a renamed tool) — M
+- Scoping LLM call runs inside the lifecycle queue and serializes spawns — M
+- Transcript search (⌘F) — M; global search plus a prior-transcript viewer — L
+- MCP timeout per server or progress-aware (fixed 4h today) — M
+- Task-scoped working directory for relative paths — M
+- Holistic oversized-input / context-budget handling — L
+- Tool-output overflow files in `$TMPDIR` are never cleaned up — S
+- Under-grant handling for tool scoping (Brown prompt wording, "no tool for X" path) — M
+- Specific model-fetch error messages (SwiftLLMKit) — S
+- PDF sanitize residual (XMP, custom Info keys, JavaScript) — M
+- General OpenAI Responses provider plus deep-research routing — L
+
+### P3 — polish (good first issues)
+
+- 🌱 Extract the 4 `ProviderManagementView` `-> some View` functions into `View` structs (this
+  also removes a Keychain lookup per provider per render)
+- 🌱 Clamp the temperature slider to the model's `maxTemperature`
+- 🌱 Settled-criteria chip on task list rows; criteria and steps in the task PDF export
+- 🌱 Recursive evidence sweep in `task_complete`
+- 🌱 `.gitignore`-aware `glob`
+- 🌱 Accessibility identifiers and the remaining labels
+- 🌱 Per-tool tests for the 10 untested tools (Abort, CancelWake, ListScheduledWakes,
+  RescheduleWake, ScheduleTaskAction, ManageTaskDisposition, RunAppleScript,
+  ListScriptableApps, GetAppScriptingSchema, SearchMemory)
+- 🌱 `Phase2LongLivedSmithTests`: look up the worker by task, not by role
+- 🌱 `setAcceptanceCriteria` duplicate-name guard; stale "BY NAME" comment; `amend_task`
+  template guard
+- 🌱 Apply attachment caps live, without a restart
+- 🌱 `ChannelBannerKind` rawValue bridge; `.scrollPosition` modernization
+- Badge attachments the worker's model can't see; model-menu sorting and benchmark chips;
+  deprecation-replacement hint
+
+### Decisions needed (product/architecture — the maintainer's call)
+
+- **Inspector "Now" panel.** Finish the remaining M2 re-key (instance-keyed archive and windows,
+  multiple Brown windows), or declare it superseded by `InspectorImprovements.md`? Parallel
+  Browns still share role-keyed UI state.
+- **Skills.** Drop it, or extend templates with embedded `bash`/`file_read` expansion and a `/`
+  command?
+- **Downloaded orchestration defaults.** Where do they come from, and when are they fetched?
+- **`ChannelLogView` `Equatable`.** Keep it, or finish the provider-only refactor?
+- **Security Agent onto `EvaluationRunner`.** Still wanted?
+- **Folder drag-and-drop** into the input.
+
+### Documentation drift found by the audit (outside this file)
+
+- `CLAUDE.md` says the instance-keyed inspector model "doesn't exist in code yet". It partly does
+  (`AgentInstanceRef`, `callLogsByInstance`, the per-instance maps in `AppViewModel`).
+- The README's security claim ("no setting to create" an unreviewed path) predates the
+  per-emitter review toggles. Corrected in the same change as this audit.
+
 ## Model capability contract (SwiftLLMKit 0.0.139 – 0.0.143) ✅ Completed 2026-08-03
 
 Built to answer one question end to end: **how do we talk to this model?** Not just "can it", but
@@ -166,7 +269,7 @@ A three-reviewer sweep (codex + agy + a claude agent) on 2026-08-03 caught and F
 
 ### OpenRouter routes and variants: one model is many routes, and we record one (found 2026-07-30)
 
-**Status:** investigated and fully characterized 2026-07-30; nothing built yet. Decided direction: the model JSON grows a `variants` collection under each model, holding both the upstream ROUTES and the dynamic `:option` suffixes. Phase 1 (synthesize `:floor` / `:nitro` into the models response so they reach the UI and the prober) is approved for immediate work; the route enumeration behind it is not yet scheduled.
+**Status:** investigated and fully characterized 2026-07-30. **(audit 2026-09-24): Phase 1 ✅ shipped** (swift-llm-kit 0.0.121, `OpenRouterDynamicVariant`). Route enumeration, `variants` on `ModelInfo`, typed `OpenRouterRouting`, and parsing the response `provider` field into usage records are NOT built — the last one matters most, since `:nitro` can bill ~48% above the recorded price. Decided direction: the model JSON grows a `variants` collection under each model, holding both the upstream ROUTES and the dynamic `:option` suffixes. Phase 1 (synthesize `:floor` / `:nitro` into the models response so they reach the UI and the prober) is approved for immediate work; the route enumeration behind it is not yet scheduled.
 
 Everything below was verified against the live API and OpenRouter's own docs (`https://openrouter.ai/docs/llms-full.txt`) on 2026-07-30, not recalled.
 
@@ -357,7 +460,7 @@ What is NOT correct is expressing OpenRouter-only concepts as `extraJSONOverride
 
 `decodeOpenRouterFacts`, `ModelInfo`, and the catalog build all live in **`swift-llm-kit`**, a versioned git dependency — not in this repo. Any of this work means the full dance: change → build → commit → push → tag → push tag → bump the `from:` pin in `AgentSmithPackage/Package.swift`, then `cd AgentSmithPackage && swift package resolve` so the package lockfile (what `swift test` reads) moves too, not just the xcworkspace copy.
 
-#### Phase 1 — synthesize `:floor` and `:nitro` (approved 2026-07-30)
+#### Phase 1 — synthesize `:floor` and `:nitro` (approved 2026-07-30) ✅ shipped in swift-llm-kit 0.0.121
 
 Add the two dynamic suffixes to the decoded OpenRouter model list so they appear in the UI and are probeable. Rules:
 
@@ -467,7 +570,7 @@ The fix is not the settings; it is (a) never trusting `async` **or `nonisolated`
 
 ### Notification architecture — generalize the wake system into a durable notification broker (design 2026-07-22)
 
-**Status:** design, not yet implemented. `schedule_reminder` is already restored and shipped against the current wake system; it ports cleanly onto this.
+**Status:** ✅ core BUILT 2026-07-23 (audit 2026-09-24) — `AgentSmithKit/Notifications/` (broker, envelope, handlers, `DeliveryLedger`), adapted to a push `WakeScheduler` + pull broker. The shipped record is `ScheduledWake` with a typed `action`, NOT the `ScheduledTimer`/`TimerSource` named below. **Still open:** `user_message` reroute through the broker (+ `message_id` param / native-id dedup), `InboundMessageSource`, the `.taskWorker` recipient + not-alive policy, event sources, age-based ledger pruning (count bound of 5,000 only), and the display-only `friendlyAction` regex over the title. Decided de facto: `AnyCodable` (not `JSONValue`), `survivesTaskTermination` stored, hub is per-session.
 
 Supersedes the wake-only draft. The wake system becomes ONE notification source among several.
 
@@ -910,9 +1013,8 @@ keeping enqueue-then-drain idempotent.
 `dispatchWakesLocally`, and the `drainQueuedNotifications` fallback + the `idleWait` wake-clamp are
 gone. The auto-run discriminator moved to `ScheduledWake.isAutoRunRunTask`. `WakeScheduler` is the
 single source of scheduling truth; the wake tests (`ScheduledWakeTests`, `ScheduledWakePersistence
-Tests`, `ScheduledTaskAndTimerEventTests`) drive it directly. Remaining nit: `WakeScheduler.stop()`
-isn't wired to full runtime teardown — harmless, the armed timer holds `[weak self]` so it no-ops on
-fire.
+Tests`, `ScheduledTaskAndTimerEventTests`) drive it directly. (The former nit — `WakeScheduler.stop()` not wired to
+teardown — is fixed: `stopAll` calls it, d2b0fe1 / 258bbdb.)
 
 ### 13. Open decisions
 
@@ -1024,7 +1126,9 @@ Now that the layered composition + probe data give us **measured** per-model cap
 
 The cross-cutting theme: a family of **role-aware pre-flight checks** the current gates miss because `validateConfiguration` is deliberately role-blind (one config can serve multiple roles). Architectural seam — keep role-aware checks (capability requirements, availability/deprecation warnings) in the role-owning app layer (`AppViewModel`/`ConfigValidationView`), and keep role-independent checks (limits, effort ladder, temperature ceiling) in `SwiftLLMKit.validateConfiguration`.
 
-### Agents are pruning at ~13% of their model's real context window (2026-07-17)
+### Agents are pruning at ~13% of their model's real context window (2026-07-17) ✅
+
+> **(audit 2026-09-24)** Fixed by the sparse per-(role, model) override design: `maxContextTokens ?? modelInfo.maxInputTokens`.
 
 `ModelConfiguration.maxContextTokens` defaults to `128_000` and **nothing ever wires it from the model's actual limit**. Anthropic's `/v1/models` reports `max_input_tokens: 1,000,000` for Sonnet 5 / Opus 4.8 / Fable 5; we decode that into `ModelInfo.maxInputTokens` and then never connect the two. It isn't cosmetic — `contextWindowSize` drives conversation pruning (`AgentActor.pruneThresholdTokens`) and the summarizer's budget (`TaskSummarizer`, 80% of the window):
 
@@ -1072,7 +1176,9 @@ The sweep was one model at a time against a ~1,700-model catalog at roughly a mi
 
 **Liveness, from the night a wedged sweep was indistinguishable from a slow one** without stack samples and socket tables (2026-08-05 — root-caused to task suspension, not app code): `--target-timeout` (default 600s) races each battery against a wall clock — a hung call stalls ONE slot, then the target is abandoned (logged, NOTHING recorded; an interrupted battery is not a measurement) and the slot reclaimed only after the cancelled battery unwinds. A `[sweep]` heartbeat line every 30s carries handled/total, per-provider in-flight, billing-skips, and a rolling rate/ETA — "handled" is derived from one scheduler snapshot (total − pending − in-flight), never a second counter that could drift. The deadline guards in-process hangs only; nothing in-process survives task suspension, and that limit is recorded on the flag's doc line.
 
-### Guide messages / system reminders — a per-call `systemReminder` in SwiftLLMKit (design 2026-07-26)
+### Guide messages / system reminders — a per-call `systemReminder` in SwiftLLMKit (design 2026-07-26) — SUPERSEDED in part
+
+> **(audit 2026-09-24)** No `systemReminder` exists. The kit shipped `BehaviorFlags.supportsTrailingSystemMessage` and keeps a trailing `.system` message in place instead. Still open: an app-side reminder composer and the stray-system-message warning.
 
 **Not being built yet — but build around it.** The shape is settled; this entry is the design of record so nothing lands that makes it harder.
 
@@ -1131,7 +1237,9 @@ Same tail rule — a trailing `developer` item in `input`, never `instructions` 
 
 Recommendation is `store: false` with a client-managed item array, keeping reasoning continuity across tool calls via `include: ["reasoning.encrypted_content"]` (the ZDR path). That collapses Responses into the same shape as the other three — app owns history, kit shapes the wire — and preserves the one genuinely unique Responses capability. Adopting `previous_response_id` would introduce a second, incompatible history model that only one provider uses and leak provider shape up into `AgentActor`, which is precisely what the kit exists to prevent. Constraints that never change can simply live in `instructions`, re-sent verbatim, at zero cache cost.
 
-### Probe dimension: where a mid-conversation system turn is legal, per model (2026-07-26)
+### Probe dimension: where a mid-conversation system turn is legal, per model (2026-07-26) ✅ (mostly)
+
+> **(audit 2026-09-24)** `TrailingSystemTurnProbe` (7004199) + kit `supportsTrailingSystemMessage`. Open: the OpenAI-compat hoist discriminator — an echo can't detect a hoist.
 
 Needed before we can ship **guide messages / reminders** — a task-scoped instruction ("don't touch the production database while testing") injected near the generation point rather than buried in the system prompt 200 messages back. The whole value is recency: restated at the tail it competes with nothing, restated at position 0 it decays. Parking it at the tail is also nearly free for caching — the trailing turn is uncached anyway, so the only new cost is the reminder's own tokens — whereas inserting it mid-history re-processes everything after it on every request. So the design wants the tail. The question the probe has to answer is whether a given model/endpoint will actually *honor* a system turn there.
 
@@ -1210,7 +1318,9 @@ hard kill for the shell path. Flagged by codex in the 2026-07-15 July-1→today 
 
 The template itself (`85E6339D`, "SwiftUI Rendering Performance Audit & Improve") still carries the loose phase-1 criteria plus two latent placeholder bugs (`{{audit_target}` missing a closing brace in description item 2; step 2 says `{{audit-target}}` — hyphen — for an input named `audit_target`), so every future instantiation reproduces the incident until it is rewritten. That rewrite is user data, done in-app via Smith; the phase-2 prompts on dead instance `8D878B1D` are the model to copy from.
 
-### Acceptance contract: per-criterion edits, and verdicts archived rather than deleted (decided 2026-07-26)
+### Acceptance contract: per-criterion edits, and verdicts archived rather than deleted (decided 2026-07-26) — SUPERSEDED
+
+> **(audit 2026-09-24)** The `archivedVerdicts` design was replaced by `criterionRejections` (see the ✅ build plan below and CLAUDE.md). Still open from this entry: the "0 of N settled" display doesn't separate unjudged from rejected; the one-easy-criterion progress exploit.
 
 **The incident that produced this.** "SwiftUI Performance Audit - macos-agent-smith" showed `FAILED` with `acceptance · 0 of 7 settled`, which reads as "all seven criteria failed" — including "Confirm the project was located", which is not a thing that fails. It didn't. Its ledger was `{round: 0, verdictRecords: [], consecutiveStallRounds: 0}`: **nothing was ever judged.** Brown had in fact finished — 10/10 steps completed, a result summary, a 5.7KB `audit_report.md` attachment — and after the failure Smith rewrote the criteria, which mints new criterion IDs, and `TaskStore.setAcceptanceCriteria` dropped every verdict whose ID was no longer on the task. The evidence of what actually happened was destroyed by the response to it, and the UI rendered the empty result identically to a genuine seven-way failure.
 
@@ -1305,7 +1415,9 @@ The design simplified substantially on 2026-07-27: a **rejection history replace
 
 **Explicitly on hold:** the `systemReminder` feature itself, and the OpenAI-compatible trailing-system probe (whose before/after design was shown not to work — a hoisted turn passes a nonce echo and a contradiction test alike, and no discriminator has been found).
 
-### Validation-ledger defects found while designing the acceptance contract (/stupid sweep, 2026-07-26)
+### Validation-ledger defects found while designing the acceptance contract (/stupid sweep, 2026-07-26) ✅
+
+> **(audit 2026-09-24)** All fixed by the 2026-07-27 build (diff-saving editor, `ValidationRoundToken`, `.superseded`, token-gated stall counter). Residual zombie-run gap is recorded in CLAUDE.md.
 
 Three parallel analyzers over `TaskStore` / `TaskValidation` / `TaskValidationCoordinator` / `SetAcceptanceCriteriaTool`, run after agy and codex had already reviewed the *design*. These are defects in the **existing code the design builds on**, not in the design. Two are live. Verify line numbers before editing.
 
@@ -1369,7 +1481,9 @@ skip re-evaluation. Reduces call volume without loosening the trust boundary (th
 approval is explicit and bounded to the granted paths). Pairs with the
 "read-only tools through security, auto-approved for Smith/validators" work.
 
-### Smith's per-call security filter is egress-only — `save_memory` is ungated for Smith (decided 2026-07-25, NO CHANGE)
+### Smith's per-call security filter is egress-only — `save_memory` is ungated for Smith (decided 2026-07-25, NO CHANGE) — SUPERSEDED
+
+> **(audit 2026-09-24)** `mustEvaluate` was deleted; every call now routes through the Security Agent and `save_memory` gets a real verdict.
 
 Recorded so nobody "fixes" this later as a bug. `AgentActor.mustEvaluate` gates two
 different ways: Brown is spawned with `requiresToolApproval: true`, so EVERY tool call
@@ -1418,7 +1532,9 @@ call gets a verdict.
   termination, unlike live supervisor lookups). Prerequisite for running multiple
   Browns; useful even at capacity 1 across sequential tasks. (Drew, 2026-07-09.)
 
-### Evaluator framework, acceptance validation, and the worker pool (agreed design, 2026-07-09)
+### Evaluator framework, acceptance validation, and the worker pool (agreed design, 2026-07-09) — partly SUPERSEDED
+
+> **(audit 2026-09-24)** The registry, `define_validator`, `custom_validator`, `.registry`/`.inline`, `prepare`, and definition pinning were all removed (CLAUDE.md). The stall limit is 8 rounds, not 3, and `review_work` is retired — the user resolves escalations from the task row. Still open: global evaluator semaphore, per-attempt validator call cap, Security Agent onto `EvaluationRunner`.
 
 Agreed with Drew in full; build order at the end. The unifying insight (Drew's): the
 acceptance validator, the per-call tool approver, and the tool scoper are all the same
@@ -1855,7 +1971,9 @@ The fixed prune-list already eats the big offenders (`node_modules`, `build`, `.
 
 Investigate whether to (a) await the load inline (changes the call site to `async`, ripples through SwiftUI scene wiring), (b) return a richer "VM + load token" pair so callers can await readiness, or (c) leave it and add a precondition + comment. Identified during the 2026-04-27 concurrency review (item L2) — not a bug today, but worth pinning down before the codebase grows another consumer.
 
-### Manage Sessions sheet (with deletion)
+### Manage Sessions sheet (with deletion) ⚠️ partial
+
+> **(audit 2026-09-24)** "Delete Session…" shipped (a4eead0). The management sheet (disk size, reveal, export) is not built.
 The previous "Close Session…" menu command was removed in 2026-04 because closing a window must NEVER mutate or delete the underlying session — Cmd-W is now strictly a UI operation, and there's no destructive command anywhere in the app. The Session menu lists all sessions and clicking one either focuses an existing window or opens a new one.
 
 This means sessions accumulate forever until we add a deliberate management UI. Plan: a "Manage Sessions" sheet (probably in Settings or as a standalone window) that shows every session with last-used date, message count, task count, and disk size. Each row gets:
@@ -1896,10 +2014,14 @@ Text selection in the channel log is limited to one line at a time because each 
 
 **Implemented:** Copy button exists on hover. The earlier hover-disappearance issue (button vanishing when the cursor moved toward it) is fixed.
 
-### Completed tasks must always include a final result
+### Completed tasks must always include a final result ✅
+
+> **(audit 2026-09-24)** `TaskCompleteTool` rejects an empty result. `accept_work`/`review_work` are retired.
 When a task reaches `completed` status, its `result` field should contain a clear, meaningful summary of what was accomplished. Currently, completed tasks can end up with an empty or missing result — making it hard for the user (and Smith) to understand what was done without digging through the channel log. Enforce that `accept_work` requires a non-empty result, and ensure Brown's `task_complete` call always provides one.
 
-### Task-scoped context and state for resumability
+### Task-scoped context and state for resumability ✅
+
+> **(audit 2026-09-24)** `lastBrownContext` is saved and resume respawns from it.
 All context and state related to a given task needs to be tied to the task itself. Currently, when a task is interrupted (e.g. the app is stopped mid-task), the task status resets to pending but all associated context — Brown's conversation history, partial work, tool call results — is lost. When the task is later resumed, agents must start from scratch with no memory of prior progress.
 
 **Goal:** An incomplete task should carry enough state that it can be resumed where it left off rather than restarting. This includes Brown's conversation history for the task, any intermediate results or artifacts, and the point at which work was interrupted.
@@ -1909,7 +2031,9 @@ When the system restarts with tasks that were in-progress (now reset to pending)
 
 **Implemented:** Added a prominent guideline in Smith's system prompt (SmithBehavior.swift) instructing Smith to always call `list_tasks` before acting on any task. The existing belt-and-suspenders instruction in OrchestrationRuntime.swift's initial message was retained.
 
-### Preserve agent inspector data after termination
+### Preserve agent inspector data after termination ✅
+
+> **(audit 2026-09-24)** `terminatedAgentArchive` / `archivedEvaluationRecords` (still role-keyed; see Inspector "Now" entry).
 When an agent is terminated, its conversation history and LLM turn records are lost because the `AgentActor` is deallocated. Users should be able to review what happened in a terminated agent's session — especially useful for debugging why Brown failed or what Security Agent flagged.
 
 **Approach:** Before removing an agent from the `agents` dictionary in `terminateAgent` and `handleAgentSelfTerminate`, snapshot the agent's `contextSnapshot()` and `turnsSnapshot()` into a separate archive keyed by agent ID. Expose this archive via `OrchestrationRuntime` so the UI inspector can display historical sessions alongside live ones.
@@ -1939,7 +2063,7 @@ Store Brown's `task_update` messages as a `updates: [(Date, String)]` array on `
 
 **Implemented:** Brown's `task_update` calls are persisted on `AgentTask.updates` as `[(date: Date, message: String)]`. Displayed in task detail view.
 
-### Remove implementation instructions from user-visible task descriptions
+### Remove implementation instructions from user-visible task descriptions ✅
 `CreateTaskTool` appends `"\n\nReport the detailed results to the user using task_complete."` to the task description at creation time (CreateTaskTool.swift:33). This implementation detail is persisted on the task and visible in the task list UI. The instruction should either be injected into Brown's initial message separately (not stored on the task), or moved into Brown's system prompt so it doesn't pollute user-facing task descriptions.
 
 ### Complete SwiftLLMKit migration — eliminate legacy LLMConfiguration ✅
@@ -1977,6 +2101,8 @@ Today only `GhTool.firstForbiddenSequence` has direct test coverage (`GhToolArgs
 - **Integration-only (excluded from `swift test`):** `SaveMemoryTool`, `SearchMemoryTool` — covered by the existing `MemoryStoreIntegrationTests` xcodebuild path.
 
 ### Web Search tool ⚠️ (shipped with a TEMPORARY backend)
+
+> **(audit 2026-09-24)** Still the DuckDuckGo HTML scrape (`WebSearchTool.swift:24`). `BraveSearchBackend.swift` exists as an unwired reference implementation — it needs a Keychain-stored key + Settings field + default swap. The re-evaluation date below passed. Smith also holds `web_search`/`web_fetch`/`instant_answer` since c644bdb, so "Brown-only" wording in this and the next two entries is stale.
 Given a query and optional `allowed_domains` and `blocked_domains` arrays, perform a web search. Only return results from `allowed_domains` (if non-empty) and exclude results from `blocked_domains` (if non-empty).
 
 **Implemented — TEMPORARY backend (2026-06-23):** `web_search` tool added to Brown (`WebSearchTool`). Returns ranked results; `allowed_domains`/`blocked_domains` filter on result host (equal-or-subdomain match, leading `www.` ignored); `max_results` caps output (default 10, max 20). `WebSearchResult` carries `title`/`url`/`snippet` (the universal fields) plus optional `age` (freshness), `score`, `extraSnippets`, and `faviconURL` — the common extras keyed APIs return — so a richer backend (Brave `page_age`/`extra_snippets`/`meta_url.favicon`, Tavily `published_date`/`score`) maps in with a direct field copy; the scrape backend just leaves them empty. The output formatter already surfaces `age` when present, so it lights up automatically on a backend swap. Classified open-world **but non-destructive** in `ToolSafetyClassification` (read-only network) — the first built-in that is open-world without being destructive — so Security Agent still gates it.
@@ -2072,7 +2198,9 @@ Ripgrep-based content search tool for Agent Brown. Parameters: `pattern` (requir
 
 **Implemented:** Native Swift implementation using `NSRegularExpression` for content search and `GlobTool.globToRegex` for file filtering. Supports `files_with_matches` (default) and `content` output modes. Skips hidden files, binary files, files >1MB. Limits: 500 matching files, 1000 content lines. Glob patterns without `/` match filename only (ripgrep convention).
 
-### Multimodal file_read — image support
+### Multimodal file_read — image support (superseded)
+
+> **(audit 2026-09-24)** Images arrive via `attach_file`; `file_read` returns image metadata only, by design.
 `file_read` currently returns metadata only for image files (filename, dimensions, size). To support actual image reading, the tool result format needs to carry multimodal content (base64 image data as a content part) instead of plain text strings. This requires changes to how `AgentActor` passes tool results to the LLM — currently all tool results are `String`, but multimodal results need structured content blocks. Once supported, the 250K character cap should be raised or replaced with a byte-based limit appropriate for images (2-5MB).
 
 ### Task-scoped working directory for relative paths
@@ -2083,10 +2211,14 @@ Add a "Start" or "Run" button to pending tasks, accessible from both the task li
 
 **Implemented:** `AppViewModel.startTask(_:)` drives `OrchestrationRuntime.restartForNewTask(taskID:)` — the same path the `run_task` tool uses. Eligible statuses are the runnable set (`.pending` / `.paused` / `.interrupted`); the verb is status-aware ("Resume" for paused/interrupted, "Run" otherwise — `runActionTitle(for:)` in `TaskListView.swift`). It refuses (surfacing `taskActionError` via an alert) when another task is `.running` or `.awaitingReview`, mirroring `RunTaskTool`'s guardrails. Surfaces: inline `play.fill` button on the sidebar row (alongside the existing running pause/stop inline controls), a context-menu item in the pending/paused/interrupted branch (`.scheduled` was split into its own case, unchanged — it already has a wake-driven "run now"), and a prominent Run/Resume button in `TaskDetailWindow`'s header (the window's `viewModel` became `@Bindable` for the alert binding). `.scheduled` tasks are intentionally excluded — `run_task` excludes them too.
 
-### Streamline model configuration UI
+### Streamline model configuration UI ✅
+
+> **(audit 2026-09-24)** Agent-centric model settings (d5c4e68); config pool retired 2026-07-31.
 The current Settings flow requires managing configurations as separate objects, then assigning them to agent roles across two different tabs. Redesign the UI to feel agent-centric — each agent/role has its own settings panel showing provider, model, temperature, max tokens, etc. directly. The underlying `ModelConfiguration` concept stays in the data model for reuse and persistence, but the UI abstracts it away so it feels like "adjusting Smith's settings" rather than "creating a configuration and assigning it." Goal: the user should essentially never have to manually create a model configuration.
 
-### Built-in providers list with fixed identifiers
+### Built-in providers list with fixed identifiers ✅
+
+> **(audit 2026-09-24)** 19 `builtin.*` providers in SwiftLLMKit `BuiltInProviders`.
 The Providers tab currently treats every provider — including well-known ones like OpenAI, Anthropic, Gemini, and Ollama — as user-created records that can be renamed, edited, or deleted. This is fragile: a provider's identity (e.g. "OpenAI" → OpenAI's API) should be a constant, not something the user can rename or accidentally delete.
 
 **Redesign:** Show all known/built-in providers as a fixed, scrollable list at the top of the Providers screen. Each built-in row:
@@ -2099,7 +2231,9 @@ Below the built-in list, keep a manual "Add provider" affordance for custom Open
 
 This pairs with the agent-centric config rework above: with stable provider identities, agent role assignments can reference providers by their fixed ID rather than by user-created configuration objects.
 
-### list_tasks search and semantic search
+### list_tasks search and semantic search ⚠️ partial
+
+> **(audit 2026-09-24)** Keyword `query` done; no semantic mode (`search_memory` covers summaries).
 Add search capabilities to the `list_tasks` tool so Brown can find relevant tasks without retrieving the entire list. Support a `query` parameter for keyword matching against task titles and descriptions, and optionally a semantic search mode that uses the embedding service to find tasks by meaning rather than exact text. This would reduce token usage (no need to dump all tasks) and improve Brown's ability to find related prior work.
 
 ### Improve prior-task relevance in new task context
@@ -2111,6 +2245,8 @@ Add a setting (persisted in UserDefaults) that controls whether the system autom
 **Implemented:** `AppViewModel.autoRunNextTask` (defaults to `true`, persisted in UserDefaults). Passed to `OrchestrationRuntime` at init, which forwards it to `SmithBehavior.systemPrompt(autoAdvanceEnabled:)` — the auto-advance instructions in Steps 6, the Key Constraints table, and the `create_task` docs are all conditional on the setting. `ReviewWorkTool` also includes advance guidance in its tool result when enabled. UI toggle added in Settings → Account tab under a "Behavior" section. Takes effect on next start (system prompt is generated at agent creation time).
 
 ### Skills — reusable prompt templates with arguments and embedded tool calls
+
+> **(audit 2026-09-24) — largely superseded by task templates; needs a decision.** Template inputs + `{{placeholder}}` rendering, `TemplateRunInputSheet`, and the Library already cover arguments, a run dialog and a list. Not covered: embedded `{{bash:}}`/`{{file_read:}}` expansion, a `/skill` command, and sending the rendered prompt to Smith (templates create a task directly). Decide: drop Skills, or extend templates with those three.
 
 Skills are saved, reusable prompt templates that generate fully-formed user messages to send to Smith. A skill encapsulates a repeatable workflow — instead of typing out a detailed prompt every time, the user defines the skill once (with variables for the parts that change) and invokes it with arguments.
 
@@ -2362,7 +2498,9 @@ When — and *only* when — a security re-eval changes the approved list, injec
 
 **Noted, not changing now:** Security Agent scopes from task title + description + ID only — task **attachments are invisible** to scoping, though a `.sql`/`.xcodeproj`/etc. attachment may imply needed tools. Cheap future improvement: feed Security Agent the attachment filenames/types. Left as a known limitation for v1.
 
-### Harden `isRetryableError` in TaskSummarizer
+### Harden `isRetryableError` in TaskSummarizer ✅ (superseded)
+
+> **(audit 2026-09-24)** Function deleted; everything uses the single `LLMRetryPolicy`.
 `TaskSummarizer.isRetryableError` currently matches on `error.localizedDescription` strings (e.g. `hasPrefix("HTTP 429")`, regex for `^HTTP 5\d\d`). This works because `LLMProviderError.httpError` formats its description as `"HTTP \(code): \(body)"`, but it's fragile — if error wrapping or formatting changes, retries silently stop working. Replace with direct pattern matching on `LLMProviderError.httpError(statusCode:body:url:)` to check the status code as an integer.
 
 ### File-tool path hardening — component-safe writes (from codex review, 2026-07-12)
@@ -2392,7 +2530,9 @@ Results should be grouped by source (current transcript, task, prior session) wi
 
 > **Note:** This implies we need a way to view prior transcripts. Currently, transcripts from previous sessions are persisted but only partially restorable. Consider adding a "Session History" or "Prior Transcripts" view (perhaps accessible from the sidebar or a dedicated tab) that lets the user browse, search, and read past session transcripts. This would also support the Cmd-Shift-F global search by providing the underlying data source and navigation target for prior-session matches.
 
-### Tool post-call behavior flags system
+### Tool post-call behavior flags system ✅ (built differently)
+
+> **(audit 2026-09-24)** Built as `ToolEffect` / `successEffects` (2beaa6e). See CLAUDE.md "Never drive behavior by matching free text".
 `AgentActor.updatePostCallFlags` currently uses stringly-typed matching on tool names and exact return value strings to determine post-call behavior (should the agent idle? did it send a message? did it complete a task?). This is fragile — adding a new tool or changing a return string requires manual sync with the agent loop, and mistakes cause bugs like the task_update spam loop.
 
 Replace with a structured system where tools declare their post-call semantics via a protocol property or return type:
@@ -2411,7 +2551,9 @@ The model stats popover (shown when clicking the model name on an agent card) cu
 - **Security Agent-specific stats**: For the security agent, show approval/denial/warning/abort counts from `EvaluationRecord` data (already available in `securityAgentEvaluationRecords`).
 - **Latency histogram or percentiles**: Show p50/p95/p99 latency instead of just the average.
 
-### Token usage cost estimation
+### Token usage cost estimation ✅ (superseded)
+
+> **(audit 2026-09-24)** Delivered as the Spending Dashboard (`SpendingDashboardView`, ae216c0).
 Add estimated cost columns to the Token Usage analytics window. Use LiteLLM pricing data (already available via `ModelMetadataService`) to calculate per-turn and per-task cost estimates based on model ID and token counts. Display in the Overview, By Task, and By Model/Provider tabs. Handle cache pricing correctly (Anthropic cached reads are cheaper than uncached input).
 
 ### Surface estimated cost in the inspector + task UI ✅
@@ -2527,7 +2669,9 @@ Estimated 30 minutes of mechanical work; no architectural change.
 ### SwiftUI review P3 — `.scrollPosition` modernization
 `ChannelLogView`'s auto-scroll-to-bottom is built on `ScrollViewReader` + `.onChange(of: messages.count)`. Modern SwiftUI offers `.scrollPosition(id:)` which is more declarative and integrates with `.scrollTargetBehavior`. Optional refactor — current implementation works.
 
-### SwiftUI review P3 — SwiftLint rule for `: some View` antipattern
+### SwiftUI review P3 — SwiftLint rule for `: some View` antipattern ✅ (as a guard test)
+
+> **(audit 2026-09-24)** Enforced by `CodeStyleGuardTests` (properties) plus a `-> some View` function ratchet (budget 4, all in `ProviderManagementView`).
 After the 2026-04-27 sweep eliminated 44 `: some View` property antipatterns, add a SwiftLint custom rule (or CI grep) to prevent reintroduction:
 
 ```regex
@@ -2580,7 +2724,7 @@ Overlaps with the holistic-oversized-input item above (the char/token caps) — 
 
 ### Inspector "Now" panel + M2 telemetry re-key (design settled 2026-07-26; full phased plan)
 
-**Status:** Phase 0 complete (this plan + the CLAUDE.md architecture-decision note). Phases 1–4 below build in order, each an independently build-green commit, reviewed between. UI settled through sketch iteration — the reference render is the artifact "Now panel — outline v7".
+**Status (audit 2026-09-24):** Phases 1–3 PARTIAL, Phase 4 mostly superseded. Built: `AgentInstanceRef` (role/instanceID/taskID only), instance-keyed callbacks, `callLogsByInstance`/`liveContextsByInstance`, per-instance maps in `AppViewModel` alongside the role maps, and `NowLiveSection` ABOVE the role cards. `InspectorImprovements.md` (phases 1–7, 2026-09-23) then took a different route — kept role cards, added pop-out windows, `LLMCallEvent` for summarizer/compaction. **Not built:** `terminatedAgentArchive` + `AgentInspectorTarget` re-keyed by instance (multiple Brown windows), `EvaluationRecord` attribution, Orchestration group / per-criterion validator rows / attention sort, retiring the gear sheets. **Needs a decision:** finish this plan or declare it superseded by InspectorImprovements.md. Original status: Phase 0 complete (this plan + the CLAUDE.md architecture-decision note). Phases 1–4 below build in order, each an independently build-green commit, reviewed between. UI settled through sketch iteration — the reference render is the artifact "Now panel — outline v7".
 
 #### Decision
 
@@ -2673,7 +2817,9 @@ Re-key the data pipeline; keep the CURRENT `InspectorView` working via compatibi
 - Do not reintroduce a per-call user-approval toggle (`perCallApprovalEnabled` is going away).
 - The left-task-sidebar breakdown (below) and the M4 serial-scoping-off-the-lifecycle-queue work are separate tracks — don't scope-creep them in here.
 
-### Left task sidebar — sectioned breakdown (design pending, noted 2026-07-25)
+### Left task sidebar — sectioned breakdown (design pending, noted 2026-07-25) — SUPERSEDED
+
+> **(audit 2026-09-24)** Built by the Task workspace overhaul (✅ 2026-08-03): Recent section, Library groups, Archived/Deleted panes, all-session browser.
 
 The left task list has outgrown its flat shape. **Not starting today — notes only.**
 
@@ -3027,8 +3173,11 @@ the work — not the OAuth, which is comparatively small.
 4. ✅ **App integration.** Provider registration, Settings sign-in (launch `codex login` in Terminal —
    no PKCE implementation of our own), status (plan, expiry, signed-out), and suppressing the
    `readAPIKey` "API key missing" error path for a provider that legitimately has no key.
-5. ✅ **Limits UX.** Proactive window display from the response headers; the `usage_limit_reached`
-   wait-and-resume flow above.
+5. ⚠️ **Limits UX — PARTIAL (audit 2026-09-24).** Built: proactive window display from the response
+   headers; the `usage_limit_reached` wait-and-resume flow above. **Not built:** the settled
+   credits-depleted "park + slow re-check" (`LLMRetryPolicy` classifies `.creditsDepleted` /
+   `.spendControlReached` as `.permanent`, so the task fails and never self-resumes after a top-up),
+   and the low-balance UI warning.
 6. ✅ **Security — mostly dissolved on inspection.** Never copy tokens into our own storage; read and
    refresh `~/.codex/auth.json` only (already how Phase 1 works). `LLMRequestLogger` needs NO change:
    `logRequest(label:url:model:body:rawData:)` takes no headers at all, so the account-linked
@@ -3076,4 +3225,4 @@ Copy the auth verbatim and adapt; treat its identity-prompt requirement as super
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved
-Was misdiagnosed as an SSH key issue. The actual problem was corrupted SwiftPM caches. Fix: delete `~/.swiftpm`, `~/Library/org.swift.swiftpm`, and `~/Library/Caches/org.swift.swiftpm`, then quit and restart Xcode. May also need to verify the build succeeds — there may be pre-existing errors in `ProviderManagementView.swift` and `ModelConfigurationEditorView.swift` referencing `ProviderAPIType` that need investigation.
+Was misdiagnosed as an SSH key issue. The actual problem was corrupted SwiftPM caches. Fix: delete `~/.swiftpm`, `~/Library/org.swift.swiftpm`, and `~/Library/Caches/org.swift.swiftpm`, then quit and restart Xcode.

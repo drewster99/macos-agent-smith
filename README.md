@@ -37,12 +37,13 @@ Four agents, each with one job — plus a judge that deliberately isn't one of t
 
 ## Models and providers
 
-**Thirteen providers ship preconfigured**, and every role gets its own model — so you can run the worker on a local model and have a frontier model judge its work, or any mix you like. API keys live in the macOS Keychain, never in config files.
+**Nineteen provider presets ship built in**, and every role gets its own model — so you can run the worker on a local model and have a frontier model judge its work, or any mix you like. API keys live in the macOS Keychain, never in config files.
 
 | | |
 | --- | --- |
 | **Shown by default** | Anthropic · OpenAI · Gemini · Grok · OpenRouter |
-| **Also built in** | Mistral · Hugging Face · Alibaba Cloud · Meta Model API · z.ai |
+| **Also built in** | Mistral · DeepSeek · Moonshot AI · Hugging Face · Alibaba Cloud (international, Singapore, Beijing) · Meta Model API · z.ai (API and Coding plan) |
+| **ChatGPT subscription** | Use OpenAI models through your ChatGPT plan by signing in with the `codex` CLI. No API key needed. |
 | **Run locally** | Ollama · LM Studio — no API key, nothing leaves the machine (an Ollama Cloud preset is included too) |
 | **Anything else** | Any OpenAI-compatible endpoint, by URL |
 
@@ -51,12 +52,12 @@ Endpoints, model catalogs, and pricing metadata come from [SwiftLLMKit](https://
 ## Highlights
 
 - **Real tools, real shell** — Brown runs `bash`, reads and edits files, manages processes, fetches the web. Not a sandbox toy.
-- **Security built in, not bolted on** — every tool call from every agent routes through the Security Agent before it runs. There is no unreviewed path, and no setting to create one.
+- **Security built in, not bolted on** — every tool call from every agent routes through the Security Agent before it runs. There's no hidden path: if you switch review off for an agent in Settings, its calls are still logged and clearly marked as unreviewed.
 - **Work is checked, not rubber-stamped** — each acceptance criterion is judged on its own, by a model assigned separately from the one doing the work.
 - **Multi-session** — run independent jobs side by side in their own tabs and windows.
 - **Persistent memory** — semantic-search-backed memory so the team remembers what it learned across runs.
 - **Agent inspector** — open any agent's full conversation, tool calls, and security verdicts, live or after the fact.
-- **Bring your own model** — thirteen providers built in, any OpenAI-compatible endpoint, and a different model per role. See [Models and providers](#models-and-providers).
+- **Bring your own model** — nineteen provider presets built in, any OpenAI-compatible endpoint, and a different model per role. See [Models and providers](#models-and-providers).
 - **Usage & cost tracking** — every call is metered and grouped by run.
 - **MCP support** — extend the team with Model Context Protocol servers.
 
@@ -93,6 +94,10 @@ The roles are independent on purpose: nothing falls back to another role's model
 ## A note on safety
 
 Agent Smith runs LLM-generated commands — including a real shell — on your machine. The Security Agent vets actions before they run, but it's a mitigation, not a sandbox, and LLMs make mistakes. This is early software: keep backups, point it at work you can afford to have go sideways, and use it at your own risk.
+
+## Contributing
+
+Feedback, bug reports, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started, and [SECURITY.md](SECURITY.md) to report a vulnerability privately. Issues labeled [`good first issue`](https://github.com/drewster99/macos-agent-smith/labels/good%20first%20issue) are a good place to start.
 
 ## License
 
