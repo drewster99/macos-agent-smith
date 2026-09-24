@@ -12,8 +12,7 @@ import SemanticSearch
 ///
 /// 1. A retune of the SAME model reaches a live agent, applied at a turn boundary so no single turn
 ///    spans two configurations.
-/// 2. A change of MODEL or PROVIDER does NOT, because the stored conversation carries
-///    provider-shaped data and tool-call ids minted in one provider's format.
+/// 2. A change of MODEL or PROVIDER reaches a live agent only with an explicit history reset.
 ///
 /// Not pinned, deliberately: that an UNCHANGED configuration skips the retune. Its failure mode is
 /// a performance regression rather than a wrong answer (a needless swap discards a provider's
@@ -219,6 +218,32 @@ struct ModelRetuneTests {
         )
     }
 
+    private func makeRuntimeWithSummarizer() -> OrchestrationRuntime {
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-retune-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        return OrchestrationRuntime(
+            providers: [
+                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
+                .summarizer: MockLLMProvider(responses: [LLMResponse(text: "Summary.")])
+            ],
+            configurations: [
+                .smith: Self.config(temperature: 0.2, modelID: "smith-old"),
+                .securityAgent: Self.config(temperature: 0.2, modelID: "security-old"),
+                .summarizer: Self.config(temperature: 0.2, modelID: "summarizer-old")
+            ],
+            providerAPITypes: [:],
+            agentTuning: [.smith: AgentTuningConfig(pollInterval: 0.5, messageDebounceInterval: 0)],
+            semanticSearchEngine: Self.sharedEngine,
+            usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
+            autoAdvanceEnabled: false,
+            autoRunInterruptedTasks: false,
+            memoryStore: nil
+        )
+    }
+
     /// Reads the live Smith's temperature, after giving its loop a chance to reach the boundary
     /// where a staged retune is applied.
     private func smithTemperature(_ runtime: OrchestrationRuntime) async -> Double? {
@@ -249,11 +274,17 @@ struct ModelRetuneTests {
         #expect(await smithTemperature(runtime) == 0.9, "a retune never reached the live Smith")
     }
 
-    @Test("A model change leaves the live Smith alone")
-    func modelChangeDoesNotRetuneLiveSmith() async {
+    @Test("A model change swaps live Smith and clears pre-swap history")
+    func modelChangeSwapsLiveSmithWithHistoryReset() async {
         let runtime = makeRuntime()
         await runtime.start()
         defer { Task { await runtime.stopAll() } }
+        guard let smithID = await runtime.agentIDForRole(.smith),
+              let smith = await runtime.liveAgent(id: smithID) else {
+            Issue.record("missing live Smith")
+            return
+        }
+        await smith.appendUserMessage("pre-swap marker")
 
         await runtime.setProviders(
             providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
@@ -261,10 +292,46 @@ struct ModelRetuneTests {
             apiTypes: [:]
         )
 
-        let temperature = await smithTemperature(runtime)
-        #expect(
-            temperature == 0.2,
-            "a MODEL change was pushed into a live agent — its history is full of the previous provider's shapes"
+        let deadline = Date().addingTimeInterval(3.0)
+        var modelID: String?
+        while Date() < deadline {
+            let liveConfig = await smith.currentModelConfiguration()
+            modelID = liveConfig.modelID
+            if modelID == "a-different-model" { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(modelID == "a-different-model", "live Smith never adopted the swapped model")
+        let swappedConfig = await smith.currentModelConfiguration()
+        #expect(swappedConfig.temperature == 0.9)
+        let context = await smith.contextSnapshot()
+        let fullText = context.compactMap { $0.content.textValue }.joined(separator: "\n")
+        #expect(!fullText.contains("pre-swap marker"), "model/provider swap must reset history before replaying")
+    }
+
+    @Test("Long-lived summarizer and security evaluator refresh on setProviders")
+    func longLivedHoldersRefreshOnProviderUpdate() async {
+        let runtime = makeRuntimeWithSummarizer()
+        await runtime.start()
+        defer { Task { await runtime.stopAll() } }
+
+        #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.modelID == "security-old")
+        #expect(await runtime.liveModelConfiguration(for: .summarizer)?.modelID == "summarizer-old")
+
+        await runtime.setProviders(
+            providers: [
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
+                .summarizer: MockLLMProvider(responses: [LLMResponse(text: "Summary.")])
+            ],
+            configurations: [
+                .securityAgent: Self.config(temperature: 0.4, modelID: "security-new"),
+                .summarizer: Self.config(temperature: 0.6, modelID: "summarizer-new")
+            ],
+            apiTypes: [:]
         )
+
+        #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.modelID == "security-new")
+        #expect(await runtime.liveModelConfiguration(for: .securityAgent)?.temperature == 0.4)
+        #expect(await runtime.liveModelConfiguration(for: .summarizer)?.modelID == "summarizer-new")
+        #expect(await runtime.liveModelConfiguration(for: .summarizer)?.temperature == 0.6)
     }
 }

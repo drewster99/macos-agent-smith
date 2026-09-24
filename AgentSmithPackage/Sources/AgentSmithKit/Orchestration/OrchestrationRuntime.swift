@@ -120,6 +120,8 @@ public actor OrchestrationRuntime {
 
     /// Summarizer for generating task summaries after completion/failure.
     private var taskSummarizer: TaskSummarizer?
+    /// Long-lived evaluator attached to Smith (open-world tool-call reviews).
+    private var smithSecurityEvaluator: SecurityEvaluator?
     /// The inspector subject for Summarizer-billed calls this run — the summarizer instance's own
     /// calls and Smith's context compaction share it, so they form one Summarizer call log.
     private var summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
@@ -1663,13 +1665,12 @@ public actor OrchestrationRuntime {
     ///   temperature, effort, thinking, token caps) reaches every LIVE agent of that role
     ///   immediately, via `AgentActor.scheduleModelRetune`. The agent applies it at its next
     ///   turn boundary and keeps its conversation.
-    /// - **A MODEL or PROVIDER change** does NOT touch a live agent, deliberately. Brown picks it
-    ///   up at its next spawn. Smith and the `TaskSummarizer` keep theirs until the runtime cold
-    ///   starts, which `restartForNewTask` does NOT do while Smith is alive — it cycles only the
-    ///   worker. See `scheduleModelRetune` for why a mid-conversation model change is unsafe.
-    /// - Non-agent holders — the `TaskSummarizer` and the long-lived `SecurityEvaluator`s (Smith's
-    ///   and `validationSecurityEvaluator`) — take NEITHER a retune nor a model change until the
-    ///   runtime restarts. Only per-Brown evaluators refresh, at spawn. Known limitation.
+    /// - **A MODEL or PROVIDER change** reaches a live Smith/Brown only through an explicit history
+    ///   reset at the same turn boundary (`AgentActor.scheduleModelSwap`): Smith gets the same
+    ///   `/clear` orientation rebuild, Brown gets a fresh task briefing. This avoids replaying
+    ///   provider-shaped history across backends.
+    /// - Non-agent holders refresh in place: `TaskSummarizer`, Smith's long-lived
+    ///   `SecurityEvaluator`, and `validationSecurityEvaluator`.
     /// - The validator needs none of this: `validatorModel()` reads these dictionaries fresh for
     ///   every criterion judgment.
     ///
@@ -1682,28 +1683,35 @@ public actor OrchestrationRuntime {
         supportsVisionByRole: [AgentRole: Bool] = [:],
         supportsDocumentsByRole: [AgentRole: Bool] = [:]
     ) async {
+        let changedRoles = Set(configurations.keys)
         // Decide what is a RETUNE before the merge overwrites the configs being compared against.
         // Three conditions, all required: the role already had a config (nothing live otherwise),
-        // the model identity is unchanged (a model change is out of scope — see the doc above),
+        // the model identity is unchanged,
         // and the resolved configuration actually differs. That last one is not an optimization:
         // the caller rebuilds every role's provider on every edit, and some providers mint
         // per-instance state (the ChatGPT-subscription provider's `prompt_cache_key`, which is its
         // prefix-cache routing hint), so retuning a role nobody touched would throw away a live
         // agent's cache locality to apply a change that isn't there.
         var retunes: [AgentRole: AgentActor.ModelRetune] = [:]
+        var identitySwaps: [AgentRole: AgentActor.ModelRetune] = [:]
         for (role, newConfig) in configurations {
             guard let currentConfig = llmConfigs[role],
-                  currentConfig.providerID == newConfig.providerID,
-                  currentConfig.modelID == newConfig.modelID,
-                  currentConfig != newConfig,
                   let newProvider = providers[role] else { continue }
-            retunes[role] = AgentActor.ModelRetune(
+            let update = AgentActor.ModelRetune(
                 provider: newProvider,
                 llmConfig: newConfig,
                 providerAPIType: apiTypes[role] ?? providerAPITypes[role] ?? .openAICompatible,
                 supportsVision: supportsVisionByRole[role],
                 supportsDocuments: supportsDocumentsByRole[role]
             )
+            if currentConfig.providerID == newConfig.providerID,
+               currentConfig.modelID == newConfig.modelID,
+               currentConfig != newConfig {
+                retunes[role] = update
+            } else if currentConfig.providerID != newConfig.providerID
+                        || currentConfig.modelID != newConfig.modelID {
+                identitySwaps[role] = update
+            }
         }
 
         for (role, provider) in providers { llmProviders[role] = provider }
@@ -1723,6 +1731,8 @@ public actor OrchestrationRuntime {
             releaseTasksBlockedOnValidatorModel()
         }
 
+        await refreshLongLivedProviderHolders(changedRoles: changedRoles)
+
         // Push retunes AFTER the merge, so a spawn racing this call reads the same configuration
         // the live agents just received.
         for (role, retune) in retunes {
@@ -1730,6 +1740,82 @@ public actor OrchestrationRuntime {
                 await workerHandle.agent.scheduleModelRetune(retune)
             }
         }
+        for (role, update) in identitySwaps {
+            switch role {
+            case .smith:
+                guard let smith = supervisor.firstHandle(role: .smith)?.agent else { continue }
+                let orientation = await composeContextResetOrientation()
+                await smith.scheduleModelSwap(update, orientation: orientation)
+            case .brown:
+                for workerHandle in supervisor.handles(role: .brown) {
+                    let orientation: String?
+                    if let task = await taskStore.taskForAgent(agentID: workerHandle.id) {
+                        orientation = await composeBrownTaskBriefing(for: task)
+                    } else {
+                        orientation = nil
+                    }
+                    await workerHandle.agent.scheduleModelSwap(update, orientation: orientation)
+                }
+            default:
+                continue
+            }
+        }
+    }
+
+    private func refreshLongLivedProviderHolders(changedRoles: Set<AgentRole>) async {
+        if changedRoles.contains(.summarizer) {
+            await refreshTaskSummarizerHolder()
+        }
+        if changedRoles.contains(.securityAgent),
+           let provider = llmProviders[.securityAgent] {
+            let providerType = providerAPITypes[.securityAgent]?.rawValue ?? ""
+            let supportsVision = supportsVisionByRole[.securityAgent] ?? true
+            let supportsDocuments = supportsDocumentsByRole[.securityAgent] ?? false
+            await smithSecurityEvaluator?.setModel(
+                provider: provider,
+                configuration: llmConfigs[.securityAgent],
+                providerType: providerType,
+                supportsVision: supportsVision,
+                supportsDocuments: supportsDocuments
+            )
+            await validationSecurityEvaluator?.setModel(
+                provider: provider,
+                configuration: llmConfigs[.securityAgent],
+                providerType: providerType,
+                supportsVision: supportsVision,
+                supportsDocuments: supportsDocuments
+            )
+        }
+    }
+
+    private func refreshTaskSummarizerHolder() async {
+        guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else {
+            taskSummarizer = nil
+            return
+        }
+        let providerType = providerAPITypes[.summarizer]?.rawValue ?? ""
+        if let summarizer = taskSummarizer {
+            await summarizer.setModel(provider: provider, configuration: config, providerType: providerType)
+            return
+        }
+        guard let sessionID = currentSessionID else { return }
+        let summarizer = TaskSummarizer(
+            provider: provider,
+            memoryStore: memoryStore,
+            channel: channel,
+            contextWindowSize: config.contextWindowSize,
+            maxOutputTokens: config.maxTokens,
+            usageStore: usageStore,
+            configuration: config,
+            providerType: providerType,
+            sessionID: sessionID,
+            activityTracker: liveActivityTracker
+        )
+        if let callCallback = onLLMCallRecorded {
+            let summarizerRef = summarizerInspectorRef
+            await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
+        }
+        taskSummarizer = summarizer
     }
 
     /// Returns every task parked on a missing validator model to `.validating` and re-enqueues
@@ -2408,6 +2494,7 @@ public actor OrchestrationRuntime {
         // through its own Security Agent evaluator — local read-only and messaging tools stay
         // un-reviewed. The provider is guaranteed present; start refuses without it.
         let smithEvaluator = makeSecurityEvaluator(provider: securityAgentProvider, executionTracker: ToolExecutionTracker())
+        smithSecurityEvaluator = smithEvaluator
         if let evalCallback = onEvaluationRecorded {
             await smithEvaluator.setOnEvaluationRecorded(evalCallback)
         }
@@ -4058,6 +4145,33 @@ public actor OrchestrationRuntime {
     /// All currently active agent IDs.
     public func activeAgentIDs() -> [UUID] {
         Array(supervisor.handlesByID.keys)
+    }
+
+    /// Best-available live model configuration for an inspector role.
+    /// Prefers the current live holder (agent/evaluator/summarizer); falls back to the assigned
+    /// role config when there is no live holder yet.
+    public func liveModelConfiguration(for role: AgentRole) async -> ModelConfiguration? {
+        switch role {
+        case .smith:
+            if let smith = supervisor.firstHandle(role: .smith)?.agent {
+                return await smith.currentModelConfiguration()
+            }
+            return llmConfigs[.smith]
+        case .brown:
+            if let brown = supervisor.firstHandle(role: .brown)?.agent {
+                return await brown.currentModelConfiguration()
+            }
+            return llmConfigs[.brown]
+        case .securityAgent:
+            if let config = await smithSecurityEvaluator?.currentConfiguration() { return config }
+            if let config = await validationSecurityEvaluator?.currentConfiguration() { return config }
+            return llmConfigs[.securityAgent]
+        case .summarizer:
+            if let config = await taskSummarizer?.currentConfiguration() { return config }
+            return llmConfigs[.summarizer]
+        case .validator:
+            return llmConfigs[.validator]
+        }
     }
 
     // MARK: - Agent Archive

@@ -23,7 +23,7 @@ struct ValidatorAgentCard: View {
     /// The validator's effective config — its `(provider, model)` assignment resolved with the
     /// per-`(role, model)` override, or nil when no model is assigned.
     private var assignedConfig: ModelConfiguration? {
-        viewModel.resolvedAgentConfigs[.validator]
+        viewModel.inspectorResolvedAgentConfigs[.validator]
     }
 
     var body: some View {
