@@ -11,40 +11,23 @@ contributor.
 
 ### P0 — correctness bugs (small, fix first)
 
-1. **`grep` can crash the app on model-supplied numbers.** `GrepTool.positiveInt` does
-   `Int(double)` with no bound (traps on `1e300`/NaN), and `UInt64(maxFileSizeMB) * 1024 * 1024`
-   overflow-traps. Clamp all three caps to hard ceilings. — S
-2. **Costs are under-reported for 1-hour cache writes.** `AnthropicProvider` sends `ttl: "1h"`,
-   but every `effectiveRates(...)` call (`CostBoard`, `UsageAggregator`, `AppViewModel`,
-   `TaskCostDetailSheet`) omits `extendedCache:`, so 1h writes are billed at the 5-minute rate.
-   There are four copies of the cost formula; fold them into one helper. — S
-3. **"Free" models show as "Unpriced"** in usage (`UsageAggregator` ignores `isFree`). — S
-4. **`provide_help` auto-respawn runs unscoped.** It calls the task-less `spawnBrown()`, so the
-   respawned worker gets the full tool set without Security Agent scoping. — S
-5. **A task restored from another session can run in place**, breaking "one task id ↔ one
-   session's transcript". The planned clone guard was never added. — S
-6. **Codex credits-depleted fails the task permanently.** The settled design was park + slow
-   re-check, so a top-up resumes the work (see ChatGPT-subscription Phase 5). — M
+1. **`grep` can crash the app on model-supplied numbers.** —
+   [#12](https://github.com/drewster99/macos-agent-smith/issues/12) — S
+2. **1-hour cache writes are billed at the 5-minute rate.** —
+   [#13](https://github.com/drewster99/macos-agent-smith/issues/13) — S
+3. **`provide_help` auto-respawn runs an unscoped Brown.** —
+   [#14](https://github.com/drewster99/macos-agent-smith/issues/14) — S
+4. **A task restored from another session can run in place.** —
+   [#15](https://github.com/drewster99/macos-agent-smith/issues/15) — S
+5. **Codex credits-depleted fails the task permanently** instead of park + re-check. —
+   [#16](https://github.com/drewster99/macos-agent-smith/issues/16) — M
 
 ### P1 — high-value work
 
-7. **Validation economics.** (a) Force a verdict on the final turn instead of discarding a paid
-   judgment as "exhausted turns" — S. (b) Seed re-judgments with the criterion's rejection
-   history (`criterionRejections` is write-only today) — M. (c) Identical-rejection convergence
-   signal — S. (d) Show unjudged vs rejected in "N of M settled" — S.
-8. **Replace the DuckDuckGo scrape with Brave.** `BraveSearchBackend` is already written; it
-   needs a Keychain key, a Settings field, and the default swap. — S
-9. **Task preconditions / fail-fast `.blocked` outcome.** — M
-10. **Hard wall-clock tool timeout.** It's cooperative today, so a non-cooperative tool can
-    wedge Brown. — M
-11. **Evaluator concurrency cap.** A global semaphore plus a per-attempt validator call cap, so
-    validation can't starve workers or overspend. — M
-12. **Guard against Smith loosening criteria after a failure.** The data is captured; nothing
-    reads it. — M
-13. **Parse OpenRouter's response `provider` field into usage records.** The recorded price can
-    be ~48% below the real route cost under `:nitro`. Needs a swift-llm-kit release. — M
-14. **Path-safety layer 3.** A per-role allowlist, including scoping the validator's
-    `attach_file` to the evidence directory. — L
+6. **Validation economics:** forced final verdict, rejection-history seeding, convergence signal,
+   unjudged vs rejected. — [#17](https://github.com/drewster99/macos-agent-smith/issues/17) — S–M
+7. **Task preconditions / fail-fast `.blocked` outcome.** —
+   [#18](https://github.com/drewster99/macos-agent-smith/issues/18) — M
 
 ### P2 — worthwhile, not urgent
 
@@ -269,7 +252,7 @@ A three-reviewer sweep (codex + agy + a claude agent) on 2026-08-03 caught and F
 
 ### OpenRouter routes and variants: one model is many routes, and we record one (found 2026-07-30)
 
-**Status:** investigated and fully characterized 2026-07-30. **(audit 2026-09-24): Phase 1 ✅ shipped** (swift-llm-kit 0.0.121, `OpenRouterDynamicVariant`). Route enumeration, `variants` on `ModelInfo`, typed `OpenRouterRouting`, and parsing the response `provider` field into usage records are NOT built — the last one matters most, since `:nitro` can bill ~48% above the recorded price. Decided direction: the model JSON grows a `variants` collection under each model, holding both the upstream ROUTES and the dynamic `:option` suffixes. Phase 1 (synthesize `:floor` / `:nitro` into the models response so they reach the UI and the prober) is approved for immediate work; the route enumeration behind it is not yet scheduled.
+**Status:** investigated and fully characterized 2026-07-30. **(audit 2026-09-24): Phase 1 ✅ shipped** (swift-llm-kit 0.0.121, `OpenRouterDynamicVariant`). Route enumeration, `variants` on `ModelInfo`, and typed `OpenRouterRouting` are NOT built. Decided direction: the model JSON grows a `variants` collection under each model, holding both the upstream ROUTES and the dynamic `:option` suffixes. Phase 1 (synthesize `:floor` / `:nitro` into the models response so they reach the UI and the prober) is approved for immediate work; the route enumeration behind it is not yet scheduled.
 
 Everything below was verified against the live API and OpenRouter's own docs (`https://openrouter.ai/docs/llms-full.txt`) on 2026-07-30, not recalled.
 
@@ -415,7 +398,7 @@ Combinations are unreachable through any suffix, e.g. cheapest-first, fp8 only, 
 {"provider": {"sort": "price", "quantizations": ["fp8"], "max_price": {"prompt": 0.5}}}
 ```
 
-**Verification:** the chat-completions response carries a top-level `provider` field naming the route that actually served the request (e.g. `"provider": "Anthropic"`), on both streaming chunks and non-streaming bodies. We do not currently parse or record it. Capturing it into `LLMTurnRecord` / `UsageRecord` is the only way to know what we were actually billed for.
+**Verification:** the chat-completions response carries a top-level `provider` field naming the route that actually served the request (e.g. `"provider": "Anthropic"`), on both streaming chunks and non-streaming bodies.
 
 #### Suffix form vs provider-object form — NOT equivalent for us
 
@@ -434,7 +417,7 @@ guard let pricing = pricingLookup(record.providerID, record.modelID) else { retu
 
 and the lookup is an exact dictionary hit (`SharedAppState.pricingLookup`): `snapshot["\(providerID)/\(modelID)"]`. A `modelID` of `qwen/qwen3.5-397b-a17b:floor` is not a catalog key today, so every turn reports **$0.00** — no error, no warning. **This is a direct argument for the Phase 1 work below:** synthesizing the suffixed ids INTO the catalog gives them a pricing row and closes the silent zero.
 
-Residual accuracy problem either way: the price we store is the default route's. With `sort: "price"` the real route is ~1% cheaper than recorded; with `sort: "throughput"` it could be Venice at 0.750 recorded as 0.390 — **~48% understated**. Only per-route data or parsing the response `provider` field fixes that.
+Residual accuracy problem either way: the price we store is the default route's. With `sort: "price"` the real route is ~1% cheaper than recorded; with `sort: "throughput"` it could be Venice at 0.750 recorded as 0.390 — **~48% understated**. Only per-route data fixes that.
 
 #### Target shape — `variants` under a model
 
@@ -454,7 +437,7 @@ Open design questions, not yet decided:
 
 It is **already its own `ProviderAPIType` case** (`.openRouter`) with its own decode path (`decodeOpenRouterFacts`, the richest of the family). What it shares is the *transport* — `OpenAICompatibleProvider` — and that sharing is correct: the wire format genuinely is OpenAI's, and this repo's own note warns that request-prep logic is already duplicated across `prepareRequest` and the per-provider adapters. Forking a whole `OpenRouterProvider` would duplicate message encoding, tool encoding and streaming to gain nothing.
 
-What is NOT correct is expressing OpenRouter-only concepts as `extraJSONOverrides` hand-edits. Routing preferences and the response's `provider` field are first-class OpenRouter semantics, and per the project's no-side-channels rule they deserve a typed home — a small `OpenRouterRouting` value on the configuration that the shared adapter serializes when `apiType == .openRouter`, and a parse of the response `provider` field into the turn/usage records. Keep one transport; give the extras a real type.
+What is NOT correct is expressing OpenRouter-only concepts as `extraJSONOverrides` hand-edits. Routing preferences are first-class OpenRouter semantics, and per the project's no-side-channels rule they deserve a typed home — a small `OpenRouterRouting` value on the configuration that the shared adapter serializes when `apiType == .openRouter`. Keep one transport; give the extras a real type.
 
 #### Where the change has to happen — this is a SwiftLLMKit release
 
@@ -1100,9 +1083,7 @@ non-nil user-override fields FORCE          (user always wins)
 
 Now that the layered composition + probe data give us **measured** per-model capabilities, limits, pricing, availability, and effort ladders, a five-subsystem survey (pickers/settings, agent-config/validation, cost/usage, attachments, orchestration) mapped where that data is used vs. missing. Ranked by leverage (value ÷ effort×risk). **Two of these are outright bugs**, flagged 🐞. Every item is file-referenced against the tree at survey time — verify line numbers before editing.
 
-**🐞 Bug A — extended-cache cost is systematically under-billed (small).** Anthropic 1-hour cache *writes* are costed at the 5-minute rate everywhere, because the persisted `config.extendedCacheTTL` is never passed to `ModelPricing.effectiveRates(...)`. Verified at all five call sites: `CostBoard:275`, `UsageAggregator:70`, `AppViewModel:2159` & `:2205`, `TaskCostDetailSheet:338`. Fix: one `UsageRecord.estimatedCost(pricing:)` helper in `AgentSmithKit/Usage` that threads `extendedCacheTTL`, replacing the five inline copies (also collapses five duplicated formulas to a single source of cost truth). Low risk — cost changes only when the flag is on, byte-identical otherwise; confirm the sessionCost turn record actually carries the configuration (default false there if not).
-
-**🐞 Bug B — "Free" is mislabeled "Unpriced" (medium).** An `isFree` model has no `ModelPricing`, so it lands in `unpricedCallCount` and shows the same orange "Unpriced" pill as *"we lack rate data"* — the opposite meaning. Split them: free calls read `$0.00`/"Free", and "Unpriced" shrinks to an actionable data-gap indicator. `isFree` set alongside `pricingLookup` in `SharedAppState`; split `UsageSummary.unpricedCallCount` in `UsageAggregator`; update the pill in `SpendingDashboardView:239` and the per-task/agent chips. Totals already correct (free contributes $0) — display-only.
+**🐞 Bug A — extended-cache cost is systematically under-billed (small).** Tracked in [#13](https://github.com/drewster99/macos-agent-smith/issues/13); the call-site line numbers below are stale. Anthropic 1-hour cache *writes* are costed at the 5-minute rate everywhere, because the persisted `config.extendedCacheTTL` is never passed to `ModelPricing.effectiveRates(...)`. Verified at all five call sites: `CostBoard:275`, `UsageAggregator:70`, `AppViewModel:2159` & `:2205`, `TaskCostDetailSheet:338`. Fix: one `UsageRecord.estimatedCost(pricing:)` helper in `AgentSmithKit/Usage` that threads `extendedCacheTTL`, replacing the five inline copies (also collapses five duplicated formulas to a single source of cost truth). Low risk — cost changes only when the flag is on, byte-identical otherwise; confirm the sessionCost turn record actually carries the configuration (default false there if not).
 
 **Enhancements, ranked:**
 
@@ -1282,18 +1263,6 @@ What shipped: `ModelProfile.trailingSystemTurn` (optional, so existing records d
 
 **This is the first probed finding that must drive runtime request shaping, and that collides with a deferred decision.** Every existing finding is informational or feeds config: vision, PDF, max-output and effort get surfaced, recorded, or used to validate a configuration. This one has to select a code path *inside the provider at send time* — trailing system turn vs. `<system-reminder>` fallback. But the standing direction (see the entry above) is that `ModelProfile` is a standalone artifact and **probe results are deliberately NOT merged back into `ModelInfo` / `BehaviorFlags`; `profiles.json` is the output**. Under that posture a probed answer has no path to `BehaviorFlags.supportsMidConversationSystem`, so the flag would stay hand-set and the probe would be documentation rather than plumbing. So the "how/when do profiles feed the existing structures" question — explicitly deferred until now — becomes a hard prerequisite for *this* dimension specifically, and is the first case that forces it. Worth deciding deliberately rather than letting this feature quietly answer it: a narrow one-field bridge is defensible as a stopgap, but it is exactly the kind of side channel the project rules warn against, so the general merge-back design is the better resolution if we're ready for it.
 
-### Tool-execution timeout is cooperative, not a hard wall-clock cap (2026-07-15)
-
-`AgentActor.runToolWithTimeout` races the tool against a sleep in a `withThrowingTaskGroup`,
-but a task group waits for ALL children at scope exit. When the timer wins, `cancelAll()`
-only REQUESTS cooperative cancellation — a tool that never checks `Task.isCancelled` keeps
-the group (and Brown) suspended past the advertised timeout; the stall watchdog only posts a
-warning. In-tree tools cooperate today, so exposure is limited, but the generic `AgentTool`
-boundary (and future in-process / MCP tools) doesn't enforce it. Options: run the tool in a
-detached task and abandon it on timeout (return the timeout result without awaiting the
-child), or document/require cancellation-responsiveness at the `AgentTool` boundary and add a
-hard kill for the shell path. Flagged by codex in the 2026-07-15 July-1→today review.
-
 ### Validation economics — lessons and planned fixes from the $30.53 SwiftUI-audit run (2026-07-28)
 
 **The incident.** Instance `8D878B1D` of the "SwiftUI Rendering Performance Audit & Improve" template (2026-07-26 23:22 → 2026-07-27 05:07) spent **$30.53 of its $31.08 total on validation** — 20 rounds, 69 criterion judgments, 372 validator LLM calls (gpt-5.5), 853 evidence tool calls, ~5.4 calls per judgment. Reconstructed from `usage_records.json` + the channel log; the dollar figure reproduces the cost dashboard exactly.
@@ -1437,17 +1406,6 @@ Three parallel analyzers over `TaskStore` / `TaskValidation` / `TaskValidationCo
 
 **Minor:** `postRoundSummary` renders verdicts in TaskGroup completion order, so the same round lists criteria differently every run — while `formatRejectionPunchList` deliberately sorts "so the list reads the same every round". Sorting the wave's records before recording fixes both the summary and ledger determinism.
 
-### Guard against Smith "cheating" by loosening criteria after a failure (2026-07-14)
-
-Smith is prone to editing/weakening acceptance criteria (or making them waivable)
-right after a validation failure to force a completion. Sometimes that's correct
-(the criteria were genuinely wrong — e.g. the validator misread an OR), but as a
-standing habit it defeats the point of acceptance validation. We may need to
-distinguish CLARIFYING an ambiguous criterion (fine) from WEAKENING a substantive
-one (not fine) — e.g. flag/annotate criteria edits made on a failed task, require
-a reason, surface them prominently, or disallow lowering the bar without user
-sign-off. Watch for the pattern before deciding how heavy-handed to be.
-
 ### Criteria as a boolean-logic expression, evaluated in code (2026-07-14)
 
 Today each acceptance criterion is judged independently and the task passes only
@@ -1534,7 +1492,7 @@ call gets a verdict.
 
 ### Evaluator framework, acceptance validation, and the worker pool (agreed design, 2026-07-09) — partly SUPERSEDED
 
-> **(audit 2026-09-24)** The registry, `define_validator`, `custom_validator`, `.registry`/`.inline`, `prepare`, and definition pinning were all removed (CLAUDE.md). The stall limit is 8 rounds, not 3, and `review_work` is retired — the user resolves escalations from the task row. Still open: global evaluator semaphore, per-attempt validator call cap, Security Agent onto `EvaluationRunner`.
+> **(audit 2026-09-24)** The registry, `define_validator`, `custom_validator`, `.registry`/`.inline`, `prepare`, and definition pinning were all removed (CLAUDE.md). The stall limit is 8 rounds, not 3, and `review_work` is retired — the user resolves escalations from the task row. Still open: Security Agent onto `EvaluationRunner`.
 
 Agreed with Drew in full; build order at the end. The unifying insight (Drew's): the
 acceptance validator, the per-call tool approver, and the tool scoper are all the same
@@ -1600,9 +1558,7 @@ clients.
   raw tool output (prompt-injection of secrets into persistence, and tasks.json bloat).
   The task PINS definition content-hashes at first use; edits apply to future tasks;
   reports snapshot what ran (full body for inline).
-- Caps: max items per prepare (fail-visible truncation), max validator calls per task
-  attempt, per-report parallelism (Settings), and a GLOBAL evaluator-concurrency
-  semaphore so validation can't starve workers.
+- Caps: max items per prepare (fail-visible truncation).
 
 **Steps (worker todo list).**
 - `steps` array on the task. Smith seeds initials at create_task; the worker owns them
@@ -1842,18 +1798,9 @@ surface than `file_read` — it ingests bytes, sends images to the provider, and
 copy, so it is NOT side-effect-free). Remaining future work: (a) the Security Agent evaluates only
 the tool's **path argument**, not the image **bytes** about to be sent — a prompt-injection payload
 in the image's pixels/metadata still isn't inspected before it reaches the model; a **Security-side
-viewing path** would close that. (b) Optionally **path-scope `attach_file` for validators to the
-task's evidence directory** (their only legitimate target) so a prompt-injected validator can't
-reach arbitrary images even with an approval. `checkPathRestriction` still only blocks a short
-credential-path list, so the Security verdict is the real gate today.
+viewing path** would close that.
 
-**Full path-safety pass (planned 2026-07-16).** A dedicated sweep over EVERY filesystem-touching
-tool (`file_read`, `file_edit`, `bash`, `attach_file`, `glob`, `grep`, `directory_listing`) to
-enforce sanctioned-directory scoping *consistently*, replacing the ad-hoc `checkPathRestriction`
-credential-path *denylist* with a real scope/allowlist model (per-role: e.g. validators confined
-to the task's evidence directory, agents to sanctioned dirs). This is **layer 3** and remains the
-open work — it also covers `attach_file` validator path-scoping (item (b) above). Two earlier
-layers landed 2026-07-16:
+**Path-safety layers (2026-07-16).** Two layers landed:
 - ✅ **Scrub-on-ingest (layer 1, done 2026-07-16).** `AttachmentSanitizer` strips image metadata
   (EXIF/GPS/IPTC/TIFF-text/maker notes + PNG tEXt/iTXt text keys + implicit XMP drop, via a
   frame-preserving decode+re-encode) and clears a PDF's document-info dict, applied unconditionally
@@ -2102,7 +2049,7 @@ Today only `GhTool.firstForbiddenSequence` has direct test coverage (`GhToolArgs
 
 ### Web Search tool ⚠️ (shipped with a TEMPORARY backend)
 
-> **(audit 2026-09-24)** Still the DuckDuckGo HTML scrape (`WebSearchTool.swift:24`). `BraveSearchBackend.swift` exists as an unwired reference implementation — it needs a Keychain-stored key + Settings field + default swap. The re-evaluation date below passed. Smith also holds `web_search`/`web_fetch`/`instant_answer` since c644bdb, so "Brown-only" wording in this and the next two entries is stale.
+> **(audit 2026-09-24)** Still the DuckDuckGo HTML scrape (`WebSearchTool.swift:24`). Smith also holds `web_search`/`web_fetch`/`instant_answer` since c644bdb, so "Brown-only" wording in this and the next two entries is stale.
 Given a query and optional `allowed_domains` and `blocked_domains` arrays, perform a web search. Only return results from `allowed_domains` (if non-empty) and exclude results from `blocked_domains` (if non-empty).
 
 **Implemented — TEMPORARY backend (2026-06-23):** `web_search` tool added to Brown (`WebSearchTool`). Returns ranked results; `allowed_domains`/`blocked_domains` filter on result host (equal-or-subdomain match, leading `www.` ignored); `max_results` caps output (default 10, max 20). `WebSearchResult` carries `title`/`url`/`snippet` (the universal fields) plus optional `age` (freshness), `score`, `extraSnippets`, and `faviconURL` — the common extras keyed APIs return — so a richer backend (Brave `page_age`/`extra_snippets`/`meta_url.favicon`, Tavily `published_date`/`score`) maps in with a direct field copy; the scrape backend just leaves them empty. The output formatter already surfaces `age` when present, so it lights up automatically on a backend swap. Classified open-world **but non-destructive** in `ToolSafetyClassification` (read-only network) — the first built-in that is open-world without being destructive — so Security Agent still gates it.
@@ -2110,8 +2057,6 @@ Given a query and optional `allowed_domains` and `blocked_domains` arrays, perfo
 The search source sits behind a `WebSearchBackend` protocol (`WebSearchBackend.swift`). The shipped backend is `DuckDuckGoHTMLSearchBackend`, which **scrapes the DuckDuckGo HTML SERP** (`html.duckduckgo.com/html/`). This is explicitly **temporary** — it exists only so the rest of the harness can develop against a usable `web_search` with no API key. It was chosen after verifying (June 2026) that no major engine returns keyless *structured* results: DDG and Google both ignore `Accept: application/json` / `format=json` on their SERP and always return HTML; DDG's keyless JSON endpoint (`api.duckduckgo.com`) is the Instant Answer API (Wikipedia abstracts), not web search, and returns nothing for normal queries; Google's Custom Search JSON API is closed to new customers and fully discontinued 2027-01-01.
 
 Why temporary matters: HTML scraping is brittle (breaks when DuckDuckGo reshuffles `result__a`/`result__snippet` markup), rate-limited, and ToS-gray.
-
-**Replacement plan (re-evaluate week of 2026-06-30):** pick a permanent keyed JSON provider — leading candidates **Brave Search API** or **Tavily** (clean JSON, domain filters, recency, SLA) — implement it as another `WebSearchBackend`, store its key in Keychain (mirror `MCPSecretStore` / SwiftLLMKit `KeychainService`), and switch the default in `BrownBehavior.tools()`. `WebSearchTool` and Brown's wiring (and the domain-filter/cap logic, which is backend-agnostic) should not need to change. Google CSE is rejected (closed to new signups + sunsetting). The DDG-scrape backend can stay as a keyless fallback if desired.
 
 ### Global archived/deleted tasks + global attachments ✅
 Archived and deleted tasks are now a single **global** set shared across all sessions/windows
