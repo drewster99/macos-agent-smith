@@ -712,14 +712,18 @@ final class AppViewModel {
                 }
             }
 
-            // Running tasks didn't survive the last quit — mark them interrupted.
+            // No worker survives a quit. Apply the shared cold-boot rule here, before any runtime
+            // exists, so a session that is never started doesn't show dead work as running.
             var anyStatusChanged = false
             for i in savedTasks.indices {
-                if savedTasks[i].status == .running {
-                    savedTasks[i].status = .interrupted
-                    savedTasks[i].updatedAt = Date()
-                    anyStatusChanged = true
+                guard let recovery = ColdBootRunningRecovery.recovery(for: savedTasks[i]) else { continue }
+                let now = Date()
+                if let note = recovery.progressNote {
+                    savedTasks[i].updates.append(AgentTask.TaskUpdate(date: now, message: note))
                 }
+                savedTasks[i].status = recovery.recoveredStatus
+                savedTasks[i].updatedAt = now
+                anyStatusChanged = true
             }
 
             // Migration backstop: any archived/deleted tasks still in this session's file (a

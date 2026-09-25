@@ -2674,21 +2674,17 @@ public actor OrchestrationRuntime {
 
         var activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
-        // A crash during `task_complete` can leave the durable result written while the
-        // status is still `.running`. That is submitted work, not resumable Brown work.
-        for task in activeTasks where task.status == .running && task.id != resumingTaskID && task.hasSubmittedResult {
-            await taskStore.addUpdate(id: task.id, message: "Recovered submitted result after restart; resuming acceptance validation without re-running Brown.")
-            await taskStore.updateStatus(id: task.id, status: .validating)
-        }
-
-        activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-
-        // Mark any leftover running tasks as interrupted — no Brown is running them anymore.
-        // (Clean shutdowns mark these interrupted via AppViewModel; this catches crashes/force-quits.)
-        // Skip the resuming task if present — it will be set to running momentarily.
-        let leftoverRunningTasks = activeTasks.filter { $0.status == .running && $0.id != resumingTaskID }
-        for task in leftoverRunningTasks {
-            await taskStore.updateStatus(id: task.id, status: .interrupted)
+        // No Brown survives a restart, so any task still `.running` gets the shared cold-boot
+        // recovery: a durably submitted result resumes validation, anything else is interrupted.
+        // The session loader already applied the same rule to the restored tasks; this is the
+        // backstop for tasks that reached `.running` after that load. Skip the resuming task — it
+        // will be set to running momentarily.
+        for task in activeTasks where task.id != resumingTaskID {
+            guard let recovery = ColdBootRunningRecovery.recovery(for: task) else { continue }
+            if let note = recovery.progressNote {
+                await taskStore.addUpdate(id: task.id, message: note)
+            }
+            await taskStore.updateStatus(id: task.id, status: recovery.recoveredStatus)
         }
 
         // A task left `.starting` by a crash mid-spawn never got a live worker (no context was
