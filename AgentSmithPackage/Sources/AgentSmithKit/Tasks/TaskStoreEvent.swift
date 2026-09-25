@@ -8,9 +8,6 @@ public enum TaskStoreEvent: Sendable, Equatable {
     case lifecycle(TaskLifecycleEvent)
     /// A write left released, undelivered effects (`TaskStore.readyEffects`).
     case effectsReady
-    /// A watch was cancelled while some of its firings had already been handed to the broker
-    /// (`occurrences`): whoever holds them should withdraw what has not reached its recipient yet.
-    case watchCancelled(taskID: UUID, watchID: UUID, handedOffOccurrences: [Int])
 }
 
 /// A task entering or leaving this session's active store. Deliberately NOT a status transition:

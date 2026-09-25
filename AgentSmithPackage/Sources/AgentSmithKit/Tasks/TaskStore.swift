@@ -237,9 +237,11 @@ public actor TaskStore {
         }
     }
 
-    /// Cancels a watch. Its unsettled firings are cancelled too, and their undelivered effects are
-    /// removed, so nothing it already produced acts after this returns. The watch itself is kept
-    /// (state `.cancelled`) as the audit record.
+    /// Cancels a watch. Its unsettled firings are cancelled too, their undelivered effects are
+    /// removed, and firings already handed to the broker are withdrawn before this returns — so
+    /// nothing it produced acts afterwards, except a delivery that had already reached its recipient
+    /// (Smith holding the note, a start already under way), which cannot be recalled. The watch
+    /// itself is kept (state `.cancelled`) as the audit record.
     public func cancelWatch(_ watchID: UUID, on taskID: UUID) async -> String? {
         var handedOff: [Int] = []
         let refusal = await mutateTaskOrTemplate(id: taskID) { task in
@@ -275,10 +277,20 @@ public actor TaskStore {
             }
             return nil
         }
-        if refusal == nil, !handedOff.isEmpty {
-            emit(.watchCancelled(taskID: taskID, watchID: watchID, handedOffOccurrences: handedOff))
+        // Awaited, so the cancel has finished taking back what it can before it returns — a caller
+        // told "cancelled" can rely on nothing withdrawable still being delivered afterwards.
+        if refusal == nil, !handedOff.isEmpty, let withdrawHandedOffFirings {
+            await withdrawHandedOffFirings(watchID, handedOff)
         }
         return refusal
+    }
+
+    /// Takes back firings a cancelled watch had already handed to the broker. Set by the runtime,
+    /// which owns the broker; nil in a store with no runtime (nothing was handed off then).
+    private var withdrawHandedOffFirings: (@Sendable (UUID, [Int]) async -> Void)?
+
+    public func setWatchWithdrawal(_ handler: @escaping @Sendable (_ watchID: UUID, _ occurrences: [Int]) async -> Void) {
+        withdrawHandedOffFirings = handler
     }
 
     /// Removes the hold `watchID` placed, wherever it is. Returns the holds the target still has.

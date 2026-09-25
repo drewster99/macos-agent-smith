@@ -74,24 +74,62 @@ struct WatchWithdrawalTests {
         #expect(await broker.deliveryStatus(banner.id) == .dropped(reason: .withdrawn))
     }
 
-    @Test("Cancelling a watch reports the firings it had already handed off")
-    func cancelReportsHandedOffFirings() async throws {
-        final class Events: @unchecked Sendable {
+    @Test("Cancelling a watch withdraws the firings it had already handed off before it returns")
+    func cancelWithdrawsHandedOffFiringsBeforeReturning() async throws {
+        final class Calls: @unchecked Sendable {
             private let lock = NSLock()
-            private var stored: [TaskStoreEvent] = []
-            func add(_ event: TaskStoreEvent) { lock.withLock { stored.append(event) } }
-            var all: [TaskStoreEvent] { lock.withLock { stored } }
+            private var stored: [(UUID, [Int])] = []
+            func add(_ call: (UUID, [Int])) { lock.withLock { stored.append(call) } }
+            var all: [(UUID, [Int])] { lock.withLock { stored } }
         }
-        let events = Events()
+        let calls = Calls()
         let store = TaskStore()
-        await store.setEventObserver { events.add($0) }
+        await store.setWatchWithdrawal { watchID, occurrences in
+            // Suspends on purpose: `cancelWatch` must still not return before this finishes.
+            try? await Task.sleep(for: .milliseconds(50))
+            calls.add((watchID, occurrences))
+        }
         let task = await store.addTask(title: "t", description: "d")
         let watch = TaskWatch(triggers: [.completed], action: .summarizeToUser, createdBy: .user)
         #expect(await store.addWatch(watch, to: task.id) == nil)
         await store.updateStatus(id: task.id, status: .completed, cause: .smithSetStatus)
         await store.setWatchFiringState(taskID: task.id, watchID: watch.id, occurrence: 1, to: .inFlight)
         #expect(await store.cancelWatch(watch.id, on: task.id) == nil)
-        #expect(events.all.contains(.watchCancelled(taskID: task.id, watchID: watch.id, handedOffOccurrences: [1])))
+        let recorded = calls.all
+        #expect(recorded.count == 1)
+        #expect(recorded.first?.0 == watch.id)
+        #expect(recorded.first?.1 == [1])
+    }
+
+    @Test("Cancelling a watch with nothing handed off asks for no withdrawal")
+    func cancelWithNothingHandedOff() async throws {
+        final class Count: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+            func bump() { lock.withLock { value += 1 } }
+            var current: Int { lock.withLock { value } }
+        }
+        let count = Count()
+        let store = TaskStore()
+        await store.setWatchWithdrawal { _, _ in count.bump() }
+        let task = await store.addTask(title: "t", description: "d")
+        let watch = TaskWatch(triggers: [.completed], action: .summarizeToUser, createdBy: .user)
+        #expect(await store.addWatch(watch, to: task.id) == nil)
+        #expect(await store.cancelWatch(watch.id, on: task.id) == nil)
+        #expect(count.current == 0)
+    }
+
+    @Test("A batch withdrawal claims every id before settling any, so none can be leased meanwhile")
+    func batchWithdrawClaimsAll() async {
+        let broker = await pullBroker()
+        let items = (1...5).map { smithNote("batch\($0)") }
+        for item in items { await broker.submit(item) }
+        async let withdrawn = broker.withdraw(items.map(\.id), reason: "cancelled")
+        async let drained = broker.drainPendingDeliveries(for: .smith)
+        let (withdrawnIDs, batch) = await (withdrawn, drained)
+        let leasedIDs = Set(batch.map(\.notification.id))
+        #expect(Set(withdrawnIDs).isDisjoint(with: leasedIDs))
+        #expect(Set(withdrawnIDs).union(leasedIDs) == Set(items.map(\.id)))
     }
 
     @Test("A withdrawal asked for while a push attempt is under way is honored when that attempt asks for a retry")

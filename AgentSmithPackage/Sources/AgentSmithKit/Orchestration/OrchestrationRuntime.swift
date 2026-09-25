@@ -1209,6 +1209,17 @@ public actor OrchestrationRuntime {
             }
         }
         await taskStore.setEventObserver { event in continuation.yield(event) }
+        // A cancelled watch takes back its handed-off firings before `cancelWatch` returns: whatever
+        // has not reached its recipient. One Smith has already been handed, or a start already under
+        // way, cannot be recalled.
+        await taskStore.setWatchWithdrawal { [weak self] watchID, occurrences in
+            guard let self else { return }
+            let broker = await self.ensureNotificationBroker()
+            await broker.withdraw(
+                occurrences.map { TaskWatchDelivery.notificationID(watchID: watchID, occurrence: $0) },
+                reason: "the watch was cancelled"
+            )
+        }
         await reconcileInFlightWatchFirings()
         // Effects restored from disk (a crash before delivery) are due now.
         continuation.yield(.effectsReady)
@@ -1436,14 +1447,7 @@ public actor OrchestrationRuntime {
             await autoCompactSmithIfNeeded()
         case .effectsReady:
             await deliverReadyTaskEffects()
-        case .watchCancelled(_, let watchID, let occurrences):
-            // Firings already handed off: take back whatever has not reached its recipient. One
-            // Smith has already been handed, or a start already under way, cannot be recalled.
-            let broker = await ensureNotificationBroker()
-            await broker.withdraw(
-                occurrences.map { TaskWatchDelivery.notificationID(watchID: watchID, occurrence: $0) },
-                reason: "the watch was cancelled"
-            )
+
         case .lifecycle(let lifecycle):
             switch lifecycle {
             case .leftActive, .permanentlyDeleted:
@@ -2288,11 +2292,16 @@ public actor OrchestrationRuntime {
             )
         }
 
+        // A role's configuration and facts are merged only together with its provider (or when the
+        // runtime has no provider for it yet). A role whose provider failed to build keeps its
+        // previous, coherent pair — and because its configuration is then still the OLD one, the
+        // next successful rebuild compares as a change and reaches every live holder.
+        func accepts(_ role: AgentRole) -> Bool { providers[role] != nil || llmProviders[role] == nil }
         for (role, provider) in providers { llmProviders[role] = provider }
-        for (role, config) in configurations { llmConfigs[role] = config }
-        for (role, apiType) in apiTypes { providerAPITypes[role] = apiType }
-        for (role, vision) in supportsVisionByRole { self.supportsVisionByRole[role] = vision }
-        for (role, docs) in supportsDocumentsByRole { self.supportsDocumentsByRole[role] = docs }
+        for (role, config) in configurations where accepts(role) { llmConfigs[role] = config }
+        for (role, apiType) in apiTypes where accepts(role) { providerAPITypes[role] = apiType }
+        for (role, vision) in supportsVisionByRole where accepts(role) { self.supportsVisionByRole[role] = vision }
+        for (role, docs) in supportsDocumentsByRole where accepts(role) { self.supportsDocumentsByRole[role] = docs }
         // New configuration is grounds to retry: close a breaker opened by
         // missing-provider spawn failures (or by scoping failures against a backend the
         // user may just have fixed).

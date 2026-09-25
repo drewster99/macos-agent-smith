@@ -163,4 +163,19 @@ struct NonAgentModelRefreshTests {
         #expect(await runtime.nonAgentModelConfigurations().security.allSatisfy { $0?.modelID == "test-model" })
         await runtime.stopAll()
     }
+
+    @Test("After a failed provider build, the next successful build of the same configuration still reaches live holders")
+    func retryAfterFailedBuildIsAChange() async {
+        let runtime = makeRuntime()
+        await runtime.start()
+        let changed = ModelConfiguration(name: "sec2", providerID: "other", modelID: "security-2")
+        await runtime.setProviders(providers: [:], configurations: [.securityAgent: changed], apiTypes: [:])
+        await runtime.setProviders(
+            providers: [.securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")])],
+            configurations: [.securityAgent: changed],
+            apiTypes: [:]
+        )
+        #expect(await runtime.nonAgentModelConfigurations().security.allSatisfy { $0?.modelID == "security-2" })
+        await runtime.stopAll()
+    }
 }

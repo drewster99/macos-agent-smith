@@ -303,7 +303,9 @@ public actor NotificationBroker {
     /// Returns the ids actually withdrawn.
     @discardableResult
     public func withdraw(_ ids: [NotificationID], reason: String) async -> [NotificationID] {
-        var withdrawn: [NotificationID] = []
+        // Claim EVERY eligible id before the first suspension: settling awaits a ledger write, and a
+        // later id in the batch must not be leased to Smith or enter push delivery meanwhile.
+        var claimed: [AgentNotification] = []
         for id in ids where !ledger.isSettled(id) {
             if inFlight.contains(id) {
                 withdrawalsPending[id] = reason
@@ -312,15 +314,19 @@ public actor NotificationBroker {
             let leasedNow = leased.values.contains { $0.contains(id) }
             if let queued = pendingDelivery.first(where: { $0.notification.id == id }), !leasedNow {
                 pendingDelivery.removeAll { $0.notification.id == id }
-                await settle(queued.notification, .dropped(reason: .withdrawn), reason: reason)
-                withdrawn.append(id)
-            } else if pushRetryAttempts[id] != nil, let notification = pushRetryNotifications[id] {
-                await settle(notification, .dropped(reason: .withdrawn), reason: reason)
-                withdrawn.append(id)
+                claimed.append(queued.notification)
+            } else if let notification = pushRetryNotifications[id], pushRetryAttempts[id] != nil {
+                // Clearing the retry state now stops the scheduled retry (it checks for it).
+                pushRetryAttempts[id] = nil
+                pushRetryNotifications[id] = nil
+                claimed.append(notification)
             }
         }
-        if !withdrawn.isEmpty { await flushPendingDelivery() }
-        return withdrawn
+        for notification in claimed {
+            await settle(notification, .dropped(reason: .withdrawn), reason: reason)
+        }
+        if !claimed.isEmpty { await flushPendingDelivery() }
+        return claimed.map(\.id)
     }
 
     /// Whether the broker is still holding `id` — queued for a pull recipient, being delivered, or
