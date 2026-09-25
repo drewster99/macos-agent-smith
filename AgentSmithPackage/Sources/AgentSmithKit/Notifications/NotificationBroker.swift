@@ -71,6 +71,13 @@ public actor NotificationBroker {
     /// Told when a save fails, once per failure streak per store (a failing disk fails every flush;
     /// repeating the report would bury it). A later success ends the streak.
     private var onPersistenceFailure: (@Sendable (NotificationPersistenceFailure) -> Void)?
+    /// Told how every notification finally ended, with a reason the producer can show. Called
+    /// synchronously in the settling actor step; it must only enqueue.
+    private var onSettled: (@Sendable (AgentNotification, NotificationSettlement) -> Void)?
+    /// Push deliveries a target asked to retry: attempts so far. Cleared when the id settles.
+    private var pushRetryAttempts: [NotificationID: Int] = [:]
+    /// Push attempts before a `.retryable` delivery is settled as refused (decision R3).
+    static let maxPushAttempts = 5
     private var failingStores: Set<PersistedStore> = []
 
     private enum PersistedStore: Hashable {
@@ -124,6 +131,17 @@ public actor NotificationBroker {
         self.pendingWriter = persistPendingDelivery.map { persist in
             SerialPersistenceWriter(label: "notification.pending", write: { snapshot in try await persist(snapshot) })
         }
+    }
+
+    /// Wire the settlement report (see `onSettled`).
+    public func setOnSettled(_ handler: @escaping @Sendable (AgentNotification, NotificationSettlement) -> Void) {
+        onSettled = handler
+    }
+
+    /// The first-party notification types with no registered handler. Must be empty once the
+    /// runtime has registered its handlers: a type with no handler is dropped on arrival.
+    public func typesMissingHandlers(_ types: [String]) -> [String] {
+        types.filter { handlers[$0] == nil }
     }
 
     /// Wire the save-failure report (see `onPersistenceFailure`).
@@ -296,61 +314,92 @@ public actor NotificationBroker {
 
         let now = Date()
         if let expiresAt = notification.expiresAt, expiresAt <= now {
-            await settle(id, .dropped(reason: .expired))
+            await settle(notification, .dropped(reason: .expired), reason: "it expired before it could be delivered")
             return
         }
 
         guard let handler = handlers[notification.payload.type] else {
             // Unknown type: not an error. Persisted + observed, never acted on. Forward-compat.
-            await settle(id, .dropped(reason: .noHandler))
+            await settle(notification, .dropped(reason: .noHandler), reason: "nothing handles notifications of type '\(notification.payload.type)'")
             return
         }
 
         do {
             switch try await handler.handle(notification, runtime: runtime) {
             case .acted:
-                await settle(id, .delivered(now))
+                await settle(notification, .delivered(now), reason: nil)
             case .refused(let reason):
                 // A legitimate "couldn't do it", not a bug: settle it so nothing retries a spent
                 // one-shot, but as DROPPED — recording a refused effect as `.delivered` is what let
-                // a silently-discarded scheduled run look like a success in the ledger. The runtime
-                // has already surfaced this to the user; log it for the audit trail.
+                // a silently-discarded scheduled run look like a success in the ledger. The reason
+                // reaches the producer through `onSettled`.
                 Self.logger.error("Notification handler for '\(notification.payload.type, privacy: .public)' refused: \(reason, privacy: .public)")
-                await settle(id, .dropped(reason: .runtimeRefused))
+                await settle(notification, .dropped(reason: .runtimeRefused), reason: reason)
             case .deliver(let text):
                 let kind = notification.recipient.kind
                 if let target = targets[kind] {
-                    // PUSH recipient (outward bridge). A false return leaves the id unsettled; log
-                    // it so a lost commitment is visible rather than silent.
-                    if await target.deliver(text, for: notification) {
-                        await settle(id, .delivered(now))
-                    } else {
-                        Self.logger.error("Push delivery for recipient \(String(describing: kind), privacy: .public) returned false — notification \(id.description, privacy: .public) left unsettled.")
-                    }
+                    await push(text, for: notification, to: target, now: now)
                 } else if pullRecipients.contains(kind) {
                     // PULL recipient: hold it in the durable pending queue until the recipient
-                    // drains. NOT settled here — it becomes `.delivered` on drain. This is the
-                    // persistence-until-delivery floor; a momentarily-absent recipient loses nothing.
+                    // acknowledges it. NOT settled here — it becomes `.delivered` on acknowledgement.
+                    // This is the persistence-until-delivery floor; a momentarily-absent recipient
+                    // loses nothing.
                     pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
                     await flushPendingDelivery()
                     onPendingEnqueued?(kind)
                 } else {
                     Self.logger.error("No target or pull registration for recipient \(String(describing: kind), privacy: .public) — dropping notification \(id.description, privacy: .public).")
-                    await settle(id, .dropped(reason: .noRecipientTarget))
+                    await settle(notification, .dropped(reason: .noRecipientTarget), reason: "nothing is set up to deliver to \(String(describing: kind))")
                 }
             }
         } catch {
             // Malformed data for a type we own — surface loudly, do NOT mark delivered.
             Self.logger.error("Notification handler for '\(notification.payload.type, privacy: .public)' threw: \(String(describing: error), privacy: .public)")
-            await settle(id, .dropped(reason: .handlerError))
+            await settle(notification, .dropped(reason: .handlerError), reason: "its data was malformed: \(error)")
         }
     }
 
-    private func settle(_ id: NotificationID, _ status: DeliveryStatus) async {
+    /// Hands `text` to a push target and settles by its answer. A `.retryable` answer is retried
+    /// with backoff (1s, 2s, 4s, …) up to `maxPushAttempts`, then settled refused with the last
+    /// reason — never left unsettled forever, never silently dropped.
+    private func push(_ text: String, for notification: AgentNotification, to target: any RecipientTarget, now: Date) async {
+        switch await target.deliver(text, for: notification) {
+        case .delivered:
+            await settle(notification, .delivered(now), reason: nil)
+        case .refused(let reason):
+            await settle(notification, .dropped(reason: .recipientRefused), reason: reason)
+        case .retryable(let reason):
+            let attempts = (pushRetryAttempts[notification.id] ?? 0) + 1
+            pushRetryAttempts[notification.id] = attempts
+            guard attempts < Self.maxPushAttempts else {
+                await settle(notification, .dropped(reason: .recipientRefused), reason: "delivery kept failing (\(reason))")
+                return
+            }
+            Self.logger.notice("Push delivery of \(notification.id.description, privacy: .public) will be retried (attempt \(attempts, privacy: .public)): \(reason, privacy: .public)")
+            let delay = Duration.seconds(1 << (attempts - 1))
+            Task { [weak self] in
+                try? await Task.sleep(for: delay)
+                await self?.retryDelivery(notification)
+            }
+        }
+    }
+
+    private func retryDelivery(_ notification: AgentNotification) async {
+        await deliver(notification)
+    }
+
+    private func settle(_ notification: AgentNotification, _ status: DeliveryStatus, reason: String?) async {
+        let id = notification.id
+        pushRetryAttempts[id] = nil
         switch status {
-        case .delivered(let date): ledger.markDelivered(id, at: date)
-        case .dropped(let reason): ledger.markDropped(id, reason: reason)
-        case .pending: return
+        case .delivered(let date):
+            ledger.markDelivered(id, at: date)
+            onSettled?(notification, .delivered(date))
+        case .dropped(let code):
+            ledger.markDropped(id, reason: code)
+            onSettled?(notification, .refused(reason: reason ?? code.rawValue))
+        case .pending:
+            return
         }
         await flushLedger()
     }
@@ -407,8 +456,10 @@ public actor NotificationBroker {
         let acknowledged = Set(ids).intersection(leased[kind] ?? [])
         guard !acknowledged.isEmpty else { return }
         let now = Date()
+        let settled = pendingDelivery.filter { acknowledged.contains($0.notification.id) }
         pendingDelivery.removeAll { acknowledged.contains($0.notification.id) }
         for id in acknowledged { ledger.markDelivered(id, at: now) }
+        for item in settled { onSettled?(item.notification, .delivered(now)) }
         leased[kind]?.subtract(acknowledged)
         await flushPendingDelivery()
         await flushLedger()

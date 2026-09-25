@@ -20,27 +20,26 @@ public struct TaskEffectRecord: Codable, Sendable, Equatable, Identifiable {
     }
 
     public init(transition: TaskStatusTransition, effect: TaskEffect, release: Release) {
-        self.id = "\(transition.taskID.uuidString)|\(transition.statusRevision)|\(effect.subscriber.rawValue)"
+        self.id = "\(transition.taskID.uuidString)|\(transition.statusRevision)|\(effect.subscriberKey)"
         self.transition = transition
         self.effect = effect
         self.release = release
     }
 }
 
-/// Who produced an effect — part of the effect's identity.
-public enum TaskEffectSubscriber: String, Codable, Sendable {
-    /// The built-in briefing that tells Smith about a task's status change.
-    case smithBriefing
-}
-
 /// What a transition's effect does when delivered.
 public enum TaskEffect: Codable, Sendable, Equatable {
-    /// Tell Smith, through the broker's durable Smith queue.
+    /// Tell Smith, through the broker's durable Smith queue (`SmithTaskBriefing`).
     case smithBriefing(note: String)
+    /// Carry out one firing of a task watch.
+    case watchFiring(watchID: UUID, occurrence: Int)
 
-    public var subscriber: TaskEffectSubscriber {
+    /// The subscriber that produced the effect — part of the effect's identity, so one transition
+    /// can carry one effect per subscriber.
+    public var subscriberKey: String {
         switch self {
-        case .smithBriefing: return .smithBriefing
+        case .smithBriefing: return "smithBriefing"
+        case .watchFiring(let watchID, _): return "watch-\(watchID.uuidString)"
         }
     }
 }

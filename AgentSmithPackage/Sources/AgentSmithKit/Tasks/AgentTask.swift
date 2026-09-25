@@ -31,6 +31,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// Effects of this task's status transitions not yet delivered — recorded in the same write as
     /// the status that caused them (see `TaskEffectRecord`). Empty almost always.
     public var pendingEffects: [TaskEffectRecord] = []
+    /// "When this task…" rules (see `TaskWatch`).
+    public var watches: [TaskWatch] = []
     public var disposition: TaskDisposition
     public var assigneeIDs: [UUID]
     public var result: String?
@@ -226,6 +228,11 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         guard hasValidationEvidence else { return true }
         let incoming = Set(criteria.map(\.id))
         return acceptanceCriteria.allSatisfy { incoming.contains($0.id) }
+    }
+
+    /// The watch with this id, if the task has it.
+    public func watch(id: UUID) -> TaskWatch? {
+        watches.first { $0.id == id }
     }
 
     /// A single progress update recorded on a task.
@@ -491,7 +498,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision, pendingEffects
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision, pendingEffects, watches
     }
 
     public init(from decoder: Decoder) throws {
@@ -502,6 +509,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         status = try c.decode(Status.self, forKey: .status)
         statusRevision = try c.decodeIfPresent(Int.self, forKey: .statusRevision) ?? 0
         pendingEffects = try c.decodeIfPresent([TaskEffectRecord].self, forKey: .pendingEffects) ?? []
+        watches = try c.decodeIfPresent([TaskWatch].self, forKey: .watches) ?? []
         disposition = try c.decodeIfPresent(TaskDisposition.self, forKey: .disposition) ?? .active
         assigneeIDs = try c.decode([UUID].self, forKey: .assigneeIDs)
         result = try c.decodeIfPresent(String.self, forKey: .result)
@@ -548,6 +556,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         }
         if !pendingEffects.isEmpty {
             try c.encode(pendingEffects, forKey: .pendingEffects)
+        }
+        if !watches.isEmpty {
+            try c.encode(watches, forKey: .watches)
         }
         try c.encode(disposition, forKey: .disposition)
         try c.encode(assigneeIDs, forKey: .assigneeIDs)

@@ -1039,7 +1039,11 @@ public actor OrchestrationRuntime {
             },
             setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) ?? false },
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
-            postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
+            postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) },
+            startTaskForWatch: { [weak self] targetID, watchedTaskID, _ in
+                guard let self else { return .refused("the session is shutting down") }
+                return await self.startTaskForWatch(targetID, watchedTaskID: watchedTaskID)
+            }
         )
         // Load BEFORE constructing the broker: a file that exists but can't be read must never be
         // overwritten by the broker's first flush (an empty snapshot would erase the dedup record
@@ -1078,6 +1082,17 @@ public actor OrchestrationRuntime {
         await broker.registerHandler(type: KnownNotificationType.reminder.rawValue, ReminderNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.userMessage.rawValue, UserMessageNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.taskBriefing.rawValue, TaskBriefingNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.taskWatch.rawValue, TaskWatchNotificationHandler())
+        // Every first-party type must have a handler before anything can fire: an unhandled type is
+        // dropped on arrival, which would silently lose every notification of that type.
+        let unhandled = await broker.typesMissingHandlers(KnownNotificationType.allCases.map(\.rawValue))
+        if !unhandled.isEmpty {
+            stopLogger.fault("Notification types with no handler: \(unhandled.joined(separator: ", "), privacy: .public)")
+            assertionFailure("Notification types with no handler: \(unhandled)")
+        }
+        await broker.setOnSettled { [weak self] notification, settlement in
+            Task { await self?.handleNotificationSettled(notification, settlement) }
+        }
         await broker.registerPullRecipient(.smith)
         await broker.setOnPendingEnqueued { [weak self] kind in
             guard kind == .smith else { return }
@@ -1167,8 +1182,100 @@ public actor OrchestrationRuntime {
             }
         }
         await taskStore.setEventObserver { event in continuation.yield(event) }
+        await reconcileInFlightWatchFirings()
         // Effects restored from disk (a crash before delivery) are due now.
         continuation.yield(.effectsReady)
+    }
+
+    /// A firing handed to the broker before a crash may have settled without its outcome reaching
+    /// the task: adopt what the broker's ledger recorded. One still queued in the broker (a Smith
+    /// delivery not yet acknowledged) stays in flight and settles when it is.
+    private func reconcileInFlightWatchFirings() async {
+        let broker = await ensureNotificationBroker()
+        for (task, watch) in await taskStore.allWatches() {
+            for firing in watch.recentFirings where firing.state == .inFlight {
+                let settled: TaskWatchFiring.State
+                switch await broker.deliveryStatus(TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)) {
+                case .delivered(let at): settled = .delivered(at: at)
+                case .dropped(let code): settled = .refused(reason: code.rawValue)
+                case .pending: continue
+                }
+                await taskStore.setWatchFiringState(taskID: task.id, watchID: watch.id, occurrence: firing.occurrence, to: settled)
+            }
+        }
+    }
+
+    /// Records how a watch firing ended and tells the user (and Smith, on a refusal). Other
+    /// notifications' settlements need nothing here.
+    private func handleNotificationSettled(_ notification: AgentNotification, _ settlement: NotificationSettlement) async {
+        guard case .taskWatch(let watchID, let occurrence) = notification.triggerSource,
+              case .string(let rawTaskID)? = notification.payload.data[TaskWatchDelivery.Key.taskID],
+              let taskID = UUID(uuidString: rawTaskID) else { return }
+        let title = await taskStore.task(id: taskID)?.title ?? rawTaskID
+        switch settlement {
+        case .delivered(let at):
+            guard await taskStore.setWatchFiringState(taskID: taskID, watchID: watchID, occurrence: occurrence, to: .delivered(at: at)) else { return }
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Watch on \"\(title)\" fired: \(notification.title).",
+                metadata: ["messageKind": .kind(.taskWatchFired), "taskID": .string(taskID.uuidString)],
+                taskID: taskID
+            ))
+        case .refused(let reason):
+            let bounded = String(reason.prefix(Self.watchRefusalReasonLimit))
+            guard await taskStore.setWatchFiringState(taskID: taskID, watchID: watchID, occurrence: occurrence, to: .refused(reason: bounded)) else { return }
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Watch on \"\(title)\" fired but could not be carried out: \(bounded)",
+                metadata: ["messageKind": .kind(.taskWatchRefused), "taskID": .string(taskID.uuidString), "severity": .severity(.error)],
+                taskID: taskID
+            ))
+            let note = """
+                [System: A task watch on "\(title)" (ID: \(taskID.uuidString)) fired but its action could not be \
+                carried out: \(bounded) The user was shown this in the transcript. Tell them briefly if it \
+                affects something they are waiting on.]
+                """
+            let broker = await ensureNotificationBroker()
+            await broker.post(
+                triggerSource: .taskWatch(watchID: watchID, occurrence: occurrence),
+                recipient: .smith,
+                payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)]),
+                title: "Watch refused",
+                idempotencyKey: "refused|\(watchID.uuidString)|\(occurrence)"
+            )
+        }
+    }
+
+    private static let watchRefusalReasonLimit = 500
+
+    /// Starts a task because a watch fired (a `startTask` chain link). Never reopens or resets: a
+    /// target that is not an ordinary runnable task in THIS session is refused with the reason.
+    /// Otherwise it goes through the durable scheduled-run queue, so it starts at once when a worker
+    /// slot is free, waits its turn at capacity, and survives a crash in between.
+    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID) async -> AutoRunDispatchOutcome {
+        guard let target = await taskStore.task(id: targetID), target.disposition == .active else {
+            return .refused("the task to start (\(targetID.uuidString)) is no longer an active task in this session")
+        }
+        guard !target.isTemplate else {
+            return .refused("\"\(target.title)\" is a template, which a watch doesn't start")
+        }
+        guard target.status.isRunnable else {
+            return .refused("\"\(target.title)\" is \(target.status.displayName.lowercased()); a watch only starts a pending, paused or interrupted task, and never reopens or resets one")
+        }
+        pendingScheduledRunQueue.append(PendingScheduledRun(taskID: targetID, amendment: nil))
+        await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+        if supervisor.handles(role: .brown).count >= maxConcurrentWorkers {
+            let watchedTitle = await taskStore.task(id: watchedTaskID)?.title ?? watchedTaskID.uuidString
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(target.title)\" was started by a watch on \"\(watchedTitle)\", but every worker slot is busy — queued; it starts when a slot frees.",
+                metadata: ["messageKind": .kind(.taskQueuedAtCapacity), "taskID": .string(targetID.uuidString)],
+                taskID: targetID
+            ))
+        } else {
+            await drainPendingScheduledRunQueue()
+        }
+        return .placed
     }
 
     /// The runtime's own reactions to task events.
@@ -1221,6 +1328,16 @@ public actor OrchestrationRuntime {
                     title: "Task \(ready.record.transition.to.displayName)",
                     idempotencyKey: ready.record.id
                 )
+            case .watchFiring(let watchID, let occurrence):
+                // Re-read the watch: a firing cancelled (or already settled) since it was recorded
+                // must not act. An in-flight one is re-submitted — the broker dedups by its id.
+                if let task = await taskStore.task(id: ready.taskID),
+                   let watch = task.watch(id: watchID),
+                   let firing = watch.firing(occurrence: occurrence),
+                   !firing.state.isSettled {
+                    await taskStore.setWatchFiringState(taskID: task.id, watchID: watchID, occurrence: occurrence, to: .inFlight)
+                    await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
+                }
             }
             await taskStore.completeEffect(taskID: ready.taskID, recordID: ready.record.id)
         }

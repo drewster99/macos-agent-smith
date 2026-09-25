@@ -123,3 +123,43 @@ public struct TaskBriefingNotificationHandler: NotificationHandler {
         return .deliver(note)
     }
 }
+
+/// Handles `task_watch` notifications — one firing of a task watch. `start_task` acts through the
+/// runtime's capacity-gated start; every other action delivers the text the runtime composed when it
+/// submitted the firing (to Smith, or to the macOS notification bridge). The payload's `action`
+/// names which, as a typed discriminator — the text is never inspected.
+public struct TaskWatchNotificationHandler: NotificationHandler {
+    public init() {}
+
+    public func handle(_ notification: AgentNotification, runtime: any NotificationRuntime) async throws -> HandlerOutcome {
+        let data = notification.payload.data
+        guard let rawAction = stringValue(data, "action"), let action = TaskWatchPayloadAction(rawValue: rawAction) else {
+            throw NotificationHandlerError("task_watch payload missing a valid action")
+        }
+        switch action {
+        case .startTask:
+            guard case .taskWatch(let watchID, _) = notification.triggerSource,
+                  let rawTarget = stringValue(data, "target_task_id"), let targetID = UUID(uuidString: rawTarget),
+                  let rawWatched = stringValue(data, "task_id"), let watchedID = UUID(uuidString: rawWatched) else {
+                throw NotificationHandlerError("task_watch start_task payload missing its task ids")
+            }
+            switch await runtime.startTaskForWatch(targetID, watchedTaskID: watchedID, watchID: watchID) {
+            case .placed: return .acted
+            case .refused(let reason): return .refused(reason)
+            }
+        case .deliverText:
+            guard let text = stringValue(data, "text") else {
+                throw NotificationHandlerError("task_watch payload missing its text")
+            }
+            return .deliver(text)
+        }
+    }
+}
+
+/// How a `task_watch` notification is carried out. Persisted in the payload.
+public enum TaskWatchPayloadAction: String, Sendable {
+    /// Start the payload's `target_task_id`.
+    case startTask = "start_task"
+    /// Deliver the payload's `text` to the notification's recipient.
+    case deliverText = "deliver_text"
+}

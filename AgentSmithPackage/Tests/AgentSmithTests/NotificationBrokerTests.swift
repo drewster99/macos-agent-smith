@@ -12,6 +12,7 @@ struct NotificationBrokerTests {
         func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { true }
         func taskTitle(_ taskID: UUID) async -> String? { nil }
         func postSystemNotice(_ text: String, taskID: UUID?) async {}
+        func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome { .placed }
     }
 
     private actor CallLog {
@@ -45,9 +46,9 @@ struct NotificationBrokerTests {
     private struct RecordingTarget: RecipientTarget {
         let log: CallLog
         let succeed: Bool
-        func deliver(_ text: String, for notification: AgentNotification) async -> Bool {
+        func deliver(_ text: String, for notification: AgentNotification) async -> PushDeliveryOutcome {
             await log.recordDelivered(text, notification.recipient)
-            return succeed
+            return succeed ? .delivered : .refused("target said no")
         }
     }
 
@@ -147,16 +148,54 @@ struct NotificationBrokerTests {
         #expect(await broker.deliveryStatus(id) == .dropped(reason: .noRecipientTarget))
     }
 
-    @Test("A target that returns false leaves the notification unsettled for retry")
-    func failedDeliveryStaysPending() async {
+    @Test("A target that refuses settles the notification as dropped, and the reason reaches the settlement observer")
+    func refusedDeliveryIsSettled() async {
         let log = CallLog()
         let broker = makeBroker()
+        let settlements = SettlementLog()
+        await broker.setOnSettled { notification, settlement in Task { await settlements.record(notification.id, settlement) } }
         await broker.registerHandler(type: "reminder", RecordingHandler(log: log, outcome: .deliver("x")))
         await broker.registerRecipientTarget(.smith, RecordingTarget(log: log, succeed: false))
 
         let id = await broker.post(triggerSource: timerTrigger(), recipient: .smith, payload: Payload(type: "reminder"), title: "t", idempotencyKey: "d3")
 
-        #expect(await broker.deliveryStatus(id) == .pending, "not settled → a later tick can retry")
+        #expect(await broker.deliveryStatus(id) == .dropped(reason: .recipientRefused))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await settlements.entries == [SettlementLog.Entry(id: id, settlement: .refused(reason: "target said no"))])
+    }
+
+    @Test("A retryable push is retried with backoff and delivered once the target accepts")
+    func retryablePushIsRetried() async {
+        let log = CallLog()
+        let broker = makeBroker()
+        await broker.registerHandler(type: "reminder", RecordingHandler(log: log, outcome: .deliver("x")))
+        let target = FlakyTarget(failuresBeforeSuccess: 1)
+        await broker.registerRecipientTarget(.smith, target)
+
+        let id = await broker.post(triggerSource: timerTrigger(), recipient: .smith, payload: Payload(type: "reminder"), title: "t", idempotencyKey: "retry")
+        #expect(await broker.deliveryStatus(id) == .pending, "unsettled while it waits for the retry")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while await broker.deliveryStatus(id) == .pending, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if case .delivered = await broker.deliveryStatus(id) {} else { Issue.record("expected delivered after the retry") }
+        #expect(await target.attempts == 2)
+    }
+
+    private actor SettlementLog {
+        struct Entry: Equatable { let id: NotificationID; let settlement: NotificationSettlement }
+        private(set) var entries: [Entry] = []
+        func record(_ id: NotificationID, _ settlement: NotificationSettlement) { entries.append(Entry(id: id, settlement: settlement)) }
+    }
+
+    private actor FlakyTarget: RecipientTarget {
+        private let failuresBeforeSuccess: Int
+        private(set) var attempts = 0
+        init(failuresBeforeSuccess: Int) { self.failuresBeforeSuccess = failuresBeforeSuccess }
+        func deliver(_ text: String, for notification: AgentNotification) async -> PushDeliveryOutcome {
+            attempts += 1
+            return attempts > failuresBeforeSuccess ? .delivered : .retryable("busy")
+        }
     }
 
     @Test("An expired notification drops(expired) without running the handler")

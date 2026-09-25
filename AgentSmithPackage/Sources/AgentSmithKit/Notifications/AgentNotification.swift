@@ -29,6 +29,8 @@ public enum TriggerSource: Sendable, Codable, Equatable {
     /// A task's status transition — its durable effects (`TaskEffectRecord`) are delivered through
     /// the broker. `statusRevision` names the transition within the task.
     case taskTransition(taskID: UUID, statusRevision: Int)
+    /// One firing of a task watch (`TaskWatch`).
+    case taskWatch(watchID: UUID, occurrence: Int)
     /// Forward-compat: a trigger written by a NEWER build decodes here rather than throwing.
     /// Sources are added freely, so an old build must tolerate an unrecognized trigger without
     /// bricking the decode of a whole persisted array — hence the custom `Codable` below, NOT the
@@ -42,12 +44,13 @@ public enum TriggerSource: Sendable, Codable, Equatable {
         case .timer: return "timer"
         case .inboundMessageObserver: return "inbox"
         case .taskTransition: return "tasktransition"
+        case .taskWatch: return "taskwatch"
         case .unknown: return "unknown"
         }
     }
 
-    private enum Kind: String, Codable { case timer, inboundMessageObserver, taskTransition, unknown }
-    private enum CodingKeys: String, CodingKey { case kind, scheduleID, occurrence, taskID, statusRevision }
+    private enum Kind: String, Codable { case timer, inboundMessageObserver, taskTransition, taskWatch, unknown }
+    private enum CodingKeys: String, CodingKey { case kind, scheduleID, occurrence, taskID, statusRevision, watchID, watchOccurrence }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -67,6 +70,11 @@ public enum TriggerSource: Sendable, Codable, Equatable {
                 taskID: try container.decode(UUID.self, forKey: .taskID),
                 statusRevision: try container.decode(Int.self, forKey: .statusRevision)
             )
+        case .taskWatch:
+            self = .taskWatch(
+                watchID: try container.decode(UUID.self, forKey: .watchID),
+                occurrence: try container.decode(Int.self, forKey: .watchOccurrence)
+            )
         case .unknown:
             self = .unknown
         }
@@ -85,6 +93,10 @@ public enum TriggerSource: Sendable, Codable, Equatable {
             try container.encode(Kind.taskTransition, forKey: .kind)
             try container.encode(taskID, forKey: .taskID)
             try container.encode(statusRevision, forKey: .statusRevision)
+        case .taskWatch(let watchID, let occurrence):
+            try container.encode(Kind.taskWatch, forKey: .kind)
+            try container.encode(watchID, forKey: .watchID)
+            try container.encode(occurrence, forKey: .watchOccurrence)
         case .unknown:
             try container.encode(Kind.unknown, forKey: .kind)
         }

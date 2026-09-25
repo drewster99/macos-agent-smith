@@ -85,6 +85,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// user — the user clicked a control, they did not write the notice. The typed action rides in
     /// `metadata["userTaskAction"]` (`UserTaskAction`).
     case userTaskAction = "user_task_action"
+    /// A task watch fired and its action was carried out (`TaskWatch`).
+    case taskWatchFired = "task_watch_fired"
+    /// A task watch fired but its action could not be carried out; severity `.error`.
+    case taskWatchRefused = "task_watch_refused"
 
     // MARK: Validation
     case changesRequested = "changes_requested"

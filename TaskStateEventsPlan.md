@@ -419,7 +419,28 @@ touched) → commit → push.
    - The move into `SmithTaskBriefing`, delivered the same way as today.
    - Then durable delivery with `QueuedDelivery` ids and the consumed-id set.
    - Tests: exact note per cause; delivery after restart; no redelivery after a completed turn.
-4. **Watch model and firing.**
+4. ✅ **Watch model and firing.** Built:
+   - **Model.** `TaskWatch` has a trigger set, an action, a lifetime, state
+     (active / cancelled / consumed), a monotonic `nextOccurrence`, and bounded `recentFirings`
+     (20 settled kept). Firings are recorded in `changeStatus`, and a `.once` watch is consumed when
+     its firing is created.
+   - **Firing and cancelling.** `TaskWatchTrigger` is mapped from the typed transition. Shutdown
+     and deletion never fire; a crash found at launch does. `addWatch` refuses empty triggers, empty
+     instructions, self-starts, missing targets, templates, and loops. `cancelWatch` cancels
+     unsettled firings and removes their undelivered effects.
+   - **Templates.** Template blueprints are copied into each instance, and `startTask` is refused
+     on a template. A preserved-history child carries no watches or effects.
+   - **Broker and delivery.** A new `task_watch` type and `TriggerSource.taskWatch` exist, and
+     `TaskWatchDelivery` composes the notification. The broker now settles typed: push targets
+     answer delivered / refused / retryable, retryable backs off up to 5 attempts, and
+     `setOnSettled` reports every final outcome with its reason.
+   - **Startup and launch checks.** A startup guard verifies every `KnownNotificationType` has a
+     handler. At launch, in-flight firings adopt the broker ledger's outcome.
+   - **Actions and rows.** `startTask` goes through the durable scheduled-run queue, and a target
+     that isn't runnable is refused, never reopened. Refusals post a `.taskWatchRefused` row with
+     severity `.error` plus a Smith note; deliveries post a `.taskWatchFired` row. Both kinds are in
+     the task-lifecycle group and carry a top-level `taskID`.
+   - Original scope:
    - `TaskWatch` / holds on `AgentTask`, firing in `applyStatus`, `TriggerSource.taskWatch`.
    - Typed broker settlement, launch reconciliation, the startup handler guard.
    - Tests: firing atomic with status; `.once` consumed at firing; cancel mid-flight; compaction

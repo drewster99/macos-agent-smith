@@ -4,13 +4,13 @@ import Foundation
 /// mechanism (inject into an agent's conversation, post to the channel, an outward bridge, …)
 /// without the notification layer importing orchestration.
 public struct ClosureRecipientTarget: RecipientTarget {
-    private let deliverText: @Sendable (String, AgentNotification) async -> Bool
+    private let deliverText: @Sendable (String, AgentNotification) async -> PushDeliveryOutcome
 
-    public init(_ deliverText: @escaping @Sendable (String, AgentNotification) async -> Bool) {
+    public init(_ deliverText: @escaping @Sendable (String, AgentNotification) async -> PushDeliveryOutcome) {
         self.deliverText = deliverText
     }
 
-    public func deliver(_ text: String, for notification: AgentNotification) async -> Bool {
+    public func deliver(_ text: String, for notification: AgentNotification) async -> PushDeliveryOutcome {
         await deliverText(text, notification)
     }
 }
@@ -22,17 +22,20 @@ public struct ClosureNotificationRuntime: NotificationRuntime {
     private let setStatus: @Sendable (UUID, AgentTask.Status) async -> Bool
     private let title: @Sendable (UUID) async -> String?
     private let systemNotice: @Sendable (String, UUID?) async -> Void
+    private let watchStart: @Sendable (UUID, UUID, UUID) async -> AutoRunDispatchOutcome
 
     public init(
         autoRunTask: @escaping @Sendable (UUID, String?) async -> AutoRunDispatchOutcome,
         setTaskStatus: @escaping @Sendable (UUID, AgentTask.Status) async -> Bool,
         taskTitle: @escaping @Sendable (UUID) async -> String?,
-        postSystemNotice: @escaping @Sendable (String, UUID?) async -> Void
+        postSystemNotice: @escaping @Sendable (String, UUID?) async -> Void,
+        startTaskForWatch: @escaping @Sendable (UUID, UUID, UUID) async -> AutoRunDispatchOutcome
     ) {
         self.autoRun = autoRunTask
         self.setStatus = setTaskStatus
         self.title = taskTitle
         self.systemNotice = postSystemNotice
+        self.watchStart = startTaskForWatch
     }
 
     public func autoRunTask(_ taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome {
@@ -41,6 +44,9 @@ public struct ClosureNotificationRuntime: NotificationRuntime {
     public func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { await setStatus(taskID, status) }
     public func taskTitle(_ taskID: UUID) async -> String? { await title(taskID) }
     public func postSystemNotice(_ text: String, taskID: UUID?) async { await systemNotice(text, taskID) }
+    public func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome {
+        await watchStart(targetID, watchedTaskID, watchID)
+    }
 }
 
 /// Builds the `AgentNotification` for a fired `ScheduledWake`, mapping the wake's structured

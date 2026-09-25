@@ -34,6 +34,7 @@ struct NotificationHandlersTests {
         func setAutoRunOutcome(_ outcome: AutoRunDispatchOutcome) { autoRunOutcome = outcome }
         func taskTitle(_ taskID: UUID) async -> String? { titles[taskID] }
         func postSystemNotice(_ text: String, taskID: UUID?) async { notices.append(text) }
+        func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome { .placed }
     }
 
     // MARK: - WakeNotificationFactory mapping

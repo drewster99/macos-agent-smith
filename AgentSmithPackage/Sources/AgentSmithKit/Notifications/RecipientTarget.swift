@@ -6,11 +6,25 @@ import Foundation
 /// A new destination — Smith's conversation, a task worker, an outward iMessage/Slack bridge — is
 /// a new `RecipientTarget`, added without touching any handler.
 public protocol RecipientTarget: Sendable {
-    /// Deliver `text` for `notification`. Return true once the text has reached the recipient OR
-    /// been durably queued for it (the ledger then marks the notification delivered). Return false
-    /// only for an unrecoverable failure — but note there is no durable retry outbox yet, so a
-    /// false return effectively drops the occurrence until its source re-produces it. A target
-    /// that wants guaranteed delivery to a not-currently-alive recipient (e.g. `.taskWorker`)
-    /// should queue the work durably and return true, NOT return false.
-    func deliver(_ text: String, for notification: AgentNotification) async -> Bool
+    /// Deliver `text` for `notification`, reporting what happened. `.retryable` asks the broker to
+    /// try again later (a bounded number of times); `.refused` is final and its reason reaches
+    /// whoever produced the notification.
+    func deliver(_ text: String, for notification: AgentNotification) async -> PushDeliveryOutcome
+}
+
+/// What a push target did with a delivery.
+public enum PushDeliveryOutcome: Sendable, Equatable {
+    /// The text reached the recipient, or was durably queued for it.
+    case delivered
+    /// It can't be delivered, and trying again won't help (e.g. notifications are not permitted).
+    case refused(String)
+    /// It couldn't be delivered right now; the broker retries with backoff.
+    case retryable(String)
+}
+
+/// How a notification finally ended, reported to the broker's settlement observer with a reason
+/// the producer can show — the ledger keeps only a coarse code.
+public enum NotificationSettlement: Sendable, Equatable {
+    case delivered(Date)
+    case refused(reason: String)
 }

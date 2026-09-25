@@ -204,6 +204,101 @@ public actor TaskStore {
         noteEffectsWritten(taskID: transition.taskID)
     }
 
+    // MARK: - Task watches
+
+    /// Adds a watch to a task (or a library template). Refuses — returning why — a rule that could
+    /// not work: no triggers, empty instructions, a `startTask` on a template or targeting itself, a
+    /// target that is not an ordinary task in this session, or a chain that would loop.
+    public func addWatch(_ watch: TaskWatch, to taskID: UUID) async -> String? {
+        if let problem = watchProblem(watch, on: taskID) { return problem }
+        return await mutateTaskOrTemplate(id: taskID) { task in
+            if task.isTemplate, !watch.action.isAllowedOnTemplate {
+                return "A template can't start another task: a template is shared across sessions, and the task to start lives in one. Put the watch on a task instead."
+            }
+            task.watches.append(watch)
+            task.updatedAt = Date()
+            return nil
+        }
+    }
+
+    /// Cancels a watch. Its unsettled firings are cancelled too, and their undelivered effects are
+    /// removed, so nothing it already produced acts after this returns. The watch itself is kept
+    /// (state `.cancelled`) as the audit record.
+    public func cancelWatch(_ watchID: UUID, on taskID: UUID) async -> String? {
+        await mutateTaskOrTemplate(id: taskID) { task in
+            guard let index = task.watches.firstIndex(where: { $0.id == watchID }) else {
+                return "Task \(taskID.uuidString) has no watch \(watchID.uuidString)."
+            }
+            guard task.watches[index].isActive else { return nil }
+            task.watches[index].state = .cancelled(at: Date())
+            for firing in task.watches[index].recentFirings where !firing.state.isSettled {
+                task.watches[index].setFiringState(occurrence: firing.occurrence, .cancelled)
+            }
+            task.pendingEffects.removeAll {
+                if case .watchFiring(let id, _) = $0.effect { return id == watchID }
+                return false
+            }
+            task.updatedAt = Date()
+            return nil
+        }
+    }
+
+    /// Records how a firing ended (or that it was handed off). A no-op when the watch or firing is
+    /// gone, or when the firing already settled — a cancelled firing stays cancelled.
+    @discardableResult
+    public func setWatchFiringState(taskID: UUID, watchID: UUID, occurrence: Int, to state: TaskWatchFiring.State) -> Bool {
+        guard var task = tasks[taskID],
+              let index = task.watches.firstIndex(where: { $0.id == watchID }),
+              let firing = task.watches[index].firing(occurrence: occurrence),
+              !firing.state.isSettled,
+              firing.state != state else { return false }
+        task.watches[index].setFiringState(occurrence: occurrence, state)
+        tasks[taskID] = task
+        didMutate()
+        return true
+    }
+
+    /// Every watch in this session's active tasks, with the task it belongs to.
+    public func allWatches() -> [(task: AgentTask, watch: TaskWatch)] {
+        allTasks().flatMap { task in task.watches.map { (task, $0) } }
+    }
+
+    private func watchProblem(_ watch: TaskWatch, on taskID: UUID) -> String? {
+        if watch.triggers.isEmpty { return "A watch needs at least one state to react to." }
+        switch watch.action {
+        case .instructSmith(let text) where text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            return "Instructions for Smith can't be empty."
+        case .startTask(let targetID):
+            if targetID == taskID { return "A task can't start itself." }
+            guard let target = tasks[targetID], target.disposition == .active else {
+                return "Task \(targetID.uuidString) is not an active task in this session, so a watch can't start it."
+            }
+            if target.isTemplate {
+                return "A watch can't start a template directly. Start a task instead."
+            }
+            if startChainReaches(taskID, from: targetID) {
+                return "Starting \"\(target.title)\" from this task would create a loop: it already leads back here."
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    /// Whether following active `startTask` watches from `start` reaches `goal`.
+    private func startChainReaches(_ goal: UUID, from start: UUID) -> Bool {
+        var visited: Set<UUID> = []
+        var frontier = [start]
+        while let current = frontier.popLast() {
+            if current == goal { return true }
+            guard visited.insert(current).inserted, let task = tasks[current] else { continue }
+            for watch in task.watches where watch.isActive {
+                if case .startTask(let next) = watch.action { frontier.append(next) }
+            }
+        }
+        return false
+    }
+
     // MARK: - Transition effects
 
     /// The store mutation after which each pending effect record was written or released. The
@@ -781,6 +876,10 @@ public actor TaskStore {
         historicalRun.templateInstanceTitleTemplate = nil
         historicalRun.templateInputValues = [:]
         historicalRun.scheduledRunAt = nil
+        // A preserved record of a past run carries no live rules or undelivered effects: those
+        // belong to the task that continues.
+        historicalRun.watches = []
+        historicalRun.pendingEffects = []
         historicalRun.updatedAt = Date()
         tasks[historicalRun.id] = historicalRun
         appendUpdate(to: &task, "Converted this task into a template. Preserved the prior run as child task \(historicalRun.id.uuidString).")
@@ -1006,9 +1105,13 @@ public actor TaskStore {
             templateInputDefinitions: template.templateInputDefinitions,
             templateInputValues: resolvedInputs.values
         )
-        tasks[instance.id] = instance
+        var withWatches = instance
+        // A template's watches are blueprints: each run gets its own copy, with fresh identity and
+        // no history (decision 5).
+        withWatches.watches = template.watches.compactMap { $0.blueprintCopy() }
+        tasks[withWatches.id] = withWatches
         didMutate()
-        return .success(instance)
+        return .success(withWatches)
     }
 
     /// Adds a new task and returns it. When auto-archive is enabled (Settings), also sweeps any
@@ -1208,6 +1311,16 @@ public actor TaskStore {
         // reach disk together.
         if let note = SmithTaskBriefing.note(for: transition, task: task) {
             task.pendingEffects.append(TaskEffectRecord(transition: transition, effect: .smithBriefing(note: note), release: effectRelease))
+        }
+        if let trigger = TaskWatchTrigger(transition: transition) {
+            for index in task.watches.indices where task.watches[index].isActive && task.watches[index].triggers.contains(trigger) {
+                let occurrence = task.watches[index].recordFiring(trigger: trigger, transition: transition)
+                task.pendingEffects.append(TaskEffectRecord(
+                    transition: transition,
+                    effect: .watchFiring(watchID: task.watches[index].id, occurrence: occurrence),
+                    release: effectRelease
+                ))
+            }
         }
         return .applied(transition)
     }
