@@ -567,12 +567,15 @@ actor SecurityEvaluator {
     /// context. Use this instead of `channel.post(...)` for any Security Agent-originated
     /// message so it carries full provenance for downstream rollups. `taskID`
     /// can be passed explicitly for messages tied to a specific evaluation.
-    private func postToChannel(_ message: ChannelMessage, taskID: UUID? = nil) async {
+    /// Inside an evaluation, pass that evaluation's `model` snapshot: the stamp must name the model
+    /// that produced the message, which a concurrent `applyModel` may already have replaced.
+    private func postToChannel(_ message: ChannelMessage, taskID: UUID? = nil, model stampModel: SecurityEvaluatorModel? = nil) async {
+        let stampModel = stampModel ?? model
         var stamped = message
         if stamped.taskID == nil { stamped.taskID = taskID }
-        if stamped.providerID == nil { stamped.providerID = model.configuration?.providerID }
-        if stamped.modelID == nil { stamped.modelID = model.configuration?.model }
-        if stamped.configuration == nil { stamped.configuration = model.configuration }
+        if stamped.providerID == nil { stamped.providerID = stampModel.configuration?.providerID }
+        if stamped.modelID == nil { stamped.modelID = stampModel.configuration?.model }
+        if stamped.configuration == nil { stamped.configuration = stampModel.configuration }
         await channel.post(stamped)
     }
 
@@ -948,7 +951,7 @@ actor SecurityEvaluator {
                 conversationMessages.append(.assistant(from: response))
                 // Execute each file_read / attach_file and append tool results, timing each one.
                 for call in response.toolCalls {
-                    await postSecurityAgentToolCallToChannel(call)
+                    await postSecurityAgentToolCallToChannel(call, model: model)
                     let execStart = Date()
                     let result: String
                     if call.name == "attach_file" {
@@ -1035,7 +1038,7 @@ actor SecurityEvaluator {
                             "severity": .severity(.error),
                             "agentRole": .string(AgentRole.securityAgent.rawValue)
                         ]
-                    ))
+                    ), model: model)
                 }
                 continue
             }
@@ -1065,7 +1068,7 @@ actor SecurityEvaluator {
                         "securityDisposition": .string("abort"),
                         "agentRole": .string(AgentRole.securityAgent.rawValue)
                     ]
-                ))
+                ), model: model)
                 await abort(msg, .securityAgent)
             }
 
@@ -1087,7 +1090,7 @@ actor SecurityEvaluator {
                 sender: .system,
                 content: abortContent,
                 metadata: ["messageKind": .kind(.securityReview)]
-            ))
+            ), model: model)
             await abort(
                 "The Security Agent failed to produce valid output after \(consecutiveEvaluationFailures) consecutive evaluations",
                 .securityAgent
@@ -2152,7 +2155,7 @@ actor SecurityEvaluator {
     }
 
     /// Posts a tool_request message to the channel so Security Agent's file reads appear in the transcript.
-    private func postSecurityAgentToolCallToChannel(_ call: LLMToolCall) async {
+    private func postSecurityAgentToolCallToChannel(_ call: LLMToolCall, model: SecurityEvaluatorModel) async {
         let path: String = {
             guard let data = call.arguments.data(using: .utf8),
                   let dict = try? JSONDecoder().decode([String: AnyCodable].self, from: data),
@@ -2174,7 +2177,7 @@ actor SecurityEvaluator {
                 "toolDescription": .string(toolDescription),
                 "toolParameters": .string("")
             ]
-        ))
+        ), model: model)
     }
 
     /// Executes a file_read tool call for Security Agent without recording the read.

@@ -93,4 +93,44 @@ struct WatchWithdrawalTests {
         #expect(await store.cancelWatch(watch.id, on: task.id) == nil)
         #expect(events.all.contains(.watchCancelled(taskID: task.id, watchID: watch.id, handedOffOccurrences: [1])))
     }
+
+    @Test("A withdrawal asked for while a push attempt is under way is honored when that attempt asks for a retry")
+    func withdrawDuringAttempt() async {
+        actor GatedTarget: RecipientTarget {
+            private(set) var attempts = 0
+            private var gate: CheckedContinuation<Void, Never>?
+            private var entered: CheckedContinuation<Void, Never>?
+            private var hasEntered = false
+            func waitUntilEntered() async {
+                guard !hasEntered else { return }
+                await withCheckedContinuation { entered = $0 }
+            }
+            func release() { gate?.resume(); gate = nil }
+            func deliver(_ text: String, for notification: AgentNotification) async -> PushDeliveryOutcome {
+                attempts += 1
+                hasEntered = true
+                entered?.resume(); entered = nil
+                await withCheckedContinuation { gate = $0 }
+                return .retryable("busy")
+            }
+        }
+        let broker = NotificationBroker(runtime: NoopRuntime())
+        await broker.registerHandler(type: KnownNotificationType.taskBriefing.rawValue, TaskBriefingNotificationHandler())
+        let target = GatedTarget()
+        await broker.registerRecipientTarget(.external("macos"), target)
+        let banner = AgentNotification(
+            id: NotificationID(namespace: "taskwatch", key: "gated"),
+            triggerSource: .taskWatch(watchID: UUID(), occurrence: 1),
+            recipient: .external("macos"), title: "t", createdAt: Date(),
+            payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string("x")])
+        )
+        let submission = Task { await broker.submit(banner) }
+        await target.waitUntilEntered()
+        #expect(await broker.withdraw([banner.id], reason: "cancelled").isEmpty, "mid-attempt: deferred, not yet withdrawn")
+        await target.release()
+        _ = await submission.value
+        #expect(await broker.deliveryStatus(banner.id) == .dropped(reason: .withdrawn))
+        try? await Task.sleep(for: .milliseconds(1_500))
+        #expect(await target.attempts == 1, "no retry after the withdrawal")
+    }
 }

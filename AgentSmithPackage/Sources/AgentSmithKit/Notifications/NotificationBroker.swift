@@ -78,6 +78,9 @@ public actor NotificationBroker {
     private var pushRetryAttempts: [NotificationID: Int] = [:]
     /// The notification each pending push retry will deliver, so it can be withdrawn.
     private var pushRetryNotifications: [NotificationID: AgentNotification] = [:]
+    /// Withdrawals asked for while the id was mid-delivery: honored the moment that attempt comes
+    /// back unsettled (a retry is due), so a cancelled push is never retried into delivery.
+    private var withdrawalsPending: [NotificationID: String] = [:]
     /// Push attempts before a `.retryable` delivery is settled as refused (decision R3).
     static let maxPushAttempts = 5
     private var failingStores: Set<PersistedStore> = []
@@ -301,7 +304,11 @@ public actor NotificationBroker {
     @discardableResult
     public func withdraw(_ ids: [NotificationID], reason: String) async -> [NotificationID] {
         var withdrawn: [NotificationID] = []
-        for id in ids where !ledger.isSettled(id) && !inFlight.contains(id) {
+        for id in ids where !ledger.isSettled(id) {
+            if inFlight.contains(id) {
+                withdrawalsPending[id] = reason
+                continue
+            }
             let leasedNow = leased.values.contains { $0.contains(id) }
             if let queued = pendingDelivery.first(where: { $0.notification.id == id }), !leasedNow {
                 pendingDelivery.removeAll { $0.notification.id == id }
@@ -391,9 +398,14 @@ public actor NotificationBroker {
                     // acknowledges it. NOT settled here — it becomes `.delivered` on acknowledgement.
                     // This is the persistence-until-delivery floor; a momentarily-absent recipient
                     // loses nothing.
-                    pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
-                    owned = await flushPendingDelivery()
-                    onPendingEnqueued?(kind)
+                    if let withdrawal = withdrawalsPending.removeValue(forKey: id) {
+                        // Withdrawn while its handler ran: never queue it.
+                        await settle(notification, .dropped(reason: .withdrawn), reason: withdrawal)
+                    } else {
+                        pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
+                        owned = await flushPendingDelivery()
+                        onPendingEnqueued?(kind)
+                    }
                 } else {
                     Self.logger.error("No target or pull registration for recipient \(String(describing: kind), privacy: .public) — dropping notification \(id.description, privacy: .public).")
                     await settle(notification, .dropped(reason: .noRecipientTarget), reason: "nothing is set up to deliver to \(String(describing: kind))")
@@ -420,6 +432,10 @@ public actor NotificationBroker {
             await settle(notification, .dropped(reason: .recipientRefused), reason: reason)
             return true
         case .retryable(let reason):
+            if let withdrawal = withdrawalsPending.removeValue(forKey: notification.id) {
+                await settle(notification, .dropped(reason: .withdrawn), reason: withdrawal)
+                return true
+            }
             let attempts = (pushRetryAttempts[notification.id] ?? 0) + 1
             pushRetryAttempts[notification.id] = attempts
             pushRetryNotifications[notification.id] = notification
@@ -447,6 +463,7 @@ public actor NotificationBroker {
         let id = notification.id
         pushRetryAttempts[id] = nil
         pushRetryNotifications[id] = nil
+        withdrawalsPending[id] = nil
         switch status {
         case .delivered(let date):
             ledger.markDelivered(id, at: date)

@@ -1226,7 +1226,9 @@ public actor OrchestrationRuntime {
                 let id = TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)
                 if let settled = Self.firingState(adopting: await broker.deliveryStatus(id)) {
                     await taskStore.setWatchFiringState(taskID: task.id, watchID: watch.id, occurrence: firing.occurrence, to: settled)
-                } else if firing.state == .inFlight, await !broker.isHoldingForDelivery(id) {
+                } else if firing.state == .inFlight, await !broker.isHoldingForDelivery(id),
+                          // Re-read: a cancel that landed since the snapshot above wins.
+                          await taskStore.task(id: task.id)?.watch(id: watch.id)?.firing(occurrence: firing.occurrence)?.state == .inFlight {
                     await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
                 }
             }
@@ -2228,12 +2230,13 @@ public actor OrchestrationRuntime {
     ///   immediately, via `AgentActor.scheduleModelRetune`. The agent applies it at its next
     ///   turn boundary and keeps its conversation.
     /// - **A MODEL or PROVIDER change** does NOT touch a live agent, deliberately. Brown picks it
-    ///   up at its next spawn. Smith and the `TaskSummarizer` keep theirs until the runtime cold
-    ///   starts, which `restartForNewTask` does NOT do while Smith is alive — it cycles only the
-    ///   worker. See `scheduleModelRetune` for why a mid-conversation model change is unsafe.
-    /// - Non-agent holders — the `TaskSummarizer` and the long-lived `SecurityEvaluator`s (Smith's
-    ///   and `validationSecurityEvaluator`) — take NEITHER a retune nor a model change until the
-    ///   runtime restarts. Only per-Brown evaluators refresh, at spawn. Known limitation.
+    ///   up at its next spawn. Smith keeps its model until the runtime cold starts, which
+    ///   `restartForNewTask` does NOT do while Smith is alive — it cycles only the worker. See
+    ///   `scheduleModelRetune` for why a mid-conversation model change is unsafe.
+    /// - Non-agent holders take BOTH, live: every live `SecurityEvaluator` gets the new Security
+    ///   Agent model (`applyModel`; each evaluation snapshots its model, and keeps no conversation),
+    ///   and the `TaskSummarizer` is rebuilt. Only when the role's provider was actually rebuilt, so a
+    ///   configuration is never paired with a stale provider.
     /// - The validator needs none of this: `validatorModel()` reads these dictionaries fresh for
     ///   every criterion judgment.
     ///
@@ -2258,8 +2261,16 @@ public actor OrchestrationRuntime {
         // as well as a retune: neither keeps a conversation across calls, so nothing provider-shaped
         // survives the switch (unlike an agent, whose history does). Same "only if the resolved
         // configuration actually changed" rule as the retune, for the same cache-locality reason.
-        let securityModelChanged = configurations[.securityAgent].map { $0 != llmConfigs[.securityAgent] } ?? false
-        let summarizerModelChanged = configurations[.summarizer].map { $0 != llmConfigs[.summarizer] } ?? false
+        // Requires the rebuilt PROVIDER too (like the retune guard): a role whose provider build
+        // failed arrives with a new config and no provider, and pairing that config with the old
+        // provider would call one model while recording and sizing requests for another.
+        // A capability-only change (vision / PDF overrides) counts too: evaluators gate attachments on it.
+        let securityModelChanged = providers[.securityAgent] != nil
+            && ((configurations[.securityAgent].map { $0 != llmConfigs[.securityAgent] } ?? false)
+                || (supportsVisionByRole[.securityAgent].map { $0 != self.supportsVisionByRole[.securityAgent] } ?? false)
+                || (supportsDocumentsByRole[.securityAgent].map { $0 != self.supportsDocumentsByRole[.securityAgent] } ?? false))
+        let summarizerModelChanged = providers[.summarizer] != nil
+            && (configurations[.summarizer].map { $0 != llmConfigs[.summarizer] } ?? false)
 
         var retunes: [AgentRole: AgentActor.ModelRetune] = [:]
         for (role, newConfig) in configurations {
@@ -2301,15 +2312,12 @@ public actor OrchestrationRuntime {
                 await workerHandle.agent.scheduleModelRetune(retune)
             }
         }
-        if securityModelChanged, let model = currentSecurityEvaluatorModel() {
-            liveSecurityEvaluators.removeAll { $0.evaluator == nil }
-            for box in liveSecurityEvaluators {
-                await box.evaluator?.applyModel(model)
-            }
+        if securityModelChanged {
+            await pushSecurityModelToLiveEvaluators()
         }
         // Only a running runtime has a summarizer to replace; one not yet started builds it at start.
         if summarizerModelChanged, currentSessionID != nil {
-            taskSummarizer = await makeTaskSummarizer()
+            await rebuildTaskSummarizer()
         }
     }
 
@@ -4012,9 +4020,12 @@ public actor OrchestrationRuntime {
     /// per-evaluator breaker would fragment across concurrent workers and reset on every respawn.
     private let securityBackendHealth = SecurityBackendHealth()
 
-    private func makeSecurityEvaluator(provider: any LLMProvider, executionTracker: ToolExecutionTracker) -> SecurityEvaluator {
+    /// Builds an evaluator on the Security Agent model as configured NOW. `provider` is the one the
+    /// caller verified exists; it is used only if the configured provider disappeared since, so an
+    /// evaluator built after a suspension never pairs a fresh configuration with a stale provider.
+    private func makeSecurityEvaluator(provider verifiedProvider: any LLMProvider, executionTracker: ToolExecutionTracker) -> SecurityEvaluator {
         let evaluator = SecurityEvaluator(
-            provider: provider,
+            provider: llmProviders[.securityAgent] ?? verifiedProvider,
             systemPrompt: SecurityAgentBehavior.systemPrompt,
             channel: channel,
             abort: { [weak self] reason, callerRole in
@@ -4066,6 +4077,35 @@ public actor OrchestrationRuntime {
             if let evaluator = box.evaluator { security.append(await evaluator.currentModel.configuration) }
         }
         return (security, await taskSummarizer?.modelConfiguration)
+    }
+
+    /// Hands every live evaluator the Security Agent model as configured NOW. The pushes suspend, so
+    /// a later `setProviders` can land between them; after the loop the configuration is compared
+    /// with what was pushed and the push repeats until they agree — an older model never ends up
+    /// overwriting a newer one.
+    private func pushSecurityModelToLiveEvaluators() async {
+        while let model = currentSecurityEvaluatorModel() {
+            liveSecurityEvaluators.removeAll { $0.evaluator == nil }
+            for box in liveSecurityEvaluators {
+                await box.evaluator?.applyModel(model)
+            }
+            if llmConfigs[.securityAgent] == model.configuration,
+               (supportsVisionByRole[.securityAgent] ?? true) == model.supportsVision,
+               (supportsDocumentsByRole[.securityAgent] ?? false) == model.supportsDocuments { return }
+        }
+    }
+
+    /// Replaces the task summarizer with one built from the CURRENT summarizer configuration,
+    /// repeating if the configuration changed while it was being built (building suspends).
+    private func rebuildTaskSummarizer() async {
+        while true {
+            let builtFrom = llmConfigs[.summarizer]
+            let rebuilt = await makeTaskSummarizer()
+            if llmConfigs[.summarizer] == builtFrom {
+                taskSummarizer = rebuilt
+                return
+            }
+        }
     }
 
     /// The Security Agent model as currently configured, for handing to a live evaluator. Nil when

@@ -37,6 +37,55 @@ struct NonAgentModelRefreshTests {
         #expect(await evaluator.currentModel.configuration?.modelID == "new-model")
     }
 
+    /// A provider whose FIRST call swaps the evaluator to another model mid-evaluation, then asks for
+    /// an evidence read, forcing a second round; the second round must stay on this provider.
+    private final class SwappingProvider: LLMProvider, @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        var onFirstCall: (@Sendable () async -> Void)?
+        var callCount: Int { lock.withLock { calls } }
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            let index = lock.withLock { calls += 1; return calls }
+            if index == 1 {
+                await onFirstCall?()
+                return LLMResponse(toolCalls: [LLMToolCall(id: "read-1", name: "file_read", arguments: #"{"path":"/nonexistent/agent-smith-test"}"#)])
+            }
+            return LLMResponse(text: "SAFE")
+        }
+    }
+
+    @Test("A swap during an evaluation leaves that evaluation — and its transcript rows — on its own model")
+    func swapMidEvaluationDoesNotLeakIn() async {
+        let original = SwappingProvider()
+        let replacement = MockLLMProvider(responses: [LLMResponse(text: "SAFE")])
+        let channel = MessageChannel()
+        let evaluator = SecurityEvaluator(
+            provider: original,
+            systemPrompt: "p",
+            channel: channel,
+            abort: { _, _ in },
+            configuration: ModelConfiguration(name: "old", providerID: "p", modelID: "old-model"),
+            hasToolSucceeded: { _ in false },
+            hasToolFailed: { _ in false }
+        )
+        let replacementModel = SecurityEvaluatorModel(
+            provider: replacement, configuration: ModelConfiguration(name: "new", providerID: "p", modelID: "new-model"),
+            providerType: "", supportsVision: false, supportsDocuments: false
+        )
+        original.onFirstCall = { await evaluator.applyModel(replacementModel) }
+        _ = await evaluator.evaluate(
+            toolName: "bash", toolParams: "{\"command\":\"ls\"}", toolDescription: "shell", toolParameterDefs: "",
+            taskTitle: "t", taskID: UUID().uuidString, taskDescription: "d", siblingCalls: nil,
+            agentRoleName: "Brown", callerRole: .brown, toolGroupDescription: nil, toolCallID: "c1",
+            evaluatingForAgentID: UUID()
+        )
+        #expect(original.callCount == 2, "the evidence round stayed on the model the evaluation started with")
+        #expect(replacement.callCount == 0)
+        let evidenceRow = await channel.allMessages().first { $0.kind == .toolRequest && $0.content.hasPrefix("file_read") }
+        #expect(evidenceRow?.modelID == "old-model", "stamped with the model that produced it")
+        #expect(await evaluator.currentModel.configuration?.modelID == "new-model", "the next evaluation uses the swap")
+    }
+
     private func makeRuntime() -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-nonagent-refresh", isDirectory: true)
@@ -85,21 +134,33 @@ struct NonAgentModelRefreshTests {
         await runtime.stopAll()
     }
 
-    @Test("A summarizer change rebuilds the task summarizer; an untouched role is left alone")
+    @Test("A summarizer model change rebuilds the task summarizer; the Security Agent's evaluators keep theirs")
     func summarizerRebuilt() async {
         let runtime = makeRuntime()
         await runtime.start()
         #expect(await runtime.nonAgentModelConfigurations().summarizer?.modelID == "test-model")
-        var retuned = ModelConfiguration(name: "sum2", providerID: "test", modelID: "summary-2")
-        retuned.temperature = 0.1
+        let changed = ModelConfiguration(name: "sum2", providerID: "test", modelID: "summary-2")
         await runtime.setProviders(
             providers: [.summarizer: MockLLMProvider(responses: [LLMResponse(text: "s")])],
-            configurations: [.summarizer: retuned],
+            configurations: [.summarizer: changed],
             apiTypes: [:]
         )
         #expect(await runtime.nonAgentModelConfigurations().summarizer?.modelID == "summary-2")
         #expect(await runtime.nonAgentModelConfigurations().security.allSatisfy { $0?.modelID == "test-model" },
                 "the Security Agent's configuration did not change, so its evaluators were not touched")
+        await runtime.stopAll()
+    }
+
+    @Test("A new configuration whose provider failed to build is not paired with the old provider")
+    func configWithoutProviderIsNotApplied() async {
+        let runtime = makeRuntime()
+        await runtime.start()
+        await runtime.setProviders(
+            providers: [:],
+            configurations: [.securityAgent: ModelConfiguration(name: "sec2", providerID: "other", modelID: "security-2")],
+            apiTypes: [:]
+        )
+        #expect(await runtime.nonAgentModelConfigurations().security.allSatisfy { $0?.modelID == "test-model" })
         await runtime.stopAll()
     }
 }

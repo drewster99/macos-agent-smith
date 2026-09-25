@@ -2073,9 +2073,9 @@ final class AppViewModel {
     }
 
     /// Rebuilds this session's per-role LLM providers from the current model assignments and pushes
-    /// them to the live runtime, so a model swap in Settings takes effect on the next task (Brown and
-    /// Security Agent re-read the providers at spawn; Smith/summarizer on the next runtime restart) without a
-    /// session restart. A per-role build failure is logged and skipped — the runtime keeps that role's
+    /// them to the live runtime without a session restart: a retune reaches live agents at their
+    /// next turn; a model change reaches Brown at its next spawn and Smith at the next runtime start;
+    /// the Security Agent's evaluators and the summarizer take either change on their next call. A per-role build failure is logged and skipped — the runtime keeps that role's
     /// existing provider — so one misconfigured model can't break the others.
     /// Resolves a model's image/document injection capability from the catalog. When the model is
     /// ABSENT from the catalog we can't know: vision fails OPEN (images have no text fallback) and
