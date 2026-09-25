@@ -99,7 +99,8 @@ public struct TaskUpdateTool: AgentTool {
     /// the LLM gets a single accurate "too big" message rather than a partial-then-fail.
     fileprivate static func collectAttachments(
         arguments: [String: AnyCodable],
-        context: ToolContext
+        context: ToolContext,
+        pathIngestions: AttachmentPathIngestions = AttachmentPathIngestions()
     ) async -> (attachments: [Attachment], failure: String?) {
         var collected: [Attachment] = []
 
@@ -123,14 +124,24 @@ public struct TaskUpdateTool: AgentTool {
                 return nil
             }
             for path in paths {
+                if let already = pathIngestions.attachment(forPath: path) {
+                    collected.append(already)
+                    continue
+                }
                 let outcome = await context.ingestAttachmentFile(path)
                 if let attachment = outcome.attachment {
+                    pathIngestions.record(attachment, forPath: path)
                     collected.append(attachment)
                 } else {
                     return (collected, outcome.error ?? "Failed to ingest attachment at path: \(path)")
                 }
             }
         }
+
+        // One file named twice (two ids, or a path repeated) is one attachment, and counts once
+        // toward the size cap.
+        var seenIDs = Set<UUID>()
+        collected = collected.filter { seenIDs.insert($0.id).inserted }
 
         // Aggregate-size guard: reject the call if the resolved set exceeds the
         // runtime's per-message cap. Applies across both `attachment_ids` and
@@ -155,8 +166,31 @@ public struct TaskUpdateTool: AgentTool {
 extension TaskUpdateTool {
     static func resolveAttachments(
         arguments: [String: AnyCodable],
-        context: ToolContext
+        context: ToolContext,
+        pathIngestions: AttachmentPathIngestions = AttachmentPathIngestions()
     ) async -> (attachments: [Attachment], failure: String?) {
-        await collectAttachments(arguments: arguments, context: context)
+        await collectAttachments(arguments: arguments, context: context, pathIngestions: pathIngestions)
+    }
+}
+
+/// The files one tool call has already ingested, by canonical path, so a file named in several
+/// places in that call (top-level `attachment_paths` and a deliverable, say) becomes ONE attachment
+/// rather than a copy per mention. Scoped to a single call and used sequentially within it.
+final class AttachmentPathIngestions {
+    private var byCanonicalPath: [String: Attachment] = [:]
+
+    func attachment(forPath path: String) -> Attachment? {
+        byCanonicalPath[Self.canonical(path)]
+    }
+
+    func record(_ attachment: Attachment, forPath path: String) {
+        byCanonicalPath[Self.canonical(path)] = attachment
+    }
+
+    private static func canonical(_ path: String) -> String {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
     }
 }

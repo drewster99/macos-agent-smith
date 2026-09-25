@@ -89,7 +89,10 @@ public struct TaskCompleteTool: AgentTool {
             return .success("Task already submitted.")
         }
 
-        let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context)
+        // Shared by the top-level attachments and every deliverable, so a file cited in both is
+        // ingested once and the deliverable points at the same attachment.
+        let pathIngestions = AttachmentPathIngestions()
+        let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context, pathIngestions: pathIngestions)
         if let failureMessage = resolution.failure {
             return .failure(failureMessage)
         }
@@ -97,7 +100,7 @@ public struct TaskCompleteTool: AgentTool {
         // entry becomes a text item and/or an attachment item/group, tagged with its `ref`. A
         // per-entry attachment-resolution failure is skipped (best-effort) rather than blocking
         // the whole submission — the plain `result` + swept evidence still carry the work.
-        let resultItems = await Self.buildDeliverables(arguments: arguments, context: context)
+        let resultItems = await Self.buildDeliverables(arguments: arguments, context: context, pathIngestions: pathIngestions)
         // Also merge any deliverable-only attachments into the canonical `resultAttachments` so
         // they show in the UI and re-register on cold boot — `resultItems` adds STRUCTURE/tags, it
         // is not a separate attachment store. Deduped by id against the already-collected set.
@@ -153,7 +156,11 @@ public struct TaskCompleteTool: AgentTool {
     /// tagged with the entry's `ref`. Best-effort: an entry with no usable content is skipped, and
     /// a per-entry attachment-resolution failure yields no attachments for that entry rather than
     /// failing the whole submission. Returns `[]` when `deliverables` is absent.
-    static func buildDeliverables(arguments: [String: AnyCodable], context: ToolContext) async -> [ResultItem] {
+    static func buildDeliverables(
+        arguments: [String: AnyCodable],
+        context: ToolContext,
+        pathIngestions: AttachmentPathIngestions = AttachmentPathIngestions()
+    ) async -> [ResultItem] {
         guard case .array(let rawDeliverables) = arguments["deliverables"] else { return [] }
         var items: [ResultItem] = []
         for raw in rawDeliverables {
@@ -177,7 +184,7 @@ public struct TaskCompleteTool: AgentTool {
             if let ids = entry["attachment_ids"] { entryArgs["attachment_ids"] = ids }
             if let paths = entry["attachment_paths"] { entryArgs["attachment_paths"] = paths }
             if !entryArgs.isEmpty {
-                let resolved = await TaskUpdateTool.resolveAttachments(arguments: entryArgs, context: context).attachments
+                let resolved = await TaskUpdateTool.resolveAttachments(arguments: entryArgs, context: context, pathIngestions: pathIngestions).attachments
                 if resolved.count == 1, description == nil {
                     items.append(ResultItem(content: .attachment(resolved[0]), refs: refs))
                 } else if !resolved.isEmpty {
@@ -189,9 +196,10 @@ public struct TaskCompleteTool: AgentTool {
     }
 
     /// Ingests every regular file in the task's evidence directory as an attachment, skipping any
-    /// whose filename already appears in `existing` (the worker's explicitly-referenced attachments)
-    /// so nothing is doubled. Best-effort: a file that can't be read or ingested is skipped. Returns
-    /// the newly ingested attachments. No-op when the task has no evidence directory.
+    /// already in `existing` (the worker's explicit and deliverable attachments) — the same file,
+    /// judged by name and bytes — so nothing is doubled. Best-effort: a file that can't be read or
+    /// ingested is skipped. Returns the newly ingested attachments. No-op when the task has no
+    /// evidence directory.
     static func ingestEvidenceDirectory(context: ToolContext, existing: [Attachment]) async -> [Attachment] {
         guard let evidenceDir = context.taskEvidenceDirectory else { return [] }
         let fm = FileManager.default
