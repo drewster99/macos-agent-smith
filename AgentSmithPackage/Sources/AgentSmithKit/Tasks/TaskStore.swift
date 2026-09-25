@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Thread-safe storage for one session's *active* tasks.
 ///
@@ -35,9 +36,21 @@ public actor TaskStore {
     /// before the source is removed — a crash in the gap must never leave a task absent from both
     /// files. Nil in standalone/test construction (the move is then best-effort, as before).
     private var durablyPersistInactiveNow: (@Sendable () async -> Bool)?
-    /// Durably writes this session's active-task snapshot to disk *now*, returning success. Same
-    /// purpose as `durablyPersistInactiveNow`, for the restore direction (global → active).
-    private var durablyPersistActiveNow: (@Sendable ([AgentTask]) async -> Bool)?
+    /// How this store's active tasks reach disk. The store is the SINGLE writer of its session's
+    /// `tasks.json`: every mutation schedules a coalesced, in-order write of the store's own state,
+    /// so what is on disk can never be a stale mirror, and a caller can ask whether a given
+    /// mutation is durable (`awaitDurable(through:)`).
+    private var persistence: Persistence = .memoryOnly
+    /// Bumped by every mutation (`didMutate`) and every explicit durable write request.
+    private var mutationSeq: UInt64 = 0
+    /// The highest `mutationSeq` the persistence drain has finished with — success or failure.
+    private var drainedSeq: UInt64 = 0
+    /// The highest `mutationSeq` a SUCCESSFUL write covers. Each write is complete state, so a later
+    /// success makes every earlier seq durable.
+    private var durableSeq: UInt64 = 0
+    private var persistenceDrainRunning = false
+    private var durabilityWaiters: [(target: UInt64, continuation: CheckedContinuation<Void, Never>)] = []
+    private static let persistenceLogger = Logger(subsystem: "com.agentsmith", category: "TaskStore.persistence")
     /// Durably writes the global template library to disk *now*, returning success. For the cross-store
     /// moves that touch the library — promote/demote (`commitTemplateFlip`) and a template's
     /// archive/soft-delete/restore — so the destination file is durable before the source is removed.
@@ -164,17 +177,15 @@ public actor TaskStore {
         onChange = handler
     }
 
-    /// Injects the durable-write hooks that make cross-store moves crash-safe. `inactive` durably
-    /// persists the global inactive store; `active` durably persists the given snapshot of this
-    /// session's active tasks; `library` durably persists the global template library. Each returns
-    /// whether the write succeeded.
+    /// Injects the durable-write hooks for the GLOBAL stores that make cross-store moves crash-safe.
+    /// `inactive` durably persists the global inactive store; `library` durably persists the global
+    /// template library. Each returns whether the write succeeded. This session's own active tasks
+    /// are persisted by the store itself (`attachPersistence`).
     public func setDurablePersistHooks(
         inactive: @escaping @Sendable () async -> Bool,
-        active: @escaping @Sendable ([AgentTask]) async -> Bool,
         library: (@Sendable () async -> Bool)? = nil
     ) {
         durablyPersistInactiveNow = inactive
-        durablyPersistActiveNow = active
         durablyPersistLibraryNow = library
     }
 
@@ -186,6 +197,145 @@ public actor TaskStore {
     /// Registers a callback fired when a task is archived or soft-deleted (leaves the active store).
     public func setOnTaskMovedToInactive(_ handler: @escaping @Sendable (UUID) -> Void) {
         onTaskMovedToInactive = handler
+    }
+
+    // MARK: - Persistence
+
+    /// How a store's active tasks reach disk.
+    public enum Persistence: Sendable {
+        /// No disk: memory IS the store's storage, so a mutation is durable the moment it is applied.
+        /// Tests and standalone construction.
+        case memoryOnly
+        /// Every mutation schedules a coalesced, in-order write of the store's full active snapshot.
+        case disk(save: @Sendable ([AgentTask]) async throws -> Void)
+        /// A retired store (replaced by another that now owns the file). Nothing is written and
+        /// nothing is ever durable, so a straggling mutation can't overwrite its successor's file.
+        case retired
+    }
+
+    /// Makes this store the writer of its session's `tasks.json`. With `writeNow`, the current state
+    /// is written at once; without it, the file is left as it is until the next mutation (the loader
+    /// uses this when stripping the session file isn't yet safe).
+    public func attachPersistence(save: @escaping @Sendable ([AgentTask]) async throws -> Void, writeNow: Bool) {
+        persistence = .disk(save: save)
+        // Whatever the store held before attaching is NOT on disk; only a write can make it so.
+        durableSeq = 0
+        drainedSeq = 0
+        if writeNow {
+            mutationSeq += 1
+            schedulePersistenceDrain()
+        } else {
+            drainedSeq = mutationSeq
+        }
+    }
+
+    /// Stops this store from writing, after its in-flight write (if any) lands. Used when another
+    /// store takes over the same file, so a late write from this one can never clobber it.
+    public func retirePersistence() async {
+        let target = mutationSeq
+        if case .disk = persistence, drainedSeq < target {
+            await withCheckedContinuation { continuation in
+                durabilityWaiters.append((target, continuation))
+            }
+        }
+        persistence = .retired
+        resumeAllDurabilityWaiters()
+    }
+
+    /// The seq of the latest mutation — pass it to `awaitDurable(through:)`.
+    public var currentMutationSeq: UInt64 { mutationSeq }
+
+    /// Waits until the write covering mutation `target` has been attempted and reports whether a
+    /// successful write covers it. A `false` stays recoverable: a later mutation's successful write
+    /// covers every earlier seq.
+    public func awaitDurable(through target: UInt64) async -> Bool {
+        if durableSeq >= target { return true }
+        switch persistence {
+        case .memoryOnly:
+            return true
+        case .retired:
+            return false
+        case .disk:
+            if drainedSeq < target {
+                await withCheckedContinuation { continuation in
+                    durabilityWaiters.append((target, continuation))
+                }
+            }
+            return durableSeq >= target
+        }
+    }
+
+    /// Writes the CURRENT state now (in order with every other write) and reports whether it is on
+    /// disk. The cross-store moves use this to land the destination before removing the source.
+    public func persistDurablyNow() async -> Bool {
+        mutationSeq += 1
+        let target = mutationSeq
+        switch persistence {
+        case .memoryOnly:
+            durableSeq = target
+            drainedSeq = target
+            return true
+        case .retired:
+            return false
+        case .disk:
+            schedulePersistenceDrain()
+            return await awaitDurable(through: target)
+        }
+    }
+
+    /// Records a mutation: schedules its write and tells the observer. Every change to `tasks` that
+    /// should survive a restart goes through here.
+    private func didMutate() {
+        mutationSeq += 1
+        switch persistence {
+        case .memoryOnly:
+            durableSeq = mutationSeq
+            drainedSeq = mutationSeq
+        case .disk:
+            schedulePersistenceDrain()
+        case .retired:
+            break
+        }
+        onChange?()
+    }
+
+    private func schedulePersistenceDrain() {
+        guard !persistenceDrainRunning else { return }
+        persistenceDrainRunning = true
+        Task { await self.drainPersistence() }
+    }
+
+    /// Single-flight drain: writes the store's CURRENT state (captured synchronously, so a snapshot
+    /// is always one consistent actor state) until every mutation has been attempted. Runs on the
+    /// actor; while a write is awaited the store stays free for other work, and anything mutated in
+    /// the meantime is picked up by the next iteration.
+    private func drainPersistence() async {
+        defer { persistenceDrainRunning = false }
+        while drainedSeq < mutationSeq, case .disk(let save) = persistence {
+            let target = mutationSeq
+            let snapshot = allTasks()
+            do {
+                try await save(snapshot)
+                durableSeq = max(durableSeq, target)
+            } catch {
+                Self.persistenceLogger.error("tasks.json write failed: \(error.localizedDescription, privacy: .public)")
+            }
+            drainedSeq = max(drainedSeq, target)
+            resumeReadyDurabilityWaiters()
+        }
+    }
+
+    private func resumeReadyDurabilityWaiters() {
+        guard !durabilityWaiters.isEmpty else { return }
+        let ready = durabilityWaiters.filter { drainedSeq >= $0.target }
+        durabilityWaiters.removeAll { drainedSeq >= $0.target }
+        for waiter in ready { waiter.continuation.resume() }
+    }
+
+    private func resumeAllDurabilityWaiters() {
+        let waiters = durabilityWaiters
+        durabilityWaiters.removeAll()
+        for waiter in waiters { waiter.continuation.resume() }
     }
 
     /// All tasks, newest first.
@@ -269,7 +419,7 @@ public actor TaskStore {
         // task with nowhere to put it (that would lose it). `wasInLibrary` is always false here.
         guard let templateLibrary else {
             tasks[id] = task
-            onChange?()
+            didMutate()
             return nil
         }
         if isTemplate, !wasInLibrary {
@@ -288,13 +438,13 @@ public actor TaskStore {
             if let durablyPersistLibraryNow, await durablyPersistLibraryNow() == false {
                 await templateLibrary.removeTemplate(id: id)
                 tasks[id] = task
-                onChange?()
+                didMutate()
                 return nil
             }
             // Destination durable. Now remove the source and make that durable too.
             tasks.removeValue(forKey: id)
-            onChange?()
-            _ = await durablyPersistActiveNow?(Array(tasks.values))
+            didMutate()
+            _ = await persistDurablyNow()
             return nil
         } else if !isTemplate, wasInLibrary {
             // Demote (library → session): land it DURABLY in this session (destination) BEFORE removing the
@@ -304,12 +454,13 @@ public actor TaskStore {
             // cosmetic (deduped by the combined readers).
             task.sessionID = sessionID
             tasks[id] = task
-            if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
+            if await persistDurablyNow() == false {
                 tasks.removeValue(forKey: id)
+                didMutate()
                 return "Couldn't save the change durably, so the task was NOT converted from a template. Please try again."
             }
             _ = await templateLibrary.removeTemplate(id: id)
-            onChange?()
+            didMutate()
             _ = await durablyPersistLibraryNow?()
             return nil
         } else if wasInLibrary {
@@ -317,7 +468,7 @@ public actor TaskStore {
             return nil
         } else {
             tasks[id] = task                     // still a per-session task — write in place
-            onChange?()
+            didMutate()
             return nil
         }
     }
@@ -555,7 +706,7 @@ public actor TaskStore {
             if var task = tasks[id] {
                 if let problem = body(&task) { return problem }
                 tasks[id] = task
-                onChange?()
+                didMutate()
                 return nil
             }
             guard let templateLibrary else { return "Task not found: \(id.uuidString)" }
@@ -704,7 +855,7 @@ public actor TaskStore {
             templateInputValues: resolvedInputs.values
         )
         tasks[instance.id] = instance
-        onChange?()
+        didMutate()
         return .success(instance)
     }
 
@@ -744,7 +895,7 @@ public actor TaskStore {
             await templateLibrary.upsert(task)
         } else {
             tasks[task.id] = task
-            onChange?()
+            didMutate()
         }
         return task
     }
@@ -758,7 +909,7 @@ public actor TaskStore {
         task.status = .pending
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return true
     }
 
@@ -779,7 +930,7 @@ public actor TaskStore {
                 moved.disposition = .archived
                 tasks[task.id] = moved
             }
-            onChange?()
+            didMutate()
             return
         }
         // Batch move with the same destination-durable-before-source-removal ordering as `move`,
@@ -800,7 +951,7 @@ public actor TaskStore {
             return
         }
         for task in stale { tasks.removeValue(forKey: task.id) }
-        onChange?()
+        didMutate()
     }
 
     /// Updates a task's status.
@@ -839,7 +990,7 @@ public actor TaskStore {
             task.disposition = .active
         }
         tasks[id] = task
-        onChange?()
+        didMutate()
         if isTerminal && !wasTerminal {
             onTaskTerminated?(id)
         }
@@ -909,7 +1060,7 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return true
     }
 
@@ -943,7 +1094,7 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return true
     }
 
@@ -1010,7 +1161,7 @@ public actor TaskStore {
             task.assigneeIDs.append(agentID)
             task.updatedAt = Date()
             tasks[taskID] = task
-            onChange?()
+            didMutate()
         }
     }
 
@@ -1022,7 +1173,7 @@ public actor TaskStore {
         task.assigneeIDs.remove(at: idx)
         task.updatedAt = Date()
         tasks[taskID] = task
-        onChange?()
+        didMutate()
     }
 
     /// Removes an agent from every task's assignee list. Called when an agent is
@@ -1042,7 +1193,7 @@ public actor TaskStore {
             modified.append(taskID)
         }
         if !modified.isEmpty {
-            onChange?()
+            didMutate()
         }
         return modified
     }
@@ -1520,7 +1671,7 @@ public actor TaskStore {
         guard tasks[taskID] != nil else { return false }
         tasks[taskID]?.pendingWorkerMessages.append(message)
         tasks[taskID]?.updatedAt = Date()
-        onChange?()
+        didMutate()
         return true
     }
 
@@ -1534,7 +1685,7 @@ public actor TaskStore {
         guard let queued = tasks[taskID]?.pendingWorkerMessages, !queued.isEmpty else { return [] }
         tasks[taskID]?.pendingWorkerMessages = []
         tasks[taskID]?.updatedAt = Date()
-        onChange?()
+        didMutate()
         return queued
     }
 
@@ -1551,7 +1702,7 @@ public actor TaskStore {
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return validation.currentRoundToken
     }
 
@@ -1576,7 +1727,7 @@ public actor TaskStore {
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Records whether a rejection round newly APPROVED anything (reached ACCEPT or WAIVE on any
@@ -1601,7 +1752,7 @@ public actor TaskStore {
         validation.consecutiveValidationsWithoutNewApprovals = updated
         task.validation = validation
         tasks[id] = task
-        onChange?()
+        didMutate()
         return updated
     }
 
@@ -1655,7 +1806,7 @@ public actor TaskStore {
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return .recorded(fresh)
     }
 
@@ -1672,7 +1823,7 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     public func requestHelp(id: UUID, request: String) {
@@ -1681,7 +1832,7 @@ public actor TaskStore {
         task.status = .awaitingHelp
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Clears a task's pending help request. Called when Smith answers via `provide_help`
@@ -1691,7 +1842,7 @@ public actor TaskStore {
         task.helpRequest = nil
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Parks a task that cannot be validated for a CONFIGURATION reason. CAS-guarded on
@@ -1704,7 +1855,7 @@ public actor TaskStore {
         task.status = .awaitingReview
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return true
     }
 
@@ -1723,7 +1874,7 @@ public actor TaskStore {
             tasks[id] = updated
             released.append(id)
         }
-        if !released.isEmpty { onChange?() }
+        if !released.isEmpty { didMutate() }
         return released
     }
 
@@ -1736,7 +1887,7 @@ public actor TaskStore {
         task.resultItems = resultItems
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Records the security-approved tool set on a task (per-task tool scoping). This is a
@@ -1763,7 +1914,7 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Sets (or clears) a per-task user override for a single tool. `enabled == nil` removes the
@@ -1810,7 +1961,7 @@ public actor TaskStore {
         task.lastBrownContext = context
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Increments the task's acknowledgment counter and returns the new value. Called
@@ -1824,7 +1975,7 @@ public actor TaskStore {
         task.updatedAt = Date()
         let newCount = task.acknowledgmentCount
         tasks[id] = task
-        onChange?()
+        didMutate()
         return newCount
     }
 
@@ -1839,7 +1990,7 @@ public actor TaskStore {
         task.summary = summary
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Stores relevant memories and prior tasks on a task (set at creation time).
@@ -1853,7 +2004,7 @@ public actor TaskStore {
         task.relevantPriorTasks = priorTasks
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Clears the stored result and commentary on a task. Preserves the prior result into the
@@ -1866,7 +2017,7 @@ public actor TaskStore {
         task.commentary = nil
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     // MARK: - Disposition management
@@ -1910,7 +2061,7 @@ public actor TaskStore {
             return false
         }
         tasks.removeValue(forKey: task.id)
-        onChange?()
+        didMutate()
         // Archive / soft-delete must cancel the task's scheduled wakes: a disposition move is not a
         // terminal STATUS change, so `onTaskTerminated` does not fire here.
         onTaskMovedToInactive?(task.id)
@@ -2042,12 +2193,13 @@ public actor TaskStore {
         // roll back and leave it in the global store. A crash between the durable active write and
         // the (coalesced) global-removal write leaves it in both files; load-time reconciliation
         // keeps the newer copy, which the freshly-stamped active copy always wins here.
-        if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
+        if await persistDurablyNow() == false {
             tasks.removeValue(forKey: task.id)
+            didMutate()
             return false
         }
         await inactiveStore.remove(id: id)
-        onChange?()
+        didMutate()
         return true
     }
 
@@ -2059,7 +2211,7 @@ public actor TaskStore {
         if let task = tasks[id] {
             guard !task.status.isInProgress else { return false }
             tasks.removeValue(forKey: id)
-            onChange?()
+            didMutate()
             return true
         }
         // A library-resident template → gone from the library. Under the library edit lock so a concurrent
@@ -2134,13 +2286,13 @@ public actor TaskStore {
             }
             tasks[task.id] = task
         }
-        onChange?()
+        didMutate()
     }
 
     /// Removes all tasks.
     public func clear() {
         tasks.removeAll()
-        onChange?()
+        didMutate()
     }
 
     // MARK: - Private
@@ -2150,6 +2302,6 @@ public actor TaskStore {
         task.disposition = disposition
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 }

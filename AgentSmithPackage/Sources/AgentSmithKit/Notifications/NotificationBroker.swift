@@ -65,8 +65,18 @@ public actor NotificationBroker {
     /// `deliver` calls for the same id can't both pass the settled check and double-deliver.
     private var inFlight: Set<NotificationID> = []
     private let runtime: any NotificationRuntime
-    /// Flushes the ledger snapshot to disk after each settle. Nil = in-memory only (tests).
-    private let persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)?
+    /// Flushes the ledger snapshot to disk after each settle. Nil = in-memory only (tests, or a
+    /// launch whose ledger file could not be read and must not be overwritten).
+    private let persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async throws -> Void)?
+    /// Told when a save fails, once per failure streak per store (a failing disk fails every flush;
+    /// repeating the report would bury it). A later success ends the streak.
+    private var onPersistenceFailure: (@Sendable (NotificationPersistenceFailure) -> Void)?
+    private var failingStores: Set<PersistedStore> = []
+
+    private enum PersistedStore: Hashable {
+        case ledger
+        case pendingDelivery
+    }
     /// Single-flight coalescing for `persistLedger` — see `flushLedger`. Only one write is in
     /// flight at a time; concurrent settles set `ledgerDirty` and the flusher re-snapshots.
     private var ledgerFlushInFlight = false
@@ -108,15 +118,34 @@ public actor NotificationBroker {
     public init(
         runtime: any NotificationRuntime,
         ledgerCapacity: Int = 5_000,
-        persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)? = nil,
-        persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)? = nil
+        persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async throws -> Void)? = nil,
+        persistPendingDelivery: (@Sendable ([QueuedDelivery]) async throws -> Void)? = nil
     ) {
         self.runtime = runtime
         self.ledger = DeliveryLedger(capacity: ledgerCapacity)
         self.persistLedger = persistLedger
         self.pendingWriter = persistPendingDelivery.map { persist in
-            SerialPersistenceWriter(label: "notification.pending", write: { snapshot in await persist(snapshot) })
+            SerialPersistenceWriter(label: "notification.pending", write: { snapshot in try await persist(snapshot) })
         }
+    }
+
+    /// Wire the save-failure report (see `onPersistenceFailure`).
+    public func setOnPersistenceFailure(_ handler: @escaping @Sendable (NotificationPersistenceFailure) -> Void) {
+        onPersistenceFailure = handler
+    }
+
+    /// Records a save outcome for `store`, reporting the first failure of a streak.
+    private func recordSaveOutcome(_ store: PersistedStore, failure: String?) {
+        guard let failure else {
+            failingStores.remove(store)
+            return
+        }
+        guard failingStores.insert(store).inserted else { return }
+        let reported: NotificationPersistenceFailure.Store = switch store {
+        case .ledger: .deliveryLedger
+        case .pendingDelivery: .pendingDelivery
+        }
+        onPersistenceFailure?(NotificationPersistenceFailure(store: reported, operation: .save, reason: failure))
     }
 
     // MARK: - Registration
@@ -340,7 +369,13 @@ public actor NotificationBroker {
         defer { ledgerFlushInFlight = false }
         repeat {
             ledgerDirty = false
-            await persistLedger(ledger.snapshot())
+            do {
+                try await persistLedger(ledger.snapshot())
+                recordSaveOutcome(.ledger, failure: nil)
+            } catch {
+                Self.logger.error("Notification ledger save failed: \(error.localizedDescription, privacy: .public)")
+                recordSaveOutcome(.ledger, failure: error.localizedDescription)
+            }
         } while ledgerDirty
     }
 
@@ -393,9 +428,14 @@ public actor NotificationBroker {
     /// bursts and preserves write order like the ledger flusher, but — critically — its `flush()`
     /// waits on a sequence watermark, so a caller can't proceed (nudge / remove the source wake)
     /// before its enqueue is on disk.
+    ///
+    /// A failed write is reported (the writer has logged it); the queue is still intact in memory,
+    /// so delivery this launch is unaffected — only a restart before the next successful save can
+    /// lose it, which is exactly what the report tells the user.
     private func flushPendingDelivery() async {
         guard let pendingWriter else { return }
         await pendingWriter.enqueue(pendingDelivery)
-        await pendingWriter.flush()
+        let durable = await pendingWriter.flush()
+        recordSaveOutcome(.pendingDelivery, failure: durable ? nil : "the write to disk failed")
     }
 }

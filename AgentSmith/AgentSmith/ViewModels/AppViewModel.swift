@@ -444,7 +444,6 @@ final class AppViewModel {
     /// `flush()` actually waits for in-flight writes to complete (the
     /// `flushPersistence()` path used to race them).
     private let channelLogAppendWriter: ChannelLogAppendWriter
-    private let tasksWriter: SerialPersistenceWriter<[AgentTask]>
     private let timerEventsWriter: SerialPersistenceWriter<[TimerEvent]>
     private let scheduledWakesWriter: SerialPersistenceWriter<[ScheduledWake]>
     private let sessionStateWriter: SerialPersistenceWriter<SessionState>
@@ -456,9 +455,6 @@ final class AppViewModel {
         self.persistenceManager = pm
         self.channelLogAppendWriter = ChannelLogAppendWriter { messages in
             try await pm.appendChannelMessages(messages)
-        }
-        self.tasksWriter = SerialPersistenceWriter(label: "tasks") { snapshot in
-            try await pm.saveTasks(snapshot)
         }
         self.timerEventsWriter = SerialPersistenceWriter(label: "timerEvents") { snapshot in
             try await pm.saveTimerEvents(snapshot)
@@ -789,9 +785,6 @@ final class AppViewModel {
 
             // `tasks` now holds only this session's active tasks.
             tasks = savedTasks
-            if canStripSessionFile && (movedToGlobal || anyStatusChanged) {
-                persistTasks()
-            }
 
             // Back-fill the immutable origin sessionID on legacy per-session tasks that predate the
             // field (nil). New tasks get stamped by the store on creation; this stamps the already-
@@ -803,6 +796,14 @@ final class AppViewModel {
             taskStore = standaloneStore
             await wireDurablePersistHooks(on: standaloneStore)
             await standaloneStore.restore(savedTasks)
+            // The store is the file's writer from here on. Write at once only when the load repaired
+            // something AND stripping this session's inactive copies is safe (the global file durably
+            // has them); otherwise the file is left as-is until the next real mutation.
+            let persistPM = persistenceManager
+            await standaloneStore.attachPersistence(
+                save: { snapshot in try await persistPM.saveTasks(snapshot) },
+                writeNow: canStripSessionFile && (movedToGlobal || anyStatusChanged)
+            )
             await standaloneStore.setOnChange { [weak self, weak standaloneStore] in
                 Task { @MainActor [weak self, weak standaloneStore] in
                     guard let self, let store = standaloneStore else { return }
@@ -812,7 +813,6 @@ final class AppViewModel {
                     guard myGen == self.taskApplyGeneration else { return }
                     self.tasks = allTasks
                     self.updateTaskOverlay()
-                    self.persistTasks()
                 }
             }
         } catch {
@@ -1059,10 +1059,23 @@ final class AppViewModel {
         runtime = newRuntime
         isRunning = true
 
-        if !tasks.isEmpty {
-            let tasksToRestore = tasks
-            await newRuntime.taskStore.restore(tasksToRestore)
+        // Hand the session's tasks to the runtime's store, which takes over `tasks.json`. The previous
+        // store (standalone, or the prior run's live store) is retired FIRST — after its in-flight
+        // write lands — so it can never write a stale snapshot over its successor's, and its own
+        // state (not the main-actor mirror, which can lag) is what the new store starts from.
+        let tasksToRestore: [AgentTask]
+        if let previousStore = taskStore {
+            await previousStore.retirePersistence()
+            tasksToRestore = await previousStore.allTasks()
+        } else {
+            tasksToRestore = tasks
         }
+        let liveStore = await newRuntime.taskStore
+        if !tasksToRestore.isEmpty {
+            await liveStore.restore(tasksToRestore)
+        }
+        let livePersistPM = persistenceManager
+        await liveStore.attachPersistence(save: { snapshot in try await livePersistPM.saveTasks(snapshot) }, writeNow: true)
 
         await newRuntime.setOnAbort { [weak self] reason in
             Task { @MainActor [weak self] in
@@ -1192,7 +1205,6 @@ final class AppViewModel {
                 guard myGen == self.taskApplyGeneration else { return }
                 self.tasks = allTasks
                 self.updateTaskOverlay()
-                self.persistTasks()
             }
         }
 
@@ -1313,21 +1325,14 @@ final class AppViewModel {
         // that dedups a fired wake across an app restart (a fired-and-delivered wake whose id is on
         // disk is recognized as a duplicate, not re-fired). Wired before the runtime starts so the
         // broker seeds from disk and its per-settle flushes land next to the other per-session state.
+        // Errors propagate: the runtime surfaces a failed load (and then leaves the file untouched)
+        // and the broker surfaces a failed save.
         await newRuntime.setDeliveryLedgerPersistence(
             load: {
-                do {
-                    return try await persistence.loadDeliveryLedger()
-                } catch {
-                    logger.error("Failed to load notification delivery ledger: \(error.localizedDescription)")
-                    return [:]
-                }
+                try await persistence.loadDeliveryLedger()
             },
             persist: { ledger in
-                do {
-                    try await persistence.saveDeliveryLedger(ledger)
-                } catch {
-                    logger.error("Failed to persist notification delivery ledger: \(error.localizedDescription)")
-                }
+                try await persistence.saveDeliveryLedger(ledger)
             }
         )
 
@@ -1392,19 +1397,10 @@ final class AppViewModel {
         // Per-session durable outbox for notifications queued for Smith until he drains them.
         await newRuntime.setPendingDeliveryPersistence(
             load: {
-                do {
-                    return try await persistence.loadPendingDelivery()
-                } catch {
-                    logger.error("Failed to load pending notification deliveries: \(error.localizedDescription)")
-                    return []
-                }
+                try await persistence.loadPendingDelivery()
             },
             persist: { items in
-                do {
-                    try await persistence.savePendingDelivery(items)
-                } catch {
-                    logger.error("Failed to persist pending notification deliveries: \(error.localizedDescription)")
-                }
+                try await persistence.savePendingDelivery(items)
             }
         )
 
@@ -2486,7 +2482,6 @@ final class AppViewModel {
         channelLogPersistTask?.cancel()
         channelLogPersistTask = nil
         await drainPendingChannelAppends()
-        await tasksWriter.enqueue(tasks)
         let finalState = SessionState(
             agentAssignments: agentAssignments,
             agentPollIntervals: agentPollIntervals,
@@ -2505,7 +2500,9 @@ final class AppViewModel {
         if await channelLogAppendWriter.flush() == false {
             logger.error("flushPersistence: channel-log flush did NOT reach disk (disk full / permissions) — the trailing transcript batch was retained in memory only and is lost on exit.")
         }
-        await tasksWriter.flush()
+        if let taskStore, await taskStore.persistDurablyNow() == false {
+            logger.error("flushPersistence: tasks.json did NOT reach disk — the latest task changes are in memory only and are lost on exit.")
+        }
         await sessionStateWriter.flush()
         await timerEventsWriter.flush()
         await scheduledWakesWriter.flush()
@@ -2792,31 +2789,11 @@ final class AppViewModel {
         await channelLogAppendWriter.enqueue(batch)
     }
 
-    private func persistTasks() {
-        let tasksToSave = tasks
-        let writer = tasksWriter
-        Task { await writer.enqueue(tasksToSave) }
-    }
-
-    /// Durably writes the given active-task snapshot to this session's `tasks.json` right now,
-    /// returning whether it succeeded. Injected into `TaskStore` as its durable-active hook so a
-    /// restore lands the task on disk before it's removed from the global inactive store.
-    private func persistActiveTasksNow(_ snapshot: [AgentTask]) async -> Bool {
-        do {
-            try await persistenceManager.saveTasks(snapshot)
-            return true
-        } catch {
-            logger.error("Failed to durably persist tasks.json: \(error.localizedDescription, privacy: .public)")
-            return false
-        }
-    }
-
     /// Wires the crash-safe durable-move hooks onto a session `TaskStore`. Kept in one place so the
     /// initial standalone store and the live runtime store are wired identically.
     private func wireDurablePersistHooks(on store: TaskStore) async {
         await store.setDurablePersistHooks(
             inactive: { [weak self] in await self?.shared.persistInactiveTasksNow() ?? false },
-            active: { [weak self] snapshot in await self?.persistActiveTasksNow(snapshot) ?? false },
             library: { [weak self] in await self?.shared.persistTemplateLibraryNow() ?? false }
         )
     }

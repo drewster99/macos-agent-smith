@@ -7,7 +7,13 @@ import os
 /// rapid enqueues collapses to at most a few writes. Snapshots are written in
 /// strict FIFO order — never an older snapshot after a newer one — and a
 /// completed `flush()` guarantees every snapshot enqueued before the flush call
-/// has hit the closure.
+/// has hit the closure, and REPORTS whether it reached disk.
+///
+/// Two watermarks, deliberately distinct: `drainedSeq` ("the writer is done with it", advanced
+/// on success AND failure so a failing disk can't park `flush()` forever) and `durableSeq`
+/// ("a write covering it succeeded"). Each snapshot is complete state, so a later successful
+/// write makes every earlier seq durable too. Conflating the two let callers treat a failed
+/// write as saved.
 ///
 /// Replaces the prior `Task.detached { await persistence.saveX(snapshot) }`
 /// pattern, which captured snapshots on MainActor in deterministic order but
@@ -23,10 +29,12 @@ public actor SerialPersistenceWriter<Snapshot: Sendable> {
     private var inflight: Task<Void, Never>?
 
     /// Monotonic id stamped on each enqueue. `flush()` captures the latest as its
-    /// target watermark; `writtenSeq` tracks the highest seq actually drained.
+    /// target watermark; `drainedSeq` tracks the highest seq the writer has finished with, and
+    /// `durableSeq` the highest seq a SUCCESSFUL write covers.
     private var enqueueSeq: UInt64 = 0
-    private var writtenSeq: UInt64 = 0
-    /// Callers parked in `flush()` waiting for `writtenSeq` to reach their target.
+    private var drainedSeq: UInt64 = 0
+    private var durableSeq: UInt64 = 0
+    /// Callers parked in `flush()` waiting for `drainedSeq` to reach their target.
     private var flushWaiters: [(target: UInt64, continuation: CheckedContinuation<Void, Never>)] = []
 
     public init(
@@ -41,7 +49,7 @@ public actor SerialPersistenceWriter<Snapshot: Sendable> {
 
     /// Schedule a write for `snapshot`. Replaces any prior un-drained snapshot.
     public func enqueue(_ snapshot: Snapshot) {
-        enqueueSeq &+= 1
+        enqueueSeq += 1
         pending = (enqueueSeq, snapshot)
         if inflight == nil {
             inflight = Task { [weak self] in
@@ -50,22 +58,27 @@ public actor SerialPersistenceWriter<Snapshot: Sendable> {
         }
     }
 
-    /// Returns once every snapshot enqueued before this call has been written.
+    /// Returns once every snapshot enqueued before this call has been drained, reporting whether
+    /// they are DURABLE — i.e. whether a successful write covers the latest of them. `false` means
+    /// the disk refused (the failure is already logged); the caller decides what that costs it.
     ///
     /// Uses a sequence watermark rather than awaiting the in-flight task: under a
     /// steady stream of post-flush enqueues the in-flight task keeps re-arming, so
     /// awaiting it could never return. Instead we capture the latest enqueued seq
-    /// as our target and wait only until `writtenSeq` reaches it.
-    public func flush() async {
+    /// as our target and wait only until `drainedSeq` reaches it.
+    @discardableResult
+    public func flush() async -> Bool {
         let target = enqueueSeq
-        // Synchronous fast-path BEFORE parking: if the target is already written
+        // Synchronous fast-path BEFORE parking: if the target is already drained
         // there is nothing to wait for. Critical — parking unconditionally would
         // leak a waiter that nothing ever resumes (the drain only resumes waiters
-        // when it advances `writtenSeq`, which won't happen with no pending work).
-        if writtenSeq >= target { return }
-        await withCheckedContinuation { continuation in
-            flushWaiters.append((target, continuation))
+        // when it advances `drainedSeq`, which won't happen with no pending work).
+        if drainedSeq < target {
+            await withCheckedContinuation { continuation in
+                flushWaiters.append((target, continuation))
+            }
         }
+        return durableSeq >= target
     }
 
     private func drain() async {
@@ -74,12 +87,13 @@ public actor SerialPersistenceWriter<Snapshot: Sendable> {
             pending = nil
             do {
                 try await write(item.snapshot)
+                durableSeq = item.seq
             } catch {
                 logger.error("Persistence write failed [\(self.label, privacy: .public)]: \(error.localizedDescription, privacy: .public)")
             }
             // Advance on BOTH success and failure: a failed write must not block
-            // `flush()` forever. The seq is "drained," not "durably persisted."
-            writtenSeq = item.seq
+            // `flush()` forever. `durableSeq` (above) is what records success.
+            drainedSeq = item.seq
             resumeFlushWaiters()
         }
     }
@@ -87,8 +101,8 @@ public actor SerialPersistenceWriter<Snapshot: Sendable> {
     /// Resumes any parked `flush()` callers whose target watermark has been reached.
     private func resumeFlushWaiters() {
         guard !flushWaiters.isEmpty else { return }
-        let ready = flushWaiters.filter { writtenSeq >= $0.target }
-        flushWaiters.removeAll { writtenSeq >= $0.target }
+        let ready = flushWaiters.filter { drainedSeq >= $0.target }
+        flushWaiters.removeAll { drainedSeq >= $0.target }
         for waiter in ready {
             waiter.continuation.resume()
         }

@@ -248,12 +248,13 @@ public actor OrchestrationRuntime {
     /// Loads the persisted notification delivery ledger from disk. Set by the app layer before
     /// `start()`; consulted once inside `ensureNotificationBroker` to seed the broker so a wake that
     /// already fired-and-delivered before a restart is recognized as a duplicate rather than re-fired.
-    private var loadDeliveryLedger: (@Sendable () async -> [NotificationID: DeliveryStatus])?
+    private var loadDeliveryLedger: (@Sendable () async throws -> [NotificationID: DeliveryStatus])?
 
     /// Persists the notification delivery ledger after every settle. Wired by the app layer to
     /// `PersistenceManager.saveDeliveryLedger` and handed to the broker as its `persistLedger` hook
-    /// (single-flight coalesced there). Fire-and-forget; failures log but never block delivery.
-    private var persistDeliveryLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)?
+    /// (single-flight coalesced there). A failure never blocks delivery, but the broker reports it
+    /// and the runtime surfaces it to the user (`reportNotificationPersistenceFailure`).
+    private var persistDeliveryLedger: (@Sendable ([NotificationID: DeliveryStatus]) async throws -> Void)?
 
     /// Inbound user messages captured while Smith could not accept them (agents stopped, or
     /// mid-startup during the "Preparing task — starting MCP servers…" window), in FIFO order.
@@ -575,11 +576,11 @@ public actor OrchestrationRuntime {
     /// Per-session persistence for the broker's pending-delivery queue (the durable outbox of
     /// notifications queued for Smith until he drains them). Load seeds the broker at boot; persist
     /// is handed to the broker as its flush hook. Wired before `start()`.
-    private var loadPendingDelivery: (@Sendable () async -> [QueuedDelivery])?
-    private var persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)?
+    private var loadPendingDelivery: (@Sendable () async throws -> [QueuedDelivery])?
+    private var persistPendingDelivery: (@Sendable ([QueuedDelivery]) async throws -> Void)?
     public func setPendingDeliveryPersistence(
-        load: @escaping @Sendable () async -> [QueuedDelivery],
-        persist: @escaping @Sendable ([QueuedDelivery]) async -> Void
+        load: @escaping @Sendable () async throws -> [QueuedDelivery],
+        persist: @escaping @Sendable ([QueuedDelivery]) async throws -> Void
     ) {
         loadPendingDelivery = load
         persistPendingDelivery = persist
@@ -604,8 +605,8 @@ public actor OrchestrationRuntime {
     /// `PersistenceManager(sessionID:)`. Must be wired before `start()` so the broker (built lazily
     /// in the Smith-setup path) is seeded from disk and its per-settle flushes land on disk.
     public func setDeliveryLedgerPersistence(
-        load: @escaping @Sendable () async -> [NotificationID: DeliveryStatus],
-        persist: @escaping @Sendable ([NotificationID: DeliveryStatus]) async -> Void
+        load: @escaping @Sendable () async throws -> [NotificationID: DeliveryStatus],
+        persist: @escaping @Sendable ([NotificationID: DeliveryStatus]) async throws -> Void
     ) {
         loadDeliveryLedger = load
         persistDeliveryLedger = persist
@@ -1034,11 +1035,38 @@ public actor OrchestrationRuntime {
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
             postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
         )
+        // Load BEFORE constructing the broker: a file that exists but can't be read must never be
+        // overwritten by the broker's first flush (an empty snapshot would erase the dedup record
+        // or the undelivered outbox). On a failed load that store runs in memory only this launch,
+        // leaving the file intact for the next one, and the user is told.
+        var seededLedger: [NotificationID: DeliveryStatus] = [:]
+        var ledgerPersistence = persistDeliveryLedger
+        if let loadDeliveryLedger {
+            do {
+                seededLedger = try await loadDeliveryLedger()
+            } catch {
+                ledgerPersistence = nil
+                await reportNotificationPersistenceFailure(.init(store: .deliveryLedger, operation: .load, reason: error.localizedDescription))
+            }
+        }
+        var seededPending: [QueuedDelivery] = []
+        var pendingPersistence = persistPendingDelivery
+        if let loadPendingDelivery {
+            do {
+                seededPending = try await loadPendingDelivery()
+            } catch {
+                pendingPersistence = nil
+                await reportNotificationPersistenceFailure(.init(store: .pendingDelivery, operation: .load, reason: error.localizedDescription))
+            }
+        }
         let broker = NotificationBroker(
             runtime: adapter,
-            persistLedger: persistDeliveryLedger,
-            persistPendingDelivery: persistPendingDelivery
+            persistLedger: ledgerPersistence,
+            persistPendingDelivery: pendingPersistence
         )
+        await broker.setOnPersistenceFailure { [weak self] failure in
+            Task { await self?.reportNotificationPersistenceFailure(failure) }
+        }
         await broker.registerHandler(type: KnownNotificationType.taskAction.rawValue, TaskActionNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.taskSummary.rawValue, TaskSummaryNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.reminder.rawValue, ReminderNotificationHandler())
@@ -1051,12 +1079,8 @@ public actor OrchestrationRuntime {
         // Seed the delivered-set AND the pending-delivery outbox from disk BEFORE anything can fire,
         // so a re-fire after restart is deduped and an undrained reminder is handed out on the next
         // drain instead of lost.
-        if let seeded = await loadDeliveryLedger?() {
-            await broker.seedLedger(seeded)
-        }
-        if let pending = await loadPendingDelivery?() {
-            await broker.seedPendingDeliveries(pending)
-        }
+        await broker.seedLedger(seededLedger)
+        await broker.seedPendingDeliveries(seededPending)
         notificationBroker = broker
         return broker
     }
@@ -1108,6 +1132,17 @@ public actor OrchestrationRuntime {
 
     private func notificationTaskTitle(_ taskID: UUID) async -> String? {
         await taskStore.task(id: taskID)?.title
+    }
+
+    /// Surfaces a notification-store persistence failure to the user. A failed save means a restart
+    /// could re-fire an already-delivered notification (ledger) or lose one Smith hasn't read yet
+    /// (outbox); a failed load means this launch runs that store in memory only.
+    private func reportNotificationPersistenceFailure(_ failure: NotificationPersistenceFailure) async {
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: failure.userFacingDescription,
+            metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
+        ))
     }
 
     private func postNotificationSystemNotice(_ text: String, taskID: UUID?) async {

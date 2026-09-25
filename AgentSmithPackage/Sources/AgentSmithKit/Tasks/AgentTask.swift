@@ -480,7 +480,10 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
 
-    private enum CodingKeys: String, CodingKey {
+    /// Internal and `CaseIterable` so `AgentTaskCodingKeyCoverageTests` can check, by reflection,
+    /// that every stored property has a case: a defaulted property with no case is silently never
+    /// persisted, and a round-trip test stays green because it decodes back to the same default.
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages
     }
 

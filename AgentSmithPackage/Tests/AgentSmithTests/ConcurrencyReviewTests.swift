@@ -106,6 +106,50 @@ struct SerialPersistenceWriterTests {
         #expect(count < 50, "Coalescing should drop redundant writes; got \(count) writes for 50 enqueues")
         #expect(count >= 1, "At least one write must occur")
     }
+    @Test("flush() reports a failed write as NOT durable")
+    func flushReportsFailure() async {
+        let writer = SerialPersistenceWriter<Int>(label: "durable.fail") { _ in
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        await writer.enqueue(1)
+        let durable = await writer.flush()
+        #expect(durable == false, "A drained-but-failed write must not read as saved")
+    }
+
+    @Test("flush() reports a successful write as durable")
+    func flushReportsSuccess() async {
+        let writer = SerialPersistenceWriter<Int>(label: "durable.ok") { _ in }
+        await writer.enqueue(1)
+        #expect(await writer.flush())
+    }
+
+    @Test("A later successful write makes an earlier failed seq durable (snapshots are complete state)")
+    func laterSuccessCoversEarlierFailure() async {
+        let failFirst = FailFirstGate()
+        let writer = SerialPersistenceWriter<Int>(label: "durable.recover") { _ in
+            if await failFirst.shouldFail() { throw CocoaError(.fileWriteNoPermission) }
+        }
+        await writer.enqueue(1)
+        #expect(await writer.flush() == false)
+        await writer.enqueue(2)
+        #expect(await writer.flush())
+    }
+
+    @Test("flush() with nothing ever enqueued is trivially durable")
+    func flushEmptyIsDurable() async {
+        let writer = SerialPersistenceWriter<Int>(label: "durable.empty") { _ in
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        #expect(await writer.flush())
+    }
+}
+
+private actor FailFirstGate {
+    private var failed = false
+    func shouldFail() -> Bool {
+        defer { failed = true }
+        return !failed
+    }
 }
 
 private actor SnapshotRecorder {

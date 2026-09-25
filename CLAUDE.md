@@ -459,7 +459,11 @@ task state. Add a subscriber.
     and only once its revision is DURABLE.
   - One serialized per-session consumer submits effects to the broker. Store callbacks only
     enqueue; nothing awaits the broker inside the writer.
-  - Persistence distinguishes "drained" from "durable".
+  - Persistence distinguishes "drained" from "durable". `TaskStore` is the SINGLE writer of its
+    session's `tasks.json`. Every mutation goes through `didMutate()`, which schedules an in-order,
+    coalesced write of the store's own state. The view model only mirrors tasks for display and
+    never writes them. When one store replaces another (the standalone store at runtime start, or
+    a prior run's store), the old one is `retirePersistence()`d first.
 - **Disposition is not status.** Archive, delete and restore emit a separate `TaskLifecycleEvent`.
 - **Cold-boot recovery** is one rule (`ColdBootRunningRecovery`) applied through the store at
   session load, independent of Start.

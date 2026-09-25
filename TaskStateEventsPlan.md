@@ -362,7 +362,11 @@ touched) → commit → push.
 
 0. ✅ **Cold-boot recovery fix** (`9056501`): one `ColdBootRunningRecovery` rule for the loader and
    the runtime.
-1. **Truthful persistence.**
+1. ✅ **Truthful persistence.** Built: `TaskStore` is now the single writer of its session's
+   `tasks.json` (`attachPersistence` / `retirePersistence` / `awaitDurable(through:)` /
+   `persistDurablyNow`). The view model's mirror no longer writes, and a replaced store is retired
+   after its in-flight write lands. Notification-store load and save failures reach the user, and a
+   store that failed to load runs in memory only rather than overwriting the file.
    - Durable watermark in `SerialPersistenceWriter`.
    - Awaitable `awaitDurable(revision:)`.
    - Broker persistence errors surfaced.
