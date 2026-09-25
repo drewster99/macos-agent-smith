@@ -93,14 +93,6 @@ public struct TaskCompleteTool: AgentTool {
         if let failureMessage = resolution.failure {
             return .failure(failureMessage)
         }
-        // Ingest everything the worker placed in its evidence directory (text reports, logs,
-        // screenshots it copied in) so those artifacts become clickable result attachments. This is
-        // the ONE place the sweep runs — `setResult` replaces the attachment list each submission,
-        // so a resubmission re-sweeps without accumulating. Merged AFTER the worker's explicit
-        // attachments and deduped by filename so an explicitly-referenced file isn't doubled.
-        var attachments = resolution.attachments
-        attachments += await Self.ingestEvidenceDirectory(context: context, existing: attachments)
-
         // Optional structured deliverables → resultItems (additive; empty when omitted). Each
         // entry becomes a text item and/or an attachment item/group, tagged with its `ref`. A
         // per-entry attachment-resolution failure is skipped (best-effort) rather than blocking
@@ -109,10 +101,18 @@ public struct TaskCompleteTool: AgentTool {
         // Also merge any deliverable-only attachments into the canonical `resultAttachments` so
         // they show in the UI and re-register on cold boot — `resultItems` adds STRUCTURE/tags, it
         // is not a separate attachment store. Deduped by id against the already-collected set.
+        var attachments = resolution.attachments
         var seenAttachmentIDs = Set(attachments.map { $0.id })
         for attachment in resultItems.flatMap({ $0.attachments }) where seenAttachmentIDs.insert(attachment.id).inserted {
             attachments.append(attachment)
         }
+        // Ingest everything the worker placed in its evidence directory (text reports, logs,
+        // screenshots it copied in) so those artifacts become clickable result attachments. This is
+        // the ONE place the sweep runs — `setResult` replaces the attachment list each submission,
+        // so a resubmission re-sweeps without accumulating. Runs LAST and dedups by filename, so a
+        // file the worker already attached — explicitly or through a deliverable, which is how
+        // workers usually cite their evidence file — is not ingested a second time.
+        attachments += await Self.ingestEvidenceDirectory(context: context, existing: attachments)
 
         // Store result on the task (survives restarts) and hand it to acceptance
         // validation — the evaluator system, not Smith, judges submissions now. The
