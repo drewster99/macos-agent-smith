@@ -478,7 +478,13 @@ public actor TaskStore {
             tasks[id] = updated
             changed = true
         }
-        if changed { didMutate() }
+        if changed {
+            didMutate()
+            for task in tasks.values {
+                for record in task.pendingEffects { effectDurabilitySeq[record.id] = mutationSeq }
+            }
+            emit(.effectsReady)
+        }
         return changed
     }
 
