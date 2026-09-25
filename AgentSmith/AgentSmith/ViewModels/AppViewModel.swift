@@ -1384,6 +1384,18 @@ final class AppViewModel {
             await wakesWriter.enqueue(wakes)
         }
 
+        // Task watches that post macOS notifications reach the app's notification service, which
+        // checks permission at delivery and tags each banner with this session so a click opens the
+        // right Task Detail window.
+        let taskNotifications = shared.taskNotifications
+        let notificationSessionID = session.id
+        await newRuntime.setExternalRecipientTarget(
+            TaskWatchDelivery.macOSNotificationTarget,
+            ClosureRecipientTarget { text, notification in
+                await taskNotifications.deliver(text, for: notification, sessionID: notificationSessionID)
+            }
+        )
+
         // Per-session durable outbox for notifications queued for Smith until he drains them.
         await newRuntime.setPendingDeliveryPersistence(
             load: {

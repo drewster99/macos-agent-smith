@@ -66,6 +66,8 @@ struct AgentSmithApp: App {
         AppLifecycleDelegate.flushHandler = { [manager] in
             await manager.flushAll()
         }
+        // Before launch completes, so a click on a task notification that launched the app is seen.
+        sharedState.taskNotifications.install()
         // Enable native NSWindow tabbing so multiple session windows auto-tab (and can be
         // dragged out to detach).
         NSWindow.allowsAutomaticWindowTabbing = true
@@ -552,6 +554,15 @@ struct SessionScene: View {
                 shared.renameSessionRequestID = nil
                 renameDraft = session.name
                 showRenameSheet = true
+            }
+        }
+        .onChange(of: shared.taskNotifications.pendingTaskDetailRequest) { _, newValue in
+            guard newValue != nil else { return }
+            // Project rule: defer @State / @Observable mutations out of .onChange. Every open
+            // window sees the click; the first to consume it opens the task, the rest get nil.
+            DispatchQueue.main.async {
+                guard let target = shared.taskNotifications.consumeTaskDetailRequest() else { return }
+                AgentSmithApp.showOrOpenTaskDetail(target: target, openWindow: openWindow)
             }
         }
         .onChange(of: shared.deleteSessionRequestID) { _, newValue in

@@ -441,6 +441,9 @@ final class SharedAppState {
         systemOrchestrationDefault.applying(orchestrationAppOverride)
     }
 
+    /// Posts task-watch macOS notifications and routes clicks on them (`TaskNotificationService`).
+    let taskNotifications = TaskNotificationService()
+
     /// Set when a load/decode operation fails during startup; drives the error alert.
     var startupError: String?
     /// ID of the session whose window is currently key (frontmost). Updated by

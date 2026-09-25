@@ -465,7 +465,20 @@ touched) → commit → push.
    - The `startTask` action and its refusal paths.
    - Tests: every origin against a held task; Play override; multi-dependency; cycles; delete of
      the upstream task.
-6. **Other actions and the macOS bridge.** `instructSmith`, `summarizeToUser`,
+6. ✅ **Other actions and the macOS bridge.** Built:
+   - **Smith-bound actions.** `summarizeToUser` and `instructSmith` go through Smith's durable
+     queue. They landed in Phase 4, and their tests are here.
+   - **macOS notifications.** `TaskNotificationService` (app target, `@Observable`) is installed as
+     the `UNUserNotificationCenter` delegate in `AgentSmithApp.init`, before launch completes.
+     - It asks for permission the first time a notification is due and checks it on every delivery.
+     - "Denied" becomes a refusal with the reason, shown in the transcript as `.taskWatchRefused`.
+     - The notification's id is the identifier, so a redelivery replaces the banner.
+     - Banners show even while the app is frontmost.
+     - A click publishes a typed `TaskDetailTarget`; the first session scene consumes it and opens
+       the window through `showOrOpenTaskDetail`.
+   - **Wiring.** The runtime takes app bridges with `setExternalRecipientTarget`, which registers
+     them on the broker as it is built.
+   - Original scope: `instructSmith`, `summarizeToUser`,
    `TaskNotificationService`, click routing. Tests: permission denied at delivery.
 7. **Authoring and UI.** Tools with all rosters, Task Detail, the Timers tab, `get_task_details`,
    transcript kinds (+ the `ChannelMessageKind` guard table).

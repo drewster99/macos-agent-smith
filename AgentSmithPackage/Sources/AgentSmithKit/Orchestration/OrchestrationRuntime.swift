@@ -1020,6 +1020,17 @@ public actor OrchestrationRuntime {
     /// the broker. Runtime-level (NOT per-spawn) so it outlives Smith restarts; the tool context and
     /// the boot restore both reach it through `ensureWakeScheduler`.
     private var wakeScheduler: WakeScheduler?
+    /// Outward delivery bridges the app supplies (e.g. macOS notifications), registered on the
+    /// broker when it is built — before anything it holds can be delivered.
+    private var externalRecipientTargets: [String: any RecipientTarget] = [:]
+
+    /// Supplies an outward delivery bridge for `.external(key)` recipients. Set before `start()`;
+    /// a later call also registers it on a broker that already exists.
+    public func setExternalRecipientTarget(_ key: String, _ target: any RecipientTarget) async {
+        externalRecipientTargets[key] = target
+        await notificationBroker?.registerRecipientTarget(.external(key), target)
+    }
+
     /// The single serialized consumer of `taskStore`'s events (`installTaskEventConsumerIfNeeded`).
     private var taskEventConsumer: Task<Void, Never>?
     /// Feeds `taskEventConsumer`; held so a delayed effect retry can re-drive delivery.
@@ -1094,6 +1105,9 @@ public actor OrchestrationRuntime {
             Task { await self?.handleNotificationSettled(notification, settlement) }
         }
         await broker.registerPullRecipient(.smith)
+        for (key, target) in externalRecipientTargets {
+            await broker.registerRecipientTarget(.external(key), target)
+        }
         await broker.setOnPendingEnqueued { [weak self] kind in
             guard kind == .smith else { return }
             Task { await self?.wakeSmithFromIdle() }

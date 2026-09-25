@@ -213,6 +213,90 @@ struct TaskWatchRuntimeTests {
         await runtime.stopAll()
     }
 
+    private actor BannerRecorder {
+        private(set) var banners: [(title: String?, body: String)] = []
+        func record(_ notification: AgentNotification, _ text: String) {
+            let title: String?
+            if case .string(let value)? = notification.payload.data[TaskWatchDelivery.Key.bannerTitle] { title = value } else { title = nil }
+            banners.append((title, text))
+        }
+    }
+
+    @Test("A macOS-notification watch reaches the app's bridge with its banner")
+    func macOSNotificationDelivered() async throws {
+        let runtime = makeRuntime()
+        await configure(runtime)
+        let recorder = BannerRecorder()
+        await runtime.setExternalRecipientTarget(TaskWatchDelivery.macOSNotificationTarget, ClosureRecipientTarget { text, notification in
+            await recorder.record(notification, text)
+            return .delivered
+        })
+        await runtime.start()
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Deploy", description: "d")
+        let watch = TaskWatch(triggers: [.failed], action: .macOSNotification, createdBy: .user)
+        #expect(await store.addWatch(watch, to: task.id) == nil)
+        await store.addUpdate(id: task.id, message: "The build broke.")
+        await store.updateStatus(id: task.id, status: .failed, cause: .smithSetStatus)
+        let delivered = await waitUntil {
+            if case .delivered = await store.task(id: task.id)?.watch(id: watch.id)?.firing(occurrence: 1)?.state { return true }
+            return false
+        }
+        #expect(delivered)
+        let banner = try #require(await recorder.banners.first)
+        #expect(banner.title == "\"Deploy\" fails")
+        #expect(banner.body == "The build broke.")
+        await runtime.stopAll()
+    }
+
+    @Test("Notifications turned off in macOS become a visible refusal, not a silent drop")
+    func macOSNotificationDenied() async throws {
+        let runtime = makeRuntime()
+        await configure(runtime)
+        await runtime.setExternalRecipientTarget(TaskWatchDelivery.macOSNotificationTarget, ClosureRecipientTarget { _, _ in
+            .refused("macOS notifications are turned off for Agent Smith")
+        })
+        await runtime.start()
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Deploy", description: "d")
+        let watch = TaskWatch(triggers: [.completed], action: .macOSNotification, createdBy: .user)
+        #expect(await store.addWatch(watch, to: task.id) == nil)
+        await store.updateStatus(id: task.id, status: .completed, cause: .smithSetStatus)
+        let refused = await waitUntil {
+            if case .refused(let reason) = await store.task(id: task.id)?.watch(id: watch.id)?.firing(occurrence: 1)?.state {
+                return reason.contains("turned off")
+            }
+            return false
+        }
+        #expect(refused)
+        let row = await waitUntil {
+            await runtime.channel.allMessages().contains { $0.kind == .taskWatchRefused && $0.content.contains("turned off") }
+        }
+        #expect(row)
+        await runtime.stopAll()
+    }
+
+    @Test("A summarize-to-user watch asks Smith to message the user, with the outcome")
+    func summarizeToUserReachesSmith() async throws {
+        let runtime = makeRuntime()
+        await configure(runtime)
+        await runtime.start()
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Report", description: "d")
+        #expect(await store.addWatch(TaskWatch(triggers: [.completed], action: .summarizeToUser, createdBy: .user), to: task.id) == nil)
+        await store.setResult(id: task.id, result: "42 widgets shipped.", commentary: nil)
+        await store.updateStatus(id: task.id, status: .completed, cause: .smithSetStatus)
+        let asked = await waitUntil {
+            let context = await runtime.contextSnapshot(for: .smith)
+            return context?.contains {
+                guard let text = $0.content.textValue else { return false }
+                return text.contains("`message_user`") && text.contains("42 widgets shipped.")
+            } == true
+        }
+        #expect(asked)
+        await runtime.stopAll()
+    }
+
     @Test("A startTask watch starts its target when the watched task completes")
     func startTaskChains() async throws {
         let runtime = makeRuntime()
