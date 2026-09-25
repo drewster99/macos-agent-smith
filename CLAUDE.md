@@ -436,20 +436,45 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
   snapshots; mutations are published only after commit, with typed `MemoryActivityOrigin`. Callers
   never synthesize memory events.
 
-### Task state events and task watches (decided 2026-09-24 — see TaskStateEventsPlan.md)
+### Task state events and task watches (decided 2026-09-24, revised 2026-09-25 — see TaskStateEventsPlan.md)
 
 **One event source, two kinds of subscriber.** Every live task status change goes through ONE
-`TaskStore` writer and emits ONE typed `TaskStatusTransition` (from, to, time, required typed
-`TaskTransitionCause`). Everything that reacts to a status change subscribes to it: the runtime's
-own reactions (`onTaskTerminated` is derived from it), the built-in Smith briefing (defined in
-code, always on), and user-defined **task watches** (data on `AgentTask.watches`: "when task X
-reaches state S, do A" — start another task, macOS notification, Smith summarizes to the user,
-instructions for Smith). Don't add a status write that bypasses the writer, and don't add a second
-notification path for task state — add a subscriber. Decisions: the Smith briefing keeps today's
-set of notified transitions and is delivered through the broker's durable Smith queue; a chained
-task is held (`startHold`) so auto-advance can't start it early (Play overrides); watches fire for
-cold-boot reconciliation transitions; template watches are blueprints copied into each run; a watch
-never reopens a completed task or resets a failed one.
+`TaskStore` writer, `applyStatus`. It emits ONE typed `TaskStatusTransition`, carrying a per-task
+`statusRevision` and a required typed `TaskTransitionCause`, validated against a single
+`TaskTransitionMatrix`; an illegal combination is refused. Everything that reacts to a status
+change subscribes to it:
+
+- the runtime's own reactions (`onTaskTerminated` becomes derived);
+- the built-in Smith briefing (defined in code, always on);
+- user-defined **task watches**: data on `AgentTask.watches` saying "when task X reaches state S,
+  do A", where A is start another task, a macOS notification, Smith summarizes to the user, or
+  instructions for Smith.
+
+Don't add a status write that bypasses the writer, and don't add a second notification path for
+task state. Add a subscriber.
+
+- **Crash consistency is structural.** A subscriber's effect is recorded on the task
+  (`pendingEffects`, id `taskID|statusRevision|subscriber`) in the same snapshot as the status.
+  - An effect is released only after the caller's ordered side effects (banner, teardown, briefing)
+    and only once its revision is DURABLE.
+  - One serialized per-session consumer submits effects to the broker. Store callbacks only
+    enqueue; nothing awaits the broker inside the writer.
+  - Persistence distinguishes "drained" from "durable".
+- **Disposition is not status.** Archive, delete and restore emit a separate `TaskLifecycleEvent`.
+- **Cold-boot recovery** is one rule (`ColdBootRunningRecovery`) applied through the store at
+  session load, independent of Start.
+- **Holds live on the dependent task.** A chained task carries `startHolds` (a set), enforced at the
+  final claim gate against a typed `TaskStartOrigin` on EVERY start input. Only the user's explicit
+  Play overrides a hold.
+
+Decisions:
+- The Smith briefing keeps today's set of notified transitions. It is delivered effectively once
+  through the broker's durable Smith queue with a consumed-id set; the residual duplicate window is
+  one interrupted turn.
+- Watches fire for crash-recovery transitions but not for session shutdown or deletion.
+- Template watches are blueprints for the notifying actions only. `startTask` is same-session,
+  ordinary tasks only.
+- A watch never reopens a completed task or resets a failed one.
 
 ## Conventions specific to this repo
 

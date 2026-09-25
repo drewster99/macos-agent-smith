@@ -1,8 +1,11 @@
 # Task state events and task watches
 
-> **Status:** design approved 2026-09-24 ("one event source, two kinds of subscriber"); finalized
-> after a research recheck, with every open decision resolved (see Decisions). References below to
-> [CONFIRM n] point at those resolved decisions.
+> **Status:** design approved 2026-09-24 ("one event source, two kinds of subscriber"). Revised
+> 2026-09-25 after an independent review against the code (Codex). The review found the first
+> draft directionally sound but not implementation-ready, citing crash consistency, cold-boot
+> behavior, hold enforcement, and actor/event ordering. Every finding was verified and the user
+> approved every recommended remedy (Decisions 7–11). The live defect it exposed, cold-boot
+> recovery of submitted work, is already fixed (`9056501`).
 
 ## Goal
 
@@ -12,7 +15,10 @@
    - the harness's Smith briefing (what Smith is told today, from scattered call sites);
    - user-defined **watches**: "when task X reaches state S, do A".
 3. Watch actions: start another task, macOS notification, summarize to the user, instructions for
-   Smith. Authored by Smith (`watch_task` tool) and in the UI (Task Detail + Timers window).
+   Smith. Authored by Smith (`watch_task` / `list_task_watches`) and in the UI (Task Detail +
+   Timers window).
+4. Every effect of a transition is **crash-consistent**: it is either durably recorded with the
+   status that caused it, or neither is.
 
 There is no second mechanism: the harness notifier and watches are two subscribers of the same
 event. They differ only in who defines them (code vs user data).
@@ -20,132 +26,243 @@ event. They differ only in who defines them (code vs user data).
 ## What the research established (verified against the code)
 
 ### Status writes today
-- `TaskStore` (an actor, one per session) owns status, but writes it through **three shapes**:
-  - `updateStatus(id:status:)` (`TaskStore.swift:811`) — the main funnel. Sets `startedAt` /
-    `completedAt` / disposition, fires `onTaskTerminated` on non-terminal→terminal only.
-  - Two CAS wrappers (`:856`, `:2105`) that **return `true` even when the inner write refuses**
-    (`.awaitingReview` with no result, `:817-825`). Verified.
-  - **Eight direct writes that bypass the funnel**: `normalizeTemplateLauncher` :496,
-    `promoteScheduledToPending` :758, `resetFailedTask` :891, `reopenCompletedTask` :932,
-    `requestHelp` :1681, `blockValidation` :1704, `releaseValidationBlockedTasks` :1721 (bulk),
-    and the `restore` migration :2133 (load time).
-- One write bypasses the store entirely: `AppViewModel.swift:716-722` (load-time running →
-  interrupted on the raw array).
-- ~40 call sites across runtime, validation coordinator, tools, app, watchdog.
-- No-op transitions happen and are not suppressed (Brown's ack running→running on every start,
-  `update_task` to the current status, template normalization pending→pending).
-- Load-time/bulk transitions that must NOT be treated as live events: `restore`, the app's
-  load-time demotion, cold-boot reconciliation in `performStart` (:2681-2720, :1620, :2705 — Smith
-  gets a whole-state initial instruction instead), `stopAll` / session-delete bulk interrupts,
-  template-clone births (:479).
+- `TaskStore` (an actor, one per session) owns status, but writes it in **three shapes**:
+  - `updateStatus(id:status:)` (`TaskStore.swift:811`) is the main funnel. It sets `startedAt` /
+    `completedAt` / disposition and fires `onTaskTerminated` on non-terminal→terminal only.
+  - Two CAS wrappers (`:856`, `:2105`) **return `true` even when the inner write refuses**
+    (`.awaitingReview` with no result, `:817-825`).
+  - **Eight direct writes bypass the funnel**: `normalizeTemplateLauncher` :496 (can turn a
+    completed/failed task back into pending), `promoteScheduledToPending` :758, `resetFailedTask`
+    :891, `reopenCompletedTask` :932, `requestHelp` :1681, `blockValidation` :1704,
+    `releaseValidationBlockedTasks` :1721 (bulk), and the `restore` migration :2133.
+- The session loader also writes status on the raw array before any store exists. It used to demote
+  every `.running` task to `.interrupted`, which blinded the runtime's submitted-result recovery.
+  Since `9056501`, both places apply one rule (`ColdBootRunningRecovery`). The loader write still
+  bypasses the store, and Phase 2 moves it into it.
+- There are 39 direct call sites of the writer APIs.
+- No-op transitions happen and are not suppressed: Brown's acknowledgement (`AgentActor.swift:2891`)
+  writes running→running, `update_task` can write the current status, and template normalization
+  writes pending→pending.
+- **Two bulk interrupts, which are not the same behavior:** `stopAll` interrupts only `.running`
+  (`AppViewModel.swift:2375`). Session deletion interrupts every `isInProgress` task
+  (`moveAllActiveTasksToInactive`, `:2405`).
+- **Status is written BEFORE the facts its effects depend on:**
+  - completion precedes worker teardown, the completion banner, and summarization
+    (`TaskValidationCoordinator.swift:1276`);
+  - failure precedes its explanatory update (`:448`);
+  - `.running` precedes worker assignment and briefing (`OrchestrationRuntime.swift:2268`);
+  - `.validating` precedes the submission banner and validation kickoff (`TaskCompleteTool.swift:121`).
+- Deletion and disposition are NOT status changes. Permanent delete of an active task fires only
+  `onChange` (`TaskStore.swift:2058`). Archive/restore have their own inactive hook (`:17`).
+
+### Persistence (why "persists together" was false)
+- A status write fires `onChange` synchronously. The app then hops through two unstructured tasks
+  before writing (`AppViewModel.swift:1182`, `:2791`), so nothing can await "this revision is
+  durable".
+- `SerialPersistenceWriter` advances its watermark on failure (`SerialPersistenceWriter.swift:75`).
+  `flush()` means "drained", not "durable".
+- The broker's pending-delivery persistence swallows errors (`AppViewModel.swift:1398`).
 
 ### How Smith hears today
-- Roughly ten status transitions produce a Smith note, each composed at its own call site and
-  injected with `AgentActor.appendUserMessage` — never persisted, **silently dropped when no Smith is
-  live** — or posted as a `.userTaskAction` channel row.
-- Many transitions reach Smith with no note (validator escalation, block/release, rejections
-  returned, user Fail / Re-validate / Send back, scheduled pause/interrupt, scheduled→pending,
-  worker self-terminate, task_complete→validating). Some are deliberate (escalation is the user's).
-- Disposition changes (archive, delete, undelete, Retry, Run Again) are not status changes; their
-  notices stay where they are.
+- About ten status transitions produce a Smith note. Each note is composed at its own call site and
+  injected with `AgentActor.appendUserMessage`. Those notes are never persisted and are **silently
+  dropped when no Smith is live**. Other notices are posted as `.userTaskAction` channel rows.
+- Several transitions reach Smith with no status note. Some of those are deliberate: escalation is
+  the user's to resolve. Correction to the first draft: worker self-termination is not silent,
+  because `.agentLifecycle` rows reach Smith through its channel whitelist
+  (`OrchestrationRuntime.swift:4217`).
+- Some notices have no status change at all, so they can never move onto a transition subscriber.
+  The clearest case is a scheduled-run refusal (`OrchestrationRuntime.swift:985`). They stay at
+  their call sites.
 
 ### Notification broker
-- Per-session actor with a durable ledger (effectively-once, deterministic ids) and a durable pull
-  outbox for Smith (leased, acked on next drain). Only producer today: the `WakeScheduler`.
-- Adding a trigger means a new `TriggerSource` case with a **permanent** namespace string plus its
-  hand-written Codable and round-trip test.
-- `.acted` / push outcomes are durable only if the SOURCE can re-produce them after a crash — so a
-  watch firing must be recorded durably by us before submission.
-- No startup guard verifies every notification type has a handler (designed in ROADMAP, never built).
+- The broker is a per-session actor with a durable ledger (deterministic ids, bounded to 5,000
+  entries) and a durable, leased pull outbox for Smith. Delivery is **at-least-once**
+  (`NotificationBroker.swift:349`). The runtime drops notification ids (`.map(\.text)`,
+  `OrchestrationRuntime.swift:2531`), and AgentActor receives bare text (`AgentActor.swift:3610`).
+- The only producer today is `WakeScheduler`. A new `TriggerSource` case needs a permanent namespace
+  string, plus hand-written Codable and a round-trip test.
+- **Settlement is lossy:**
+  - observers run before handling and are best-effort (`:260`);
+  - a handler's refusal reason collapses to `.runtimeRefused` (`:281`);
+  - a push target returning `false` leaves the id unsettled with no retry (`:294`);
+  - there is no settlement callback.
+- No startup guard checks that every notification type has a handler.
 
 ### Starting a task from a trigger
-- The timer path (`dispatchAutoRunWake` → pending scheduled-run queue → `restartForNewTask`) is the
-  analogue. It never evicts, queues at capacity, reports refusals — but its wording and channel
-  kinds say "Scheduled run", and it calls `prepareForRun`, which **silently reopens a completed task
-  or resets a failed one**. Reusing it unchanged would let a watch reopen a completed task, against
-  the 2026-09-22 "a completed contract is immutable" rule.
-- **Auto-advance would start the dependent task early**: a pending B is picked up by "Auto-run next
-  task" as soon as any slot frees, long before A completes. Chaining needs B held.
+- The start inputs are independent:
+  - auto-advance's three queues (capacity-deferred, launch-resume, pending; `:1236`);
+  - scheduled wakes (`:901`);
+  - `run_task`;
+  - the UI's Play;
+  - cold-launch resume, which spawns workers directly (`:2903`) instead of going through
+    `restartForNewTask` (`:2071`).
+- None of them carries a start origin (`AppViewModel.swift:2256`, `RunTaskTool.swift:155`), so a
+  hold enforced in one place is bypassed by the others.
+- `prepareForRun` resets failed tasks and reopens completed ones in place (`TaskStore.swift:984`).
+  Reusing it would let a watch reopen a completed task, against the 2026-09-22 immutable-contract
+  rule.
+- Auto-advance starts any ordinary pending task (`:1249`), so a chained B would start early.
+
+### Sessions and templates
+- Templates are global. `TaskStore` and the broker are per session. `AgentTask.sessionID` is the
+  immutable ORIGIN session (`AgentTask.swift:100`). A cross-session unarchive keeps it while placing
+  the task in the current store. Cross-session routing does not exist.
 
 ### macOS notifications
-- Nothing exists (no `UserNotifications` anywhere). Sandbox off, hardened runtime on, Developer ID —
-  no entitlement or plist key needed. Needs: authorization request, a delegate set at launch
-  (`willPresent` so banners show while the app is frontmost; `didReceive` for clicks), and click
-  routing to Task Detail through a `SharedAppState` request flag (the app's existing pattern — there
-  is no URL deep-linking).
+- Nothing exists yet: `UserNotifications` is not used anywhere.
+- Task Detail opens through `OpenWindowAction` with a typed `(sessionID, taskID)` target
+  (`AgentSmithApp.swift:250`, `:372`). `SharedAppState` has request flags for other windows but none
+  for Task Detail.
+- The delegate must be installed before launch completes.
+- Authorization can be revoked at any time.
 
-### Where watches live
-- On the task (`AgentTask.watches`), not in a per-session file: the watch travels with the task
-  through archive/restore and cross-session unarchive, is deleted with it, and its trigger check can
-  run in the same actor step as the status write (no TOCTOU). `AgentTask` has hand-written Codable
-  with no key-coverage guard — the new field needs all four places plus a round-trip test.
+### `AgentTask` Codable
+- `AgentTask` has hand-written Codable: declaration, init, CodingKeys, decode, encode
+  (`AgentTask.swift:403`, `:483`, `:487`).
+- There is no key-coverage guard. A round-trip test cannot catch an omitted default-valued key
+  (CLAUDE.md, "Persisted keys outlive property renames").
 
 ## Design
 
-### A. `TaskStatusTransition` — one funnel, one event
+### A. The transition funnel
 
 ```swift
 public struct TaskStatusTransition: Sendable, Equatable {
     public let taskID: UUID
-    public let taskTitle: String
+    public let statusRevision: Int          // per-task, monotonic, persisted
     public let from: AgentTask.Status
     public let to: AgentTask.Status
     public let at: Date
-    public let cause: TaskTransitionCause   // typed, required
+    public let cause: TaskTransitionCause   // typed, required, validated
 }
 ```
 
-- **`TaskTransitionCause`** is a typed enum naming why the status changed, with the context
-  subscribers need as associated values — e.g. `.startClaimed`, `.workerStarted`,
-  `.spawnFailed(reason)`, `.submittedForValidation`, `.validationPassed(validationWasRun:)`,
-  `.validationFailedNoProgress(summary)`, `.validationEscalated`, `.rejectionsReturned`,
-  `.userPaused`, `.userStopped`, `.userAccepted`, `.userFailed`, `.userRevalidated`,
-  `.userSentBack`, `.capacityShed(newCapacity:)`, `.scheduledAction(TaskActionKind)`,
-  `.scheduledTimeReached`, `.helpRequested`, `.helpProvided`, `.workerSelfTerminated(reason)`,
-  `.orphanRecovered`, `.smithSetStatus`, `.resetForRun`, `.reopenedForRun`,
-  `.validationBlocked(reason)`, `.validationReleased`, `.coldBootReconciliation`,
-  `.sessionShutdown`.
-- **One private writer** in `TaskStore` (`applyStatus(_:to:cause:)`) that every live status write
-  routes through — the funnel, both CAS wrappers, and the eight direct writers. It performs the
-  bookkeeping (`startedAt`, `completedAt` including the deliberate clears on reset/reopen,
-  disposition), suppresses no-op transitions (`from == to`), reads `from` itself (never trusts a
-  caller snapshot), and emits exactly one event per real write.
-- Every public status-writing API gains a **required** `cause:` parameter, so the compiler
-  enumerates all ~40 call sites; none can be forgotten.
-- The CAS wrappers return whether the write **actually happened** (fixes the lying `true`).
-- Excluded by construction (no event): `restore` and its migration, the app's load-time demotion
-  (moved into `restore` as a typed load-time repair), template normalization, clone births.
-- Cold-boot reconciliation and shutdown bulk writes DO emit, tagged `.coldBootReconciliation` /
-  `.sessionShutdown`, so each subscriber decides (the Smith briefing skips them; watches — see
-  [CONFIRM 4]).
-- Delivery: emitted synchronously inside the actor to registered subscribers, in write order
-  (per-store FIFO). `onTaskTerminated` becomes a derived subscriber of this stream (same trigger:
-  first entry into completed/failed), so the runtime's slot refill and timer cancellation keep
-  their behavior with one source.
+- **One private writer**, `TaskStore.applyStatus(_:to:cause:)`.
+  - **Scope:** every live status write goes through it: the funnel, both CAS wrappers, the eight
+    direct writers, and cold-boot reconciliation.
+  - **Behavior:**
+    - reads `from` itself and suppresses no-ops;
+    - does the bookkeeping (`startedAt`, `completedAt`, deliberate clears, disposition);
+    - increments `AgentTask.statusRevision`;
+    - builds the transition.
+  - **Returns** whether the write happened. The CAS wrappers pass that through, so they stop
+    returning `true` for a refused write.
+- **Causes are validated, not just typed.** A single `TaskTransitionMatrix` lists every legal
+  `(from, to, cause)`. `applyStatus` REFUSES an illegal combination: it logs an error and returns
+  false, so a wrong cause fails visibly instead of silently steering watches. Free-form text is
+  display context only. Watch matching reads `cause`, never prose.
+  - Cause cases: `.startClaimed`, `.workerStarted`, `.spawnFailed`, `.submittedForValidation`,
+    `.validationPassed(validationWasRun:)`, `.validationFailedNoProgress`, `.validationEscalated`,
+    `.rejectionsReturned`, `.userPaused`, `.userStopped`, `.userAccepted`, `.userFailed`,
+    `.userRevalidated`, `.userSentBack`, `.capacityShed`, `.scheduledAction(TaskActionKind)`,
+    `.scheduledTimeReached`, `.helpRequested`, `.helpProvided`, `.workerSelfTerminated`,
+    `.orphanRecovered`, `.smithSetStatus`, `.resetForRun`, `.reopenedForRun`,
+    `.validationBlocked`, `.validationReleased`, `.templateLauncherNormalized`,
+    `.coldBootRecovery(ColdBootRunningRecovery)`, `.coldBootSpawnAbandoned`,
+    `.sessionShutdown`, `.sessionDeletion`.
+- **The effect outbox lives on the task, in the same snapshot as the status.** In the same actor
+  step as the write, each subscriber that cares appends a `TaskEffectRecord` to
+  `AgentTask.pendingEffects`:
+  - **Id:** deterministic, `taskID|statusRevision|subscriber`.
+  - **Kind:** Smith briefing, or watch firing.
+  - **State:** held, then released, then submitted, then settled.
+
+  Status and effect become durable in one write, or not at all.
+- **Release after ordered side effects.** A transition whose effects depend on later facts is
+  written with `.deferredRelease`, which returns a `TransitionReleaseTicket`. The caller releases
+  the ticket after its side effects finish:
+  - the completion banner, teardown and summary;
+  - the failure's explanatory update;
+  - worker assignment and briefing;
+  - the submission banner.
+
+  Every other write releases immediately. An unreleased ticket is a code bug. After 30 s it is
+  logged at `.error` and released, which is visible rather than silent loss (Decision R2). At cold
+  boot, held effects of a task that is no longer mid-transition are released during reconciliation.
+- **Nothing is submitted before it is durable.** Persistence becomes awaitable and truthful:
+  - `SerialPersistenceWriter` gains a **durable** watermark, advanced only by a successful write,
+    alongside the drained one;
+  - `persistTasks` exposes `awaitDurable(revision:) -> Bool`;
+  - the broker's persistence errors surface instead of being swallowed.
+
+  A released effect is handed to the consumer only after its task's revision is durable.
+- **One serialized consumer.** `TaskEffectConsumer` is runtime-owned, one per session. It drains
+  released, durable effects in FIFO order, submits them to the broker, and writes settlement back
+  through the store.
+  - Store callbacks only ENQUEUE, synchronously. Nothing awaits the broker from inside the writer,
+    so the store never suspends mid-transition and cannot reenter.
+  - Subscriptions carry tokens with replace semantics, so a runtime restart cannot pile up
+    duplicate callbacks.
+  - `onTaskTerminated` becomes a derived subscriber, but only after the consumer is proven. Until
+    then the old hook stays alongside it (Phase 2).
+- **Lifecycle events are separate.** `TaskLifecycleEvent` is emitted by the disposition writers:
+  archived, softDeleted, restored, permanentlyDeleted. On delete or archive the runtime:
+  - cancels the task's wakes (fixing the permanent-delete wake leak);
+  - cancels its unsettled effects;
+  - finds dependents holding on it and surfaces the dangling hold.
+- **Cold boot runs through the store.** `ColdBootRunningRecovery` and the other boot repairs become
+  `TaskStore.reconcileAfterLaunch()`. It runs at session load on the store, with typed causes,
+  recording effects in the outbox. The consumer delivers them when the runtime attaches, so
+  reconciliation no longer depends on the user pressing Start. The loader's raw-array write is
+  deleted.
+- **Excluded by construction (no event):** `restore` / decode migrations and clone births.
+  Template normalization emits, with `.templateLauncherNormalized`, and no subscriber reacts to it.
+
+### Transition matrix (authoritative; the code's `TaskTransitionMatrix` must match)
+
+| Cause | from → to | Watches | Smith briefed | Adjacent effect kept at call site |
+|---|---|---|---|---|
+| `.startClaimed` | pending/paused/interrupted → starting | — | — | — |
+| `.workerStarted` | starting → running | **started** | as today | Brown briefing |
+| `.spawnFailed` | starting → pending/failed | failed (if →failed) | as today | channel error |
+| `.submittedForValidation` | running → validating | — | as today (none) | submission banner |
+| `.validationPassed` | validating → completed | **completed** | as today | banner, teardown, summary |
+| `.validationFailedNoProgress` | validating → failed | **failed** | as today | failure update |
+| `.validationEscalated` | validating → awaitingReview | **needs review** | as today (none) | escalation row |
+| `.rejectionsReturned` | validating → running | — | as today (none) | punch list to Brown |
+| `.validationBlocked` / `.validationReleased` | ↔ awaitingReview / validating | — | as today (none) | — |
+| `.helpRequested` / `.helpProvided` | → awaitingHelp / → running | needs help / — | as today | — |
+| `.user*` (paused, stopped, accepted, failed, revalidated, sentBack) | per action | completed / failed / interrupted when reached | as today | `.userTaskAction` row |
+| `.capacityShed` | running → paused | — | as today | capacity row |
+| `.scheduledAction` / `.scheduledTimeReached` | per action / scheduled → pending | interrupted when reached | as today | — |
+| `.workerSelfTerminated` / `.orphanRecovered` | running → interrupted/failed | interrupted / failed | as today (`.agentLifecycle` row) | — |
+| `.smithSetStatus` | per `update_task` | per state reached | — (Smith did it) | — |
+| `.resetForRun` / `.reopenedForRun` | failed/completed → pending | — | as today | — |
+| `.coldBootRecovery` | running → validating/interrupted | interrupted (crash) | no (initial instruction covers launch) | recovery note |
+| `.coldBootSpawnAbandoned` | starting → pending | — | no | — |
+| `.sessionShutdown` / `.sessionDeletion` | running/in-progress → interrupted | **no** (Decision 9) | no | — |
+| `.templateLauncherNormalized` | any → pending | — | no | — |
+
+"As today" is pinned by the Phase 3 parity table. That table is exact wording per cause, and it is
+written and committed BEFORE the move.
 
 ### B. The harness Smith briefing (built-in subscriber)
 
-- One `SmithTaskBriefing` maps `(to, cause)` → the note Smith receives, or nothing. It replaces the
-  scattered per-site notes for STATUS transitions; the wording of today's notes is preserved.
-- Same transitions notified, same text (decision 1 — widening the set is a later decision). Two
-  commits: first the move (same delivery as today, so the refactor is checkable on its own), then
-  durable delivery (decision 2): notes that were injected with `appendUserMessage` go to the broker's
-  durable Smith queue instead, so a note survives a Smith restart. `.userTaskAction` rows stay
-  channel rows (they carry the transcript's inline controls).
-- Disposition notices (delete, undelete, Retry, Run Again) stay where they are — they are not status
-  transitions.
+- `SmithTaskBriefing` maps `(to, cause)` to the note Smith receives, or nothing. It replaces the
+  per-site notes for STATUS transitions only. Non-transition notices, such as the scheduled-run
+  refusal and disposition notices, stay at their sites.
+- **Delivery is effectively once** (Decision 8):
+  - Notes go to the broker's durable Smith queue as `QueuedDelivery` values carrying their
+    `NotificationID`, not bare text.
+  - `AgentActor` records a delivery's id as consumed when the turn that received it COMPLETES. The
+    consumed-id set is persisted per session, and the drain skips consumed ids.
+  - A crash mid-turn redelivers, so the residual duplicate window is one interrupted Smith turn.
+    This is documented, not hidden.
 
 ### C. Task watches
 
 ```swift
 public struct TaskWatch: Codable, Sendable, Equatable, Identifiable {
     public let id: UUID
-    public var triggers: Set<TaskWatchTrigger>        // see "Watchable states"
+    public var triggers: Set<TaskWatchTrigger>
     public var action: TaskWatchAction
     public var lifetime: TaskWatchLifetime            // .once / .everyTime
-    public let createdBy: TaskAuthorship               // .user / .smith
+    public var state: TaskWatchState                  // .active / .cancelled(at:) / .consumed(at:)
+    public var nextOccurrence: Int                    // monotonic; survives firing compaction
+    public let createdBy: TaskAuthorship              // .user / .smith
     public let createdAt: Date
-    public var firings: [TaskWatchFiring]             // durable record, drives delivery
+    public var recentFirings: [TaskWatchFiring]       // bounded audit (Decision R4)
 }
 
 public enum TaskWatchAction: Codable, Sendable, Equatable {
@@ -156,102 +273,180 @@ public enum TaskWatchAction: Codable, Sendable, Equatable {
 }
 ```
 
-- **Watchable states** (user-meaningful): started, completed, failed, needs help (`awaitingHelp`),
-  needs review (`awaitingReview`), interrupted. Matched on the typed transition, not the bare status
-  pair: "started" means cause `.workerStarted` — NOT any entry into `running`, which would also fire
-  when validation hands rejections back (validating → running) or help is provided. The watchable
-  state is therefore its own small enum (`TaskWatchTrigger`) mapped from `(to, cause)` in one place.
-- **Lifetime defaults**: `startTask` → `.once` (a chain link runs once); the notifying actions →
-  `.everyTime`. Editable.
-- **Firing** happens inside `applyStatus`, in the same actor step as the status write: each matching
-  watch appends a `TaskWatchFiring(occurrence: n, transition: …, state: .pending)`. Because it lands
-  in the same in-memory write as the status, both persist together — there is no window where the
-  status changed but the firing was lost.
-- **Delivery** through the NotificationBroker: new `TriggerSource.taskWatch(watchID:occurrence:)`
-  (namespace `"taskwatch"`, permanent), idempotency key `watchID|occurrence`. On settle, the firing
-  is marked `.delivered`/`.refused(reason)`. At cold boot, every `.pending` firing is re-submitted —
-  the ledger dedups, and the firing record (not the 5,000-id ledger alone) is the real dedup.
-- **Actions**
-  - `startTask(B)`: a watch-specific run path (NOT `prepareForRun`'s reopen/reset): B must be
-    runnable (pending / paused / interrupted, or a template → cloned instance). Completed or failed
-    B is refused visibly, never reopened. Queues at capacity like a scheduled run; refusals get their
-    own typed channel kind (`.taskWatchRefused`), `.error` severity, plus a Smith note.
-    **Holding B until A fires** — see [CONFIRM 3].
-  - `macOSNotification`: push recipient `.external("macos")`, supplied by the app. Title = task
-    title + state; body = result excerpt (completed) / reason (failed, help, review). Identifier =
-    the notification id (a re-post replaces, never duplicates). Authorization requested lazily when
-    the first such watch is created; denied permission surfaces as a visible `.warning`, never a
-    silent drop. Click opens that task's Task Detail.
-  - `summarizeToUser`: delivered to Smith's durable pull queue with an explicit instruction to send
-    the user a short summary via `message_user` — the note overrides the completion briefing's "no
-    action needed". Uses `task.summary` when present, else the result. See [CONFIRM 6].
-  - `instructSmith(text)`: delivered to Smith's durable pull queue, framed with the task and the
-    state reached.
-- **Templates**: a watch on a template is a blueprint — `instantiateTemplate` copies it into each
-  instance with a fresh id and empty firings (e.g. "every nightly run: notify me if it fails").
-  The preserved-history child and every other copy get none. See [CONFIRM 5].
-- **Archive / delete**: a watch on an archived task is dormant (the task can't change state);
-  delete removes it with the task. A `startTask` target that is archived is refused, not restored.
+- **Watchable states:** started, completed, failed, needs help, needs review, interrupted. They are
+  mapped from `(to, cause)` in the matrix above and nowhere else. "Started" is `.workerStarted`
+  only.
+- **Firing:** inside `applyStatus`, each active matching watch takes `nextOccurrence`, increments
+  it, and appends an effect record. A `.once` watch becomes `.consumed` in that same step, so it can
+  never fire twice. The firing's states are pending, inFlight, delivered, refused(reason), and
+  cancelled.
+- **Cancel** marks the watch `.cancelled` and cancels its unsettled firings. It never deletes them,
+  so the audit survives. Every handler re-reads the watch and firing state before acting, so a
+  cancelled watch cannot act late.
+- **Delivery** uses `TriggerSource.taskWatch(watchID:occurrence:)` (namespace `"taskwatch"`,
+  permanent), keyed `watchID|occurrence`.
+- **Typed settlement:**
+  - The broker gains a settlement stream: notification id, outcome, and bounded reason.
+  - `RecipientTarget` returns `.delivered` / `.refused(reason)` / `.retryable(reason)`, replacing
+    `Bool`.
+  - Retryable results retry at the next drain with backoff, up to a bound. After that the result is
+    refused, with the last reason.
+  - The consumer writes settlement back to the firing through the store.
+- **Reconciliation at launch.** For every mismatch between firing state, outbox, and ledger:
 
-### D. Authoring and display
+  | Firing | Ledger | Result |
+  |---|---|---|
+  | pending/inFlight | settled | adopt the ledger outcome |
+  | inFlight | absent | resubmit |
+  | settled | — | drop the outbox entry |
+  | older than ledger retention | — | the firing record is the dedup, never the ledger alone |
 
-- **`watch_task` Smith tool** — `create` / `list` / `cancel`, typed argument enums, optional
-  arguments through `ToolArguments`. Pre-cleared in Smith's `autoApprovedToolsByRole` (same class as
-  `schedule_task_action`), classified low-risk side-effecting, in a built-in tool group, billed to
-  the watched task, prompt guidance next to `## Timers`.
-- **Task Detail**: a "When this task…" section (list, add, cancel; task picker for `startTask`).
-- **Timers window**: a "Watches" tab listing every watch in the session with cancel.
-- **`get_task_details`** renders a task's watches.
-- **Transcript**: a typed `.taskWatchFired` row per delivered firing (visible, filterable) and
-  `.taskWatchRefused` at `.error`.
+- **Holds live on the dependent task.** Setting up `startTask(B)` on A adds
+  `TaskStartHold.awaitingTask(A, watchID)` to `B.startHolds`, which is a set, so several upstream
+  tasks are allowed. At creation, self-links and cycles are rejected.
+  - The hold is enforced at the **final claim gate**, before template cloning or `.starting`, keyed
+    on a typed `TaskStartOrigin`:
+    - `.explicitUser` (Play) overrides the hold;
+    - `.watchSatisfied(watchID)` clears only its own hold;
+    - `.scheduled`, `.smithTool`, `.autoAdvance`, `.launchResume` and `.capacityResume` are refused
+      while any hold remains.
+  - Every start input carries an origin. Cold-launch resume is routed through the gate.
+  - Deleting or archiving A leaves B held and tells the user; the lifecycle event finds B through
+    its holds. Cancelling the watch removes its hold.
+- **`startTask(B)` action:** a watch-specific run path, not `prepareForRun`. B must be an ordinary
+  task in the same session's store, in pending, paused or interrupted. Completed, failed, archived,
+  missing, cross-session and template targets are refused visibly (`.taskWatchRefused`, `.error`,
+  plus a Smith note), never reopened. At capacity it queues like a scheduled run.
+- **Templates (Decision 10):** a watch on a template is a blueprint for the notifying actions only.
+  `startTask` is not allowed on a template or targeting one. `instantiateTemplate` copies blueprints
+  with fresh ids, empty firings and `nextOccurrence` 0. The preserved-history child and every other
+  copy get none.
+- **Cross-session unarchive:** targets resolve against the CURRENT store, never `task.sessionID`.
+  A target that is not there is refused.
+- **Retention (Decision R4):** keep the latest 20 settled firings per watch. `nextOccurrence` keeps
+  the count. Unsettled firings are never compacted.
+
+### D. Authoring, display, and the macOS bridge
+
+- **Smith tools:** `watch_task` covers create and cancel, and is side-effecting. `list_task_watches`
+  is read-only. Both use typed argument enums and `ToolArguments` for optional arguments. Every
+  roster is updated:
+  - `SmithBehavior`;
+  - `autoApprovedToolsByRole`: pre-cleared like `schedule_task_action`, still routed through the
+    Security chokepoint;
+  - `ToolSafetyClassification`;
+  - `BuiltInToolGroup`;
+  - `smithTaskActionTools`: attribution resolves `watch_id` to the watched task, so cancel is billed
+    correctly;
+  - the prompt guidance next to `## Timers`.
+
+  Registration and attribution tests are required.
+- **Task Detail:** a "When this task…" section (list, add, cancel, holds shown as "Waiting on A").
+  **Timers window:** a Watches tab. **`get_task_details`** renders watches and holds.
+- **Transcript:** typed `.taskWatchFired` and `.taskWatchRefused` (`.error`) rows, stamped with
+  top-level `taskID` and `sessionID` so the task pane shows them. They are kept out of Smith's
+  channel whitelist, because Smith is told through the broker and a channel copy would duplicate it.
+- **macOS bridge (app target):**
+  - `TaskNotificationService` owns authorization and the `UNUserNotificationCenter` delegate,
+    installed at launch.
+  - It registers the `.external("macos")` push target before pending deliveries replay.
+  - Authorization is checked AT DELIVERY. Denied is `.refused(reason)`, surfaced as a `.warning`.
+  - Clicks set a typed `SharedAppState` task-detail request `(sessionID, taskID)`, which opens
+    through the existing `OpenWindowAction` target.
+  - The runtime receives authorization and registration as injected closures.
 
 ## Phases
 
 Each phase: implement → recheck → build (xcode-mcp) → full `swift test` (+ MLX suite when memory is
 touched) → commit → push.
 
-1. **Transition funnel.** `TaskStatusTransition`, `TaskTransitionCause`, `applyStatus`, required
-   `cause:` at every call site, truthful CAS returns, no-op suppression, load-time exclusions,
-   `onTaskTerminated` derived from the stream. Tests: every writer emits exactly once, no-ops and
-   restore emit nothing, CAS returns false on refusal, per-store ordering, cold-boot causes tagged.
-2. **Smith briefing subscriber.** Move the status-transition notes into `SmithTaskBriefing`
-   (parity commit), then switch them to the durable Smith queue. Tests: each cause → exact note (or
-   none), parity with today's set, a note queued while no Smith is live is delivered after restart.
-3. **Watch model + firing.** `TaskWatch` on `AgentTask` (Codable in all four places + round trip),
-   firing inside `applyStatus`, `TriggerSource.taskWatch`, handlers, cold-boot re-submission, the
-   startup handler guard (every `KnownNotificationType` has a handler). Tests: firing is atomic with
-   the write, once vs everyTime, crash-replay dedup, template blueprint copy.
-4. **Actions.** `startTask` path (+ hold, per [CONFIRM 3]), `instructSmith`, `summarizeToUser`,
-   macOS notifications (app target: authorization, delegate, push target, click routing).
-5. **Authoring + UI.** `watch_task` tool (all registration points), Task Detail section, Timers tab,
-   `get_task_details`, transcript kinds (+ ChannelMessageKind guard table).
-6. **Integrated recheck.** Live run: chain A→B, notifications, restart mid-chain; CLAUDE.md entry.
+0. ✅ **Cold-boot recovery fix** (`9056501`): one `ColdBootRunningRecovery` rule for the loader and
+   the runtime.
+1. **Truthful persistence.**
+   - Durable watermark in `SerialPersistenceWriter`.
+   - Awaitable `awaitDurable(revision:)`.
+   - Broker persistence errors surfaced.
+   - A reflection-based `AgentTask` coding-key coverage guard.
+   - Tests: a failed write does not advance durability; `flush` semantics.
+2. **Transition funnel.**
+   - `TaskStatusTransition`, `statusRevision`, the matrix and its validation, `applyStatus` at all
+     call sites.
+   - Truthful CAS returns, no-op suppression, the effect outbox, release tickets.
+   - `TaskEffectConsumer` and subscription tokens, `TaskLifecycleEvent`, and
+     `reconcileAfterLaunch` (the loader write deleted).
+   - The old hooks are kept until the consumer is proven, then `onTaskTerminated` is derived.
+   - Tests: every writer emits once; illegal causes are refused; no-ops and restore are silent;
+     ordering; the release-ticket ordering pinned per call site; lifecycle events.
+3. **Smith briefing.**
+   - The parity table, committed first.
+   - The move into `SmithTaskBriefing`, delivered the same way as today.
+   - Then durable delivery with `QueuedDelivery` ids and the consumed-id set.
+   - Tests: exact note per cause; delivery after restart; no redelivery after a completed turn.
+4. **Watch model and firing.**
+   - `TaskWatch` / holds on `AgentTask`, firing in `applyStatus`, `TriggerSource.taskWatch`.
+   - Typed broker settlement, launch reconciliation, the startup handler guard.
+   - Tests: firing atomic with status; `.once` consumed at firing; cancel mid-flight; compaction
+     keeps the counter; every reconciliation row.
+5. **Start origins and chaining.**
+   - `TaskStartOrigin` on every start input, the final-gate hold check, cold-launch resume via the
+     gate.
+   - The `startTask` action and its refusal paths.
+   - Tests: every origin against a held task; Play override; multi-dependency; cycles; delete of
+     the upstream task.
+6. **Other actions and the macOS bridge.** `instructSmith`, `summarizeToUser`,
+   `TaskNotificationService`, click routing. Tests: permission denied at delivery.
+7. **Authoring and UI.** Tools with all rosters, Task Detail, the Timers tab, `get_task_details`,
+   transcript kinds (+ the `ChannelMessageKind` guard table).
+8. **Integrated recheck.** Failure injection: a crash at each point (after the write before durable,
+   after durable before submit, after settle before write-back), persistence failure, permission
+   denial, template, cross-session, capacity-deferred, every start origin. Then a live run: chain
+   A→B, notifications, restart mid-chain. Update CLAUDE.md.
 
-## Decisions (resolved 2026-09-24)
+## Decisions
 
-1. **Smith briefing set** — keep exactly today's set of notified transitions in Phase 2. Widening it
-   (escalation, rejections returned, user Fail/Re-validate/Send back, scheduled pause/interrupt,
-   worker self-terminate) is a separate later decision.
-2. **Briefing durability** — route the briefing through the broker's durable Smith queue, so a note
-   is delivered after a restart instead of being dropped when no Smith is live.
-3. **Holding the chained task** — a typed hold on B (`startHold: .awaitingTask(A)`): auto-advance
-   skips it, the task list shows "Waiting on A", Play still starts it (explicit override). If A fails
-   or is deleted, B stays held and the user is told.
-4. **Cold-boot transitions** — watches DO fire for them (a task found mid-run after a crash and
-   marked interrupted is a real event). The Smith briefing still skips them (its initial instruction
-   covers launch state).
-5. **Template watches** — blueprints copied into each run (recommended default; not separately
-   asked — revisit if it surprises).
-6. **"Summarize to me"** — Smith writes it (one turn, `message_user`).
+Resolved 2026-09-24:
+1. **Smith briefing set:** exactly today's notified transitions. Widening it is a later decision.
+2. **Briefing durability:** through the broker's durable Smith queue.
+3. **Holding the chained task:** a typed hold on B; auto-advance cannot start it; Play overrides.
+   Refined by Decision 7 into a hold set enforced at the final claim gate for every start origin.
+4. **Cold-boot transitions:** watches fire for crash recovery. Smith's briefing skips them.
+5. **Template watches:** blueprints. Narrowed by Decision 10.
+6. **"Summarize to me":** Smith writes it with `message_user`.
+
+Resolved 2026-09-25 (after review):
+7. **Scope:** the full hardening: truthful persistence, `statusRevision`, the task-side outbox,
+   the serialized consumer, typed settlement, `TaskStartOrigin`, and lifecycle events.
+8. **Smith delivery:** effectively once through a durable consumed-id set. The residual window is
+   one interrupted Smith turn.
+9. **Session shutdown and deletion transitions do not fire watches.** A crash is still caught by the
+   next launch's reconciliation.
+10. **Templates:** no `startTask` on or targeting a template. Task-targeting watches are
+    same-session ordinary tasks only. Notifying watches remain blueprints.
+11. **The cold-boot recovery defect** was fixed on its own, ahead of the feature (`9056501`).
+
+Implementation defaults chosen while revising (revisit if they surprise):
+- R1. Illegal `(from, to, cause)` combinations are REFUSED, not merely logged.
+- R2. The unreleased-ticket timeout is 30 s, and the ticket is then released with an `.error` log.
+- R3. The retryable push-delivery bound is shared with the broker's existing backoff; after it the
+  delivery is refused with the last reason.
+- R4. Retention is the latest 20 settled firings per watch.
 
 ## Existing defects found during research (fixed in the phase noted)
 
-- CAS status wrappers report success when the write was refused — Phase 1.
+- ✅ The loader's load-time demotion blinded the runtime's submitted-result recovery — `9056501`.
+- `stopAll` interrupts a `.running` task even when its result was already submitted, which is the
+  same loss at clean shutdown in a narrow window. Fixed in Phase 2, where the shutdown path applies
+  `ColdBootRunningRecovery`.
+- `SerialPersistenceWriter` reports drained as durable, and broker persistence errors are swallowed —
+  Phase 1.
+- The CAS status wrappers report success when the write was refused — Phase 2.
 - `TaskStore.permanentlyDelete` of an active task fires no hook, orphaning its scheduled wakes —
-  Phase 1 (the transition/disposition hooks are being reworked anyway).
-- `NotificationBroker` has no startup guard that every first-party type has a handler — Phase 3.
-- Brown's acknowledgement writes running→running on every start (a no-op write) — Phase 1
-  (suppressed as a no-op).
-- `update_task` can set `.paused` on a running task without stopping its worker; `request_help` can
-  move a `.validating` task to `.awaitingHelp` — reported, not changed (behavior decisions, out of
-  scope).
+  Phase 2 (`TaskLifecycleEvent`).
+- Brown's acknowledgement writes running→running on every start — Phase 2 (suppressed as a no-op).
+- Broker refusal reasons collapse to `.runtimeRefused`, and a push target's `false` is never
+  retried — Phase 4.
+- `NotificationBroker` has no startup guard that every first-party type has a handler — Phase 4.
+- Cold-launch resume spawns workers outside `restartForNewTask` — Phase 5 (routed through the gate).
+- `update_task` can set `.paused` on a running task without stopping its worker, and `request_help`
+  can move a `.validating` task to `.awaitingHelp`. Reported, not changed: these are behavior
+  decisions and out of scope.
