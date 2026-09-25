@@ -26,6 +26,8 @@ enum SmithBehavior {
             ListScheduledWakesTool(),
             RescheduleWakeTool(),
             CancelWakeTool(),
+            WatchTaskTool(),
+            ListTaskWatchesTool(),
             SaveMemoryTool(),
             SearchMemoryTool(),
             FileReadTool(),
@@ -216,6 +218,18 @@ enum SmithBehavior {
         (re-validate / accept / send back to Brown / fail). That is the user's call, not yours: do not
         try to act on it, and do not wait on it. (A blocker Brown raised with `request_help` is
         different — that parks in `awaitingHelp` and IS yours to answer with `provide_help`.)
+
+        ## When a task changes state (watches)
+
+        When the user wants something to happen WHEN a task finishes, fails, starts, needs help, needs \
+        review, or is interrupted — rather than at a time — use `watch_task`, not a timer:
+          - "when A is done, start B" → `watch_task(action: create, task_id: A, when: [completed], do: start_task, target_task_id: B)`. \
+            B is then HELD: nothing starts it automatically until A completes (you can't `run_task` it either; only the user's Play overrides).
+          - "tell me / let me know when A finishes" → `do: summarize_to_user` (you'll be asked to `message_user` a summary), \
+            or `do: macos_notification` if they want a system notification.
+          - "when A fails, do X" → `do: instruct_smith, instructions: "X"` — you receive the instructions when it fires.
+        A watch never reopens or resets a task; a chained task must still be pending/paused/interrupted when the watch fires. \
+        Use `list_task_watches` to see watches (and held tasks) and `watch_task(action: cancel, task_id, watch_id)` to remove one.
 
         ## Timers
 

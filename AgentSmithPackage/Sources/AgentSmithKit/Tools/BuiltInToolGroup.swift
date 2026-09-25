@@ -139,7 +139,8 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         ],
         .scheduling: [
             "schedule_task_action", "schedule_reminder",
-            "reschedule_wake", "cancel_wake", "list_scheduled_wakes"
+            "reschedule_wake", "cancel_wake", "list_scheduled_wakes",
+            "watch_task", "list_task_watches"
         ],
         .filesystem: [
             "file_read", "file_write", "file_edit",

@@ -275,7 +275,8 @@ struct ToolArgumentReadingGuardTests {
     /// There are ZERO `if case` sites left: every optional argument in every tool now reads
     /// through `ToolArguments`, which the companion test below pins separately and absolutely —
     /// that one is the real guard, and this budget is the coarse backstop behind it.
-    private static let handUnwrapBudget = 62
+    /// Raised from 62 to 64 on 2026-09-25 for `watch_task`'s required `action` and `task_id`.
+    private static let handUnwrapBudget = 64
 
     /// Every `if case .string/.array(let x) = arguments["k"]` still in the tool sources.
     private static func handUnwrapSites(requiringPrefix prefix: String? = nil) throws -> [String] {

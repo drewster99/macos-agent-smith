@@ -1899,6 +1899,28 @@ final class AppViewModel {
         return true
     }
 
+    /// Adds a watch the user authored in Task Detail. Returns why it was refused, if it was. A
+    /// macOS-notification watch asks for notification permission now, while the user is here to
+    /// answer, rather than first when it fires.
+    func addTaskWatch(_ watch: TaskWatch, to taskID: UUID) async -> String? {
+        guard let taskStore else { return "The session's tasks haven't loaded yet." }
+        if let refusal = await taskStore.addWatch(watch, to: taskID) {
+            return refusal
+        }
+        if case .macOSNotification = watch.action {
+            await shared.taskNotifications.requestAuthorizationIfNeeded()
+        }
+        return nil
+    }
+
+    /// Cancels a watch from Task Detail or the Timers window; a refusal is shown as the task alert.
+    func cancelTaskWatch(_ watchID: UUID, on taskID: UUID) async {
+        guard let taskStore else { return }
+        if let refusal = await taskStore.cancelWatch(watchID, on: taskID) {
+            taskActionError = refusal
+        }
+    }
+
     /// Replaces a task's step list from the task-detail editor (same gating). The user
     /// holds full authority over the plan — unlike the worker, edits here may delete
     /// steps outright rather than tombstoning them.

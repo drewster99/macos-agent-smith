@@ -79,6 +79,18 @@ final class TaskNotificationService: NSObject, UNUserNotificationCenterDelegate 
         }
     }
 
+    /// Asks for notification permission if the user has never been asked. Failure is left for
+    /// delivery to report: permission is checked again there, where a refusal becomes visible.
+    func requestAuthorizationIfNeeded() async {
+        let center = UNUserNotificationCenter.current()
+        guard await center.notificationSettings().authorizationStatus == .notDetermined else { return }
+        do {
+            _ = try await center.requestAuthorization(options: [.alert, .sound])
+        } catch {
+            Self.logger.error("Notification permission request failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Returns and clears the click waiting to be handled, so exactly one scene acts on it.
     func consumeTaskDetailRequest() -> TaskDetailTarget? {
         defer { pendingTaskDetailRequest = nil }

@@ -13,6 +13,7 @@ private enum TaskDetailSectionKind: Hashable {
     case steps
     case updates
     case description
+    case watches
     case relatedContext
 
     var label: String {
@@ -24,6 +25,7 @@ private enum TaskDetailSectionKind: Hashable {
         case .steps:          return "Steps"
         case .updates:        return "Updates"
         case .description:    return "Description"
+        case .watches:        return "Watches"
         case .relatedContext: return "Context"
         }
     }
@@ -37,6 +39,7 @@ private enum TaskDetailSectionKind: Hashable {
         case .steps:          return "list.bullet"
         case .updates:        return "clock.arrow.circlepath"
         case .description:    return "doc.text"
+        case .watches:        return "bell.badge"
         case .relatedContext: return "link"
         }
     }
@@ -74,13 +77,13 @@ private func orderedSections(for status: AgentTask.Status) -> [TaskDetailSection
     // so they can be listed unconditionally.
     switch status {
     case .pending, .scheduled:
-        return [.description, .acceptance, .steps, .relatedContext]
+        return [.description, .acceptance, .steps, .watches, .relatedContext]
     case .starting, .running, .paused, .interrupted, .awaitingReview, .awaitingHelp, .validating:
-        return [.updates, .acceptance, .steps, .description, .relatedContext]
+        return [.updates, .acceptance, .steps, .watches, .description, .relatedContext]
     case .completed:
-        return [.summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
+        return [.summary, .result, .acceptance, .steps, .updates, .watches, .description, .relatedContext]
     case .failed:
-        return [.error, .summary, .result, .acceptance, .steps, .updates, .description, .relatedContext]
+        return [.error, .summary, .result, .acceptance, .steps, .updates, .watches, .description, .relatedContext]
     }
 }
 
@@ -90,6 +93,8 @@ private func presentSections(_ task: AgentTask) -> [TaskDetailSectionKind] {
     orderedSections(for: task.status).filter { kind in
         switch kind {
         case .description:    return true
+        // Always offered: it is where a watch is added.
+        case .watches:        return true
         case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
         case .summary:        return !(task.summary ?? "").isEmpty
         case .result:         return !(task.result ?? "").isEmpty
@@ -134,6 +139,8 @@ private func defaultMode(_ kind: TaskDetailSectionKind, for task: AgentTask) -> 
     case (.description, _):                       return .preview
 
     case (.relatedContext, _):                    return .preview
+
+    case (.watches, _):                           return .expanded
 
     // Front-and-center throughout the validation loop; compact otherwise. Keyed on the
     // stable flag, not the raw status, so the validating↔running oscillation doesn't flip it.
@@ -629,11 +636,11 @@ private struct TaskDetailSectionView: View {
         case .steps:
             TaskDetailStepsSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
         case .updates:
-            TaskDetailUpdatesSection(task: task, mode: mode,
-                                     attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
+            TaskDetailUpdatesSection(task: task, mode: mode, attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
         case .description:
-            TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel,
-                                         attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
+            TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel, attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
+        case .watches:
+            TaskWatchesSection(task: task, viewModel: viewModel)
         case .relatedContext:
             TaskDetailRelatedContextSection(task: task, viewModel: viewModel, sessionManager: sessionManager)
         }

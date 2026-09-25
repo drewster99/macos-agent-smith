@@ -325,6 +325,10 @@ actor SecurityEvaluator {
                 "reschedule_wake",
                 "cancel_wake",
                 "list_scheduled_wakes",
+                // Task watches: rules on this session's own tasks, bounded by `TaskStore.addWatch`'s
+                // validation — the same class as the scheduling tools above.
+                "watch_task",
+                "list_task_watches",
 
                 "notify_brown",
                 "provide_help",

@@ -3434,7 +3434,7 @@ public actor AgentActor {
     static let smithTaskActionTools: Set<String> = [
         "provide_help", "edit_task", "set_template_inputs",
         "set_acceptance_criteria", "manage_steps", "run_task", "update_task",
-        "amend_task", "manage_task_disposition", "schedule_task_action"
+        "amend_task", "manage_task_disposition", "schedule_task_action", "watch_task"
     ]
 
     /// The task a Smith turn should be billed to: the FIRST task its tool calls acted on, in

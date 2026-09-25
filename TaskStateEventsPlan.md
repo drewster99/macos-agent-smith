@@ -480,7 +480,18 @@ touched) → commit → push.
      them on the broker as it is built.
    - Original scope: `instructSmith`, `summarizeToUser`,
    `TaskNotificationService`, click routing. Tests: permission denied at delivery.
-7. **Authoring and UI.** Tools with all rosters, Task Detail, the Timers tab, `get_task_details`,
+7. ✅ **Authoring and UI.** Built:
+   - **Smith tools.** `watch_task` (create / cancel; `task_id` is required for both, so cost is
+     billed to the watched task) and the read-only `list_task_watches`. They are registered in
+     `SmithBehavior`, the auto-approve table (still routed through the Security Agent),
+     `ToolSafetyClassification`, the scheduling tool group, and `smithTaskActionTools`.
+   - **Smith's prompt.** A "When a task changes state (watches)" section.
+   - **`get_task_details`.** Renders a task's watches and holds.
+   - **Task Detail.** A "When this task…" section with watches, a hold banner, Cancel, and an
+     add-watch editor. Adding a macOS-notification watch asks for permission then.
+   - **Timers window.** A Watches tab.
+   - **Transcript rows.** Shipped in Phase 4.
+   - Original scope: Tools with all rosters, Task Detail, the Timers tab, `get_task_details`,
    transcript kinds (+ the `ChannelMessageKind` guard table).
 8. **Integrated recheck.** Failure injection: a crash at each point (after the write before durable,
    after durable before submit, after settle before write-back), persistence failure, permission

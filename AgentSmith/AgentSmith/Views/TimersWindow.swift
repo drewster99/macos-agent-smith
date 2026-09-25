@@ -9,18 +9,12 @@ struct TimersWindow: View {
     @State private var selectedTab: Tab = .active
 
     enum Tab: Hashable {
-        case active, history
+        case active, history, watches
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $selectedTab) {
-                Text("Active (\(viewModel.activeTimers.count))").tag(Tab.active)
-                Text("History (\(viewModel.timerHistory.count))").tag(Tab.history)
-            }
-            .pickerStyle(.segmented)
-            .padding(12)
-
+            TimersTabPicker(selectedTab: $selectedTab, activeCount: viewModel.activeTimers.count, historyCount: viewModel.timerHistory.count)
             Divider()
 
             switch selectedTab {
@@ -28,6 +22,8 @@ struct TimersWindow: View {
                 ActiveTimersList(viewModel: viewModel)
             case .history:
                 TimerHistoryList(history: viewModel.timerHistory)
+            case .watches:
+                SessionWatchesList(viewModel: viewModel)
             }
         }
         .frame(minWidth: 640, minHeight: 480)
@@ -35,6 +31,22 @@ struct TimersWindow: View {
         .task {
             await viewModel.refreshActiveTimers()
         }
+    }
+}
+
+private struct TimersTabPicker: View {
+    @Binding var selectedTab: TimersWindow.Tab
+    let activeCount: Int
+    let historyCount: Int
+
+    var body: some View {
+        Picker("", selection: $selectedTab) {
+            Text("Active (\(activeCount))").tag(TimersWindow.Tab.active)
+            Text("History (\(historyCount))").tag(TimersWindow.Tab.history)
+            Text("Watches").tag(TimersWindow.Tab.watches)
+        }
+        .pickerStyle(.segmented)
+        .padding(12)
     }
 }
 

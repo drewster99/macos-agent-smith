@@ -79,6 +79,13 @@ enum AppColors {
     static let stepSkipped = Color.orange
     static let stepRemoved = Color.gray
 
+    // Task watches ("When this task…").
+    static let watchActive = Color.accentColor
+    static let watchInactive = Color.secondary
+    static let watchRefused = Color.red
+    static let watchHold = Color.orange
+    static let watchHoldBackground = Color.orange.opacity(0.10)
+
     // MARK: - Security-review dispositions
 
     static let securityApproved = Color.green
