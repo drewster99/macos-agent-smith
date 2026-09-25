@@ -530,13 +530,13 @@ struct TaskValidationModelTests {
         #expect(write == .superseded)
         #expect(await store.updateValidationStall(id: task.id, progressed: false, judgedInRound: inFlight) == nil,
                 "a superseded round must not spend the new contract's convergence budget")
-        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: inFlight, cause: .validationFailedNoProgress) == false,
+        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: inFlight, cause: .validationFailedNoProgress(roundsWithoutNewApprovals: 1, stillRejected: 1)) == false,
                 "nor fail the task for not converging on a contract it never judged")
         #expect(await store.task(id: task.id)?.status == .validating)
 
         // The successor, holding the live token, is refused nothing.
         #expect(await store.updateValidationStall(id: task.id, progressed: false, judgedInRound: successor) == 1)
-        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: successor, cause: .validationFailedNoProgress))
+        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: successor, cause: .validationFailedNoProgress(roundsWithoutNewApprovals: 1, stillRejected: 1)))
     }
 
     @Test("A round is ordered by criterion position, not by whichever validator answered first")

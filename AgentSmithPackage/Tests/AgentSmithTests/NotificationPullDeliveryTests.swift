@@ -37,17 +37,21 @@ struct NotificationPullDeliveryTests {
         let n = reminder("a")
         await broker.submit(n)
 
-        // Not settled — pending until the acking drain.
+        // Not settled — pending until acknowledged.
         #expect(await broker.deliveryStatus(n.id) == .pending)
+        let generation = await broker.resetLease(for: .smith)
 
         // Drain 1 LEASES: returns it, but it stays pending (in the outbox) for at-least-once.
         let d1 = await broker.drainPendingDeliveries(for: .smith)
         #expect(d1.map(\.text) == ["hello"])
         #expect(await broker.deliveryStatus(n.id) == .pending, "leased, not yet acked")
 
-        // Drain 2 ACKs: the prior lease is now delivered + removed; no new batch.
-        let d2 = await broker.drainPendingDeliveries(for: .smith)
-        #expect(d2.isEmpty)
+        // Drain 2 hands out nothing new: a leased item is not handed out twice.
+        #expect(await broker.drainPendingDeliveries(for: .smith).isEmpty)
+        #expect(await broker.deliveryStatus(n.id) == .pending, "still not acknowledged")
+
+        // The recipient acknowledges once it has acted: delivered + removed.
+        await broker.acknowledgeDeliveries([n.id], for: .smith, leaseGeneration: generation)
         if case .delivered = await broker.deliveryStatus(n.id) {} else { Issue.record("expected delivered after ack") }
 
         // A re-submit after delivery is deduped.
@@ -84,14 +88,18 @@ struct NotificationPullDeliveryTests {
         await broker.submit(reminder("x"))
 
         // Smith-A drains — leases it, still in the durable outbox.
+        let oldGeneration = await broker.resetLease(for: .smith)
         #expect(await broker.drainPendingDeliveries(for: .smith).map(\.text) == ["keep"])
 
         // Smith-A is torn down and a NEW Smith wired: the runtime clears the lease. The new Smith's
-        // first drain must RE-DELIVER the still-undelivered item, not ack it away.
-        await broker.resetLease(for: .smith)
+        // first drain must RE-DELIVER the item Smith-A never acknowledged.
+        let newGeneration = await broker.resetLease(for: .smith)
         #expect(await broker.drainPendingDeliveries(for: .smith).map(\.text) == ["keep"], "re-delivered after re-spawn")
-        // And now the second drain acks it (delivered), no longer re-delivered.
-        _ = await broker.drainPendingDeliveries(for: .smith)
+        // A late acknowledgement from Smith-A is ignored — Smith-B has not acted on it yet.
+        await broker.acknowledgeDeliveries([reminder("x").id], for: .smith, leaseGeneration: oldGeneration)
+        #expect(await broker.deliveryStatus(reminder("x").id) == .pending, "a stale acknowledgement removes nothing")
+        // Smith-B's acknowledgement settles it.
+        await broker.acknowledgeDeliveries([reminder("x").id], for: .smith, leaseGeneration: newGeneration)
         if case .delivered = await broker.deliveryStatus(reminder("x").id) {} else { Issue.record("delivered after ack") }
     }
 

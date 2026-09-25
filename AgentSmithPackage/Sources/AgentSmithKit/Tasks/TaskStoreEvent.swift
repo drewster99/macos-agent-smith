@@ -6,6 +6,8 @@ import Foundation
 public enum TaskStoreEvent: Sendable, Equatable {
     case transition(TaskStatusTransition)
     case lifecycle(TaskLifecycleEvent)
+    /// A write left released, undelivered effects (`TaskStore.readyEffects`).
+    case effectsReady
 }
 
 /// A task entering or leaving this session's active store. Deliberately NOT a status transition:

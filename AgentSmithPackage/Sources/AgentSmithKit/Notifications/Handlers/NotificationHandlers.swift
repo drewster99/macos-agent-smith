@@ -110,3 +110,16 @@ public struct UserMessageNotificationHandler: NotificationHandler {
         return .deliver(lines.joined(separator: "\n"))
     }
 }
+
+/// Handles `task_briefing` notifications — delivers the note `SmithTaskBriefing` composed when the
+/// task's status changed. The note is already framed for Smith.
+public struct TaskBriefingNotificationHandler: NotificationHandler {
+    public init() {}
+
+    public func handle(_ notification: AgentNotification, runtime: any NotificationRuntime) async throws -> HandlerOutcome {
+        guard let note = stringValue(notification.payload.data, "note") else {
+            throw NotificationHandlerError("task_briefing payload missing a note")
+        }
+        return .deliver(note)
+    }
+}

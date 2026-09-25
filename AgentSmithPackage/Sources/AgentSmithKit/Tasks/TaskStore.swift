@@ -197,6 +197,145 @@ public actor TaskStore {
         eventObserver?(event)
     }
 
+    /// Emits a transition, then — when the write left released effects on the task — tells the
+    /// consumer there is something to deliver.
+    private func publish(_ transition: TaskStatusTransition) {
+        emit(.transition(transition))
+        noteEffectsWritten(taskID: transition.taskID)
+    }
+
+    // MARK: - Transition effects
+
+    /// The store mutation after which each pending effect record was written or released. The
+    /// consumer delivers a record only once that mutation is durable. In memory only: a record read
+    /// back from disk is durable by definition.
+    private var effectDurabilitySeq: [String: UInt64] = [:]
+    /// Tickets for effects written `held`, with the watchdog that releases a forgotten one.
+    private var heldEffectTickets: [TransitionEffectTicket: Task<Void, Never>] = [:]
+    /// How long a held effect may wait for its writer's `releaseEffects` before the store releases
+    /// it and logs the missing release as the bug it is (decision R2).
+    private var heldEffectReleaseDeadline: Duration = .seconds(30)
+
+    /// Shortens the held-effect deadline so a test can observe the watchdog.
+    func setHeldEffectReleaseDeadline(_ deadline: Duration) {
+        heldEffectReleaseDeadline = deadline
+    }
+
+    /// Records, for every effect on `taskID` written by the mutation just made, the mutation that
+    /// must be durable before it is delivered — and signals the consumer when any are released.
+    private func noteEffectsWritten(taskID: UUID) {
+        guard let effects = tasks[taskID]?.pendingEffects, !effects.isEmpty else { return }
+        for record in effects where effectDurabilitySeq[record.id] == nil {
+            effectDurabilitySeq[record.id] = mutationSeq
+        }
+        if effects.contains(where: { $0.release == .released }) {
+            emit(.effectsReady)
+        }
+    }
+
+    /// As the CAS `updateStatus(id:to:ifCurrentlyIn:ifValidationRoundIs:cause:)`, but the
+    /// transition's effects are written HELD: the caller releases them (`releaseEffects`) once the
+    /// facts they describe exist — the completion banner, the worker's briefing. Returns nil when
+    /// the transition did not happen.
+    public func updateStatusHoldingEffects(
+        id: UUID,
+        to newStatus: AgentTask.Status,
+        ifCurrentlyIn allowed: Set<AgentTask.Status>,
+        ifValidationRoundIs token: ValidationRoundToken? = nil,
+        cause: TaskTransitionCause
+    ) -> TransitionEffectTicket? {
+        guard var task = tasks[id], allowed.contains(task.status) else { return nil }
+        guard validationRoundIsCurrent(token, on: task) else { return nil }
+        guard case .applied(let transition) = changeStatus(of: &task, to: newStatus, cause: cause, effectRelease: .held) else { return nil }
+        tasks[id] = task
+        didMutate()
+        publish(transition)
+        let ticket = TransitionEffectTicket(taskID: id, statusRevision: transition.statusRevision)
+        if task.pendingEffects.contains(where: { $0.transition.statusRevision == transition.statusRevision }) {
+            let deadline = heldEffectReleaseDeadline
+            heldEffectTickets[ticket] = Task { [weak self] in
+                try? await Task.sleep(for: deadline)
+                guard !Task.isCancelled else { return }
+                await self?.releaseOverdueEffects(ticket)
+            }
+        }
+        return ticket
+    }
+
+    /// Releases the effects a `updateStatusHoldingEffects` write held. Idempotent.
+    public func releaseEffects(_ ticket: TransitionEffectTicket) {
+        heldEffectTickets.removeValue(forKey: ticket)?.cancel()
+        guard var task = tasks[ticket.taskID] else { return }
+        var released = false
+        for index in task.pendingEffects.indices
+        where task.pendingEffects[index].transition.statusRevision == ticket.statusRevision
+            && task.pendingEffects[index].release == .held {
+            task.pendingEffects[index].release = .released
+            released = true
+        }
+        guard released else { return }
+        tasks[ticket.taskID] = task
+        didMutate()
+        for record in task.pendingEffects where record.transition.statusRevision == ticket.statusRevision {
+            effectDurabilitySeq[record.id] = mutationSeq
+        }
+        emit(.effectsReady)
+    }
+
+    private func releaseOverdueEffects(_ ticket: TransitionEffectTicket) {
+        guard heldEffectTickets[ticket] != nil else { return }
+        Self.statusLogger.error("Effects of task \(ticket.taskID.uuidString, privacy: .public) revision \(ticket.statusRevision, privacy: .public) were never released by their writer — releasing them now")
+        releaseEffects(ticket)
+    }
+
+    /// Every released, undelivered effect in this store, oldest transition first.
+    public func readyEffects() -> [ReadyTaskEffect] {
+        tasks.values
+            .flatMap { task in
+                task.pendingEffects
+                    .filter { $0.release == .released }
+                    .map { ReadyTaskEffect(taskID: task.id, record: $0, durableThrough: effectDurabilitySeq[$0.id] ?? 0) }
+            }
+            .sorted {
+                if $0.record.transition.at != $1.record.transition.at { return $0.record.transition.at < $1.record.transition.at }
+                if $0.taskID != $1.taskID { return $0.taskID.uuidString < $1.taskID.uuidString }
+                return $0.record.transition.statusRevision < $1.record.transition.statusRevision
+            }
+    }
+
+    /// Removes a delivered effect. A no-op when the task or record is gone.
+    public func completeEffect(taskID: UUID, recordID: String) {
+        guard var task = tasks[taskID], let index = task.pendingEffects.firstIndex(where: { $0.id == recordID }) else { return }
+        task.pendingEffects.remove(at: index)
+        tasks[taskID] = task
+        effectDurabilitySeq[recordID] = nil
+        didMutate()
+    }
+
+    /// At launch no writer survives to release a held effect: release them all. Returns whether
+    /// anything changed.
+    private func releaseEffectsHeldAcrossLaunch() -> Bool {
+        var changed = false
+        for (id, task) in tasks where task.pendingEffects.contains(where: { $0.release == .held }) {
+            var updated = task
+            for index in updated.pendingEffects.indices { updated.pendingEffects[index].release = .released }
+            tasks[id] = updated
+            changed = true
+        }
+        if changed { didMutate() }
+        return changed
+    }
+
+    /// A task leaving the active store takes no undelivered effects with it: they describe a run
+    /// the user has now archived or deleted, and a later restore must not replay them.
+    private func droppingPendingEffects(_ task: AgentTask) -> AgentTask {
+        guard !task.pendingEffects.isEmpty else { return task }
+        var stripped = task
+        for record in stripped.pendingEffects { effectDurabilitySeq[record.id] = nil }
+        stripped.pendingEffects.removeAll()
+        return stripped
+    }
+
     // MARK: - Persistence
 
     /// How a store's active tasks reach disk.
@@ -401,7 +540,7 @@ public actor TaskStore {
             }
             task.updatedAt = Date()
             let refusal = await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
-            if refusal == nil, let normalization { emit(.transition(normalization)) }
+            if refusal == nil, let normalization { publish(normalization) }
             return refusal
             }
         }
@@ -615,7 +754,7 @@ public actor TaskStore {
         task.updatedAt = now
         task.lastEditedAt = now
         let refusal = await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
-        if refusal == nil, let normalization { emit(.transition(normalization)) }
+        if refusal == nil, let normalization { publish(normalization) }
         return refusal
         }
     }
@@ -952,7 +1091,7 @@ public actor TaskStore {
         // bumped, preserving the original completion time as the archive sort key (and letting the
         // reconciliation's `>=` tiebreak still resolve an equal-timestamp crash-duplicate).
         for task in stale {
-            var moved = task
+            var moved = droppingPendingEffects(task)
             moved.disposition = .archived
             await inactiveStore.insert(moved)
         }
@@ -1010,7 +1149,7 @@ public actor TaskStore {
         case .applied(let transition):
             tasks[id] = task
             didMutate()
-            emit(.transition(transition))
+            publish(transition)
             return true
         case .unchanged:
             return true
@@ -1025,7 +1164,13 @@ public actor TaskStore {
     /// write (reset, reopen, help, validation park/release, template normalization) use this and
     /// then write the task back and `emit` the transition themselves — `applyStatus` for everyone
     /// else.
-    func changeStatus(of task: inout AgentTask, to newStatus: AgentTask.Status, cause: TaskTransitionCause, now: Date = Date()) -> StatusChange {
+    func changeStatus(
+        of task: inout AgentTask,
+        to newStatus: AgentTask.Status,
+        cause: TaskTransitionCause,
+        effectRelease: TaskEffectRecord.Release = .released,
+        now: Date = Date()
+    ) -> StatusChange {
         let from = task.status
         let taskID = task.id
         guard from != newStatus else { return .unchanged }
@@ -1051,14 +1196,20 @@ public actor TaskStore {
             task.disposition = .active
         }
         task.statusRevision += 1
-        return .applied(TaskStatusTransition(
+        let transition = TaskStatusTransition(
             taskID: task.id,
             statusRevision: task.statusRevision,
             from: from,
             to: newStatus,
             at: now,
             cause: cause
-        ))
+        )
+        // The durable subscribers record their effects in THIS write, so the status and its effects
+        // reach disk together.
+        if let note = SmithTaskBriefing.note(for: transition, task: task) {
+            task.pendingEffects.append(TaskEffectRecord(transition: transition, effect: .smithBriefing(note: note), release: effectRelease))
+        }
+        return .applied(transition)
     }
 
     private static let statusLogger = Logger(subsystem: "com.agentsmith", category: "TaskStore.status")
@@ -1113,7 +1264,7 @@ public actor TaskStore {
         }
         tasks[id] = task
         didMutate()
-        emit(.transition(transition))
+        publish(transition)
         return true
     }
 
@@ -1147,7 +1298,7 @@ public actor TaskStore {
         }
         tasks[id] = task
         didMutate()
-        emit(.transition(transition))
+        publish(transition)
         return true
     }
 
@@ -1889,7 +2040,7 @@ public actor TaskStore {
         task.updatedAt = Date()
         tasks[id] = task
         didMutate()
-        if case .applied(let transition) = change { emit(.transition(transition)) }
+        if case .applied(let transition) = change { publish(transition) }
         return true
     }
 
@@ -1913,7 +2064,7 @@ public actor TaskStore {
         guard case .applied(let transition) = changeStatus(of: &task, to: .awaitingReview, cause: .validationBlocked) else { return false }
         tasks[id] = task
         didMutate()
-        emit(.transition(transition))
+        publish(transition)
         return true
     }
 
@@ -1934,7 +2085,7 @@ public actor TaskStore {
             transitions.append(transition)
         }
         if !released.isEmpty { didMutate() }
-        for transition in transitions { emit(.transition(transition)) }
+        for transition in transitions { publish(transition) }
         return released
     }
 
@@ -2113,7 +2264,7 @@ public actor TaskStore {
     /// active-file write leaves the task in both files; load-time reconciliation drops the duplicate
     /// by newest `updatedAt`, which the global copy always wins here.
     private func move(_ task: AgentTask, to disposition: AgentTask.TaskDisposition, in inactiveStore: InactiveTaskStore) async -> Bool {
-        var moved = task
+        var moved = droppingPendingEffects(task)
         moved.disposition = disposition
         moved.updatedAt = Date()
         await inactiveStore.insert(moved)
@@ -2347,6 +2498,14 @@ public actor TaskStore {
             tasks[task.id] = task
         }
         didMutate()
+        // Restored effects are delivered only once THIS store's copy is durable: the state being
+        // restored may have come from a store whose last write had not landed.
+        for task in persistedTasks {
+            for record in task.pendingEffects { effectDurabilitySeq[record.id] = mutationSeq }
+        }
+        if persistedTasks.contains(where: { $0.pendingEffects.contains { $0.release == .released } }) {
+            emit(.effectsReady)
+        }
     }
 
     /// Applies the launch-time repairs to tasks whose worker cannot have survived: a `.running` task
@@ -2357,7 +2516,7 @@ public actor TaskStore {
     /// its workers behind). Returns whether anything changed.
     @discardableResult
     public func reconcileAfterLaunch(excluding excludedTaskID: UUID? = nil) -> Bool {
-        var changed = false
+        var changed = releaseEffectsHeldAcrossLaunch()
         for task in allTasks() where task.disposition == .active && task.id != excludedTaskID {
             if let recovery = ColdBootRunningRecovery.recovery(for: task) {
                 guard var updated = tasks[task.id],
@@ -2367,7 +2526,7 @@ public actor TaskStore {
                 }
                 tasks[task.id] = updated
                 didMutate()
-                emit(.transition(transition))
+                publish(transition)
                 changed = true
             } else if task.status == .starting {
                 changed = applyStatus(id: task.id, to: .pending, cause: .coldBootSpawnAbandoned) || changed

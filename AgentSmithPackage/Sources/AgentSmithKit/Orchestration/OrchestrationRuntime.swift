@@ -1022,6 +1022,9 @@ public actor OrchestrationRuntime {
     private var wakeScheduler: WakeScheduler?
     /// The single serialized consumer of `taskStore`'s events (`installTaskEventConsumerIfNeeded`).
     private var taskEventConsumer: Task<Void, Never>?
+    /// Feeds `taskEventConsumer`; held so a delayed effect retry can re-drive delivery.
+    private var taskEventContinuation: AsyncStream<TaskStoreEvent>.Continuation?
+    private var taskEffectRetryScheduled = false
 
     /// Returns the broker, constructing and fully registering it on first call. Called only from
     /// the serialized Smith-setup path, so there is no concurrent construction. Smith is a PULL
@@ -1074,6 +1077,7 @@ public actor OrchestrationRuntime {
         await broker.registerHandler(type: KnownNotificationType.taskSummary.rawValue, TaskSummaryNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.reminder.rawValue, ReminderNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.userMessage.rawValue, UserMessageNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.taskBriefing.rawValue, TaskBriefingNotificationHandler())
         await broker.registerPullRecipient(.smith)
         await broker.setOnPendingEnqueued { [weak self] kind in
             guard kind == .smith else { return }
@@ -1154,6 +1158,7 @@ public actor OrchestrationRuntime {
     private func installTaskEventConsumerIfNeeded(scheduler: WakeScheduler) async {
         guard taskEventConsumer == nil else { return }
         let (stream, continuation) = AsyncStream<TaskStoreEvent>.makeStream()
+        taskEventContinuation = continuation
         // Claimed before the await below, so a concurrent caller can't install a second consumer.
         taskEventConsumer = Task { [weak self] in
             for await event in stream {
@@ -1162,6 +1167,8 @@ public actor OrchestrationRuntime {
             }
         }
         await taskStore.setEventObserver { event in continuation.yield(event) }
+        // Effects restored from disk (a crash before delivery) are due now.
+        continuation.yield(.effectsReady)
     }
 
     /// The runtime's own reactions to task events.
@@ -1178,6 +1185,8 @@ public actor OrchestrationRuntime {
                 await drainPendingTaskQueue()
             }
             await autoCompactSmithIfNeeded()
+        case .effectsReady:
+            await deliverReadyTaskEffects()
         case .lifecycle(let lifecycle):
             switch lifecycle {
             case .leftActive, .permanentlyDeleted:
@@ -1190,6 +1199,51 @@ public actor OrchestrationRuntime {
             }
         }
     }
+
+    /// Delivers every released transition effect whose write is on disk, oldest first, then removes
+    /// it from its task. A write that has not reached disk yet (or failed to) stops the pass — its
+    /// effect must not outrun the status it describes — and a retry is scheduled. Delivery is
+    /// idempotent: the broker id is the effect's deterministic id, so a crash between submitting
+    /// and removing re-submits a duplicate the broker recognizes.
+    private func deliverReadyTaskEffects() async {
+        let broker = await ensureNotificationBroker()
+        for ready in await taskStore.readyEffects() {
+            guard await taskStore.awaitDurable(through: ready.durableThrough) else {
+                scheduleTaskEffectRetry()
+                return
+            }
+            switch ready.record.effect {
+            case .smithBriefing(let note):
+                await broker.post(
+                    triggerSource: .taskTransition(taskID: ready.taskID, statusRevision: ready.record.transition.statusRevision),
+                    recipient: .smith,
+                    payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)]),
+                    title: "Task \(ready.record.transition.to.displayName)",
+                    idempotencyKey: ready.record.id
+                )
+            }
+            await taskStore.completeEffect(taskID: ready.taskID, recordID: ready.record.id)
+        }
+    }
+
+    /// Re-drives effect delivery after a failed or pending task write. A later mutation's successful
+    /// write covers every earlier one, so retrying is enough; the delay keeps a failing disk from
+    /// spinning the consumer.
+    private func scheduleTaskEffectRetry() {
+        guard !taskEffectRetryScheduled, let continuation = taskEventContinuation else { return }
+        taskEffectRetryScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.taskEffectRetryDelay)
+            await self?.clearTaskEffectRetry()
+            continuation.yield(.effectsReady)
+        }
+    }
+
+    private func clearTaskEffectRetry() {
+        taskEffectRetryScheduled = false
+    }
+
+    private static let taskEffectRetryDelay: Duration = .seconds(5)
 
     /// Surfaces a notification-store persistence failure to the user. A failed save means a restart
     /// could re-fire an already-delivered notification (ledger) or lose one Smith hasn't read yet
@@ -2339,15 +2393,9 @@ public actor OrchestrationRuntime {
             // Only fail the task if it's STILL our `.starting` claim. A wake may have paused it during
             // the spawn (same race as the `.running` finalize below); don't clobber that pause or tell
             // Smith it FAILED when it was actually paused — the paused task retries its spawn on resume.
-            guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.starting], cause: .spawnFailed) else { return }
-            if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-                await smithAgent.appendUserMessage("""
-                    [System: Task "\(task.title)" (ID: \(taskID.uuidString)) could not be started — the worker \
-                    failed to spawn (provider unreachable or tool-scoping failed; details were posted to the \
-                    channel). The task has been marked FAILED. Tell the user briefly what happened; saying \
-                    "retry" will re-run it via `run_task`, which auto-resets failed tasks.]
-                    """)
-            }
+            // Smith is told through the task's durable briefing (`SmithTaskBriefing`): the spawn
+            // failure's details were already posted, so it is released with the write.
+            await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.starting], cause: .spawnFailed)
             return
         }
 
@@ -2357,7 +2405,9 @@ public actor OrchestrationRuntime {
         // an unconditional set to `.running` would silently clobber that pause and run the task Smith
         // was told to interrupt. If the CAS loses, honor the new status and tear down the worker we
         // just spawned — the paused task resumes later via its queued wake.
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.starting], cause: .workerStarted) else {
+        // Smith's "has been started" briefing is written with the status but HELD until Brown is
+        // assigned and briefed, then released below.
+        guard let startEffects = await taskStore.updateStatusHoldingEffects(id: taskID, to: .running, ifCurrentlyIn: [.starting], cause: .workerStarted) else {
             stopLogger.notice("performStart: task \(taskID.uuidString, privacy: .public) left .starting during spawn (e.g. paused by a wake) — tearing down the freshly spawned worker")
             _ = await performTerminateAgent(id: brownID)
             return
@@ -2371,18 +2421,7 @@ public actor OrchestrationRuntime {
             await brownAgent.setAcknowledgesTaskOnFirstTurn()
             await brownAgent.appendUserMessage(briefing, attachments: attachmentsForBrown)
         }
-
-        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-            await smithAgent.appendUserMessage("""
-                [System: Task "\(refreshed.title)" (ID: \(taskID.uuidString)) has been started. A fresh worker \
-                (Brown) was spawned and briefed automatically. Do NOT call `run_task`, `create_task`, or \
-                `notify_brown` FOR THIS task — Brown will signal progress via task_update / task_complete, \
-                and you'll get the periodic Brown-activity digest; do NOT poll. This start came from your own \
-                run_task call, a scheduled timer, auto-advance, or the user's Play/Resume control; if it \
-                resumes a task you were told was paused or stopped, it is in progress again. If the user \
-                doesn't already know it started, tell them in one short line. Handle any NEW user message normally.]
-                """)
-        }
+        await taskStore.releaseEffects(startEffects)
     }
 
     /// Awaits every previously-scheduled restart. Surfaced for tests / smoke
@@ -2617,13 +2656,19 @@ public actor OrchestrationRuntime {
         }
         // This is a NEW Smith (performStart re-spawns it; the live-Smith task-start path doesn't run
         // here). The broker is memoized and survives the re-spawn, so clear any lease the PREVIOUS
-        // Smith left outstanding — otherwise this Smith's first drain would ack away that undelivered
-        // batch and lose it. Cleared → the new Smith re-delivers the durable outbox (at-least-once).
-        await broker.resetLease(for: .smith)
-        await smithAgent.setDrainNotifications { [weak broker] in
-            guard let broker else { return [] }
-            return await broker.drainPendingDeliveries(for: .smith).map(\.text)
-        }
+        // Smith left outstanding: whatever it never acknowledged is re-delivered to this one. The new
+        // lease generation keeps a late acknowledgement from the old Smith from removing an item this
+        // one was re-handed.
+        let leaseGeneration = await broker.resetLease(for: .smith)
+        await smithAgent.setDrainNotifications(
+            { [weak broker] in
+                guard let broker else { return [] }
+                return await broker.drainPendingDeliveries(for: .smith)
+            },
+            onActedOn: { [weak broker] ids in
+                await broker?.acknowledgeDeliveries(ids, for: .smith, leaseGeneration: leaseGeneration)
+            }
+        )
         if let callCallback = onLLMCallRecorded {
             await smithAgent.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .smith, instanceID: id), event) }
         }
@@ -2804,7 +2849,7 @@ public actor OrchestrationRuntime {
                 // Auto-spawn Brown and deliver the task briefing
                 let brownSpawned: Bool
                 if let brownID = await performSpawnBrown(for: resumingTask) {
-                    await taskStore.updateStatus(id: resumingTaskID, status: .running, cause: .workerStarted)
+                    await taskStore.updateStatus(id: resumingTaskID, status: .running, cause: .workerStartedAtRuntimeStart)
                     await taskStore.assignAgent(taskID: resumingTaskID, agentID: brownID)
                     // Re-read to get the latest state (includes any amendments from run_task)
                     resumingTask = await taskStore.task(id: resumingTaskID) ?? resumingTask
@@ -2883,7 +2928,7 @@ public actor OrchestrationRuntime {
                     // mistaken for "the task the user means" after the 2026-07-08 outage.
                     // Mark it failed; `run_task` auto-resets failed tasks, so retrying is
                     // one call once the provider is reachable again.
-                    await taskStore.updateStatus(id: resumingTaskID, status: .failed, cause: .spawnFailed)
+                    await taskStore.updateStatus(id: resumingTaskID, status: .failed, cause: .spawnFailedAtRuntimeStart)
                     smithParts.append("""
                         Failed to start task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)) — Brown could not be spawned \
                         (LLM provider unreachable or the security agent could not scope tools; details were posted to the channel). \
@@ -2949,7 +2994,7 @@ public actor OrchestrationRuntime {
                 while supervisor.handles(role: .brown).count < maxConcurrentWorkers, let task = remaining.first {
                     guard let brownID = await performSpawnBrown(for: task) else { break }
                     remaining.removeFirst()
-                    await taskStore.updateStatus(id: task.id, status: .running, cause: .workerStarted)
+                    await taskStore.updateStatus(id: task.id, status: .running, cause: .workerStartedAtRuntimeStart)
                     await taskStore.assignAgent(taskID: task.id, agentID: brownID)
 
                     let briefing = await composeBrownTaskBriefing(for: task)

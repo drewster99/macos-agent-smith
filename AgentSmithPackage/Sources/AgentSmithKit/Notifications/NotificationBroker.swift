@@ -91,13 +91,15 @@ public actor NotificationBroker {
     /// outbox — persisted via `persistPendingDelivery`, so an undelivered notification survives a
     /// restart and is handed out on the next drain rather than lost.
     private var pendingDelivery: [QueuedDelivery] = []
-    /// Per-recipient LEASE: ids handed out on the recipient's LAST drain but not yet acked. They stay
-    /// in `pendingDelivery` (durable) until the recipient's NEXT drain confirms it came back around
-    /// and consumed them — the ack. This is what makes pull delivery at-LEAST-once: a crash after a
-    /// drain but before the acking next-drain leaves the items in the outbox, so a restart re-delivers
-    /// them (never a lost reminder). In-memory only: on restart the lease is empty and the still-
-    /// present outbox items are re-delivered, which is exactly the intended recovery.
+    /// Per-recipient LEASE: ids handed out but not yet acknowledged. They stay in `pendingDelivery`
+    /// (durable) until the recipient acknowledges them (`acknowledgeDeliveries`), and are not handed
+    /// out again meanwhile. A crash before the acknowledgement leaves them in the outbox, so a restart
+    /// re-delivers them (never a lost reminder). In-memory only: on restart the lease is empty and the
+    /// still-present outbox items are re-delivered, which is exactly the intended recovery.
     private var leased: [RecipientKind: Set<NotificationID>] = [:]
+    /// Bumped by every `resetLease`, so an acknowledgement from a torn-down recipient (carrying the
+    /// OLD generation) can't remove an item its successor has been re-handed and not yet acted on.
+    private var leaseGeneration: [RecipientKind: Int] = [:]
     /// Durable outbox writer. Unlike the ledger's single-flight flush (whose fast-path returns
     /// BEFORE the write lands — fine for a dedup ledger), pending-delivery is the reminder-durability
     /// FLOOR: `SerialPersistenceWriter.flush()` parks the caller until its snapshot has actually been
@@ -107,11 +109,6 @@ public actor NotificationBroker {
     /// Fired (best-effort) when something is enqueued for a pull recipient, so an idle recipient can
     /// wake and drain instead of waiting for its next scheduled tick.
     private var onPendingEnqueued: (@Sendable (RecipientKind) -> Void)?
-    /// Recipient kinds with a drain in flight. `drainPendingDeliveries` awaits a disk flush, leaving
-    /// the actor open; a SECOND concurrent drain for the same kind would ack the batch the first has
-    /// leased-but-not-yet-returned, silently breaking at-least-once. Today the sole caller (Smith's
-    /// single run loop) can't overlap, but this makes the public method safe by construction.
-    private var draining: Set<RecipientKind> = []
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "Notifications")
 
@@ -178,15 +175,17 @@ public actor NotificationBroker {
         onPendingEnqueued = handler
     }
 
-    /// Drops a pull recipient's outstanding lease. MUST be called whenever that recipient is
-    /// re-created (e.g. Smith re-spawned by `restartForNewTask`) — the broker (and this in-memory
-    /// lease) is memoized and outlives the recipient, but the lease's ack semantics are tied to the
-    /// RECIPIENT's lifetime, not the broker's. Without this, a fresh recipient's first drain would
-    /// ack away the PRIOR recipient's still-undelivered batch (remove it from the outbox + mark it
-    /// delivered) and lose it. Clearing the lease makes the new recipient re-deliver the outbox
-    /// instead — the intended at-least-once recovery.
-    public func resetLease(for kind: RecipientKind) {
+    /// Drops a pull recipient's outstanding lease and returns the new lease generation. MUST be
+    /// called whenever that recipient is re-created (e.g. Smith re-spawned) — the broker outlives the
+    /// recipient, but a lease belongs to the recipient that was handed the items. Clearing it makes
+    /// the new recipient re-deliver whatever the old one never acknowledged. The new recipient passes
+    /// the returned generation with its acknowledgements.
+    @discardableResult
+    public func resetLease(for kind: RecipientKind) -> Int {
         leased[kind] = nil
+        let generation = (leaseGeneration[kind] ?? 0) + 1
+        leaseGeneration[kind] = generation
+        return generation
     }
 
     /// Seed the pending-delivery queue from persisted state at cold boot, so notifications that were
@@ -381,46 +380,38 @@ public actor NotificationBroker {
 
     // MARK: - Pull delivery (persistence until delivery)
 
-    /// Hands the recipient its queued notifications with AT-LEAST-ONCE durability, via lease/ack:
+    /// Hands the recipient the queued notifications it has not been handed yet, LEASING them: they
+    /// stay in the durable outbox — and are not handed out again — until the recipient ACKNOWLEDGES
+    /// them (`acknowledgeDeliveries`) once it has finished acting on them.
     ///
-    ///   1. ACK the previous lease — the ids handed out on the LAST drain. The recipient has come
-    ///      back around to this drain, so it consumed them: remove from the durable outbox and mark
-    ///      them `.delivered`. This is the acknowledgement.
-    ///   2. LEASE and return the current batch — hand it to the recipient but KEEP it in the outbox
-    ///      until the NEXT drain acks it.
-    ///
-    /// So a crash after a drain but before the acking next-drain leaves the batch in the persisted
-    /// outbox → a restart re-delivers it (never a lost reminder). The cost is at-least-once: a kill
-    /// between the recipient processing a batch and its next drain can re-deliver that batch once.
-    /// The `pendingDelivery.contains` guard in `deliver` prevents a leased id from being re-enqueued
-    /// while it's outstanding.
-    public func drainPendingDeliveries(for kind: RecipientKind) async -> [QueuedDelivery] {
-        // Enforce one in-flight drain per kind (the method awaits flushes mid-body, opening the
-        // actor): a concurrent same-kind drain returns empty rather than acking the other's batch.
-        guard !draining.contains(kind) else { return [] }
-        draining.insert(kind)
-        defer { draining.remove(kind) }
-
-        let now = Date()
-        var acked = false
-        if let previous = leased[kind], !previous.isEmpty {
-            pendingDelivery.removeAll { previous.contains($0.notification.id) }
-            for id in previous { ledger.markDelivered(id, at: now) }
-            leased[kind] = nil
-            acked = true
-        }
-
-        let batch = pendingDelivery.filter { $0.notification.recipient.kind == kind }
+    /// A crash (or a recipient torn down) between the hand-out and the acknowledgement leaves them in
+    /// the persisted outbox, so they are re-delivered to the next recipient (`resetLease`) or after a
+    /// restart — never lost. Acknowledging only after the recipient has ACTED (not on its next drain,
+    /// as this used to) shrinks the redelivery window to "crashed while acting on it": a note that was
+    /// fully acted on is not handed out again.
+    public func drainPendingDeliveries(for kind: RecipientKind) -> [QueuedDelivery] {
+        let alreadyLeased = leased[kind] ?? []
+        let batch = pendingDelivery.filter { $0.notification.recipient.kind == kind && !alreadyLeased.contains($0.notification.id) }
         if !batch.isEmpty {
-            leased[kind] = Set(batch.map(\.notification.id))
-        }
-        // Persist only when the ack actually removed items — the lease itself is in-memory (a
-        // restart re-delivers, which is the point).
-        if acked {
-            await flushPendingDelivery()
-            await flushLedger()
+            leased[kind, default: []].formUnion(batch.map(\.notification.id))
         }
         return batch
+    }
+
+    /// The recipient has finished acting on these deliveries: remove them from the durable outbox and
+    /// record them delivered. `leaseGeneration` is the value `resetLease` returned when this recipient
+    /// was wired; an acknowledgement from an older generation (a torn-down recipient) is ignored, as
+    /// are ids not currently leased.
+    public func acknowledgeDeliveries(_ ids: [NotificationID], for kind: RecipientKind, leaseGeneration generation: Int) async {
+        guard generation == (leaseGeneration[kind] ?? 0) else { return }
+        let acknowledged = Set(ids).intersection(leased[kind] ?? [])
+        guard !acknowledged.isEmpty else { return }
+        let now = Date()
+        pendingDelivery.removeAll { acknowledged.contains($0.notification.id) }
+        for id in acknowledged { ledger.markDelivered(id, at: now) }
+        leased[kind]?.subtract(acknowledged)
+        await flushPendingDelivery()
+        await flushLedger()
     }
 
     /// Durably persists the CURRENT pending-delivery queue and does not return until that snapshot

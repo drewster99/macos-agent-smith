@@ -16,4 +16,7 @@ public enum KnownNotificationType: String, CaseIterable, Sendable {
     case reminder
     /// Inbound external message observed by a worker. Dispatch `.deliver`, recipient `.smith`.
     case userMessage = "user_message"
+    /// A task status change Smith is told about (`SmithTaskBriefing`). Dispatch `.deliver`,
+    /// recipient `.smith`.
+    case taskBriefing = "task_briefing"
 }

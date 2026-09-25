@@ -401,10 +401,16 @@ public actor AgentActor {
     private var smithDigestProvider: (@Sendable (Date) async -> String?)?
 
     /// Smith-only: pulls notifications the broker has queued for this agent (reminders, summaries,
-    /// external messages), returning their delivery text. Drained once per run-loop iteration — Smith
-    /// no longer polls scheduled wakes; the `WakeScheduler` fires them into the broker, which holds
-    /// them here until Smith drains. Nil in agents/tests without a broker.
-    private var drainNotifications: (@Sendable () async -> [String])?
+    /// task briefings, external messages). Drained once per run-loop iteration — the broker holds
+    /// them until Smith drains. Nil in agents/tests without a broker.
+    private var drainNotifications: (@Sendable () async -> [QueuedDelivery])?
+    /// Smith-only: told which drained notifications Smith has finished ACTING on — fired when the run
+    /// loop next goes idle, i.e. after every turn their arrival triggered has completed. The broker
+    /// keeps them in its durable outbox until then, so a crash mid-action re-delivers them, and one
+    /// fully acted on is never handed out again.
+    private var onNotificationsActedOn: (@Sendable ([NotificationID]) async -> Void)?
+    /// Drained notifications not yet reported through `onNotificationsActedOn`.
+    private var notificationsAwaitingAcknowledgement: [NotificationID] = []
 
     private var maxToolCallsPerIteration: Int
     /// Maximum concurrent Security Agent evaluations for ONE agent's tool batch, enforced as a
@@ -836,8 +842,12 @@ public actor AgentActor {
 
     /// Smith-only: wires the notification-drain source (the broker's pending queue for this agent).
     /// Once set, the run loop drains queued notifications each iteration instead of polling wakes.
-    public func setDrainNotifications(_ handler: @escaping @Sendable () async -> [String]) {
+    public func setDrainNotifications(
+        _ handler: @escaping @Sendable () async -> [QueuedDelivery],
+        onActedOn: @escaping @Sendable ([NotificationID]) async -> Void
+    ) {
         drainNotifications = handler
+        onNotificationsActedOn = onActedOn
     }
 
     /// Wakes the agent from an idle sleep so it can drain freshly-queued notifications immediately
@@ -1464,6 +1474,8 @@ public actor AgentActor {
             await pruneHistoryIfNeeded()
 
             guard hasUnprocessedInput else {
+                // Every turn the drained notifications triggered is done: acknowledge them.
+                await acknowledgeActedOnNotifications()
                 // About to go quiet. If a tool is STILL failing, say so before falling silent —
                 // see `reportAbandonedToolFailures`.
                 await reportAbandonedToolFailures()
@@ -3609,13 +3621,22 @@ public actor AgentActor {
     /// durability. A no-op for agents without a drain source wired (Brown).
     private func drainQueuedNotifications() async {
         guard let drainNotifications else { return }
-        let texts = await drainNotifications()
-        guard !texts.isEmpty else { return }
-        for text in texts {
-            conversationHistory.append(.user(text))
+        let deliveries = await drainNotifications()
+        guard !deliveries.isEmpty else { return }
+        for delivery in deliveries {
+            conversationHistory.append(.user(delivery.text))
+            notificationsAwaitingAcknowledgement.append(delivery.notification.id)
         }
         hasUnprocessedInput = true
         pushLiveContext()
+    }
+
+    /// Reports the notifications Smith has finished acting on (see `onNotificationsActedOn`).
+    private func acknowledgeActedOnNotifications() async {
+        guard !notificationsAwaitingAcknowledgement.isEmpty, let onNotificationsActedOn else { return }
+        let ids = notificationsAwaitingAcknowledgement
+        notificationsAwaitingAcknowledgement.removeAll()
+        await onNotificationsActedOn(ids)
     }
 
     /// Smith-only: if the digest interval has elapsed, ask the runtime-supplied provider for a

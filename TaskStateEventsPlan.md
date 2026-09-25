@@ -395,7 +395,26 @@ touched) → commit → push.
    - The old hooks are kept until the consumer is proven, then `onTaskTerminated` is derived.
    - Tests: every writer emits once; illegal causes are refused; no-ops and restore are silent;
      ordering; the release-ticket ordering pinned per call site; lifecycle events.
-3. **Smith briefing.**
+3. ✅ **Smith briefing.** Built:
+   - **Effect outbox.** `TaskEffectRecord` lives on `AgentTask.pendingEffects` and is written in
+     the same write as the status, with the id `taskID|statusRevision|subscriber`.
+   - **Held effects.** A writer can hold effects with `updateStatusHoldingEffects`, returning a
+     ticket for `releaseEffects`. A 30 s watchdog releases a forgotten ticket and logs an error;
+     effects still held at launch are released.
+   - **Delivery.** The runtime's consumer delivers only after `awaitDurable`, via the broker (new
+     `TriggerSource.taskTransition` and `task_briefing` type), and retries after a failed write.
+   - **Smith briefing notes.** The four `appendUserMessage` notes moved into `SmithTaskBriefing`:
+     started, spawn failed, completed, and failed with no progress. They keep today's wording,
+     except the user-Accept note, which no longer claims validation passed. Starts and failures
+     during runtime start use their own causes (`workerStartedAtRuntimeStart`,
+     `spawnFailedAtRuntimeStart`), because the new Smith's initial instruction already covers them.
+   - **Effectively-once delivery.** The broker no longer acknowledges on the next drain. Smith
+     acknowledges a delivery when its run loop next goes idle, meaning every turn the note triggered
+     has finished. Lease generations stop a torn-down Smith's late acknowledgement from removing
+     what its successor was handed. The broker's own outbox and ledger are the consumed record, so
+     no separate consumed-id file was needed.
+   - **Effects on archived tasks.** A task leaving the active store drops its undelivered effects.
+   - Original scope:
    - The parity table, committed first.
    - The move into `SmithTaskBriefing`, delivered the same way as today.
    - Then durable delivery with `QueuedDelivery` ids and the consumed-id set.

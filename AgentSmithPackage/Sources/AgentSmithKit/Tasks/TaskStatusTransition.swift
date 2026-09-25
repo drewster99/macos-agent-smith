@@ -41,8 +41,15 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     case startAbandoned
     /// The worker could not be spawned; the task fails.
     case spawnFailed
-    /// The worker is live and assigned. THE "started" fact for watches.
+    /// As `spawnFailed`, while the runtime itself was starting: the NEW Smith's initial instruction
+    /// reports it, so the Smith briefing stays silent.
+    case spawnFailedAtRuntimeStart
+    /// The worker is live and assigned. A "started" fact for watches.
     case workerStarted
+    /// As `workerStarted`, while the runtime itself was starting (a run_task restart with no live
+    /// Smith, or the launch auto-resume of interrupted tasks): the NEW Smith's initial instruction
+    /// reports it, so the Smith briefing stays silent. Also a "started" fact for watches.
+    case workerStartedAtRuntimeStart
     /// Brown's first-turn acknowledgement. Usually a no-op (the runtime already set `.running`).
     case workerAcknowledged
 
@@ -52,7 +59,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     /// Every criterion settled (or validation is switched off) and the task completed.
     case validationPassed(validationWasRun: Bool)
     /// Too many consecutive rounds settled nothing.
-    case validationFailedNoProgress
+    case validationFailedNoProgress(roundsWithoutNewApprovals: Int, stillRejected: Int)
     /// A validator error parked the task for the user.
     case validationEscalated
     /// No validator model is assigned; the task is parked until one is.
@@ -117,9 +124,9 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return from.isRunnable && to == .starting
         case .startAbandoned:
             return from == .starting && to == .pending
-        case .spawnFailed:
+        case .spawnFailed, .spawnFailedAtRuntimeStart:
             return [.starting, .pending, .paused, .interrupted, .running].contains(from) && to == .failed
-        case .workerStarted:
+        case .workerStarted, .workerStartedAtRuntimeStart:
             return [.starting, .pending, .paused, .interrupted].contains(from) && to == .running
         case .workerAcknowledged:
             return (from.isRunnable || from == .running) && to == .running

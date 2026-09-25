@@ -445,9 +445,21 @@ extension OrchestrationRuntime {
         // CAS: only fail if still validating AND this round's contract is still the live one — never
         // overwrite a pause/stop that landed after the coordinator's status snapshot, and never fail
         // a task for not converging on a contract that has since been rewritten.
-        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .validationFailedNoProgress) else { return }
-        guard let task = await taskStore.task(id: taskID) else { return }
-        let reason = "No acceptance criterion was newly approved for \(validationsWithoutNewApprovals) validation rounds in a row — \(stillRejected) criterion(s) still rejected."
+        //
+        // Smith's briefing is written with the status but HELD until the failure's own update and
+        // banner exist, then released below.
+        guard let effects = await taskStore.updateStatusHoldingEffects(
+            id: taskID,
+            to: .failed,
+            ifCurrentlyIn: [.validating],
+            ifValidationRoundIs: token,
+            cause: .validationFailedNoProgress(roundsWithoutNewApprovals: validationsWithoutNewApprovals, stillRejected: stillRejected)
+        ) else { return }
+        guard let task = await taskStore.task(id: taskID) else {
+            await taskStore.releaseEffects(effects)
+            return
+        }
+        let reason = SmithTaskBriefing.noProgressReason(roundsWithoutNewApprovals: validationsWithoutNewApprovals, stillRejected: stillRejected)
         await taskStore.addUpdate(id: taskID, message: "Task FAILED validation: \(reason)")
         for agentID in task.assigneeIDs {
             _ = await terminateAgent(id: agentID)
@@ -463,17 +475,7 @@ extension OrchestrationRuntime {
                 "severity": .severity(.warning)
             ]
         ))
-        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-            await smithAgent.appendUserMessage("""
-                [System: Task "\(task.title)" (ID: \(taskID.uuidString)) FAILED acceptance validation. \(reason) \
-                The result was NOT delivered. Tell the user briefly. Then decide WHY it stalled by reading the \
-                rejection reasons in the task updates: if the criteria themselves were too strict, ambiguous, or \
-                demanded evidence the worker's tools cannot produce, fix them with `set_acceptance_criteria` before \
-                retrying; if the worker simply kept resubmitting incomplete work, a `run_task` retry (which resets \
-                the validation counters) with clearer instructions may be enough. Do NOT re-run it unchanged and \
-                expect a different outcome.]
-                """)
-        }
+        await taskStore.releaseEffects(effects)
     }
 
     /// Hard ceiling on items a prepare function may emit for one criterion. Exceeding it
@@ -1274,8 +1276,16 @@ extension OrchestrationRuntime {
         // CAS: only complete from an allowed state under the contract we judged — a pause/stop/
         // re-validate or a criteria edit that landed after the caller's snapshot must not be
         // overwritten by this completion.
-        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token, cause: cause) else { return false }
-        guard let completed = await taskStore.task(id: taskID) else { return false }
+        //
+        // Smith's briefing is written with the status but HELD until the worker is torn down and the
+        // Task Completed banner (which it says already delivered the result) exists.
+        guard let effects = await taskStore.updateStatusHoldingEffects(
+            id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token, cause: cause
+        ) else { return false }
+        guard let completed = await taskStore.task(id: taskID) else {
+            await taskStore.releaseEffects(effects)
+            return false
+        }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
         }
@@ -1296,16 +1306,7 @@ extension OrchestrationRuntime {
         }
         await channel.post(ChannelMessage(sender: .system, content: completed.title, metadata: bannerMetadata))
         await summarizeAndEmbedTask(taskID: taskID)
-        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-            let completionNote = validationWasRun
-                ? "passed acceptance validation and is COMPLETE"
-                : "is COMPLETE — acceptance validation is disabled, so its criteria were NOT judged"
-            await smithAgent.appendUserMessage("""
-                [System: Task "\(completed.title)" (ID: \(taskID.uuidString)) \(completionNote). \
-                The result was already delivered to the user in the Task Completed banner — do not repeat it. \
-                No action is needed from you.]
-                """)
-        }
+        await taskStore.releaseEffects(effects)
         return true
     }
 

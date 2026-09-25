@@ -475,9 +475,12 @@ task state. Add a subscriber.
   Play overrides a hold.
 
 Decisions:
-- The Smith briefing keeps today's set of notified transitions. It is delivered effectively once
-  through the broker's durable Smith queue with a consumed-id set; the residual duplicate window is
-  one interrupted turn.
+- The Smith briefing (`SmithTaskBriefing`) keeps today's set of notified transitions. It is
+  recorded as a durable effect in the status write and delivered through the broker's Smith queue,
+  effectively once. Smith acknowledges a delivery (`acknowledgeDeliveries`, with the lease
+  generation) only when its run loop next goes idle, so the only duplicate window is a crash
+  mid-turn. Don't reintroduce `appendUserMessage` for a status note: it is dropped when no Smith
+  is live.
 - Watches fire for crash-recovery transitions but not for session shutdown or deletion.
 - Template watches are blueprints for the notifying actions only. `startTask` is same-session,
   ordinary tasks only.
