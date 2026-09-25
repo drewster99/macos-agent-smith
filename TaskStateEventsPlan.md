@@ -259,7 +259,7 @@ public struct TaskWatch: Codable, Sendable, Equatable, Identifiable {
     public var action: TaskWatchAction
     public var lifetime: TaskWatchLifetime            // .once / .everyTime
     public var state: TaskWatchState                  // .active / .cancelled(at:) / .consumed(at:)
-    public var nextOccurrence: Int                    // monotonic; survives firing compaction
+    public var nextOccurrence: Int                    // monotonic from 1; survives firing compaction
     public let createdBy: TaskAuthorship              // .user / .smith
     public let createdAt: Date
     public var recentFirings: [TaskWatchFiring]       // bounded audit (Decision R4)
@@ -493,7 +493,49 @@ touched) → commit → push.
    - **Transcript rows.** Shipped in Phase 4.
    - Original scope: Tools with all rosters, Task Detail, the Timers tab, `get_task_details`,
    transcript kinds (+ the `ChannelMessageKind` guard table).
-8. **Integrated recheck.** Failure injection: a crash at each point (after the write before durable,
+8. ✅ **Integrated recheck.** Built: failure-injection tests for each crash point (a held briefing
+   on disk delivered at the next launch; an in-flight firing adopting the ledger's outcome), for
+   notification-queue save and load failures, and for a start target that left the session. Two
+   independent final reviews (Codex and a Claude agent) found issues; all confirmed ones are
+   fixed, each with a regression test:
+   - **Watch lifecycle:**
+     - A macOS delivery no longer waits on the permission prompt, which would stall the whole event
+       consumer.
+     - Cancelling a fired `.once` watch now stops its undelivered firing too.
+     - A refused chain link releases its target's hold.
+     - `addWatch` refuses a non-runnable target and a watched task that has already finished.
+     - Turning a task into a template cancels its chain links and drops its holds and effects.
+   - **Holds and start paths:** scheduled and queued starts check holds before `prepareForRun`;
+     `.watchSatisfied` queue entries never reopen or reset, and skip a cancelled watch.
+   - **Crash consistency:**
+     - An effect now leaves its task only once the broker durably owns it (`submit` reports
+       ownership; a failed pull-queue save or a pending push retry keeps it for resubmission).
+     - Launch reconciliation adopts ledger outcomes for pending and in-flight firings, and
+       resubmits an in-flight firing the broker lost.
+     - A failed `tasks.json` write is re-attempted on the next durability check.
+   - **Cancellation races:** the effect consumer claims a firing and re-reads it before sending,
+     `startTaskForWatch` re-checks the firing at the moment of acting, and cancelling a watch
+     releases its hold in the same actor step.
+   - **Timing:**
+     - Completion effects are released before summarization.
+     - The held-effect watchdog is cancelled at launch.
+     - The app adopts the live store immediately, and a notification click that launched the app
+       is honored.
+   - **Status semantics:**
+     - Brown's acknowledgement is an atomic "running and assigned to me" check that never writes a
+       status (the `workerAcknowledged` cause is gone).
+     - Capacity shedding and a missing-validator park fire no watch.
+   - **Wakes and failures:**
+     - Archive and delete cancel ALL of a task's wakes (`WakeCancellationCause.taskRemoved`).
+     - Wakes for tasks removed while the session was stopped are dropped at replay.
+     - Holds dangling on such tasks are reported at start.
+     - The run queue's save and load failures are surfaced; an unreadable queue is never
+       overwritten.
+   - **`list_task_watches`** includes library templates.
+   - **Not done:** the live A→B run could not be exercised because the Mac's screen was locked for
+     the whole run (the app launched and loaded cleanly, and `tasks.json` was verified
+     byte-identical before and after).
+   - Original scope: Failure injection: a crash at each point (after the write before durable,
    after durable before submit, after settle before write-back), persistence failure, permission
    denial, template, cross-session, capacity-deferred, every start origin. Then a live run: chain
    A→B, notifications, restart mid-chain. Update CLAUDE.md.

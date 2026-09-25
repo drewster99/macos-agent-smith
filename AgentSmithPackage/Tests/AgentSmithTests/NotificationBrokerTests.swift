@@ -12,7 +12,7 @@ struct NotificationBrokerTests {
         func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { true }
         func taskTitle(_ taskID: UUID) async -> String? { nil }
         func postSystemNotice(_ text: String, taskID: UUID?) async {}
-        func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome { .placed }
+        func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID, occurrence: Int) async -> AutoRunDispatchOutcome { .placed }
     }
 
     private actor CallLog {

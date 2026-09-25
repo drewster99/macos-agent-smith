@@ -184,7 +184,7 @@ struct SmithTaskBriefingTests {
     @Test("Transitions Smith was never told about stay unbriefed")
     func unbriefedCauses() {
         let silent: [TaskTransitionCause] = [
-            .startClaimed, .startAbandoned, .workerAcknowledged, .submittedForValidation, .validationEscalated,
+            .startClaimed, .startAbandoned, .submittedForValidation, .validationEscalated,
             .validationBlocked, .validationReleased, .rejectionsReturned, .helpRequested, .helpProvided,
             .userPaused, .userStopped, .userFailed, .userRevalidated, .userSentBack, .capacityShed,
             .scheduledAction(.pause), .scheduledTimeReached, .workerSelfTerminated, .smithTerminatedWorker,

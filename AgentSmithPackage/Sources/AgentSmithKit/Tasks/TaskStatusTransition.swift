@@ -50,8 +50,6 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     /// Smith, or the launch auto-resume of interrupted tasks): the NEW Smith's initial instruction
     /// reports it, so the Smith briefing stays silent. Also a "started" fact for watches.
     case workerStartedAtRuntimeStart
-    /// Brown's first-turn acknowledgement. Usually a no-op (the runtime already set `.running`).
-    case workerAcknowledged
 
     // MARK: Validation
     /// Brown's `task_complete` handed the result to acceptance validation.
@@ -128,8 +126,6 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return [.starting, .pending, .paused, .interrupted, .running].contains(from) && to == .failed
         case .workerStarted, .workerStartedAtRuntimeStart:
             return [.starting, .pending, .paused, .interrupted].contains(from) && to == .running
-        case .workerAcknowledged:
-            return (from.isRunnable || from == .running) && to == .running
         case .submittedForValidation:
             return from == .running && to == .validating
         case .validationPassed:

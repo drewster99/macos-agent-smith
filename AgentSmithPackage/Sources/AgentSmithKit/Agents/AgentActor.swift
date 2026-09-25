@@ -2889,18 +2889,17 @@ public actor AgentActor {
         }
     }
 
-    /// Acknowledges the agent's assigned task as a runtime side effect: bumps the ack counter,
-    /// moves the task to `.running`, and privately notifies Smith whether this is a fresh start
-    /// or a continuation. Formerly the `task_acknowledged` tool; now a first-turn runtime action
-    /// with no model-callable surface. The ack counter is authoritative across respawns,
-    /// rejections, and crash recovery (a `count == 1` post-increment is a fresh ack).
+    /// Acknowledges the agent's assigned task as a runtime side effect: bumps the ack counter and
+    /// privately notifies Smith whether this is a fresh start or a continuation. Formerly the
+    /// `task_acknowledged` tool; now a first-turn runtime action with no model-callable surface.
+    /// The ack counter is authoritative across respawns, rejections, and crash recovery (a
+    /// `count == 1` post-increment is a fresh ack). It never changes the task's status: every start
+    /// path sets `.running` before briefing the worker, and a task paused, stopped or finished in
+    /// between must stay that way (the store refuses the acknowledgement, so nothing is posted).
     private func performTaskAcknowledgement() async {
         guard let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) else { return }
-        guard task.status.isRunnable || task.status == .running else { return }
-
-        let newAckCount = await toolContext.taskStore.incrementAcknowledgmentCount(id: task.id)
+        guard let newAckCount = await toolContext.taskStore.acknowledgeTask(id: task.id, byAgent: toolContext.agentID) else { return }
         let isContinuation = newAckCount > 1
-        await toolContext.taskStore.updateStatus(id: task.id, status: .running, cause: .workerAcknowledged)
 
         guard let smithID = await toolContext.agentIDForRole(.smith) else { return }
         let content = isContinuation

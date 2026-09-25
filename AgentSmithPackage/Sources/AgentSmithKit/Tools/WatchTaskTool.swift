@@ -273,8 +273,13 @@ struct ListTaskWatchesTool: AgentTool {
         case .malformed(let raw): return .failure("Invalid task_id: '\(raw)' is not a valid UUID.")
         case .value(let id): filter = id
         }
-        let tasks = await context.taskStore.allTasks().filter { filter == nil || $0.id == filter }
-        let titles = Dictionary(await context.taskStore.allTasks().map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })
+        // Library templates too: a notifying watch on a template lives there, and Smith needs its id
+        // to cancel it.
+        let everything = await context.taskStore.allTasks() + context.taskStore.allLibraryTemplates()
+        var seen: Set<UUID> = []
+        let unique = everything.filter { seen.insert($0.id).inserted }
+        let tasks = unique.filter { filter == nil || $0.id == filter }
+        let titles = Dictionary(unique.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })
         var lines: [String] = []
         for task in tasks {
             for watch in task.watches {

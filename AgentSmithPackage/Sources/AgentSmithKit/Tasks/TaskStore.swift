@@ -245,21 +245,33 @@ public actor TaskStore {
             guard let index = task.watches.firstIndex(where: { $0.id == watchID }) else {
                 return "Task \(taskID.uuidString) has no watch \(watchID.uuidString)."
             }
-            guard task.watches[index].isActive else { return nil }
-            task.watches[index].state = .cancelled(at: Date())
+            // A fired `.once` watch is no longer active, but a firing it produced may still be
+            // undelivered — cancelling must stop THAT too. Only the state flip needs an active watch.
+            if task.watches[index].isActive {
+                task.watches[index].state = .cancelled(at: Date())
+            }
             for firing in task.watches[index].recentFirings where !firing.state.isSettled {
                 task.watches[index].setFiringState(occurrence: firing.occurrence, .cancelled)
+            }
+            for record in task.pendingEffects {
+                if case .watchFiring(let id, _) = record.effect, id == watchID {
+                    effectDurabilitySeq[record.id] = nil
+                }
             }
             task.pendingEffects.removeAll {
                 if case .watchFiring(let id, _) = $0.effect { return id == watchID }
                 return false
             }
             task.updatedAt = Date()
+            // A cancelled chain link no longer holds its target — released in this same actor step,
+            // so no start in between can see the watch cancelled but its hold still in place.
+            for (heldID, held) in tasks where heldID != taskID && held.startHolds.contains(where: { $0.watchID == watchID }) {
+                var updated = held
+                updated.startHolds.removeAll { $0.watchID == watchID }
+                updated.updatedAt = Date()
+                tasks[heldID] = updated
+            }
             return nil
-        }
-        // A cancelled chain link no longer holds its target.
-        if refusal == nil {
-            releaseStartHolds(placedBy: watchID)
         }
         return refusal
     }
@@ -279,6 +291,14 @@ public actor TaskStore {
         return remaining
     }
 
+    /// The state of the watch `watchID` on any active task here, or nil when no such watch exists.
+    public func watchState(_ watchID: UUID) -> TaskWatchState? {
+        for task in tasks.values {
+            if let watch = task.watch(id: watchID) { return watch.state }
+        }
+        return nil
+    }
+
     /// The tasks waiting on `watchedTaskID` (holding a start hold its watches placed).
     public func tasksHeld(by watchedTaskID: UUID) -> [AgentTask] {
         allTasks().filter { $0.startHolds.contains { $0.watchedTaskID == watchedTaskID } }
@@ -292,9 +312,11 @@ public actor TaskStore {
         for hold in holds {
             _ = await cancelWatch(hold.watchID, on: hold.watchedTaskID)
         }
-        // A hold whose watch could not be cancelled (its task is gone) is removed directly.
-        if var task = tasks[taskID], !task.startHolds.isEmpty {
-            task.startHolds.removeAll()
+        // A hold whose watch could not be cancelled (its task is gone) is removed directly. Only the
+        // holds overridden here: one added while this was suspended belongs to a watch still live.
+        let overridden = Set(holds)
+        if var task = tasks[taskID], task.startHolds.contains(where: overridden.contains) {
+            task.startHolds.removeAll(where: overridden.contains)
             tasks[taskID] = task
             didMutate()
         }
@@ -336,6 +358,12 @@ public actor TaskStore {
             }
             if target.isTemplate {
                 return "A watch can't start a template directly. Start a task instead."
+            }
+            guard target.status.isRunnable else {
+                return "\"\(target.title)\" is \(target.status.displayName.lowercased()). A watch only starts a pending, paused or interrupted task, and never reopens or resets one."
+            }
+            if let watched = tasks[taskID], watched.status.isTerminal {
+                return "\"\(watched.title)\" has already \(watched.status == .completed ? "completed" : "failed"), so this watch would only fire if it ran again — and \"\(target.title)\" would wait until then. Start it now instead, or re-run the first task before adding the watch."
             }
             if startChainReaches(taskID, from: targetID) {
                 return "Starting \"\(target.title)\" from this task would create a loop: it already leads back here."
@@ -471,6 +499,9 @@ public actor TaskStore {
     /// At launch no writer survives to release a held effect: release them all. Returns whether
     /// anything changed.
     private func releaseEffectsHeldAcrossLaunch() -> Bool {
+        // Their writers are gone, so their watchdogs would only log a false "never released".
+        for (_, watchdog) in heldEffectTickets { watchdog.cancel() }
+        heldEffectTickets.removeAll()
         var changed = false
         for (id, task) in tasks where task.pendingEffects.contains(where: { $0.release == .held }) {
             var updated = task
@@ -490,12 +521,18 @@ public actor TaskStore {
 
     /// A task leaving the active store takes no undelivered effects with it: they describe a run
     /// the user has now archived or deleted, and a later restore must not replay them.
+    /// Pure: the caller forgets the dropped records' durability tracking (`forgetEffects(of:)`) only
+    /// once the move has succeeded — a failed move leaves the task active with its effects, which
+    /// must still wait for disk.
     private func droppingPendingEffects(_ task: AgentTask) -> AgentTask {
         guard !task.pendingEffects.isEmpty else { return task }
         var stripped = task
-        for record in stripped.pendingEffects { effectDurabilitySeq[record.id] = nil }
         stripped.pendingEffects.removeAll()
         return stripped
+    }
+
+    private func forgetEffects(of task: AgentTask) {
+        for record in task.pendingEffects { effectDurabilitySeq[record.id] = nil }
     }
 
     // MARK: - Persistence
@@ -559,6 +596,12 @@ public actor TaskStore {
                 await withCheckedContinuation { continuation in
                     durabilityWaiters.append((target, continuation))
                 }
+            } else if durableSeq < target {
+                // The write covering `target` was attempted and failed. Nothing else may ever
+                // mutate this store again, so ask for another attempt rather than wait on one;
+                // the caller retries and a successful write covers every earlier seq.
+                mutationSeq += 1
+                schedulePersistenceDrain()
             }
             return durableSeq >= target
         }
@@ -700,9 +743,13 @@ public actor TaskStore {
             } else {
                 clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
             }
+            let spentChainLinks = isTemplate && !wasTemplate ? stripRunStateForTemplatePromotion(&task) : []
             task.updatedAt = Date()
             let refusal = await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
-            if refusal == nil, let normalization { publish(normalization) }
+            if refusal == nil {
+                if let normalization { publish(normalization) }
+                for watchID in spentChainLinks { releaseStartHolds(placedBy: watchID) }
+            }
             return refusal
             }
         }
@@ -910,13 +957,17 @@ public actor TaskStore {
         } else {
             clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
         }
+        let spentChainLinks = isTemplate && !wasTemplate ? stripRunStateForTemplatePromotion(&task) : []
         task.title = title
         task.description = description
         let now = Date()
         task.updatedAt = now
         task.lastEditedAt = now
         let refusal = await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
-        if refusal == nil, let normalization { publish(normalization) }
+        if refusal == nil {
+            if let normalization { publish(normalization) }
+            for watchID in spentChainLinks { releaseStartHolds(placedBy: watchID) }
+        }
         return refusal
         }
     }
@@ -951,6 +1002,29 @@ public actor TaskStore {
         historicalRun.updatedAt = Date()
         tasks[historicalRun.id] = historicalRun
         appendUpdate(to: &task, "Converted this task into a template. Preserved the prior run as child task \(historicalRun.id.uuidString).")
+    }
+
+    /// A task becoming a template leaves its run state behind (decision 10: a template is global, a
+    /// chain link targets one session's task). Its `startTask` watches are cancelled — their firings
+    /// too — and returned so the caller can release their targets' holds once the flip lands; holds
+    /// ON the task are dropped (a template is never a chain target); undelivered effects are dropped
+    /// (they describe a run, and the template leaves this store). Notifying watches stay as
+    /// blueprints.
+    private func stripRunStateForTemplatePromotion(_ task: inout AgentTask) -> [UUID] {
+        var cancelled: [UUID] = []
+        let now = Date()
+        for index in task.watches.indices {
+            guard case .startTask = task.watches[index].action else { continue }
+            if task.watches[index].isActive { task.watches[index].state = .cancelled(at: now) }
+            for firing in task.watches[index].recentFirings where !firing.state.isSettled {
+                task.watches[index].setFiringState(occurrence: firing.occurrence, .cancelled)
+            }
+            cancelled.append(task.watches[index].id)
+        }
+        task.startHolds.removeAll()
+        forgetEffects(of: task)
+        task.pendingEffects.removeAll()
+        return cancelled
     }
 
     /// Returns the transition when the status actually changed; the caller emits it once the task is
@@ -1270,7 +1344,10 @@ public actor TaskStore {
             for task in stale { await inactiveStore.remove(id: task.id) }
             return
         }
-        for task in stale { tasks.removeValue(forKey: task.id) }
+        for task in stale {
+            tasks.removeValue(forKey: task.id)
+            forgetEffects(of: task)
+        }
         didMutate()
         for task in stale { emit(.lifecycle(.leftActive(taskID: task.id, disposition: .archived))) }
     }
@@ -2361,8 +2438,12 @@ public actor TaskStore {
     /// distinguish a first-time ack (count == 1) from a continuation (count > 1) without relying
     /// on the fragile `updates.isEmpty` heuristic.
     @discardableResult
-    public func incrementAcknowledgmentCount(id: UUID) -> Int {
-        guard var task = tasks[id] else { return 0 }
+    /// Records a worker's first-turn acknowledgement and returns the new count — but only while the
+    /// task is still `.running` AND assigned to that worker, checked in the same actor step as the
+    /// write. Nil otherwise: a task paused, stopped or finished since the worker was briefed is not
+    /// acknowledged, and its status is never touched here (an acknowledgement is not a transition).
+    public func acknowledgeTask(id: UUID, byAgent agentID: UUID) -> Int? {
+        guard var task = tasks[id], task.status == .running, task.assigneeIDs.contains(agentID) else { return nil }
         task.acknowledgmentCount += 1
         task.updatedAt = Date()
         let newCount = task.acknowledgmentCount
@@ -2454,6 +2535,7 @@ public actor TaskStore {
             return false
         }
         tasks.removeValue(forKey: task.id)
+        forgetEffects(of: task)
         didMutate()
         emit(.lifecycle(.leftActive(taskID: task.id, disposition: disposition)))
         return true
@@ -2606,6 +2688,7 @@ public actor TaskStore {
         if let task = tasks[id] {
             guard !task.status.isInProgress else { return false }
             tasks.removeValue(forKey: id)
+            forgetEffects(of: task)
             didMutate()
             emit(.lifecycle(.permanentlyDeleted(taskID: id)))
             return true

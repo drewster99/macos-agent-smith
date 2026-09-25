@@ -66,7 +66,7 @@ public protocol NotificationRuntime: Sendable {
     /// Start `targetID` because a watch on `watchedTaskID` fired. Queues at capacity like a scheduled
     /// run and never evicts. Refuses — never reopens or resets — a target that is not an ordinary
     /// runnable task in this session.
-    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome
+    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID, occurrence: Int) async -> AutoRunDispatchOutcome
 }
 
 /// Decodes a notification's `data` and either performs the runtime effect or returns the text to

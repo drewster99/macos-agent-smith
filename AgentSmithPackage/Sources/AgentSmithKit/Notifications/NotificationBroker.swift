@@ -272,7 +272,13 @@ public actor NotificationBroker {
 
     /// Submit a pre-built notification (e.g. one produced from a fired wake by
     /// `WakeNotificationFactory`, whose deterministic id makes it dedup-safe). Dedups + routes it.
-    public func submit(_ notification: AgentNotification) async {
+    ///
+    /// Returns whether the broker now OWNS the notification durably — it is settled in the ledger,
+    /// or durably queued for its pull recipient. `false` means the producer must keep its own record
+    /// and submit again later: the pull queue could not be saved, a push is waiting on a retry, or
+    /// the same id is mid-delivery. Resubmitting is always safe (the id dedups).
+    @discardableResult
+    public func submit(_ notification: AgentNotification) async -> Bool {
         await deliver(notification)
     }
 
@@ -286,6 +292,12 @@ public actor NotificationBroker {
         }
     }
 
+    /// Whether the broker is still holding `id` — queued for a pull recipient, being delivered, or
+    /// waiting on a push retry.
+    public func isHoldingForDelivery(_ id: NotificationID) -> Bool {
+        inFlight.contains(id) || pushRetryAttempts[id] != nil || pendingDelivery.contains { $0.notification.id == id }
+    }
+
     public func deliveryStatus(_ id: NotificationID) -> DeliveryStatus {
         ledger.status(id)
     }
@@ -294,12 +306,22 @@ public actor NotificationBroker {
 
     /// The one path every notification flows through. Dedups on id, fans out to observers, then
     /// routes to the type handler and (for `.deliver`) the recipient target.
-    private func deliver(_ notification: AgentNotification) async {
+    ///
+    /// Returns whether the broker durably owns it afterwards (see `submit`). `isPushRetry` is set
+    /// only by the broker's own push-retry timer, which is the one caller allowed past the
+    /// waiting-on-retry check.
+    @discardableResult
+    private func deliver(_ notification: AgentNotification, isPushRetry: Bool = false) async -> Bool {
         let id = notification.id
         // Claim synchronously — before any await — so a concurrent duplicate can't also pass. A
-        // notification already queued for a pull recipient is also a duplicate (don't re-enqueue).
-        guard !ledger.isSettled(id), !inFlight.contains(id),
-              !pendingDelivery.contains(where: { $0.notification.id == id }) else { return }
+        // notification already queued for a pull recipient is also a duplicate (don't re-enqueue),
+        // but its queue save may have failed: try again, and report whether it is durable now.
+        if ledger.isSettled(id) { return true }
+        if inFlight.contains(id) { return false }
+        if !isPushRetry, pushRetryAttempts[id] != nil { return false }
+        if pendingDelivery.contains(where: { $0.notification.id == id }) {
+            return await flushPendingDelivery()
+        }
         inFlight.insert(id)
         defer { inFlight.remove(id) }
 
@@ -315,15 +337,16 @@ public actor NotificationBroker {
         let now = Date()
         if let expiresAt = notification.expiresAt, expiresAt <= now {
             await settle(notification, .dropped(reason: .expired), reason: "it expired before it could be delivered")
-            return
+            return true
         }
 
         guard let handler = handlers[notification.payload.type] else {
             // Unknown type: not an error. Persisted + observed, never acted on. Forward-compat.
             await settle(notification, .dropped(reason: .noHandler), reason: "nothing handles notifications of type '\(notification.payload.type)'")
-            return
+            return true
         }
 
+        var owned = true
         do {
             switch try await handler.handle(notification, runtime: runtime) {
             case .acted:
@@ -338,14 +361,14 @@ public actor NotificationBroker {
             case .deliver(let text):
                 let kind = notification.recipient.kind
                 if let target = targets[kind] {
-                    await push(text, for: notification, to: target, now: now)
+                    owned = await push(text, for: notification, to: target, now: now)
                 } else if pullRecipients.contains(kind) {
                     // PULL recipient: hold it in the durable pending queue until the recipient
                     // acknowledges it. NOT settled here — it becomes `.delivered` on acknowledgement.
                     // This is the persistence-until-delivery floor; a momentarily-absent recipient
                     // loses nothing.
                     pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
-                    await flushPendingDelivery()
+                    owned = await flushPendingDelivery()
                     onPendingEnqueued?(kind)
                 } else {
                     Self.logger.error("No target or pull registration for recipient \(String(describing: kind), privacy: .public) — dropping notification \(id.description, privacy: .public).")
@@ -357,23 +380,27 @@ public actor NotificationBroker {
             Self.logger.error("Notification handler for '\(notification.payload.type, privacy: .public)' threw: \(String(describing: error), privacy: .public)")
             await settle(notification, .dropped(reason: .handlerError), reason: "its data was malformed: \(error)")
         }
+        return owned
     }
 
     /// Hands `text` to a push target and settles by its answer. A `.retryable` answer is retried
     /// with backoff (1s, 2s, 4s, …) up to `maxPushAttempts`, then settled refused with the last
     /// reason — never left unsettled forever, never silently dropped.
-    private func push(_ text: String, for notification: AgentNotification, to target: any RecipientTarget, now: Date) async {
+    /// Returns whether it settled (false while a retry is pending).
+    private func push(_ text: String, for notification: AgentNotification, to target: any RecipientTarget, now: Date) async -> Bool {
         switch await target.deliver(text, for: notification) {
         case .delivered:
             await settle(notification, .delivered(now), reason: nil)
+            return true
         case .refused(let reason):
             await settle(notification, .dropped(reason: .recipientRefused), reason: reason)
+            return true
         case .retryable(let reason):
             let attempts = (pushRetryAttempts[notification.id] ?? 0) + 1
             pushRetryAttempts[notification.id] = attempts
             guard attempts < Self.maxPushAttempts else {
                 await settle(notification, .dropped(reason: .recipientRefused), reason: "delivery kept failing (\(reason))")
-                return
+                return true
             }
             Self.logger.notice("Push delivery of \(notification.id.description, privacy: .public) will be retried (attempt \(attempts, privacy: .public)): \(reason, privacy: .public)")
             let delay = Duration.seconds(1 << (attempts - 1))
@@ -381,11 +408,12 @@ public actor NotificationBroker {
                 try? await Task.sleep(for: delay)
                 await self?.retryDelivery(notification)
             }
+            return false
         }
     }
 
     private func retryDelivery(_ notification: AgentNotification) async {
-        await deliver(notification)
+        await deliver(notification, isPushRetry: true)
     }
 
     private func settle(_ notification: AgentNotification, _ status: DeliveryStatus, reason: String?) async {
@@ -474,10 +502,13 @@ public actor NotificationBroker {
     /// A failed write is reported (the writer has logged it); the queue is still intact in memory,
     /// so delivery this launch is unaffected — only a restart before the next successful save can
     /// lose it, which is exactly what the report tells the user.
-    private func flushPendingDelivery() async {
-        guard let pendingWriter else { return }
+    /// Returns whether the queue is on disk (true when there is no disk: memory is the storage).
+    @discardableResult
+    private func flushPendingDelivery() async -> Bool {
+        guard let pendingWriter else { return true }
         await pendingWriter.enqueue(pendingDelivery)
         let durable = await pendingWriter.flush()
         recordSaveOutcome(.pendingDelivery, failure: durable ? nil : "the write to disk failed")
+        return durable
     }
 }

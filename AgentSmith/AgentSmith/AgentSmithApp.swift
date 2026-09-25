@@ -542,7 +542,14 @@ struct SessionScene: View {
                 })
             }
         }
-        .task { await bootstrapIfNeeded() }
+        .task {
+            await bootstrapIfNeeded()
+            // A notification click that launched the app arrived before this scene existed, so
+            // `.onChange` never saw it.
+            if let target = shared.taskNotifications.consumeTaskDetailRequest() {
+                AgentSmithApp.showOrOpenTaskDetail(target: target, openWindow: openWindow)
+            }
+        }
         .background(WindowKeyObserver(sessionID: resolvedID, shared: shared))
         .onChange(of: shared.renameSessionRequestID) { _, newValue in
             guard let id = newValue, id == resolvedID,

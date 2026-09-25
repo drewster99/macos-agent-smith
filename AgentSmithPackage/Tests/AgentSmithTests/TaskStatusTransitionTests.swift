@@ -50,8 +50,9 @@ struct TaskStatusTransitionTests {
         let task = await store.addTask(title: "t", description: "d")
         await store.driveStatus(id: task.id, to: .running)
         let before = recorder.transitions.count
-        #expect(await store.updateStatus(id: task.id, status: .running, cause: .workerAcknowledged))
-        #expect(recorder.transitions.count == before, "Brown's acknowledgement of a running task is not an event")
+        #expect(await store.updateStatus(id: task.id, status: .running, cause: .smithSetStatus),
+                "writing the status a task already has reports it is there")
+        #expect(recorder.transitions.count == before, "rewriting the current status is not an event")
     }
 
     @Test("A cause that does not permit the move is refused, changes nothing, and emits nothing")
@@ -235,6 +236,21 @@ struct TaskLifecycleReactionTests {
         ])
         #expect(await runtime.currentScheduledWakes()?.count == 1)
         #expect(await store.permanentlyDelete(id: task.id))
+        let cancelled = await waitUntil { await runtime.currentScheduledWakes()?.isEmpty == true }
+        #expect(cancelled)
+        await runtime.stopAll()
+    }
+
+    @Test("Archiving a task cancels even the wakes that survive a terminal status")
+    func archiveCancelsSurvivingWakes() async {
+        let runtime = makeRuntime()
+        await runtime.start()
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "t", description: "d")
+        await runtime.restoreScheduledWakes([
+            ScheduledWake(wakeAt: Date().addingTimeInterval(3600), instructions: "again at six", taskID: task.id, survivesTaskTermination: true)
+        ])
+        #expect(await store.archive(id: task.id))
         let cancelled = await waitUntil { await runtime.currentScheduledWakes()?.isEmpty == true }
         #expect(cancelled)
         await runtime.stopAll()

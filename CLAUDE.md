@@ -485,6 +485,16 @@ Decisions:
 - Template watches are blueprints for the notifying actions only. `startTask` is same-session,
   ordinary tasks only.
 - A watch never reopens a completed task or resets a failed one.
+- **An effect leaves its task only when the broker durably owns it.** `NotificationBroker.submit`
+  returns that ownership: settled in the ledger, or durably queued. Keep the record until it is
+  true; resubmitting is safe because ids dedup.
+- **Never block the task-event consumer on a person.** It is one serialized task: anything it awaits
+  delays every slot refill, briefing and chain start. `TaskNotificationService` therefore refuses
+  (and asks for permission in the background) instead of awaiting the permission prompt.
+- **Brown's first-turn acknowledgement never writes a status** (`TaskStore.acknowledgeTask`). Every
+  start path sets `.running` before the briefing.
+- **Archive and delete cancel ALL of a task's wakes**, including `survivesTaskTermination` ones
+  (`WakeScheduler.cancelAllWakes(forRemovedTask:)`). Only a terminal status spares those.
 
 ## Conventions specific to this repo
 

@@ -22,14 +22,14 @@ public struct ClosureNotificationRuntime: NotificationRuntime {
     private let setStatus: @Sendable (UUID, AgentTask.Status) async -> Bool
     private let title: @Sendable (UUID) async -> String?
     private let systemNotice: @Sendable (String, UUID?) async -> Void
-    private let watchStart: @Sendable (UUID, UUID, UUID) async -> AutoRunDispatchOutcome
+    private let watchStart: @Sendable (UUID, UUID, UUID, Int) async -> AutoRunDispatchOutcome
 
     public init(
         autoRunTask: @escaping @Sendable (UUID, String?) async -> AutoRunDispatchOutcome,
         setTaskStatus: @escaping @Sendable (UUID, AgentTask.Status) async -> Bool,
         taskTitle: @escaping @Sendable (UUID) async -> String?,
         postSystemNotice: @escaping @Sendable (String, UUID?) async -> Void,
-        startTaskForWatch: @escaping @Sendable (UUID, UUID, UUID) async -> AutoRunDispatchOutcome
+        startTaskForWatch: @escaping @Sendable (UUID, UUID, UUID, Int) async -> AutoRunDispatchOutcome
     ) {
         self.autoRun = autoRunTask
         self.setStatus = setTaskStatus
@@ -44,8 +44,8 @@ public struct ClosureNotificationRuntime: NotificationRuntime {
     public func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { await setStatus(taskID, status) }
     public func taskTitle(_ taskID: UUID) async -> String? { await title(taskID) }
     public func postSystemNotice(_ text: String, taskID: UUID?) async { await systemNotice(text, taskID) }
-    public func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome {
-        await watchStart(targetID, watchedTaskID, watchID)
+    public func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID, occurrence: Int) async -> AutoRunDispatchOutcome {
+        await watchStart(targetID, watchedTaskID, watchID, occurrence)
     }
 }
 

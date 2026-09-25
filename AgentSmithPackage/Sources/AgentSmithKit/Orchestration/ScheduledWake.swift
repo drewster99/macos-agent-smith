@@ -259,4 +259,7 @@ public enum WakeCancellationCause: String, Sendable, Codable {
     /// user's series forever with no channel row, no timer event, and no log line — for every
     /// cause, including an empty weekday set and a sub-minimum interval, not just a bad time.
     case recurrenceExhausted
+    /// The linked task left the active list (archived or deleted). Unlike a terminal status, this
+    /// takes every wake with it — including ones marked `survivesTaskTermination`.
+    case taskRemoved
 }

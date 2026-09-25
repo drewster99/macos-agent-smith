@@ -1066,6 +1066,12 @@ final class AppViewModel {
         }
         let livePersistPM = persistenceManager
         await liveStore.attachPersistence(save: { snapshot in try await livePersistPM.saveTasks(snapshot) }, writeNow: true)
+        // Adopt the live store at once: edits made while the rest of start() runs must land on the
+        // store that persists them, not on the retired one (whose writes are gone for good).
+        if let previousStore = taskStore, previousStore !== liveStore {
+            await previousStore.setOnChange { }
+        }
+        taskStore = liveStore
 
         await newRuntime.setOnAbort { [weak self] reason in
             Task { @MainActor [weak self] in
@@ -1197,6 +1203,11 @@ final class AppViewModel {
                 self.updateTaskOverlay()
             }
         }
+        // Edits that landed on the live store before this observer existed would otherwise not show
+        // until the next change.
+        taskApplyGeneration &+= 1
+        tasks = await liveTaskStore.allTasks()
+        updateTaskOverlay()
 
         // Auto-archive policy ("Auto-archive completed tasks" in Settings): push it into the store
         // BEFORE the launch sweep so the first sweep honors the user's choice, then run the gated
@@ -1293,21 +1304,14 @@ final class AppViewModel {
         // rather than cached, so it always reflects the latest persisted state.
         let persistence = persistenceManager
         let logger = self.logger
+        // Errors propagate: the runtime reports a failed save, and on a failed load keeps the queue in
+        // memory rather than overwriting the file it couldn't read.
         await newRuntime.setPendingScheduledRunQueuePersistence(
             load: {
-                do {
-                    return try await persistence.loadPendingScheduledRunQueue()
-                } catch {
-                    logger.error("Failed to load pending scheduled-run queue: \(error.localizedDescription)")
-                    return []
-                }
+                try await persistence.loadPendingScheduledRunQueue()
             },
             persist: { entries in
-                do {
-                    try await persistence.savePendingScheduledRunQueue(entries)
-                } catch {
-                    logger.error("Failed to persist pending scheduled-run queue: \(error.localizedDescription)")
-                }
+                try await persistence.savePendingScheduledRunQueue(entries)
             }
         )
 
@@ -1456,6 +1460,7 @@ final class AppViewModel {
             switch event.cancellationCause {
             case .replaced:        label = "rescheduled"
             case .taskTerminated:  label = "cancelled (task ended)"
+            case .taskRemoved:     label = "cancelled (task archived or deleted)"
             case .agentTerminated: label = "cancelled (agent ended)"
             // Not a cancellation the user asked for: the repeat pattern simply has no further
             // occurrence, so the series retired itself. Saying "cancelled" would imply someone

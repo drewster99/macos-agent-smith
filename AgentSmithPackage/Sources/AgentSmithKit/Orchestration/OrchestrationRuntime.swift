@@ -238,12 +238,15 @@ public actor OrchestrationRuntime {
     /// Loads the persisted pending-scheduled-run queue from disk. Set by the app layer
     /// at runtime construction; consulted inside `start()` so a fresh runtime inherits
     /// any deferred scheduled tasks from the previous session lifetime.
-    private var loadPendingScheduledRunQueue: (@Sendable () async -> [PendingScheduledRun])?
+    private var loadPendingScheduledRunQueue: (@Sendable () async throws -> [PendingScheduledRun])?
 
     /// Persists the pending-scheduled-run queue on every mutation. Wired by the app
-    /// layer to `PersistenceManager.savePendingScheduledRunQueue`. Fire-and-forget;
-    /// failures log to the app's logger but do not block the runtime.
-    private var persistPendingScheduledRunQueue: (@Sendable ([PendingScheduledRun]) async -> Void)?
+    /// layer to `PersistenceManager.savePendingScheduledRunQueue`. Nil when this launch could not
+    /// read the file (it is then kept in memory only, so the unreadable file is never
+    /// overwritten). Every save goes through `savePendingScheduledRunQueue`, which reports a failure.
+    private var persistPendingScheduledRunQueue: (@Sendable ([PendingScheduledRun]) async throws -> Void)?
+    /// Whether the last save of the queue failed — so a failing disk is reported once, not per save.
+    private var pendingScheduledRunQueueSaveFailing = false
 
     /// Loads the persisted notification delivery ledger from disk. Set by the app layer before
     /// `start()`; consulted once inside `ensureNotificationBroker` to seed the broker so a wake that
@@ -594,8 +597,8 @@ public actor OrchestrationRuntime {
     /// `PersistenceManager(sessionID:)` so the queue lives next to the channel log,
     /// scheduled wakes, and other per-session state.
     public func setPendingScheduledRunQueuePersistence(
-        load: @escaping @Sendable () async -> [PendingScheduledRun],
-        persist: @escaping @Sendable ([PendingScheduledRun]) async -> Void
+        load: @escaping @Sendable () async throws -> [PendingScheduledRun],
+        persist: @escaping @Sendable ([PendingScheduledRun]) async throws -> Void
     ) {
         loadPendingScheduledRunQueue = load
         persistPendingScheduledRunQueue = persist
@@ -926,6 +929,13 @@ public actor OrchestrationRuntime {
         // Templates are exempt at the CALL SITE (as in `RunTaskTool`): starting one clones a fresh
         // instance downstream, and `prepareForRun` is a per-session method that cannot see a
         // library-resident template at all.
+        // A held task is refused BEFORE `prepareForRun`, which would otherwise reset or reopen it
+        // only for the start gate to turn it away.
+        if !scheduledTask.startHolds.isEmpty {
+            let reason = "it is waiting on \(await describeHolds(scheduledTask.startHolds)) — a watch starts it when that happens"
+            await reportScheduledRunRefused(taskID: taskID, title: scheduledTask.title, reason: reason)
+            return .refused(reason)
+        }
         if !scheduledTask.isTemplate,
            case .refused(let reason) = await taskStore.prepareForRun(id: taskID) {
             await reportScheduledRunRefused(taskID: taskID, title: scheduledTask.title, reason: reason)
@@ -950,7 +960,7 @@ public actor OrchestrationRuntime {
         // runs independently of `autoAdvanceEnabled`), so an autoAdvance-off run isn't lost.
         guard supervisor.handles(role: .brown).count >= maxConcurrentWorkers, let blocker = inFlight else {
             pendingScheduledRunQueue.append(entry)
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+            await savePendingScheduledRunQueue()
             await drainPendingScheduledRunQueue()
             return .placed
         }
@@ -959,7 +969,7 @@ public actor OrchestrationRuntime {
         // task to run the scheduled one, resume it after) is gone by design: a scheduled run waits
         // its turn like any other queued work rather than interrupting live work.
         pendingScheduledRunQueue.append(entry)
-        await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+        await savePendingScheduledRunQueue()
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Scheduled task '\(scheduledTask.title)' fired while '\(blocker.title)' is \(blocker.status.rawValue). Queued — will run after the current task finishes.",
@@ -1051,9 +1061,9 @@ public actor OrchestrationRuntime {
             setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) ?? false },
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
             postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) },
-            startTaskForWatch: { [weak self] targetID, watchedTaskID, watchID in
+            startTaskForWatch: { [weak self] targetID, watchedTaskID, watchID, occurrence in
                 guard let self else { return .refused("the session is shutting down") }
-                return await self.startTaskForWatch(targetID, watchedTaskID: watchedTaskID, watchID: watchID)
+                return await self.startTaskForWatch(targetID, watchedTaskID: watchedTaskID, watchID: watchID, occurrence: occurrence)
             }
         )
         // Load BEFORE constructing the broker: a file that exists but can't be read must never be
@@ -1202,20 +1212,30 @@ public actor OrchestrationRuntime {
     }
 
     /// A firing handed to the broker before a crash may have settled without its outcome reaching
-    /// the task: adopt what the broker's ledger recorded. One still queued in the broker (a Smith
-    /// delivery not yet acknowledged) stays in flight and settles when it is.
+    /// the task: adopt what the broker's ledger recorded. A firing the broker is still holding (a
+    /// Smith delivery not yet acknowledged) stays in flight and settles when it is. An in-flight
+    /// firing the broker has neither settled nor queued was lost in the crash (e.g. mid push
+    /// retry): hand it to the broker again.
     private func reconcileInFlightWatchFirings() async {
         let broker = await ensureNotificationBroker()
         for (task, watch) in await taskStore.allWatches() {
-            for firing in watch.recentFirings where firing.state == .inFlight {
-                let settled: TaskWatchFiring.State
-                switch await broker.deliveryStatus(TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)) {
-                case .delivered(let at): settled = .delivered(at: at)
-                case .dropped(let code): settled = .refused(reason: code.rawValue)
-                case .pending: continue
+            for firing in watch.recentFirings where !firing.state.isSettled {
+                let id = TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)
+                if let settled = Self.firingState(adopting: await broker.deliveryStatus(id)) {
+                    await taskStore.setWatchFiringState(taskID: task.id, watchID: watch.id, occurrence: firing.occurrence, to: settled)
+                } else if firing.state == .inFlight, await !broker.isHoldingForDelivery(id) {
+                    await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
                 }
-                await taskStore.setWatchFiringState(taskID: task.id, watchID: watch.id, occurrence: firing.occurrence, to: settled)
             }
+        }
+    }
+
+    /// The firing state a settled ledger entry implies, or nil while it is unsettled.
+    private static func firingState(adopting status: DeliveryStatus) -> TaskWatchFiring.State? {
+        switch status {
+        case .delivered(let at): return .delivered(at: at)
+        case .dropped(let code): return .refused(reason: code.rawValue)
+        case .pending: return nil
         }
     }
 
@@ -1325,7 +1345,22 @@ public actor OrchestrationRuntime {
     /// target that is not an ordinary runnable task in THIS session is refused with the reason.
     /// Otherwise it goes through the durable scheduled-run queue, so it starts at once when a worker
     /// slot is free, waits its turn at capacity, and survives a crash in between.
-    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome {
+    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID, occurrence: Int) async -> AutoRunDispatchOutcome {
+        // The handler re-checks at the moment of acting: a firing cancelled after it was handed to
+        // the broker must not start anything.
+        if case .cancelled = await taskStore.task(id: watchedTaskID)?.watch(id: watchID)?.firing(occurrence: occurrence)?.state {
+            return .refused("the watch was cancelled before it could start \"\(await taskStore.task(id: targetID)?.title ?? targetID.uuidString)\"")
+        }
+        let outcome = await placeWatchStart(targetID, watchedTaskID: watchedTaskID, watchID: watchID)
+        if case .refused = outcome, await taskStore.watchState(watchID)?.isActive != true {
+            // A refused chain link whose watch can never fire again must not leave its target
+            // waiting on it forever.
+            await taskStore.releaseStartHolds(placedBy: watchID)
+        }
+        return outcome
+    }
+
+    private func placeWatchStart(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome {
         guard let target = await taskStore.task(id: targetID), target.disposition == .active else {
             return .refused("the task to start (\(targetID.uuidString)) is no longer an active task in this session")
         }
@@ -1349,7 +1384,7 @@ public actor OrchestrationRuntime {
             return .placed
         }
         pendingScheduledRunQueue.append(PendingScheduledRun(taskID: targetID, amendment: nil, origin: .watchSatisfied(watchID: watchID)))
-        await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+        await savePendingScheduledRunQueue()
         if supervisor.handles(role: .brown).count >= maxConcurrentWorkers {
             let watchedTitle = await taskStore.task(id: watchedTaskID)?.title ?? watchedTaskID.uuidString
             await channel.post(ChannelMessage(
@@ -1402,7 +1437,7 @@ public actor OrchestrationRuntime {
                 // A task that leaves the active store (archive, soft or permanent delete) relinquishes
                 // its schedule: an orphaned wake would fire later and be skipped. No queue drain —
                 // an inactive task never held a worker slot.
-                await scheduler.cancelWakesForTask(lifecycle.taskID)
+                await scheduler.cancelAllWakes(forRemovedTask: lifecycle.taskID)
                 await reportStrandedHolds(watchedTaskID: lifecycle.taskID, because: "is no longer in the active list")
             case .restoredToActive:
                 break
@@ -1422,27 +1457,48 @@ public actor OrchestrationRuntime {
                 scheduleTaskEffectRetry()
                 return
             }
-            switch ready.record.effect {
-            case .smithBriefing(let note):
-                await broker.post(
-                    triggerSource: .taskTransition(taskID: ready.taskID, statusRevision: ready.record.transition.statusRevision),
-                    recipient: .smith,
-                    payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)]),
-                    title: "Task \(ready.record.transition.to.displayName)",
-                    idempotencyKey: ready.record.id
-                )
-            case .watchFiring(let watchID, let occurrence):
-                // Re-read the watch: a firing cancelled (or already settled) since it was recorded
-                // must not act. An in-flight one is re-submitted — the broker dedups by its id.
-                if let task = await taskStore.task(id: ready.taskID),
-                   let watch = task.watch(id: watchID),
-                   let firing = watch.firing(occurrence: occurrence),
-                   !firing.state.isSettled {
-                    await taskStore.setWatchFiringState(taskID: task.id, watchID: watchID, occurrence: occurrence, to: .inFlight)
-                    await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
-                }
+            // An effect leaves its task only once the broker durably owns what it produced; until
+            // then it stays (and is resubmitted — the id dedups) so a crash can't lose it.
+            if await deliver(ready, via: broker) {
+                await taskStore.completeEffect(taskID: ready.taskID, recordID: ready.record.id)
+            } else {
+                scheduleTaskEffectRetry()
             }
-            await taskStore.completeEffect(taskID: ready.taskID, recordID: ready.record.id)
+        }
+    }
+
+    /// Hands one effect to the broker. Returns whether nothing more is owed on it: the broker owns
+    /// it durably, or it has become moot (its firing was cancelled or already settled).
+    private func deliver(_ ready: ReadyTaskEffect, via broker: NotificationBroker) async -> Bool {
+        switch ready.record.effect {
+        case .smithBriefing(let note):
+            let trigger = TriggerSource.taskTransition(taskID: ready.taskID, statusRevision: ready.record.transition.statusRevision)
+            return await broker.submit(AgentNotification(
+                id: NotificationID(namespace: trigger.namespace, key: ready.record.id),
+                triggerSource: trigger,
+                recipient: .smith,
+                title: "Task \(ready.record.transition.to.displayName)",
+                createdAt: Date(),
+                payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)])
+            ))
+        case .watchFiring(let watchID, let occurrence):
+            guard let task = await taskStore.task(id: ready.taskID),
+                  let watch = task.watch(id: watchID),
+                  let firing = watch.firing(occurrence: occurrence),
+                  !firing.state.isSettled else { return true }
+            // Already settled by the broker (a crash after submitting, before the task recorded
+            // it): the broker would dedup silently, so adopt its outcome instead.
+            let id = TaskWatchDelivery.notificationID(watchID: watchID, occurrence: occurrence)
+            if let settled = Self.firingState(adopting: await broker.deliveryStatus(id)) {
+                await taskStore.setWatchFiringState(taskID: task.id, watchID: watchID, occurrence: occurrence, to: settled)
+                return true
+            }
+            // Claim it, then re-read: a cancel that landed in between wins, and nothing is sent.
+            await taskStore.setWatchFiringState(taskID: task.id, watchID: watchID, occurrence: occurrence, to: .inFlight)
+            guard await taskStore.task(id: task.id)?.watch(id: watchID)?.firing(occurrence: occurrence)?.state == .inFlight else {
+                return true
+            }
+            return await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
         }
     }
 
@@ -1464,6 +1520,29 @@ public actor OrchestrationRuntime {
     }
 
     private static let taskEffectRetryDelay: Duration = .seconds(5)
+
+    /// Saves the queue of runs waiting for a worker slot, reporting (once per failure streak) a save
+    /// that failed: those runs — scheduled wakes and chained starts — would be lost if the app
+    /// restarted before a later save succeeds.
+    @discardableResult
+    private func savePendingScheduledRunQueue() async -> Bool {
+        guard let persistPendingScheduledRunQueue else { return true }
+        do {
+            try await persistPendingScheduledRunQueue(pendingScheduledRunQueue)
+            pendingScheduledRunQueueSaveFailing = false
+            return true
+        } catch {
+            if !pendingScheduledRunQueueSaveFailing {
+                pendingScheduledRunQueueSaveFailing = true
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Couldn't save the queue of runs waiting for a free worker (\(error.localizedDescription)). If the app restarts before a later save succeeds, a queued scheduled or chained run may not start.",
+                    metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
+                ))
+            }
+            return false
+        }
+    }
 
     /// Surfaces a notification-store persistence failure to the user. A failed save means a restart
     /// could re-fire an already-delivered notification (ledger) or lose one Smith hasn't read yet
@@ -1527,7 +1606,7 @@ public actor OrchestrationRuntime {
 
         while let next = pendingScheduledRunQueue.first {
             pendingScheduledRunQueue.removeFirst()
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+            await savePendingScheduledRunQueue()
             // Library-aware, for the same reason as `dispatchAutoRunWake`: a recurring run's target
             // is a template, and templates live in the GLOBAL library. The bare `task(id:)` this
             // replaced returned nil for every one of them and `continue`d without a word.
@@ -1539,14 +1618,34 @@ public actor OrchestrationRuntime {
                 )
                 continue
             }
-            // Re-prepare rather than re-check: an entry queued while a slot was busy may have been
-            // failed or completed in the meantime, and this is the same acceptance a manual
-            // `run_task` would apply. The old bare `task.status.isRunnable` check here refused
-            // exactly those cases — and refused them SILENTLY, with a bare `continue`.
-            if !task.isTemplate,
-               case .refused(let reason) = await taskStore.prepareForRun(id: next.taskID) {
-                await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
-                continue
+            if case .watchSatisfied(let watchID) = next.origin {
+                // A watch never reopens or resets its target, and a cancelled watch starts nothing.
+                if case .cancelled = await taskStore.watchState(watchID) { continue }
+                guard task.status.isRunnable else {
+                    await channel.post(ChannelMessage(
+                        sender: .system,
+                        content: "\"\(task.title)\" was queued to start by a watch, but it is now \(task.status.displayName.lowercased()); a watch never reopens or resets a task, so it was not started.",
+                        metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(task.id.uuidString), "severity": .severity(.warning)],
+                        taskID: task.id
+                    ))
+                    continue
+                }
+            } else {
+                // A held task is refused BEFORE `prepareForRun` could reset or reopen it.
+                if !task.startHolds.isEmpty, !next.origin.overridesStartHolds {
+                    let reason = "it is waiting on \(await describeHolds(task.startHolds)) — a watch starts it when that happens"
+                    await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
+                    continue
+                }
+                // Re-prepare rather than re-check: an entry queued while a slot was busy may have
+                // been failed or completed in the meantime, and this is the same acceptance a manual
+                // `run_task` would apply. The old bare `task.status.isRunnable` check here refused
+                // exactly those cases — and refused them SILENTLY, with a bare `continue`.
+                if !task.isTemplate,
+                   case .refused(let reason) = await taskStore.prepareForRun(id: next.taskID) {
+                    await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
+                    continue
+                }
             }
             restartForNewTask(taskID: next.taskID, amendment: next.amendment, origin: next.origin)
             return true
@@ -1907,6 +2006,13 @@ public actor OrchestrationRuntime {
                 kept.append(candidate)
             } else {
                 guard seenIDs.insert(wake.id).inserted else { droppedCount += 1; continue }
+                // A task archived or deleted while no runtime was listening (the session stopped)
+                // took its wakes with it: nothing scheduled for a task that is gone may fire.
+                if let taskID = wake.taskID, tasksByID[taskID]?.disposition != .active,
+                   await taskStore.taskOrLibraryTemplate(id: taskID) == nil {
+                    droppedCount += 1
+                    continue
+                }
                 kept.append(wake)
             }
         }
@@ -2917,6 +3023,17 @@ public actor OrchestrationRuntime {
         // The runtime reacts to task transitions and lifecycle changes through one serialized
         // consumer (wake cancellation, slot refill, Smith compaction).
         await installTaskEventConsumerIfNeeded(scheduler: wakeScheduler)
+        // A task deleted or archived while the session was stopped left no runtime to warn the tasks
+        // waiting on it.
+        var goneWatchedTaskIDs: Set<UUID> = []
+        for held in await taskStore.allTasks() {
+            for hold in held.startHolds where await taskStore.task(id: hold.watchedTaskID) == nil {
+                goneWatchedTaskIDs.insert(hold.watchedTaskID)
+            }
+        }
+        for watchedTaskID in goneWatchedTaskIDs {
+            await reportStrandedHolds(watchedTaskID: watchedTaskID, because: "is no longer in the active list")
+        }
 
         // Wire timer lifecycle callbacks from the WakeScheduler into the runtime's event log so the
         // timers UI / history view can render scheduled / fired / cancelled rows.
@@ -2974,9 +3091,20 @@ public actor OrchestrationRuntime {
         // the slot frees up. The queue is per-session, so each window's runtime restores
         // its own list — no cross-session bleed.
         if let loader = loadPendingScheduledRunQueue {
-            let queue = await loader()
-            if !queue.isEmpty {
-                pendingScheduledRunQueue = queue
+            do {
+                let queue = try await loader()
+                if !queue.isEmpty {
+                    pendingScheduledRunQueue = queue
+                }
+            } catch {
+                // Never overwrite a file this launch couldn't read: runs queued before the restart
+                // may be in it. Keep the queue in memory only, and say so.
+                persistPendingScheduledRunQueue = nil
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Couldn't read the queue of runs waiting for a free worker (\(error.localizedDescription)). It is left untouched on disk; this launch keeps the queue in memory only, so runs queued before the restart won't start on their own — check your scheduled and chained tasks.",
+                    metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
+                ))
             }
         }
 
@@ -3000,7 +3128,7 @@ public actor OrchestrationRuntime {
             // it no longer loses the run. Carrying the amendment in the QUEUE (which IS persisted)
             // is what keeps that window down to a crash, rather than every deferred run.
             pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map { PendingScheduledRun(taskID: $0.id, origin: .scheduled) })
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+            await savePendingScheduledRunQueue()
         }
 
         // Belt-and-suspenders: re-arm any `.scheduled` task that doesn't yet have a wake

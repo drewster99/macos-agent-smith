@@ -1305,8 +1305,11 @@ extension OrchestrationRuntime {
             bannerMetadata["validationSkipped"] = .bool(true)
         }
         await channel.post(ChannelMessage(sender: .system, content: completed.title, metadata: bannerMetadata))
-        await summarizeAndEmbedTask(taskID: taskID)
+        // Released once the banner exists and the worker is gone — BEFORE summarization, an LLM call
+        // that can take arbitrarily long (retries) and would otherwise hold every completion watch
+        // and Smith's note hostage, and trip the held-effect watchdog.
         await taskStore.releaseEffects(effects)
+        await summarizeAndEmbedTask(taskID: taskID)
         return true
     }
 

@@ -137,6 +137,19 @@ actor WakeScheduler {
         return doomed.map(\.id)
     }
 
+    /// Cancels EVERY wake bound to `taskID`, including ones that survive a terminal status: the
+    /// task has left the active list (archived or deleted), so nothing scheduled for it may fire.
+    @discardableResult
+    func cancelAllWakes(forRemovedTask taskID: UUID) async -> [UUID] {
+        let doomed = wakes.filter { $0.taskID == taskID }
+        guard !doomed.isEmpty else { return [] }
+        wakes.removeAll { $0.taskID == taskID }
+        for wake in doomed { onCancelled?(wake, .taskRemoved) }
+        await persistWakes()
+        armTimer()
+        return doomed.map(\.id)
+    }
+
     // MARK: - Firing
 
     /// Arms a single timer for the earliest scheduled wake. Re-armed on every mutation, so an

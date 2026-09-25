@@ -51,7 +51,7 @@ public enum SmithTaskBriefing {
                 the validation counters) with clearer instructions may be enough. Do NOT re-run it unchanged and \
                 expect a different outcome.]
                 """
-        case .startClaimed, .startAbandoned, .workerAcknowledged, .workerStartedAtRuntimeStart,
+        case .startClaimed, .startAbandoned, .workerStartedAtRuntimeStart,
              .spawnFailedAtRuntimeStart, .submittedForValidation, .validationEscalated,
              .validationBlocked, .validationReleased, .rejectionsReturned, .helpRequested,
              .helpProvided, .userPaused, .userStopped, .userFailed, .userRevalidated, .userSentBack,

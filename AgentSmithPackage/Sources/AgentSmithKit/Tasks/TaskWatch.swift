@@ -40,10 +40,7 @@ public struct TaskWatch: Codable, Sendable, Equatable, Identifiable {
         self.recentFirings = []
     }
 
-    public var isActive: Bool {
-        if case .active = state { return true }
-        return false
-    }
+    public var isActive: Bool { state.isActive }
 
     /// Records a firing for `transition` and returns its occurrence. A `.once` watch is consumed
     /// HERE, when the firing is created — not when it is delivered — so it can never fire twice.
@@ -107,6 +104,10 @@ public enum TaskWatchTrigger: String, Codable, Sendable, CaseIterable, Hashable 
         case .sessionShutdown, .sessionDeletion:
             // The user quitting or deleting the session is not an event to notify about (decision 9).
             return nil
+        case .capacityShed:
+            // Lowering capacity parks the task for an automatic resume as soon as a slot frees: an
+            // internal deferral, not an interruption anyone should react to (or chain on).
+            return nil
         default:
             break
         }
@@ -118,6 +119,9 @@ public enum TaskWatchTrigger: String, Codable, Sendable, CaseIterable, Hashable 
         case .interrupted: self = .interrupted
         case .pending, .starting, .running, .paused, .scheduled, .validating: return nil
         }
+        // A missing-validator park is a configuration gap, not a review (the plan's matrix gives it
+        // no watch trigger): only a validator escalation "needs review".
+        if self == .needsReview, transition.cause != .validationEscalated { return nil }
     }
 
     public var displayName: String {
@@ -169,6 +173,11 @@ public enum TaskWatchState: Codable, Sendable, Equatable {
     case cancelled(at: Date)
     /// A `.once` watch that has fired.
     case consumed(at: Date)
+
+    public var isActive: Bool {
+        if case .active = self { return true }
+        return false
+    }
 }
 
 /// One firing of a watch: the audit record and the delivery state.

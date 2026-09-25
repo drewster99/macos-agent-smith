@@ -35,22 +35,18 @@ final class TaskNotificationService: NSObject, UNUserNotificationCenterDelegate 
     /// Delivers one firing of a `macOSNotification` watch.
     func deliver(_ text: String, for notification: AgentNotification, sessionID: UUID) async -> PushDeliveryOutcome {
         let center = UNUserNotificationCenter.current()
-        var status = await center.notificationSettings().authorizationStatus
-        if status == .notDetermined {
-            do {
-                _ = try await center.requestAuthorization(options: [.alert, .sound])
-            } catch {
-                return .refused("macOS would not ask for notification permission: \(error.localizedDescription)")
-            }
-            status = await center.notificationSettings().authorizationStatus
-        }
-        switch status {
+        switch await center.notificationSettings().authorizationStatus {
         case .authorized, .provisional, .ephemeral:
             break
         case .denied:
             return .refused("macOS notifications are turned off for Agent Smith (System Settings ▸ Notifications ▸ Agent Smith)")
         case .notDetermined:
-            return .refused("notification permission was not granted")
+            // Never wait on the permission prompt here: it returns only when the user answers, and
+            // delivery runs on the runtime's single task-event consumer, which would stall every
+            // other reaction until then. Ask in the background; this one is refused, and later
+            // notifications appear once permission is granted.
+            Task { await self.requestAuthorizationIfNeeded() }
+            return .refused("Agent Smith doesn't have notification permission yet — macOS is asking now; allow it and later notifications will appear")
         @unknown default:
             return .refused("macOS reported a notification permission this version doesn't know")
         }

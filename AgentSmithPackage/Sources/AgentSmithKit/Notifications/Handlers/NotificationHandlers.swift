@@ -138,12 +138,12 @@ public struct TaskWatchNotificationHandler: NotificationHandler {
         }
         switch action {
         case .startTask:
-            guard case .taskWatch(let watchID, _) = notification.triggerSource,
+            guard case .taskWatch(let watchID, let occurrence) = notification.triggerSource,
                   let rawTarget = stringValue(data, "target_task_id"), let targetID = UUID(uuidString: rawTarget),
                   let rawWatched = stringValue(data, "task_id"), let watchedID = UUID(uuidString: rawWatched) else {
                 throw NotificationHandlerError("task_watch start_task payload missing its task ids")
             }
-            switch await runtime.startTaskForWatch(targetID, watchedTaskID: watchedID, watchID: watchID) {
+            switch await runtime.startTaskForWatch(targetID, watchedTaskID: watchedID, watchID: watchID, occurrence: occurrence) {
             case .placed: return .acted
             case .refused(let reason): return .refused(reason)
             }

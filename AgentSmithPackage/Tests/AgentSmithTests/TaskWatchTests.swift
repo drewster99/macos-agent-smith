@@ -330,6 +330,8 @@ struct TaskWatchRuntimeTests {
         }
         #expect(refused)
         #expect(await store.task(id: downstream.id)?.status == .completed, "a completed target is never reopened")
+        #expect(await store.task(id: downstream.id)?.startHolds.isEmpty == true,
+                "a refused chain link whose watch can't fire again doesn't leave its target waiting forever")
         let row = await waitUntil {
             await runtime.channel.allMessages().contains { $0.kind == .taskWatchRefused && $0.severity == .error && $0.taskID == upstream.id }
         }
