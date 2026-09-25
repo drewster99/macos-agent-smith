@@ -85,6 +85,8 @@ enum AppColors {
     static let watchRefused = Color.red
     static let watchHold = Color.orange
     static let watchHoldBackground = Color.orange.opacity(0.10)
+    /// An agent still calling a model other than the one assigned to its role.
+    static let runningModelMismatch = Color.orange
 
     // MARK: - Security-review dispositions
 

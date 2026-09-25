@@ -191,7 +191,17 @@ LLM provider/model state is owned by `SwiftLLMKit.LLMKitManager` (`@Observable`,
 
 **`restartForNewTask` does NOT rebuild Smith while Smith is alive** — it cycles only the worker and returns (Phase 2, long-lived Smith). Older comments and commit messages claiming Smith picks up a new model "on the next task" or "on the next runtime restart (`restartForNewTask`)" are wrong and have been corrected. Without a retune, a live Smith keeps its spawn-time model and parameters for the entire session.
 
-**Known limitation, tracked as [issue #9](https://github.com/drewster99/macos-agent-smith/issues/9):** the non-agent long-lived holders take NEITHER a retune nor a model change until the runtime restarts — `TaskSummarizer`, Smith's own `SecurityEvaluator`, and `validationSecurityEvaluator`. Only per-Brown evaluators refresh, at spawn. The validator needs nothing: `validatorModel()` reads the dictionaries fresh for every criterion judgment.
+**The non-agent holders take BOTH a retune and a model change live** (issue #9 gap 2, closed
+2026-09-25). Every `SecurityEvaluator` the runtime makes (Smith's, each Brown's, the validators'
+shared one) is registered weakly (`liveSecurityEvaluators`). When the Security Agent's resolved
+configuration changes, `setProviders` hands each one the new `SecurityEvaluatorModel` (`applyModel`),
+keeping its accumulated review state. A model change is safe here, unlike for an agent: an evaluation
+snapshots its model at its start and its conversation lives only for that evaluation. The
+`TaskSummarizer` is rebuilt (`makeTaskSummarizer`) when the summarizer's configuration changes. The
+validator needs nothing: `validatorModel()` reads the dictionaries fresh for every criterion
+judgment. The inspector's model line shows `AgentCardRunningModelNotice` whenever an agent's last call
+used a model other than its assignment. Issue #9 gap 1, switching a live AGENT's model mid-conversation,
+stays unsupported by the decision above.
 
 The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch and backs one-way migration of pre-retirement state (a session's legacy `[AgentRole: UUID]` decodes into `SessionState.legacyConfigAssignments`, mapped to `(provider, model)` via the pool at load; `AppDefaults` self-migrates its bundled UUID `agentAssignments` the same way at decode and re-encodes as `agentModelAssignments`) — but no longer drives assignment. Nothing edits it: the old **Configurations** settings tab is now a per-model **Models** tab (`SettingsView.modelsTab`) listing every cached `(provider, model)` with the per-model Flags/Capabilities/Pricing editors (keyed on `providerID+modelID`, never on a config) plus Refresh Models + Export Defaults. `ModelConfigurationEditorView`, the config CRUD, `SharedAppState.updateAgentConfig`/`deleteConfiguration`, and `SessionManager.deleteConfiguration` were all deleted.
 

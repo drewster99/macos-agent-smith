@@ -53,6 +53,8 @@ actor TaskSummarizer {
     private let usageStore: UsageStore?
     /// Full snapshot of the ModelConfiguration used for summarization LLM calls.
     private let configuration: ModelConfiguration?
+    /// The model configuration this summarizer calls with.
+    public var modelConfiguration: ModelConfiguration? { configuration }
     /// Provider API type (e.g. "anthropic", "openAICompatible") — not on ModelConfiguration.
     private let providerType: String
     /// Session ID for the current orchestration run — stamped on every UsageRecord.

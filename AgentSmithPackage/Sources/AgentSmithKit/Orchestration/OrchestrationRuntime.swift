@@ -1043,6 +1043,9 @@ public actor OrchestrationRuntime {
 
     /// The single serialized consumer of `taskStore`'s events (`installTaskEventConsumerIfNeeded`).
     private var taskEventConsumer: Task<Void, Never>?
+    /// Every `SecurityEvaluator` this runtime made that is still alive — Smith's, each Brown's, and
+    /// the validators' shared one — so a Security Agent model change reaches all of them at once.
+    private var liveSecurityEvaluators: [WeakSecurityEvaluator] = []
     /// Feeds `taskEventConsumer`; held so a delayed effect retry can re-drive delivery.
     private var taskEventContinuation: AsyncStream<TaskStoreEvent>.Continuation?
     private var taskEffectRetryScheduled = false
@@ -2251,6 +2254,13 @@ public actor OrchestrationRuntime {
         // per-instance state (the ChatGPT-subscription provider's `prompt_cache_key`, which is its
         // prefix-cache routing hint), so retuning a role nobody touched would throw away a live
         // agent's cache locality to apply a change that isn't there.
+        // The non-agent holders (Security Agent evaluators, the task summarizer) take a MODEL change
+        // as well as a retune: neither keeps a conversation across calls, so nothing provider-shaped
+        // survives the switch (unlike an agent, whose history does). Same "only if the resolved
+        // configuration actually changed" rule as the retune, for the same cache-locality reason.
+        let securityModelChanged = configurations[.securityAgent].map { $0 != llmConfigs[.securityAgent] } ?? false
+        let summarizerModelChanged = configurations[.summarizer].map { $0 != llmConfigs[.summarizer] } ?? false
+
         var retunes: [AgentRole: AgentActor.ModelRetune] = [:]
         for (role, newConfig) in configurations {
             guard let currentConfig = llmConfigs[role],
@@ -2290,6 +2300,16 @@ public actor OrchestrationRuntime {
             for workerHandle in supervisor.handles(role: role) {
                 await workerHandle.agent.scheduleModelRetune(retune)
             }
+        }
+        if securityModelChanged, let model = currentSecurityEvaluatorModel() {
+            liveSecurityEvaluators.removeAll { $0.evaluator == nil }
+            for box in liveSecurityEvaluators {
+                await box.evaluator?.applyModel(model)
+            }
+        }
+        // Only a running runtime has a summarizer to replace; one not yet started builds it at start.
+        if summarizerModelChanged, currentSessionID != nil {
+            taskSummarizer = await makeTaskSummarizer()
         }
     }
 
@@ -2872,32 +2892,9 @@ public actor OrchestrationRuntime {
         await powerMgr.start()
         powerManager = powerMgr
 
-        // Create the TaskSummarizer only if a summarizer model is explicitly configured.
-        // If not configured, task summarization is silently skipped.
-        if let summarizerProvider = llmProviders[.summarizer],
-           let summarizerConfig = llmConfigs[.summarizer] {
-            taskSummarizer = TaskSummarizer(
-                provider: summarizerProvider,
-                memoryStore: memoryStore,
-                channel: channel,
-                contextWindowSize: summarizerConfig.contextWindowSize,
-                maxOutputTokens: summarizerConfig.maxTokens,
-                usageStore: usageStore,
-                configuration: summarizerConfig,
-                providerType: providerAPITypes[.summarizer]?.rawValue ?? "",
-                sessionID: sessionID,
-                activityTracker: liveActivityTracker
-            )
-            // One inspector identity per summarizer instance, so its calls form one stable
-            // subject in the inspector for the life of this run.
-            summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
-            if let callCallback = onLLMCallRecorded, let summarizer = taskSummarizer {
-                let summarizerRef = summarizerInspectorRef
-                await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
-            }
-        } else {
-            taskSummarizer = nil
-        }
+        // Created only if a summarizer model is explicitly configured; otherwise task summarization
+        // is skipped. Rebuilt by `setProviders` whenever the summarizer's model or tuning changes.
+        taskSummarizer = await makeTaskSummarizer()
 
         guard let smithConfig = llmConfigs[.smith],
               let provider = llmProviders[.smith] else {
@@ -4016,7 +4013,7 @@ public actor OrchestrationRuntime {
     private let securityBackendHealth = SecurityBackendHealth()
 
     private func makeSecurityEvaluator(provider: any LLMProvider, executionTracker: ToolExecutionTracker) -> SecurityEvaluator {
-        SecurityEvaluator(
+        let evaluator = SecurityEvaluator(
             provider: provider,
             systemPrompt: SecurityAgentBehavior.systemPrompt,
             channel: channel,
@@ -4056,6 +4053,60 @@ public actor OrchestrationRuntime {
                     ?? SemanticSearchResults(memories: [], taskSummaries: [])
             }
         )
+        liveSecurityEvaluators.removeAll { $0.evaluator == nil }
+        liveSecurityEvaluators.append(WeakSecurityEvaluator(evaluator: evaluator))
+        return evaluator
+    }
+
+    /// The configurations every live Security Agent evaluator and the task summarizer are calling
+    /// with — what a model change must reach.
+    func nonAgentModelConfigurations() async -> (security: [ModelConfiguration?], summarizer: ModelConfiguration?) {
+        var security: [ModelConfiguration?] = []
+        for box in liveSecurityEvaluators {
+            if let evaluator = box.evaluator { security.append(await evaluator.currentModel.configuration) }
+        }
+        return (security, await taskSummarizer?.modelConfiguration)
+    }
+
+    /// The Security Agent model as currently configured, for handing to a live evaluator. Nil when
+    /// no Security Agent provider is configured (evaluators then keep what they have; `start()` and
+    /// `spawnBrown` refuse to run without one).
+    private func currentSecurityEvaluatorModel() -> SecurityEvaluatorModel? {
+        guard let provider = llmProviders[.securityAgent] else { return nil }
+        return SecurityEvaluatorModel(
+            provider: provider,
+            configuration: llmConfigs[.securityAgent],
+            providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
+            supportsVision: supportsVisionByRole[.securityAgent] ?? true,
+            supportsDocuments: supportsDocumentsByRole[.securityAgent] ?? false
+        )
+    }
+
+    /// Builds the task summarizer from the summarizer role's CURRENT configuration, or nil when no
+    /// summarizer model is assigned (summarization is then skipped). Called at start and again
+    /// whenever the summarizer's model or tuning changes, so it never runs on a stale snapshot.
+    private func makeTaskSummarizer() async -> TaskSummarizer? {
+        guard let summarizerProvider = llmProviders[.summarizer],
+              let summarizerConfig = llmConfigs[.summarizer] else { return nil }
+        let summarizer = TaskSummarizer(
+            provider: summarizerProvider,
+            memoryStore: memoryStore,
+            channel: channel,
+            contextWindowSize: summarizerConfig.contextWindowSize,
+            maxOutputTokens: summarizerConfig.maxTokens,
+            usageStore: usageStore,
+            configuration: summarizerConfig,
+            providerType: providerAPITypes[.summarizer]?.rawValue ?? "",
+            sessionID: currentSessionID,
+            activityTracker: liveActivityTracker
+        )
+        // One inspector identity per summarizer instance, so its calls form one stable subject.
+        summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
+        if let callCallback = onLLMCallRecorded {
+            let summarizerRef = summarizerInspectorRef
+            await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
+        }
+        return summarizer
     }
 
     /// Publishes THIS runtime's live Brown-worker count to the shared activity tracker, keyed by the
@@ -5184,4 +5235,11 @@ Message:
         }
         return lines.joined(separator: "\n")
     }
+}
+
+
+/// A weak reference to a `SecurityEvaluator`, so the runtime can reach every live evaluator without
+/// keeping a retired Brown's alive.
+private struct WeakSecurityEvaluator {
+    weak var evaluator: SecurityEvaluator?
 }
