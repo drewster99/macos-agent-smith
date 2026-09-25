@@ -65,7 +65,7 @@ struct Phase2LongLivedSmithTests {
 
         let store = await runtime.taskStore
         let task = await store.addTask(title: "First task", description: "do the thing")
-        await runtime.restartForNewTask(taskID: task.id)
+        await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
 
         let smithAfter = await runtime.agentIDForRole(.smith)
@@ -101,7 +101,7 @@ struct Phase2LongLivedSmithTests {
         let store = await runtime.taskStore
 
         let first = await store.addTask(title: "First", description: "d")
-        await runtime.restartForNewTask(taskID: first.id)
+        await runtime.restartForNewTask(taskID: first.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
         let firstBrown = await runtime.agentIDForRole(.brown)
 
@@ -109,7 +109,7 @@ struct Phase2LongLivedSmithTests {
         await store.driveStatus(id: first.id, to: .completed)
 
         let second = await store.addTask(title: "Second", description: "d")
-        await runtime.restartForNewTask(taskID: second.id)
+        await runtime.restartForNewTask(taskID: second.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
         let secondBrown = await runtime.agentIDForRole(.brown)
 
@@ -181,7 +181,7 @@ struct Phase2LongLivedSmithTests {
 
         // Task A occupies the only slot, genuinely running.
         let taskA = await store.addTask(title: "A", description: "d")
-        await runtime.restartForNewTask(taskID: taskA.id)
+        await runtime.restartForNewTask(taskID: taskA.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
         let workerA = await runtime.agentIDForRole(.brown)
         #expect(workerA != nil)
@@ -189,7 +189,7 @@ struct Phase2LongLivedSmithTests {
         // A second start arrives anyway (the tool-check race). The lifecycle-queue gate
         // pends it instead of failing it or evicting task A's worker.
         let taskB = await store.addTask(title: "B", description: "d")
-        await runtime.restartForNewTask(taskID: taskB.id)
+        await runtime.restartForNewTask(taskID: taskB.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
 
         #expect(await store.task(id: taskB.id)?.status == .pending, "the race loser queues")
@@ -207,7 +207,7 @@ struct Phase2LongLivedSmithTests {
         let store = await runtime.taskStore
         let template = await store.addTask(title: "Nightly", description: "d", isTemplate: true)
 
-        await runtime.restartForNewTask(taskID: template.id)
+        await runtime.restartForNewTask(taskID: template.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
 
         // The template itself never ran — it's still a pending template.
@@ -239,7 +239,8 @@ struct Phase2LongLivedSmithTests {
 
         await runtime.restartForNewTask(
             taskID: template.id,
-            templateInputValues: ["target_app": "  Notes  ", "locale": "   "]
+            templateInputValues: ["target_app": "  Notes  ", "locale": "   "],
+            origin: .explicitUser
         )
         await runtime.waitForPendingRestarts()
 
@@ -259,7 +260,7 @@ struct Phase2LongLivedSmithTests {
         let store = await runtime.taskStore
         let template = await store.addTask(title: "Nightly", description: "base description", isTemplate: true)
 
-        await runtime.restartForNewTask(taskID: template.id, amendment: "run only the smoke suite")
+        await runtime.restartForNewTask(taskID: template.id, amendment: "run only the smoke suite", origin: .explicitUser)
         await runtime.waitForPendingRestarts()
 
         // The reusable template's description is untouched — no welded per-run text.
@@ -311,7 +312,7 @@ struct Phase2LongLivedSmithTests {
 
         let store = await runtime.taskStore
         let task = await store.addTask(title: "Doomed", description: "no brown provider exists")
-        await runtime.restartForNewTask(taskID: task.id)
+        await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
 
         let after = await store.task(id: task.id)

@@ -62,7 +62,7 @@ struct WorkerCapacityLiveChangeTests {
         let store = await runtime.taskStore
 
         let taskA = await store.addTask(title: "A", description: "d")
-        await runtime.restartForNewTask(taskID: taskA.id)
+        await runtime.restartForNewTask(taskID: taskA.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
         let taskB = await store.addTask(title: "B", description: "d")
         #expect(await store.task(id: taskB.id)?.status == .pending, "B queues behind the only slot")
@@ -86,10 +86,10 @@ struct WorkerCapacityLiveChangeTests {
         let store = await runtime.taskStore
 
         let older = await store.addTask(title: "Older", description: "d")
-        await runtime.restartForNewTask(taskID: older.id)
+        await runtime.restartForNewTask(taskID: older.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
         let newer = await store.addTask(title: "Newer", description: "d")
-        await runtime.restartForNewTask(taskID: newer.id)
+        await runtime.restartForNewTask(taskID: newer.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
         #expect(await runtime.workerSlots().live == 2)
 

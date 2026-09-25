@@ -102,7 +102,7 @@ struct WorkerSlotDrainTests {
         let store = await runtime.taskStore
 
         let taskA = await store.addTask(title: "A", description: "d")
-        await runtime.restartForNewTask(taskID: taskA.id)
+        await runtime.restartForNewTask(taskID: taskA.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
         #expect(await store.task(id: taskA.id)?.status == .running)
         #expect(await runtime.agentIDForRole(.brown) != nil, "A must hold the only worker slot")

@@ -445,7 +445,21 @@ touched) → commit → push.
    - Typed broker settlement, launch reconciliation, the startup handler guard.
    - Tests: firing atomic with status; `.once` consumed at firing; cancel mid-flight; compaction
      keeps the counter; every reconciliation row.
-5. **Start origins and chaining.**
+5. ✅ **Start origins and chaining.** Built:
+   - **Origins.** Every call to `restartForNewTask` requires a `TaskStartOrigin`. Queued runs
+     persist theirs, and old entries decode as `.scheduled`.
+   - **Holds.** A hold is stored on its target (`AgentTask.startHolds`) and is added and removed
+     together with its `startTask` watch.
+   - **The gate.** `passesStartGate` runs before template cloning and before the claim.
+     `.explicitUser` overrides a hold: it cancels the superseded watch and posts a note. Scheduled
+     starts are refused and reported, Smith's are refused with a warning, and the automatic queues
+     (auto-advance, launch resume, capacity resume) and launch auto-resume skip held tasks.
+     `run_task` refuses a held task before `prepareForRun` can reset it.
+   - **Multiple upstream tasks.** A task waiting on several starts only when the last hold
+     releases.
+   - **Stranded holds.** The user is warned when the task a hold waits on fails or completes
+     without firing, or leaves the active list.
+   - Original scope:
    - `TaskStartOrigin` on every start input, the final-gate hold check, cold-launch resume via the
      gate.
    - The `startTask` action and its refusal paths.

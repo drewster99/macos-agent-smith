@@ -18,28 +18,35 @@ public struct PendingScheduledRun: Sendable, Codable, Equatable {
     /// Applied to the started task (or, for a template, to its fresh instance) as that run's
     /// amendment. Nil when the schedule carried no refinements.
     public let amendment: String?
+    /// Who queued the run: a scheduled wake, or a `startTask` watch. Checked at the start gate.
+    public let origin: TaskStartOrigin
 
-    public init(taskID: UUID, amendment: String? = nil) {
+    public init(taskID: UUID, amendment: String? = nil, origin: TaskStartOrigin) {
         self.taskID = taskID
         self.amendment = amendment
+        self.origin = origin
     }
 
-    private enum CodingKeys: String, CodingKey { case taskID, amendment }
+    private enum CodingKeys: String, CodingKey { case taskID, amendment, origin }
 
     public init(from decoder: Decoder) throws {
         if let single = try? decoder.singleValueContainer(), let id = try? single.decode(UUID.self) {
             self.taskID = id
             self.amendment = nil
+            self.origin = .scheduled
             return
         }
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.taskID = try c.decode(UUID.self, forKey: .taskID)
         self.amendment = try c.decodeIfPresent(String.self, forKey: .amendment)
+        // Entries written before origins existed were all scheduled runs.
+        self.origin = try c.decodeIfPresent(TaskStartOrigin.self, forKey: .origin) ?? .scheduled
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(taskID, forKey: .taskID)
         try c.encodeIfPresent(amendment, forKey: .amendment)
+        try c.encode(origin, forKey: .origin)
     }
 }

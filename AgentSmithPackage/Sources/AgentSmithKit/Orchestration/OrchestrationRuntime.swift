@@ -932,7 +932,7 @@ public actor OrchestrationRuntime {
             return .refused(reason)
         }
 
-        let entry = PendingScheduledRun(taskID: taskID, amendment: amendment)
+        let entry = PendingScheduledRun(taskID: taskID, amendment: amendment, origin: .scheduled)
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let inFlight = activeTasks.first {
             $0.id != taskID
@@ -1040,9 +1040,9 @@ public actor OrchestrationRuntime {
             setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) ?? false },
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
             postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) },
-            startTaskForWatch: { [weak self] targetID, watchedTaskID, _ in
+            startTaskForWatch: { [weak self] targetID, watchedTaskID, watchID in
                 guard let self else { return .refused("the session is shutting down") }
-                return await self.startTaskForWatch(targetID, watchedTaskID: watchedTaskID)
+                return await self.startTaskForWatch(targetID, watchedTaskID: watchedTaskID, watchID: watchID)
             }
         )
         // Load BEFORE constructing the broker: a file that exists but can't be read must never be
@@ -1248,11 +1248,70 @@ public actor OrchestrationRuntime {
 
     private static let watchRefusalReasonLimit = 500
 
+    /// The start gate for holds. A held task (`AgentTask.startHolds`) starts only for the user's
+    /// explicit Play — which cancels the chain links it supersedes and says so — or once every
+    /// watch holding it has fired. Every other origin is turned away here, before anything is
+    /// cloned or claimed, and the ones a person or Smith is waiting on are told why.
+    private func passesStartGate(taskID: UUID, origin: TaskStartOrigin) async -> Bool {
+        guard let task = await taskStore.task(id: taskID), !task.startHolds.isEmpty else { return true }
+        let waitingOn = await describeHolds(task.startHolds)
+        if origin.overridesStartHolds {
+            _ = await taskStore.overrideStartHolds(of: taskID)
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Started \"\(task.title)\" now instead of waiting on \(waitingOn); the watch that would have started it is cancelled.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(taskID.uuidString)],
+                taskID: taskID
+            ))
+            return true
+        }
+        let reason = "it is waiting on \(waitingOn) — a watch starts it when that happens"
+        switch origin {
+        case .scheduled:
+            await reportScheduledRunRefused(taskID: taskID, title: task.title, reason: reason)
+        case .smithTool, .watchSatisfied:
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Did not start \"\(task.title)\": \(reason).",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(taskID.uuidString), "severity": .severity(.warning)],
+                taskID: taskID
+            ))
+        case .autoAdvance, .launchResume, .capacityResume:
+            // These paths skip held tasks when choosing; reaching here means a hold landed in between.
+            stopLogger.notice("start of held task \(taskID.uuidString, privacy: .public) from \(String(describing: origin), privacy: .public) skipped")
+        case .explicitUser:
+            break
+        }
+        return false
+    }
+
+    /// "“A”" or "“A” and “B”" — the tasks a hold set waits on, for messages.
+    private func describeHolds(_ holds: [TaskStartHold]) async -> String {
+        var names: [String] = []
+        for hold in holds {
+            names.append(await taskStore.task(id: hold.watchedTaskID).map { "\"\($0.title)\"" } ?? "task \(hold.watchedTaskID.uuidString)")
+        }
+        return names.joined(separator: " and ")
+    }
+
+    /// Tells the user when a task that another task is waiting on can no longer start it on its own:
+    /// it finished without firing its startTask watch, or it left the active list.
+    private func reportStrandedHolds(watchedTaskID: UUID, because situation: String) async {
+        for held in await taskStore.tasksHeld(by: watchedTaskID) {
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(held.title)\" is still waiting on a task that \(situation), so it won't start on its own. Press Play to start it now, or remove the watch.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(held.id.uuidString), "severity": .severity(.warning)],
+                taskID: held.id
+            ))
+        }
+    }
+
     /// Starts a task because a watch fired (a `startTask` chain link). Never reopens or resets: a
     /// target that is not an ordinary runnable task in THIS session is refused with the reason.
     /// Otherwise it goes through the durable scheduled-run queue, so it starts at once when a worker
     /// slot is free, waits its turn at capacity, and survives a crash in between.
-    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID) async -> AutoRunDispatchOutcome {
+    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome {
         guard let target = await taskStore.task(id: targetID), target.disposition == .active else {
             return .refused("the task to start (\(targetID.uuidString)) is no longer an active task in this session")
         }
@@ -1262,7 +1321,20 @@ public actor OrchestrationRuntime {
         guard target.status.isRunnable else {
             return .refused("\"\(target.title)\" is \(target.status.displayName.lowercased()); a watch only starts a pending, paused or interrupted task, and never reopens or resets one")
         }
-        pendingScheduledRunQueue.append(PendingScheduledRun(taskID: targetID, amendment: nil))
+        // This watch's hold is satisfied. A target waiting on more than one task starts only when
+        // the last of them fires.
+        let stillWaitingOn = await taskStore.releaseStartHolds(placedBy: watchID)
+        guard stillWaitingOn.isEmpty else {
+            let waitingOn = await describeHolds(stillWaitingOn)
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(target.title)\" is no longer waiting on this task, but still waits on \(waitingOn) before it starts.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(targetID.uuidString)],
+                taskID: targetID
+            ))
+            return .placed
+        }
+        pendingScheduledRunQueue.append(PendingScheduledRun(taskID: targetID, amendment: nil, origin: .watchSatisfied(watchID: watchID)))
         await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
         if supervisor.handles(role: .brown).count >= maxConcurrentWorkers {
             let watchedTitle = await taskStore.task(id: watchedTaskID)?.title ?? watchedTaskID.uuidString
@@ -1278,6 +1350,21 @@ public actor OrchestrationRuntime {
         return .placed
     }
 
+    /// A watched task that reached completed/failed without firing the startTask watch that holds
+    /// another task (its triggers didn't include this state) leaves that task waiting — say so.
+    private func reportHoldsStrandedByTerminal(_ transition: TaskStatusTransition) async {
+        guard let task = await taskStore.task(id: transition.taskID) else { return }
+        let firedNow = Set(task.watches.filter { watch in
+            watch.recentFirings.contains { $0.transition.statusRevision == transition.statusRevision }
+        }.map(\.id))
+        let stillHolding = task.watches.contains { watch in
+            guard case .startTask = watch.action, watch.isActive else { return false }
+            return !firedNow.contains(watch.id)
+        }
+        guard stillHolding else { return }
+        await reportStrandedHolds(watchedTaskID: task.id, because: "\(transition.to.displayName.lowercased()) without starting it")
+    }
+
     /// The runtime's own reactions to task events.
     private func react(to event: TaskStoreEvent, scheduler: WakeScheduler) async {
         switch event {
@@ -1287,6 +1374,7 @@ public actor OrchestrationRuntime {
             // oldest pending task (gated on auto-advance). Task boundaries are also the long-lived
             // Smith's compaction points: the finished task's play-by-play just became history.
             guard transition.entersTerminal else { return }
+            await reportHoldsStrandedByTerminal(transition)
             await scheduler.cancelWakesForTask(transition.taskID)
             if await !drainPendingScheduledRunQueue() {
                 await drainPendingTaskQueue()
@@ -1301,6 +1389,7 @@ public actor OrchestrationRuntime {
                 // its schedule: an orphaned wake would fire later and be skipped. No queue drain —
                 // an inactive task never held a worker slot.
                 await scheduler.cancelWakesForTask(lifecycle.taskID)
+                await reportStrandedHolds(watchedTaskID: lifecycle.taskID, because: "is no longer in the active list")
             case .restoredToActive:
                 break
             }
@@ -1445,7 +1534,7 @@ public actor OrchestrationRuntime {
                 await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
                 continue
             }
-            restartForNewTask(taskID: next.taskID, amendment: next.amendment)
+            restartForNewTask(taskID: next.taskID, amendment: next.amendment, origin: next.origin)
             return true
         }
         return false
@@ -1505,9 +1594,9 @@ public actor OrchestrationRuntime {
         // (never-started) work; each oldest-first. `restartForNewTask` resumes an interrupted
         // task WITH its prior context (the briefing draws on task.updates), so nothing is lost.
         // Capacity-deferred work first: it was already running before the user shrank the pool.
-        var runnable: [AgentTask] = capacityDeferredQueue.compactMap { byID[$0] }
+        var runnable: [(task: AgentTask, origin: TaskStartOrigin)] = capacityDeferredQueue.compactMap { byID[$0] }.map { ($0, .capacityResume) }
         if autoRunInterruptedTasks {
-            runnable += launchResumeQueue.compactMap { byID[$0] }
+            runnable += launchResumeQueue.compactMap { byID[$0] }.map { ($0, .launchResume) }
         }
         if autoAdvanceEnabled {
             // Templates are `.pending` launchers, not queued work — they start only on an
@@ -1517,18 +1606,20 @@ public actor OrchestrationRuntime {
             runnable += activeTasks
                 .filter { $0.status == .pending && !$0.isTemplate }
                 .sorted { $0.createdAt < $1.createdAt }
+                .map { ($0, .autoAdvance) }
         }
-        // One start per task even if it sits on more than one queue.
+        // One start per task even if it sits on more than one queue; a task a watch is waiting to
+        // start is never picked up automatically (only its watch, or the user's Play, starts it).
         var queued: Set<UUID> = []
-        runnable = runnable.filter { queued.insert($0.id).inserted }
+        runnable = runnable.filter { $0.task.startHolds.isEmpty && queued.insert($0.task.id).inserted }
         let toStart = Array(runnable.prefix(freeSlots))
         // Drop resumed IDs from the queue immediately, so a later mid-session Stop of the same
         // task can't put it back on the auto-resume path.
-        let startedIDs = Set(toStart.map(\.id))
+        let startedIDs = Set(toStart.map(\.task.id))
         launchResumeQueue.removeAll { startedIDs.contains($0) }
         capacityDeferredQueue.removeAll { startedIDs.contains($0) }
-        for task in toStart {
-            restartForNewTask(taskID: task.id)
+        for entry in toStart {
+            restartForNewTask(taskID: entry.task.id, origin: entry.origin)
         }
     }
 
@@ -2334,10 +2425,12 @@ public actor OrchestrationRuntime {
     public func restartForNewTask(
         taskID: UUID,
         amendment: String? = nil,
-        templateInputValues: [String: String] = [:]
+        templateInputValues: [String: String] = [:],
+        origin: TaskStartOrigin
     ) {
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
+            guard await self.passesStartGate(taskID: taskID, origin: origin) else { return }
             // Template interception: starting a template never runs the template — it
             // clones a fresh instance and runs THAT. The template stays put (gets a
             // "started instance" note) so it can spawn another instance next time. This
@@ -2364,7 +2457,7 @@ public actor OrchestrationRuntime {
             if let priorSessionID {
                 await self.usageStore.backfillTaskID(startID, forSession: priorSessionID)
             }
-            await self.performStart(resumingTaskID: startID, lastUserMessage: lastUserMessage)
+            await self.performStart(resumingTaskID: startID, resumingOrigin: origin, lastUserMessage: lastUserMessage)
         }
     }
 
@@ -2613,13 +2706,18 @@ public actor OrchestrationRuntime {
     /// The actual start implementation. Runs ONLY as a lifecycle-queue item (or from
     /// another implementation already inside one) — never call directly from a public
     /// entry point.
-    private func performStart(resumingTaskID: UUID? = nil, lastUserMessage: String? = nil) async {
+    private func performStart(resumingTaskID: UUID? = nil, resumingOrigin: TaskStartOrigin? = nil, lastUserMessage: String? = nil) async {
         guard !startInProgress, smith == nil else {
             // Bailing — but if we were asked to resume a specific task, don't silently drop
             // it (the historical `guard smith == nil` drop bug). Re-route it through the
-            // restart queue so it runs once the in-flight start has finished.
+            // restart queue so it runs once the in-flight start has finished, under the origin
+            // that asked for it.
             if let resumingTaskID {
-                restartForNewTask(taskID: resumingTaskID)
+                if let resumingOrigin {
+                    restartForNewTask(taskID: resumingTaskID, origin: resumingOrigin)
+                } else {
+                    stopLogger.fault("performStart: resuming task \(resumingTaskID.uuidString, privacy: .public) arrived with no start origin — not re-routed")
+                }
             }
             return
         }
@@ -2887,7 +2985,7 @@ public actor OrchestrationRuntime {
             // crash between the enqueue and the start still loses the run's refinements even though
             // it no longer loses the run. Carrying the amendment in the QUEUE (which IS persisted)
             // is what keeps that window down to a crash, rather than every deferred run.
-            pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map { PendingScheduledRun(taskID: $0.id) })
+            pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map { PendingScheduledRun(taskID: $0.id, origin: .scheduled) })
             await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
         }
 
@@ -3107,7 +3205,8 @@ public actor OrchestrationRuntime {
             // but it never enters this queue, so it stays stopped until the next launch.
             var autoResumedTasks: [AgentTask] = []
             if autoRunInterruptedTasks, awaitingReviewTasks.isEmpty {
-                var remaining = interruptedTasks.sorted { $0.createdAt < $1.createdAt }
+                // A held task waits for its watch (or the user's Play), not for launch.
+                var remaining = interruptedTasks.filter(\.startHolds.isEmpty).sorted { $0.createdAt < $1.createdAt }
                 while supervisor.handles(role: .brown).count < maxConcurrentWorkers, let task = remaining.first {
                     guard let brownID = await performSpawnBrown(for: task) else { break }
                     remaining.removeFirst()
@@ -4552,7 +4651,7 @@ public actor OrchestrationRuntime {
             },
             restartForNewTask: { [weak self] taskID, amendment in
                 guard let self else { return }
-                await self.restartForNewTask(taskID: taskID, amendment: amendment)
+                await self.restartForNewTask(taskID: taskID, amendment: amendment, origin: .smithTool)
             },
             currentResumingTaskID: currentResumingTaskID,
             memoryStore: memoryStore,

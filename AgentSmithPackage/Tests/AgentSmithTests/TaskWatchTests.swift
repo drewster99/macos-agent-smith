@@ -223,10 +223,7 @@ struct TaskWatchRuntimeTests {
         let downstream = await store.addTask(title: "B", description: "d")
         #expect(await store.addWatch(TaskWatch(triggers: [.completed], action: .startTask(taskID: downstream.id), createdBy: .user), to: upstream.id) == nil)
         await store.updateStatus(id: upstream.id, status: .completed, cause: .smithSetStatus)
-        let started = await waitUntil {
-            let status = await store.task(id: downstream.id)?.status
-            return status == .starting || status == .running
-        }
+        let started = await waitUntil { await store.task(id: downstream.id)?.startedAt != nil }
         #expect(started)
         await runtime.stopAll()
     }

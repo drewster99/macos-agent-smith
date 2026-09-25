@@ -211,6 +211,22 @@ public actor TaskStore {
     /// target that is not an ordinary task in this session, or a chain that would loop.
     public func addWatch(_ watch: TaskWatch, to taskID: UUID) async -> String? {
         if let problem = watchProblem(watch, on: taskID) { return problem }
+        if case .startTask(let targetID) = watch.action {
+            // Both tasks are in this store (`watchProblem` checked the target; a template, which
+            // lives in the library, may not carry a startTask), so the watch and the target's hold
+            // land in one synchronous step — never one without the other.
+            guard var watched = tasks[taskID], var target = tasks[targetID] else {
+                return "Task \(taskID.uuidString) is not an active task in this session."
+            }
+            watched.watches.append(watch)
+            watched.updatedAt = Date()
+            target.startHolds.append(TaskStartHold(watchedTaskID: taskID, watchID: watch.id))
+            target.updatedAt = Date()
+            tasks[taskID] = watched
+            tasks[targetID] = target
+            didMutate()
+            return nil
+        }
         return await mutateTaskOrTemplate(id: taskID) { task in
             if task.isTemplate, !watch.action.isAllowedOnTemplate {
                 return "A template can't start another task: a template is shared across sessions, and the task to start lives in one. Put the watch on a task instead."
@@ -225,7 +241,7 @@ public actor TaskStore {
     /// removed, so nothing it already produced acts after this returns. The watch itself is kept
     /// (state `.cancelled`) as the audit record.
     public func cancelWatch(_ watchID: UUID, on taskID: UUID) async -> String? {
-        await mutateTaskOrTemplate(id: taskID) { task in
+        let refusal = await mutateTaskOrTemplate(id: taskID) { task in
             guard let index = task.watches.firstIndex(where: { $0.id == watchID }) else {
                 return "Task \(taskID.uuidString) has no watch \(watchID.uuidString)."
             }
@@ -241,6 +257,48 @@ public actor TaskStore {
             task.updatedAt = Date()
             return nil
         }
+        // A cancelled chain link no longer holds its target.
+        if refusal == nil {
+            releaseStartHolds(placedBy: watchID)
+        }
+        return refusal
+    }
+
+    /// Removes the hold `watchID` placed, wherever it is. Returns the holds the target still has.
+    @discardableResult
+    public func releaseStartHolds(placedBy watchID: UUID) -> [TaskStartHold] {
+        var remaining: [TaskStartHold] = []
+        for (id, task) in tasks where task.startHolds.contains(where: { $0.watchID == watchID }) {
+            var updated = task
+            updated.startHolds.removeAll { $0.watchID == watchID }
+            updated.updatedAt = Date()
+            tasks[id] = updated
+            remaining = updated.startHolds
+            didMutate()
+        }
+        return remaining
+    }
+
+    /// The tasks waiting on `watchedTaskID` (holding a start hold its watches placed).
+    public func tasksHeld(by watchedTaskID: UUID) -> [AgentTask] {
+        allTasks().filter { $0.startHolds.contains { $0.watchedTaskID == watchedTaskID } }
+    }
+
+    /// An explicit user start overrides a task's holds: the chain links that would have started it
+    /// are spent, so their watches are cancelled (kept as audit) and the holds removed. Returns the
+    /// holds that were overridden.
+    public func overrideStartHolds(of taskID: UUID) async -> [TaskStartHold] {
+        guard let holds = tasks[taskID]?.startHolds, !holds.isEmpty else { return [] }
+        for hold in holds {
+            _ = await cancelWatch(hold.watchID, on: hold.watchedTaskID)
+        }
+        // A hold whose watch could not be cancelled (its task is gone) is removed directly.
+        if var task = tasks[taskID], !task.startHolds.isEmpty {
+            task.startHolds.removeAll()
+            tasks[taskID] = task
+            didMutate()
+        }
+        return holds
     }
 
     /// Records how a firing ended (or that it was handed off). A no-op when the watch or firing is
@@ -270,6 +328,9 @@ public actor TaskStore {
             return "Instructions for Smith can't be empty."
         case .startTask(let targetID):
             if targetID == taskID { return "A task can't start itself." }
+            if tasks[taskID]?.isTemplate == true {
+                return "A template can't start another task: a template is shared across sessions, and the task to start lives in one. Put the watch on a task instead."
+            }
             guard let target = tasks[targetID], target.disposition == .active else {
                 return "Task \(targetID.uuidString) is not an active task in this session, so a watch can't start it."
             }
@@ -880,6 +941,7 @@ public actor TaskStore {
         // belong to the task that continues.
         historicalRun.watches = []
         historicalRun.pendingEffects = []
+        historicalRun.startHolds = []
         historicalRun.updatedAt = Date()
         tasks[historicalRun.id] = historicalRun
         appendUpdate(to: &task, "Converted this task into a template. Preserved the prior run as child task \(historicalRun.id.uuidString).")

@@ -2257,7 +2257,7 @@ final class AppViewModel {
         }
         // No separate "resumed" notice: the runtime tells Smith "has been started" once the worker
         // is actually claimed and spawned, which is the only point it is true.
-        await runtime?.restartForNewTask(taskID: task.id, templateInputValues: templateInputValues)
+        await runtime?.restartForNewTask(taskID: task.id, templateInputValues: templateInputValues, origin: .explicitUser)
     }
 
     func updatePollInterval(for role: AgentRole, interval: TimeInterval) async {

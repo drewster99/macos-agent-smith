@@ -163,11 +163,11 @@ struct ScheduledRunAcceptanceTests {
         // What every queue file written before the amendment existed looks like.
         let legacy = "[\"\(a.uuidString)\"]"
         let decodedLegacy = try JSONDecoder().decode([PendingScheduledRun].self, from: Data(legacy.utf8))
-        #expect(decodedLegacy == [PendingScheduledRun(taskID: a, amendment: nil)])
+        #expect(decodedLegacy == [PendingScheduledRun(taskID: a, amendment: nil, origin: .scheduled)])
 
         let current = [
-            PendingScheduledRun(taskID: a, amendment: "Safari only"),
-            PendingScheduledRun(taskID: b, amendment: nil)
+            PendingScheduledRun(taskID: a, amendment: "Safari only", origin: .scheduled),
+            PendingScheduledRun(taskID: b, amendment: nil, origin: .scheduled)
         ]
         let round = try JSONDecoder().decode(
             [PendingScheduledRun].self,
