@@ -114,12 +114,12 @@ struct RebuildTaskBindingTests {
         // OLDER task — the one our agent owns. `allTasks()` sorts newest-first, so the
         // pre-fix `first(where: .running)` lookup would skip right past it.
         let ownTask = await taskStore.addTask(title: "own task", description: "the agent's actual work")
-        await taskStore.updateStatus(id: ownTask.id, status: .running)
+        await taskStore.driveStatus(id: ownTask.id, to: .running)
 
         // NEWER task, running concurrently and assigned to a DIFFERENT agent. This is the
         // task the pre-fix lookup returned for every worker that compacted.
         let otherTask = await taskStore.addTask(title: "other task", description: "a second worker's work")
-        await taskStore.updateStatus(id: otherTask.id, status: .running)
+        await taskStore.driveStatus(id: otherTask.id, to: .running)
         await taskStore.assignAgent(taskID: otherTask.id, agentID: UUID())
 
         let firstRunningID = await taskStore.allTasks().first(where: { $0.status == .running })?.id
@@ -170,7 +170,7 @@ struct RebuildTaskBindingTests {
 
         // A running task owned by somebody else. Nothing may re-seed our agent from it.
         let strangerTask = await taskStore.addTask(title: "stranger", description: "not ours")
-        await taskStore.updateStatus(id: strangerTask.id, status: .running)
+        await taskStore.driveStatus(id: strangerTask.id, to: .running)
         await taskStore.assignAgent(taskID: strangerTask.id, agentID: UUID())
 
         let agent = makeAgent(

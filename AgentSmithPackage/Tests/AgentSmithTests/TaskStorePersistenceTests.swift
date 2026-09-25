@@ -24,7 +24,7 @@ struct TaskStorePersistenceTests {
         let store = TaskStore()
         await store.attachPersistence(save: { try await disk.save($0) }, writeNow: false)
         let task = await store.addTask(title: "A", description: "d")
-        await store.updateStatus(id: task.id, status: .running)
+        await store.driveStatus(id: task.id, to: .running)
         #expect(await store.awaitDurable(through: store.currentMutationSeq))
         #expect(await disk.last?.first?.status == .running)
     }

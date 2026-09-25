@@ -67,7 +67,7 @@ struct TaskValidationCoordinatorTests {
         // A real task reaches `.validating` only after pre-flight scoping, so its scoped set
         // (approvedTools) is always populated — the validator reads it as the worker's toolset.
         await store.setApprovedTools(id: task.id, approvedTools: ["bash", "file_read", "file_write", "grep", "glob", "manage_steps", "task_complete"])
-        await store.updateStatus(id: task.id, status: .validating)
+        await store.driveStatus(id: task.id, to: .validating)
         return await store.task(id: task.id) ?? task
     }
 
@@ -102,7 +102,7 @@ struct TaskValidationCoordinatorTests {
         _ = await store.recordCriterionVerdicts(id: task.id, records: [
             CriterionVerdictRecord(criterionID: criterion.id, verdict: .rejected(reason: "wrongly rejected"), validatorName: "default", validatorHash: "x", round: token.round)
         ], judgedAgainst: [criterion], judgedInRound: token)
-        await store.updateStatus(id: task.id, status: .awaitingReview)
+        await store.driveStatus(id: task.id, to: .awaitingReview)
         return (await store.task(id: task.id) ?? task, criterion)
     }
 
@@ -212,7 +212,7 @@ struct TaskValidationCoordinatorTests {
 
         // The worker "fixes and resubmits".
         await runtime.taskStore.setResult(id: task.id, result: "Now with the log file.", commentary: nil, attachments: [])
-        await runtime.taskStore.updateStatus(id: task.id, status: .validating)
+        await runtime.taskStore.driveStatus(id: task.id, to: .validating)
         await runtime.startTaskValidation(taskID: task.id)
         let afterRound2 = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
         #expect(afterRound2 == .completed)
@@ -286,7 +286,7 @@ struct TaskValidationCoordinatorTests {
 
         for expectedOutcome in [AgentTask.Status.running, .failed] {
             await store.setResult(id: task.id, result: "another attempt", commentary: nil, attachments: [])
-            await store.updateStatus(id: task.id, status: .validating)
+            await store.driveStatus(id: task.id, to: .validating)
             await runtime.startTaskValidation(taskID: task.id)
             status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
             #expect(status == expectedOutcome)
@@ -301,7 +301,7 @@ struct TaskValidationCoordinatorTests {
         // run_task's auto-reset gives the retry fresh counters; the resubmission judges again.
         #expect(await store.resetFailedTask(id: task.id))
         await store.setResult(id: task.id, result: "the real fix", commentary: nil, attachments: [])
-        await store.updateStatus(id: task.id, status: .validating)
+        await store.driveStatus(id: task.id, to: .validating)
         await runtime.startTaskValidation(taskID: task.id)
         status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
         #expect(status == .completed, "after a reset, validation judges again instead of insta-failing")

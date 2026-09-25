@@ -400,7 +400,7 @@ struct WebFetchNetworkTests {
         await agent.setOnContextChanged { recorder.update($0) }
 
         let task = await taskStore.addTask(title: "web_fetch loop", description: "drive web_fetch")
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
         await taskStore.assignAgent(taskID: task.id, agentID: agentID)
         await agent.start(initialInstruction: "go")
 

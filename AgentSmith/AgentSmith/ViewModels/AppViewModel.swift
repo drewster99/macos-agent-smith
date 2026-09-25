@@ -708,20 +708,6 @@ final class AppViewModel {
                 }
             }
 
-            // No worker survives a quit. Apply the shared cold-boot rule here, before any runtime
-            // exists, so a session that is never started doesn't show dead work as running.
-            var anyStatusChanged = false
-            for i in savedTasks.indices {
-                guard let recovery = ColdBootRunningRecovery.recovery(for: savedTasks[i]) else { continue }
-                let now = Date()
-                if let note = recovery.progressNote {
-                    savedTasks[i].updates.append(AgentTask.TaskUpdate(date: now, message: note))
-                }
-                savedTasks[i].status = recovery.recoveredStatus
-                savedTasks[i].updatedAt = now
-                anyStatusChanged = true
-            }
-
             // Migration backstop: any archived/deleted tasks still in this session's file (a
             // session the one-time sweep didn't rewrite, or a crash mid-migration) move to the
             // global store. `merge` dedupes by id, so this is idempotent and never duplicates.
@@ -796,13 +782,17 @@ final class AppViewModel {
             taskStore = standaloneStore
             await wireDurablePersistHooks(on: standaloneStore)
             await standaloneStore.restore(savedTasks)
+            // No worker survives a quit: repair launch state now, through the store (typed
+            // transitions), so a session that is never started doesn't show dead work as running.
+            let reconciled = await standaloneStore.reconcileAfterLaunch()
+            tasks = await standaloneStore.allTasks()
             // The store is the file's writer from here on. Write at once only when the load repaired
             // something AND stripping this session's inactive copies is safe (the global file durably
             // has them); otherwise the file is left as-is until the next real mutation.
             let persistPM = persistenceManager
             await standaloneStore.attachPersistence(
                 save: { snapshot in try await persistPM.saveTasks(snapshot) },
-                writeNow: canStripSessionFile && (movedToGlobal || anyStatusChanged)
+                writeNow: canStripSessionFile && (movedToGlobal || reconciled)
             )
             await standaloneStore.setOnChange { [weak self, weak standaloneStore] in
                 Task { @MainActor [weak self, weak standaloneStore] in
@@ -1924,7 +1914,7 @@ final class AppViewModel {
         stopLogger.notice("VM.pauseTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
         // CAS: only pause a task that's actually working — if it finished (completed, escalated,
         // failed) in the click/iteration window, don't clobber that terminal status with .paused.
-        guard await taskStore?.updateStatus(id: id, to: .paused, ifCurrentlyIn: [.running, .validating]) == true else {
+        guard await taskStore?.updateStatus(id: id, to: .paused, ifCurrentlyIn: [.running, .validating], cause: .userPaused) == true else {
             stopLogger.notice("VM.pauseTask task=\(slug, privacy: .public) not in a pausable state — skipped")
             return
         }
@@ -1942,7 +1932,7 @@ final class AppViewModel {
         stopLogger.notice("VM.stopTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
         // CAS: only interrupt a task that's actually working — don't clobber a terminal status
         // if it finished in the click window.
-        guard await taskStore?.updateStatus(id: id, to: .interrupted, ifCurrentlyIn: [.running, .validating]) == true else {
+        guard await taskStore?.updateStatus(id: id, to: .interrupted, ifCurrentlyIn: [.running, .validating], cause: .userStopped) == true else {
             stopLogger.notice("VM.stopTask task=\(slug, privacy: .public) not in a stoppable state — skipped")
             return
         }
@@ -2367,10 +2357,12 @@ final class AppViewModel {
         // and persisted before we tear down rather than dropped here.
         self.runtime = nil
 
+        // A running task whose result was already submitted is left `.running`: the next launch's
+        // reconciliation (`ColdBootRunningRecovery`) resumes its validation instead of re-running it.
         if let store = taskStore {
             let liveTasks = await store.allTasks()
-            for task in liveTasks where task.status == .running {
-                await store.updateStatus(id: task.id, status: .interrupted)
+            for task in liveTasks where task.status == .running && ColdBootRunningRecovery.recovery(for: task) == .interrupt {
+                await store.updateStatus(id: task.id, status: .interrupted, cause: .sessionShutdown)
             }
         }
 
@@ -2402,7 +2394,7 @@ final class AppViewModel {
         var allMoved = true
         for task in await taskStore.allTasks() where task.disposition == .active {
             if task.status.isInProgress {
-                await taskStore.updateStatus(id: task.id, status: .interrupted)
+                await taskStore.updateStatus(id: task.id, status: .interrupted, cause: .sessionDeletion)
             }
             let moved = archiving
                 ? await taskStore.archive(id: task.id)

@@ -15,7 +15,7 @@ struct TaskStoreResultPreservationTests {
         let task = await store.addTask(title: "T", description: "D")
         await store.setResult(id: task.id, result: "RESULT ONE", commentary: "did A then B")
         await store.setSummary(id: task.id, summary: "SUMMARY ONE")
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
 
         // Re-run path: reopen clears the result (must preserve it first), then a new completion.
         _ = await store.reopenCompletedTask(id: task.id)

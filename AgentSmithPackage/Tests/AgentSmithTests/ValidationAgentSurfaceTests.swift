@@ -155,8 +155,8 @@ struct ValidationAgentSurfaceTests {
         let ranStore = TaskStore()
         let ran = await ranStore.addTask(title: "t", description: "d")
         await ranStore.setSteps(id: ran.id, steps: ["a", "b"].map { TaskStep(text: $0, origin: .smith) })
-        await ranStore.updateStatus(id: ran.id, status: .running)
-        await ranStore.updateStatus(id: ran.id, status: .failed)
+        await ranStore.driveStatus(id: ran.id, to: .running)
+        await ranStore.driveStatus(id: ran.id, to: .failed)
         #expect(await ranStore.task(id: ran.id)?.startedAt != nil, "precondition: the task recorded a start")
         let ranStepID = await ranStore.task(id: ran.id)!.steps[0].id
         let refused = try await tool.execute(
@@ -186,7 +186,7 @@ struct ValidationAgentSurfaceTests {
     func manageStepsSmithBlockedWhileRunning() async throws {
         let taskStore = TaskStore()
         let task = await taskStore.addTask(title: "t", description: "d")
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
         let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
 
         let result = try await ManageStepsTool().execute(
@@ -323,7 +323,7 @@ struct ValidationAgentSurfaceTests {
         let existing = AcceptanceCriterion(name: "A", validationPrompt: "judge A", origin: .smith)
         await taskStore.setAcceptanceCriteria(id: task.id, criteria: [existing])
         await taskStore.setResult(id: task.id, result: "done", commentary: nil, attachments: [])
-        await taskStore.updateStatus(id: task.id, status: .validating)
+        await taskStore.driveStatus(id: task.id, to: .validating)
         let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
         let tool = SetAcceptanceCriteriaTool()
 
@@ -354,7 +354,7 @@ struct ValidationAgentSurfaceTests {
 
         // Back out of validation and the same edit lands — the gate is about the live validator,
         // not about the task having been judged.
-        await taskStore.updateStatus(id: task.id, status: .awaitingReview)
+        await taskStore.driveStatus(id: task.id, to: .awaitingReview)
         let afterPark = try await tool.execute(
             arguments: [
                 "task_id": .string(task.id.uuidString),
@@ -381,7 +381,7 @@ struct ValidationAgentSurfaceTests {
 
         // Failed task: editing criteria is the recovery path (run_task then resets it), so allowed.
         let failed = await taskStore.addTask(title: "f", description: "d")
-        await taskStore.updateStatus(id: failed.id, status: .failed)
+        await taskStore.driveStatus(id: failed.id, to: .failed)
         let onFailed = try await tool.execute(
             arguments: ["task_id": .string(failed.id.uuidString),
                         "criteria": .array([.dictionary(["name": .string("fixed criterion"), "validation_prompt": .string("judge the fixed criterion")])])],
@@ -392,7 +392,7 @@ struct ValidationAgentSurfaceTests {
         // Completed task: result was accepted and delivered — closed to criteria edits.
         let completed = await taskStore.addTask(title: "c", description: "d")
         await taskStore.setResult(id: completed.id, result: "done", commentary: nil)
-        await taskStore.updateStatus(id: completed.id, status: .completed)
+        await taskStore.driveStatus(id: completed.id, to: .completed)
         let onCompleted = try await tool.execute(
             arguments: ["task_id": .string(completed.id.uuidString),
                         "criteria": .array([.dictionary(["name": .string("too late"), "validation_prompt": .string("judge it")])])],
@@ -427,7 +427,7 @@ struct ValidationAgentSurfaceTests {
     func setCriteriaRefusesCompleted() async throws {
         let taskStore = TaskStore()
         let task = await taskStore.addTask(title: "t", description: "d")
-        await taskStore.updateStatus(id: task.id, status: .completed)
+        await taskStore.driveStatus(id: task.id, to: .completed)
         let context = TestToolContext.make(agentRole: .smith, taskStore: taskStore)
         let result = try await SetAcceptanceCriteriaTool().execute(
             arguments: [

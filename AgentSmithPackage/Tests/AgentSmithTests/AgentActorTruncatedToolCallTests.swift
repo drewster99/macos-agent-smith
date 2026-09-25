@@ -78,7 +78,7 @@ struct AgentActorTruncatedToolCallTests {
             title: "truncated tool-call test",
             description: "verify internal retry recovery"
         )
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
         await taskStore.assignAgent(taskID: task.id, agentID: agentID)
         await agent.start(initialInstruction: "write the file")
 

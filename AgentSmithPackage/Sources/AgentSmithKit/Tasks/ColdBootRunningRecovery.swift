@@ -7,7 +7,7 @@ import Foundation
 /// runtime's cold-boot reconciliation (the crash/force-quit backstop) apply it. They used to state
 /// it separately and disagree: the loader demoted every `.running` task to `.interrupted` first, so
 /// the runtime's submitted-result recovery below could never see a `.running` task and never ran.
-public enum ColdBootRunningRecovery: Sendable, Equatable {
+public enum ColdBootRunningRecovery: String, Codable, Sendable, Equatable, Hashable {
     /// The worker's `task_complete` durably wrote a result before the status left `.running`.
     /// That is submitted work, so it resumes acceptance validation instead of re-running Brown.
     case resumeValidation

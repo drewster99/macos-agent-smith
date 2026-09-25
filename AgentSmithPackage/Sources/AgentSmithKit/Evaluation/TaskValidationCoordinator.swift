@@ -240,7 +240,7 @@ extension OrchestrationRuntime {
         // here; validation simply doesn't run. Checked BEFORE the missing-model park: if the user turned
         // validation off, a missing validator model is moot.
         guard orchestrationSettings.enableTaskCompletionValidators else {
-            _ = await completeValidatedTask(taskID: taskID, validationWasRun: false)
+            _ = await completeValidatedTask(taskID: taskID, validationWasRun: false, cause: .validationPassed(validationWasRun: false))
             return
         }
 
@@ -274,7 +274,7 @@ extension OrchestrationRuntime {
         let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
         let pending = task.acceptanceCriteria.filter { !settled.contains($0.id) }
         guard !pending.isEmpty else {
-            await completeValidatedTask(taskID: taskID, judgedInRound: token)
+            await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
             return
         }
 
@@ -386,7 +386,7 @@ extension OrchestrationRuntime {
 
         if unjudged == 0 && errored.isEmpty && rejected.isEmpty {
             mirrorRoundOutcome("completed")
-            await completeValidatedTask(taskID: taskID, judgedInRound: token)
+            await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
         } else if !errored.isEmpty {
             let messages = errored.map { record -> String in
                 if case .error(let message) = record.verdict { return message }
@@ -445,7 +445,7 @@ extension OrchestrationRuntime {
         // CAS: only fail if still validating AND this round's contract is still the live one — never
         // overwrite a pause/stop that landed after the coordinator's status snapshot, and never fail
         // a task for not converging on a contract that has since been rewritten.
-        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .validationFailedNoProgress) else { return }
         guard let task = await taskStore.task(id: taskID) else { return }
         let reason = "No acceptance criterion was newly approved for \(validationsWithoutNewApprovals) validation rounds in a row — \(stillRejected) criterion(s) still rejected."
         await taskStore.addUpdate(id: taskID, message: "Task FAILED validation: \(reason)")
@@ -1268,12 +1268,13 @@ extension OrchestrationRuntime {
         taskID: UUID,
         from allowedStatuses: Set<AgentTask.Status> = [.validating],
         judgedInRound token: ValidationRoundToken? = nil,
-        validationWasRun: Bool = true
+        validationWasRun: Bool = true,
+        cause: TaskTransitionCause
     ) async -> Bool {
         // CAS: only complete from an allowed state under the contract we judged — a pause/stop/
         // re-validate or a criteria edit that landed after the caller's snapshot must not be
         // overwritten by this completion.
-        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token) else { return false }
+        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token, cause: cause) else { return false }
         guard let completed = await taskStore.task(id: taskID) else { return false }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
@@ -1341,7 +1342,7 @@ extension OrchestrationRuntime {
             // Status first, then clear: a `.pending` task with a stale result is
             // consistent; a `.validating` task with no result is the invariant-violating
             // shape observers must never see (agy review finding).
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .rejectionsReturned) else { return }
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Validation rejected \(rejected.count) criterion(s); no worker slot was free for the rework, so the task is re-queued:\n\(punchList)")
             await channel.post(ChannelMessage(
@@ -1357,7 +1358,7 @@ extension OrchestrationRuntime {
 
         // CAS: if a pause/stop or a criteria edit landed after our snapshot, don't flip to .running —
         // and if we just spawned a worker for the rework, tear it back down so it doesn't orphan.
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else {
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .rejectionsReturned) else {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
             return
         }
@@ -1415,7 +1416,7 @@ extension OrchestrationRuntime {
         // Claim the transition BEFORE zeroing the convergence budget, so a lost race can't leave a
         // task the winner moved elsewhere with a reset counter. Nothing consumes the counter between
         // here and `startTaskValidation` below.
-        guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview]) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview], cause: .userRevalidated) else { return }
         await taskStore.resetValidationRound(id: taskID)
         await taskStore.addUpdate(id: taskID, message: "Re-running acceptance validation at the user's request.")
         startTaskValidation(taskID: taskID)
@@ -1436,7 +1437,7 @@ extension OrchestrationRuntime {
         // the task off `.awaitingReview` — returns false, so a sticky ACCEPT override can never land on
         // a task this call didn't complete (which a later re-validation would then wrongly skip), and
         // we never complete a task that a concurrent Re-validate put back into `.validating`.
-        guard await completeValidatedTask(taskID: taskID, from: [.awaitingReview]) else { return }
+        guard await completeValidatedTask(taskID: taskID, from: [.awaitingReview], cause: .userAccepted) else { return }
         if !unsettled.isEmpty {
             _ = await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
                 CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
@@ -1449,7 +1450,7 @@ extension OrchestrationRuntime {
     /// User fails the escalated task outright.
     public func failEscalatedTask(taskID: UUID) async {
         guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
-        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.awaitingReview]) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.awaitingReview], cause: .userFailed) else { return }
         for agentID in task.assigneeIDs { _ = await terminateAgent(id: agentID) }
         taskWorkspace(for: taskID).cleanupTemporary()
         await taskStore.addUpdate(id: taskID, message: "Failed by the user from a validation escalation.")
@@ -1475,13 +1476,13 @@ extension OrchestrationRuntime {
         }
         guard let brownID else {
             // No worker slot free: re-queue as pending; the fresh briefing carries the feedback.
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview]) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview], cause: .userSentBack) else { return }
             await taskStore.resetValidationRound(id: taskID)
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Sent back by the user (no worker slot free — re-queued):\n\(feedback)")
             return
         }
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.awaitingReview]) else {
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.awaitingReview], cause: .userSentBack) else {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
             return
         }
@@ -1608,7 +1609,7 @@ extension OrchestrationRuntime {
         }
         // Publish the park only after the worker is gone. CAS: a pause/stop that landed during
         // teardown must not be overwritten (such a transition tears Brown down anyway).
-        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .validationEscalated) else { return }
         // The freed slot isn't a terminal event, so `onTaskTerminated` won't fire the usual
         // auto-advance — kick it here so a pending task can take the slot.
         // Redundant since `terminateAgent` kicks the drain itself, and kept deliberately: this

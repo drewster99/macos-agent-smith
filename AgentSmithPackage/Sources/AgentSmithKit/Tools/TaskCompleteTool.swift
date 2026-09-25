@@ -119,7 +119,10 @@ public struct TaskCompleteTool: AgentTool {
         // "Ready for Review" banner is preserved for the UI via the same task_complete
         // message kind, posted publicly (Smith's filter drops it; the user sees it).
         await context.taskStore.setResult(id: task.id, result: result, commentary: commentary, attachments: attachments, resultItems: resultItems)
-        await context.taskStore.updateStatus(id: task.id, status: .validating)
+        guard await context.taskStore.updateStatus(id: task.id, status: .validating, cause: .submittedForValidation) else {
+            let current = await context.taskStore.task(id: task.id)?.status.displayName ?? "unknown"
+            return .failure("The task is \(current), so it can't be submitted for validation right now. Your result is saved on the task.")
+        }
 
         var message = "Task '\(task.title)' submitted — acceptance validation is running."
         if let commentary {

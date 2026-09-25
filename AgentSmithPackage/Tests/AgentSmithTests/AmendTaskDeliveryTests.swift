@@ -49,7 +49,7 @@ struct AmendTaskDeliveryTests {
 
         let task = await taskStore.addTask(title: "Extract hooks", description: "Original briefing.")
         await taskStore.assignAgent(taskID: task.id, agentID: brownID)
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
 
         let context = Self.makeContext(channel: channel, taskStore: taskStore, brownID: brownID)
         let result = try await AmendTaskTool().execute(

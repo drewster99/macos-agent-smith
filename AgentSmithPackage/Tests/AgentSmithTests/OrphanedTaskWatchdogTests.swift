@@ -29,9 +29,9 @@ struct OrphanedTaskWatchdogTests {
         let taskStore = TaskStore()
         let channel = MessageChannel()
         let orphan = await taskStore.addTask(title: "Orphaned", description: "d")
-        await taskStore.updateStatus(id: orphan.id, status: .running)
+        await taskStore.driveStatus(id: orphan.id, to: .running)
         let healthy = await taskStore.addTask(title: "Healthy", description: "d")
-        await taskStore.updateStatus(id: healthy.id, status: .running)
+        await taskStore.driveStatus(id: healthy.id, to: .running)
         await taskStore.assignAgent(taskID: healthy.id, agentID: UUID())
 
         let timer = MonitoringTimer(interval: 0.05, channel: channel, taskStore: taskStore)

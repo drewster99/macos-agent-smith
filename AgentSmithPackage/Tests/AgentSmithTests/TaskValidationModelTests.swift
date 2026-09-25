@@ -11,17 +11,17 @@ struct TaskValidationModelTests {
     func conditionalStatusCAS() async {
         let store = TaskStore()
         let t = await store.addTask(title: "t", description: "d")
-        await store.updateStatus(id: t.id, status: .validating)
+        await store.driveStatus(id: t.id, to: .validating)
 
         // Applies while the status is still what validation expects.
-        let applied = await store.updateStatus(id: t.id, to: .completed, ifCurrentlyIn: [.validating])
+        let applied = await store.updateStatus(id: t.id, to: .completed, ifCurrentlyIn: [.validating], cause: .validationPassed(validationWasRun: true))
         #expect(applied)
         #expect(await store.task(id: t.id)?.status == .completed)
 
         // Refuses once the task has moved on — the guarantee that a pause/stop landing
         // mid-validation is never overwritten by a late validation transition.
-        await store.updateStatus(id: t.id, status: .paused)
-        let refused = await store.updateStatus(id: t.id, to: .awaitingReview, ifCurrentlyIn: [.validating])
+        await store.driveStatus(id: t.id, to: .paused)
+        let refused = await store.updateStatus(id: t.id, to: .awaitingReview, ifCurrentlyIn: [.validating], cause: .validationEscalated)
         #expect(!refused)
         #expect(await store.task(id: t.id)?.status == .paused, "a non-validating task is not clobbered")
     }
@@ -197,7 +197,7 @@ struct TaskValidationModelTests {
             _ = await store.applyStepAction(taskID: task.id, action: .setStatus(stepID: ids[1], status: .skipped, note: "blocked"))
             _ = await store.applyStepAction(taskID: task.id, action: .delete(stepID: ids[2], note: "not needed"))
             await store.setResult(id: task.id, result: "r", commentary: nil, attachments: [])
-            await store.updateStatus(id: task.id, status: finalStatus)
+            await store.driveStatus(id: task.id, to: finalStatus)
             return (store, task.id, ids)
         }
 
@@ -284,7 +284,7 @@ struct TaskValidationModelTests {
         #expect(await store.task(id: task.id)?.acceptanceCriteria.map(\.name) == ["A"])
 
         // And the status half of the gate: nothing edits a contract a validator is consuming.
-        await store.updateStatus(id: task.id, status: .validating)
+        await store.driveStatus(id: task.id, to: .validating)
         #expect(await store.setAcceptanceCriteria(id: task.id, criteria: [editedFirst]) != nil)
         #expect(await store.applyCriterionActions(taskID: task.id, actions: [
             .add(name: "C", validationPrompt: "judge C", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
@@ -433,7 +433,7 @@ struct TaskValidationModelTests {
 
         // Step three of the same pattern: retry. The retry drops the sticky verdicts on purpose —
         // the history is what remains to show the bar moved between attempts.
-        await store.updateStatus(id: task.id, status: .failed)
+        await store.driveStatus(id: task.id, to: .failed)
         #expect(await store.resetFailedTask(id: task.id))
         let afterRetry = await store.task(id: task.id)!.validation!
         #expect(afterRetry.verdictRecords.isEmpty)
@@ -521,7 +521,7 @@ struct TaskValidationModelTests {
         let successor = await store.beginValidationRound(id: task.id)!
         #expect(successor.round == inFlight.round, "the round NUMBER is no longer distinguishing")
         #expect(successor.contractVersion > inFlight.contractVersion)
-        await store.updateStatus(id: task.id, status: .validating)
+        await store.driveStatus(id: task.id, to: .validating)
 
         // Every mutation the in-flight round would make is refused, on the actor that owns the truth.
         let write = await store.recordCriterionVerdicts(id: task.id, records: [
@@ -530,13 +530,13 @@ struct TaskValidationModelTests {
         #expect(write == .superseded)
         #expect(await store.updateValidationStall(id: task.id, progressed: false, judgedInRound: inFlight) == nil,
                 "a superseded round must not spend the new contract's convergence budget")
-        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: inFlight) == false,
+        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: inFlight, cause: .validationFailedNoProgress) == false,
                 "nor fail the task for not converging on a contract it never judged")
         #expect(await store.task(id: task.id)?.status == .validating)
 
         // The successor, holding the live token, is refused nothing.
         #expect(await store.updateValidationStall(id: task.id, progressed: false, judgedInRound: successor) == 1)
-        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: successor))
+        #expect(await store.updateStatus(id: task.id, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: successor, cause: .validationFailedNoProgress))
     }
 
     @Test("A round is ordered by criterion position, not by whichever validator answered first")

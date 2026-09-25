@@ -24,6 +24,10 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     public var title: String
     public var description: String
     public var status: Status
+    /// Bumped by every real status transition (`TaskStore.changeStatus`) — per task, monotonic,
+    /// persisted. With the task id it names a transition deterministically, which is what makes a
+    /// transition's effects idempotent across a crash.
+    public var statusRevision: Int = 0
     public var disposition: TaskDisposition
     public var assigneeIDs: [UUID]
     public var result: String?
@@ -484,7 +488,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision
     }
 
     public init(from decoder: Decoder) throws {
@@ -493,6 +497,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         title = try c.decode(String.self, forKey: .title)
         description = try c.decode(String.self, forKey: .description)
         status = try c.decode(Status.self, forKey: .status)
+        statusRevision = try c.decodeIfPresent(Int.self, forKey: .statusRevision) ?? 0
         disposition = try c.decodeIfPresent(TaskDisposition.self, forKey: .disposition) ?? .active
         assigneeIDs = try c.decode([UUID].self, forKey: .assigneeIDs)
         result = try c.decodeIfPresent(String.self, forKey: .result)
@@ -534,6 +539,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encode(title, forKey: .title)
         try c.encode(description, forKey: .description)
         try c.encode(status, forKey: .status)
+        if statusRevision > 0 {
+            try c.encode(statusRevision, forKey: .statusRevision)
+        }
         try c.encode(disposition, forKey: .disposition)
         try c.encode(assigneeIDs, forKey: .assigneeIDs)
         try c.encodeIfPresent(result, forKey: .result)

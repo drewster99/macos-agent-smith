@@ -106,7 +106,7 @@ struct Phase2LongLivedSmithTests {
         let firstBrown = await runtime.agentIDForRole(.brown)
 
         // Finish the first task so the second is allowed to start.
-        await store.updateStatus(id: first.id, status: .completed)
+        await store.driveStatus(id: first.id, to: .completed)
 
         let second = await store.addTask(title: "Second", description: "d")
         await runtime.restartForNewTask(taskID: second.id)
@@ -333,7 +333,7 @@ struct Phase2LongLivedSmithTests {
         await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(autoRunNextTask: false, autoRunInterruptedTasks: true, scopeToolSetOnTaskStart: false)))
         let store = await runtime.taskStore
         let task = await store.addTask(title: "Reply to Drew", description: "Send the reply.")
-        await store.updateStatus(id: task.id, status: .running)
+        await store.driveStatus(id: task.id, to: .running)
         await store.setResult(id: task.id, result: "Reply sent.", commentary: nil)
 
         await runtime.start()
@@ -360,8 +360,8 @@ struct Phase2LongLivedSmithTests {
         // Two tasks that were mid-run when the app quit.
         let a = await store.addTask(title: "A", description: "d")
         let b = await store.addTask(title: "B", description: "d")
-        await store.updateStatus(id: a.id, status: .interrupted)
-        await store.updateStatus(id: b.id, status: .interrupted)
+        await store.driveStatus(id: a.id, to: .interrupted)
+        await store.driveStatus(id: b.id, to: .interrupted)
 
         await runtime.start()
 
@@ -383,8 +383,8 @@ struct Phase2LongLivedSmithTests {
 
         let a = await store.addTask(title: "A", description: "d")
         let b = await store.addTask(title: "B", description: "d")
-        await store.updateStatus(id: a.id, status: .interrupted)
-        await store.updateStatus(id: b.id, status: .interrupted)
+        await store.driveStatus(id: a.id, to: .interrupted)
+        await store.driveStatus(id: b.id, to: .interrupted)
 
         await runtime.start()
 
@@ -406,7 +406,7 @@ struct Phase2LongLivedSmithTests {
         let a = await store.addTask(title: "A", description: "d")
         let b = await store.addTask(title: "B", description: "d")
         let c = await store.addTask(title: "C", description: "d")
-        for t in [a, b, c] { await store.updateStatus(id: t.id, status: .interrupted) }
+        for t in [a, b, c] { await store.driveStatus(id: t.id, to: .interrupted) }
 
         await runtime.start()
 
@@ -431,7 +431,7 @@ struct Phase2LongLivedSmithTests {
         for t in [a, b, c] where await statusOf(t.id) == .running { freedID = t.id; break }
         if let freedID {
             await runtime.terminateTaskAgents(taskID: freedID)
-            await store.updateStatus(id: freedID, status: .completed)
+            await store.driveStatus(id: freedID, to: .completed)
         }
         await runtime.drainPendingTaskQueueForTesting()
         await runtime.waitForPendingRestarts()
@@ -452,7 +452,7 @@ struct Phase2LongLivedSmithTests {
         let store = await runtime.taskStore
 
         let a = await store.addTask(title: "A", description: "d")
-        await store.updateStatus(id: a.id, status: .interrupted)
+        await store.driveStatus(id: a.id, to: .interrupted)
 
         await runtime.start()
         #expect(await store.task(id: a.id)?.status == .running, "the launch-time interrupt resumes")
@@ -460,7 +460,7 @@ struct Phase2LongLivedSmithTests {
         // The user Stops it mid-session — it becomes interrupted again, but is NOT on the
         // launch resume queue (it was removed when first resumed), so the drain leaves it be.
         await runtime.terminateTaskAgents(taskID: a.id)
-        await store.updateStatus(id: a.id, status: .interrupted)
+        await store.driveStatus(id: a.id, to: .interrupted)
         await runtime.drainPendingTaskQueueForTesting()
         await runtime.waitForPendingRestarts()
 

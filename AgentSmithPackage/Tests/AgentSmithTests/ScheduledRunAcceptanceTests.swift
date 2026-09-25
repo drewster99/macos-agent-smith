@@ -24,8 +24,8 @@ struct ScheduledRunAcceptanceTests {
     func failedTaskIsResetForRetry() async throws {
         let store = TaskStore()
         let task = await store.addTask(title: "Find 10 products", description: "...")
-        await store.updateStatus(id: task.id, status: .running)
-        await store.updateStatus(id: task.id, status: .failed)
+        await store.driveStatus(id: task.id, to: .running)
+        await store.driveStatus(id: task.id, to: .failed)
 
         #expect(await store.prepareForRun(id: task.id) == .ready)
         let after = try #require(await store.task(id: task.id))
@@ -36,7 +36,7 @@ struct ScheduledRunAcceptanceTests {
     func completedTaskIsReopened() async throws {
         let store = TaskStore()
         let task = await store.addTask(title: "Ship it", description: "...")
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
 
         #expect(await store.prepareForRun(id: task.id) == .ready)
         let after = try #require(await store.task(id: task.id))
@@ -73,13 +73,19 @@ struct ScheduledRunAcceptanceTests {
     func purePredicateMatchesTheMutatingAuthority() async throws {
         for status in AgentTask.Status.allCases {
             let store = TaskStore()
-            let task = await store.addTask(title: "T-\(status.rawValue)", description: "...")
+            // `.scheduled` is only ever a task's BIRTH status (a future `scheduledRunAt`); no live
+            // transition enters it.
+            let task = await store.addTask(
+                title: "T-\(status.rawValue)",
+                description: "...",
+                scheduledRunAt: status == .scheduled ? Date().addingTimeInterval(3600) : nil
+            )
             // `.awaitingReview` carries a hard invariant — a parked submission always HAS a
             // submitted result — and `updateStatus` refuses the transition without one.
             if status == .awaitingReview {
                 await store.setResult(id: task.id, result: "submitted work", commentary: nil)
             }
-            await store.updateStatus(id: task.id, status: status)
+            await store.driveStatus(id: task.id, to: status)
 
             let prepared = await store.prepareForRun(id: task.id) == .ready
             #expect(
@@ -94,7 +100,7 @@ struct ScheduledRunAcceptanceTests {
         for status in AgentTask.Status.allCases where status.isRunnable {
             let store = TaskStore()
             let task = await store.addTask(title: "T", description: "...")
-            await store.updateStatus(id: task.id, status: status)
+            await store.driveStatus(id: task.id, to: status)
             #expect(await store.prepareForRun(id: task.id) == .ready)
             let after = try #require(await store.task(id: task.id))
             #expect(after.status == status, "'\(status.rawValue)' must be left alone, not normalized")

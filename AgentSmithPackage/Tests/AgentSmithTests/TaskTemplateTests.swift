@@ -83,7 +83,7 @@ struct TaskTemplateTests {
         let store = TaskStore()
         let task = await store.addTask(title: "One-off", description: "d")
         await store.setResult(id: task.id, result: "done", commentary: nil, attachments: [])
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
 
         let error = await store.setTemplate(id: task.id, isTemplate: true)
         #expect(error == nil)
@@ -117,7 +117,7 @@ struct TaskTemplateTests {
     func inProgressTaskCannotConvertToTemplate() async {
         let store = TaskStore()
         let task = await store.addTask(title: "Running", description: "d")
-        await store.updateStatus(id: task.id, status: .running)
+        await store.driveStatus(id: task.id, to: .running)
 
         let error = await store.setTemplate(id: task.id, isTemplate: true)
 
@@ -343,7 +343,7 @@ struct TaskTemplateTests {
         let store = TaskStore()
         let task = await store.addTask(title: "Check disk space", description: "Report free space on /")
         await store.setResult(id: task.id, result: "42 GB free.", commentary: nil)
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
 
         let problem = await store.updateDefinition(
             id: task.id,

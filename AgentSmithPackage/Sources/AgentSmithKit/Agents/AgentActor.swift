@@ -2888,7 +2888,7 @@ public actor AgentActor {
 
         let newAckCount = await toolContext.taskStore.incrementAcknowledgmentCount(id: task.id)
         let isContinuation = newAckCount > 1
-        await toolContext.taskStore.updateStatus(id: task.id, status: .running)
+        await toolContext.taskStore.updateStatus(id: task.id, status: .running, cause: .workerAcknowledged)
 
         guard let smithID = await toolContext.agentIDForRole(.smith) else { return }
         let content = isContinuation

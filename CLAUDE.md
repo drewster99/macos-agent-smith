@@ -444,7 +444,10 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
 `TaskTransitionMatrix`; an illegal combination is refused. Everything that reacts to a status
 change subscribes to it:
 
-- the runtime's own reactions (`onTaskTerminated` becomes derived);
+- the runtime's own reactions. The store has ONE `setEventObserver`, which yields
+  `TaskStoreEvent`s (transitions AND `TaskLifecycleEvent`s, in write order) into a FIFO that one
+  serialized runtime consumer drains (`installTaskEventConsumerIfNeeded` / `react(to:)`). There
+  is no `onTaskTerminated` or `onTaskMovedToInactive` any more;
 - the built-in Smith briefing (defined in code, always on);
 - user-defined **task watches**: data on `AgentTask.watches` saying "when task X reaches state S,
   do A", where A is start another task, a macOS notification, Smith summarizes to the user, or

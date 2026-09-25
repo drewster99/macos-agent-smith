@@ -372,7 +372,21 @@ touched) → commit → push.
    - Broker persistence errors surfaced.
    - A reflection-based `AgentTask` coding-key coverage guard.
    - Tests: a failed write does not advance durability; `flush` semantics.
-2. **Transition funnel.**
+2. ✅ **Transition funnel.** Built:
+   - `TaskStore.applyStatus` / `changeStatus` are the only live status writers, with
+     `TaskTransitionCause.permits` as the matrix. A refusal is logged as a fault and returns
+     false, so it can be tested.
+   - The CAS results are truthful, no-ops are suppressed, and `statusRevision` is persisted.
+   - The store has one event observer. The runtime drains `TaskStoreEvent`s through one serialized
+     consumer, which replaced `onTaskTerminated` and `onTaskMovedToInactive`.
+   - `TaskLifecycleEvent` is emitted, which fixes the permanent-delete wake leak.
+   - `reconcileAfterLaunch` runs at session load and at runtime start. The loader's raw-array write
+     is gone.
+   - `update_task` refuses statuses outside `UpdateTaskStatusPolicy`.
+   - Stop All leaves a submitted-result task `.running`, so the next launch resumes its validation.
+   - **Moved to Phase 3:** the effect outbox and release tickets. They ship with their first real
+     subscriber, the Smith briefing, instead of as unused machinery.
+   - Original scope:
    - `TaskStatusTransition`, `statusRevision`, the matrix and its validation, `applyStatus` at all
      call sites.
    - Truthful CAS returns, no-op suppression, the effect outbox, release tickets.

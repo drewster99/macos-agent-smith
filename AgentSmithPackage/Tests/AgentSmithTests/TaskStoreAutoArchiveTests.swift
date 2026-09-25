@@ -23,7 +23,7 @@ struct TaskStoreAutoArchiveTests {
     func offByDefault() async {
         let (store, inactive) = makePair()
         let task = await store.addTask(title: "T", description: "D")
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
 
         await store.autoArchiveStaleCompletedIfEnabled()
 
@@ -35,7 +35,7 @@ struct TaskStoreAutoArchiveTests {
     func disabledLeavesStale() async {
         let (store, inactive) = makePair()
         let task = await store.addTask(title: "T", description: "D")
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
         await store.setAutoArchivePolicy(enabled: false, interval: -1)
 
         await store.autoArchiveStaleCompletedIfEnabled()
@@ -48,7 +48,7 @@ struct TaskStoreAutoArchiveTests {
     func enabledSweeps() async {
         let (store, inactive) = makePair()
         let task = await store.addTask(title: "T", description: "D")
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
         await store.setAutoArchivePolicy(enabled: true, interval: -1)
 
         await store.autoArchiveStaleCompletedIfEnabled()
@@ -62,7 +62,7 @@ struct TaskStoreAutoArchiveTests {
     func enabledRespectsCutoff() async {
         let (store, inactive) = makePair()
         let task = await store.addTask(title: "T", description: "D")
-        await store.updateStatus(id: task.id, status: .completed)
+        await store.driveStatus(id: task.id, to: .completed)
         // Large positive cutoff: a just-completed task is far younger than this, so it stays.
         await store.setAutoArchivePolicy(enabled: true, interval: 4 * 3600)
 
@@ -76,7 +76,7 @@ struct TaskStoreAutoArchiveTests {
     func failedNotArchived() async {
         let (store, inactive) = makePair()
         let task = await store.addTask(title: "T", description: "D")
-        await store.updateStatus(id: task.id, status: .failed)
+        await store.driveStatus(id: task.id, to: .failed)
         await store.setAutoArchivePolicy(enabled: true, interval: -1)
 
         await store.autoArchiveStaleCompletedIfEnabled()

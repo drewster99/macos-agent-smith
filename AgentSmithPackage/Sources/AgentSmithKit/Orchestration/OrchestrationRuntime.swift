@@ -477,7 +477,8 @@ public actor OrchestrationRuntime {
             // CAS: a task that reached a terminal status in the meantime keeps it.
             guard await taskStore.updateStatus(
                 id: task.id, to: .interrupted,
-                ifCurrentlyIn: [.starting, .running, .validating, .awaitingHelp, .awaitingReview]
+                ifCurrentlyIn: [.starting, .running, .validating, .awaitingHelp, .awaitingReview],
+                cause: .capacityShed
             ) else { continue }
             deferred.append((task, handle.sequence))
         }
@@ -1019,6 +1020,8 @@ public actor OrchestrationRuntime {
     /// the broker. Runtime-level (NOT per-spawn) so it outlives Smith restarts; the tool context and
     /// the boot restore both reach it through `ensureWakeScheduler`.
     private var wakeScheduler: WakeScheduler?
+    /// The single serialized consumer of `taskStore`'s events (`installTaskEventConsumerIfNeeded`).
+    private var taskEventConsumer: Task<Void, Never>?
 
     /// Returns the broker, constructing and fully registering it on first call. Called only from
     /// the serialized Smith-setup path, so there is no concurrent construction. Smith is a PULL
@@ -1124,14 +1127,68 @@ public actor OrchestrationRuntime {
         // slot), then the CAS would fail (`.awaitingReview` isn't in the set) and the handler would
         // report "skipped": worker silently destroyed, user told nothing happened. The CAS below is
         // still the atomic authority; this guard just prevents the terminate outside its window.
+        let action: TaskActionKind
+        switch status {
+        case .paused: action = .pause
+        case .interrupted: action = .interrupt
+        default:
+            stopLogger.fault("Scheduled task action asked for status \(status.rawValue, privacy: .public), which no scheduled action sets — refused")
+            return false
+        }
         guard let task = await taskStore.task(id: taskID),
               task.status == .running || task.status == .validating else { return false }
         await terminateTaskAgents(taskID: taskID)
-        return await taskStore.updateStatus(id: taskID, to: status, ifCurrentlyIn: [.running, .validating])
+        return await taskStore.updateStatus(id: taskID, to: status, ifCurrentlyIn: [.running, .validating], cause: .scheduledAction(action))
     }
 
     private func notificationTaskTitle(_ taskID: UUID) async -> String? {
         await taskStore.task(id: taskID)?.title
+    }
+
+    /// Installs the ONE consumer of the task store's events (status transitions and lifecycle
+    /// changes). The store's observer only yields into a FIFO; this single task drains it, so the
+    /// runtime's reactions run one at a time in the order the store produced them — never
+    /// reordered by racing unstructured tasks. Installed once per runtime: the store and the wake
+    /// scheduler both outlive `restartForNewTask`, and replacing a live consumer could drop events
+    /// it had not reached yet.
+    private func installTaskEventConsumerIfNeeded(scheduler: WakeScheduler) async {
+        guard taskEventConsumer == nil else { return }
+        let (stream, continuation) = AsyncStream<TaskStoreEvent>.makeStream()
+        // Claimed before the await below, so a concurrent caller can't install a second consumer.
+        taskEventConsumer = Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                await self.react(to: event, scheduler: scheduler)
+            }
+        }
+        await taskStore.setEventObserver { event in continuation.yield(event) }
+    }
+
+    /// The runtime's own reactions to task events.
+    private func react(to event: TaskStoreEvent, scheduler: WakeScheduler) async {
+        switch event {
+        case .transition(let transition):
+            // First entry into completed/failed: cancel the task's wakes, then fill the freed slot —
+            // a deferred scheduled run first (a commitment, independent of auto-advance), else the
+            // oldest pending task (gated on auto-advance). Task boundaries are also the long-lived
+            // Smith's compaction points: the finished task's play-by-play just became history.
+            guard transition.entersTerminal else { return }
+            await scheduler.cancelWakesForTask(transition.taskID)
+            if await !drainPendingScheduledRunQueue() {
+                await drainPendingTaskQueue()
+            }
+            await autoCompactSmithIfNeeded()
+        case .lifecycle(let lifecycle):
+            switch lifecycle {
+            case .leftActive, .permanentlyDeleted:
+                // A task that leaves the active store (archive, soft or permanent delete) relinquishes
+                // its schedule: an orphaned wake would fire later and be skipped. No queue drain —
+                // an inactive task never held a worker slot.
+                await scheduler.cancelWakesForTask(lifecycle.taskID)
+            case .restoredToActive:
+                break
+            }
+        }
     }
 
     /// Surfaces a notification-store persistence failure to the user. A failed save means a restart
@@ -2223,7 +2280,7 @@ public actor OrchestrationRuntime {
         // lifecycle queue, finds the task already `.starting` (or `.running`), the CAS returns false,
         // and it bails. Without this, the loser could flip a live `.running` task back to `.pending`
         // (orphaning its worker) or respawn Brown and discard its in-progress context.
-        guard await taskStore.updateStatus(id: taskID, to: .starting, ifCurrentlyIn: [.pending, .paused, .interrupted]) else {
+        guard await taskStore.updateStatus(id: taskID, to: .starting, ifCurrentlyIn: [.pending, .paused, .interrupted], cause: .startClaimed) else {
             stopLogger.notice("performStart: task \(taskID.uuidString, privacy: .public) not claimable (already starting/running) — duplicate start ignored")
             return
         }
@@ -2264,7 +2321,7 @@ public actor OrchestrationRuntime {
             // idle-worker cycling above, and an unconditional `.pending` would clobber that pause and
             // let the auto-advance drain run a task that was meant to stay paused. If the CAS loses,
             // honor the new status silently (no misleading "queued" message).
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.starting]) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.starting], cause: .startAbandoned) else { return }
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees.",
@@ -2282,7 +2339,7 @@ public actor OrchestrationRuntime {
             // Only fail the task if it's STILL our `.starting` claim. A wake may have paused it during
             // the spawn (same race as the `.running` finalize below); don't clobber that pause or tell
             // Smith it FAILED when it was actually paused — the paused task retries its spawn on resume.
-            guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.starting]) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.starting], cause: .spawnFailed) else { return }
             if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
                 await smithAgent.appendUserMessage("""
                     [System: Task "\(task.title)" (ID: \(taskID.uuidString)) could not be started — the worker \
@@ -2300,7 +2357,7 @@ public actor OrchestrationRuntime {
         // an unconditional set to `.running` would silently clobber that pause and run the task Smith
         // was told to interrupt. If the CAS loses, honor the new status and tear down the worker we
         // just spawned — the paused task resumes later via its queued wake.
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.starting]) else {
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.starting], cause: .workerStarted) else {
             stopLogger.notice("performStart: task \(taskID.uuidString, privacy: .public) left .starting during spawn (e.g. paused by a wake) — tearing down the freshly spawned worker")
             _ = await performTerminateAgent(id: brownID)
             return
@@ -2583,39 +2640,9 @@ public actor OrchestrationRuntime {
             guard let self else { return nil }
             return await self.assembleDigestIfBrownAlive(since: since)
         }
-        // Cancel any task-scoped wakes when the task transitions to a terminal status the first time.
-        // Also drain `pendingScheduledRunQueue` so any deferred scheduled task — or a paused
-        // task awaiting resume after an interrupt — runs immediately when the in-flight slot
-        // frees up. The scheduled-run drain runs INDEPENDENTLY of `autoAdvanceEnabled`
-        // (scheduled wakes are a commitment, not a deferred suggestion). The pending-task
-        // drain that follows IS gated on `autoAdvanceEnabled` and only runs when the
-        // scheduled drain didn't claim the slot — that's the auto-advance step Smith's
-        // prompt promises after `review_work(accepted: true)`.
-        let scheduler = wakeScheduler
-        await taskStore.setOnTaskTerminated { [weak self] taskID in
-            // Fire-and-forget Task to stay synchronous from TaskStore's view.
-            // Both calls are non-throwing today; if either ever gains a `throws`
-            // signature, wrap them in `do { try await ... } catch { os_log(.error) }`
-            // so the failure surfaces rather than vanishing into the unstructured
-            // Task. (L3 from the 2026-04-27 concurrency review.)
-            Task {
-                await scheduler.cancelWakesForTask(taskID)
-                let kicked = await self?.drainPendingScheduledRunQueue() ?? false
-                if !kicked {
-                    await self?.drainPendingTaskQueue()
-                }
-                // Task boundaries are the long-lived Smith's compaction points: the
-                // terminated task's play-by-play just became history (Phase 2).
-                await self?.autoCompactSmithIfNeeded()
-            }
-        }
-
-        // Archive / soft-delete: cancel the task's scheduled wakes so an orphaned wake doesn't fire
-        // (and get skipped) later. Unlike the terminal-status path above, an inactivated task simply
-        // relinquishes its schedule — no queue drain, no compaction.
-        await taskStore.setOnTaskMovedToInactive { taskID in
-            Task { await scheduler.cancelWakesForTask(taskID) }
-        }
+        // The runtime reacts to task transitions and lifecycle changes through one serialized
+        // consumer (wake cancellation, slot refill, Smith compaction).
+        await installTaskEventConsumerIfNeeded(scheduler: wakeScheduler)
 
         // Wire timer lifecycle callbacks from the WakeScheduler into the runtime's event log so the
         // timers UI / history view can render scheduled / fired / cancelled rows.
@@ -2707,29 +2734,15 @@ public actor OrchestrationRuntime {
         // tasks get promoted to `.pending` so the cold-launch instruction surfaces them.
         await rearmScheduledTaskWakes(excluding: resumingTaskID)
 
+        // No worker survives a restart: a `.running` task gets `ColdBootRunningRecovery` (a durably
+        // submitted result resumes validation, anything else is interrupted) and a `.starting` one
+        // returns to `.pending` for a fresh start, re-picked by the cold-boot auto-advance below.
+        // The session loader already reconciled the restored tasks; this covers tasks that reached
+        // those states after that load (a runtime restart leaves its workers behind). Skip the
+        // resuming task — it will be set to running momentarily.
+        await taskStore.reconcileAfterLaunch(excluding: resumingTaskID)
+
         var activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-
-        // No Brown survives a restart, so any task still `.running` gets the shared cold-boot
-        // recovery: a durably submitted result resumes validation, anything else is interrupted.
-        // The session loader already applied the same rule to the restored tasks; this is the
-        // backstop for tasks that reached `.running` after that load. Skip the resuming task — it
-        // will be set to running momentarily.
-        for task in activeTasks where task.id != resumingTaskID {
-            guard let recovery = ColdBootRunningRecovery.recovery(for: task) else { continue }
-            if let note = recovery.progressNote {
-                await taskStore.addUpdate(id: task.id, message: note)
-            }
-            await taskStore.updateStatus(id: task.id, status: recovery.recoveredStatus)
-        }
-
-        // A task left `.starting` by a crash mid-spawn never got a live worker (no context was
-        // saved), so demote it to `.pending` — a fresh start, re-picked by the cold-boot
-        // auto-advance below rather than resumed as if it had in-progress work.
-        for task in activeTasks where task.status == .starting && task.id != resumingTaskID {
-            await taskStore.updateStatus(id: task.id, status: .pending)
-        }
-
-        activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
         // A validator model may already be configured at boot (the runtime is built with providers
         // BEFORE tasks are restored), so a task persisted-parked on a missing validator would
@@ -2746,8 +2759,8 @@ public actor OrchestrationRuntime {
         // (Brown needs an answer a restart can't give) or missing-validator parks (need config).
         for task in activeTasks where task.status == .awaitingReview
             && task.helpRequest == nil && task.validationBlockedReason == nil {
+            guard await taskStore.updateStatus(id: task.id, to: .validating, ifCurrentlyIn: [.awaitingReview], cause: .coldBootRevalidate) else { continue }
             await taskStore.addUpdate(id: task.id, message: "Re-running acceptance validation after restart instead of waiting on manual review.")
-            await taskStore.updateStatus(id: task.id, status: .validating)
         }
         activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
@@ -2791,7 +2804,7 @@ public actor OrchestrationRuntime {
                 // Auto-spawn Brown and deliver the task briefing
                 let brownSpawned: Bool
                 if let brownID = await performSpawnBrown(for: resumingTask) {
-                    await taskStore.updateStatus(id: resumingTaskID, status: .running)
+                    await taskStore.updateStatus(id: resumingTaskID, status: .running, cause: .workerStarted)
                     await taskStore.assignAgent(taskID: resumingTaskID, agentID: brownID)
                     // Re-read to get the latest state (includes any amendments from run_task)
                     resumingTask = await taskStore.task(id: resumingTaskID) ?? resumingTask
@@ -2870,7 +2883,7 @@ public actor OrchestrationRuntime {
                     // mistaken for "the task the user means" after the 2026-07-08 outage.
                     // Mark it failed; `run_task` auto-resets failed tasks, so retrying is
                     // one call once the provider is reachable again.
-                    await taskStore.updateStatus(id: resumingTaskID, status: .failed)
+                    await taskStore.updateStatus(id: resumingTaskID, status: .failed, cause: .spawnFailed)
                     smithParts.append("""
                         Failed to start task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)) — Brown could not be spawned \
                         (LLM provider unreachable or the security agent could not scope tools; details were posted to the channel). \
@@ -2936,7 +2949,7 @@ public actor OrchestrationRuntime {
                 while supervisor.handles(role: .brown).count < maxConcurrentWorkers, let task = remaining.first {
                     guard let brownID = await performSpawnBrown(for: task) else { break }
                     remaining.removeFirst()
-                    await taskStore.updateStatus(id: task.id, status: .running)
+                    await taskStore.updateStatus(id: task.id, status: .running, cause: .workerStarted)
                     await taskStore.assignAgent(taskID: task.id, agentID: brownID)
 
                     let briefing = await composeBrownTaskBriefing(for: task)
@@ -4592,7 +4605,7 @@ Message:
             // `task_complete`) after this snapshot must not be force-failed. `task.status`
             // from the snapshot is not trustworthy here, so the decision is made atomically
             // inside the store.
-            let didFail = await taskStore.updateStatus(id: task.id, ifCurrentlyEquals: .running, to: .failed)
+            let didFail = await taskStore.updateStatus(id: task.id, ifCurrentlyEquals: .running, to: .failed, cause: .workerSelfTerminated)
             if didFail && !task.updates.isEmpty {
                 Task.detached { [weak self] in
                     guard let self else { return }

@@ -54,7 +54,7 @@ actor MonitoringTimer {
             let confirmedOrphans = orphaned.filter { orphanCandidateIDs.contains($0.id) }
             orphanCandidateIDs = Set(orphaned.map(\.id)).subtracting(confirmedOrphans.map(\.id))
             for task in confirmedOrphans {
-                await taskStore.updateStatus(id: task.id, status: .interrupted)
+                await taskStore.updateStatus(id: task.id, status: .interrupted, cause: .orphanRecovered)
                 await channel.post(ChannelMessage(
                     sender: .system,
                     content: "Task \"\(task.title)\" (ID: \(task.id.uuidString)) was marked `running` but had NO assigned worker for two consecutive monitor ticks — an orphaned status that would spin forever and block the queue. It has been marked `interrupted`. Call `run_task` on it when nothing else is running (never set `running` via `update_task`).",

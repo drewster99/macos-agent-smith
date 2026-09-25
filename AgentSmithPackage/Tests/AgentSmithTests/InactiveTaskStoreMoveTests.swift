@@ -104,7 +104,7 @@ struct InactiveTaskStoreMoveTests {
     func inProgressCannotLeaveActive() async {
         let (store, inactive) = makePair()
         let task = await store.addTask(title: "T", description: "D")
-        await store.updateStatus(id: task.id, status: .running)
+        await store.driveStatus(id: task.id, to: .running)
 
         #expect(await store.archive(id: task.id) == false)
         #expect(await store.softDelete(id: task.id) == false)
