@@ -1233,6 +1233,16 @@ public actor OrchestrationRuntime {
     private func reconcileInFlightWatchFirings() async {
         let broker = await ensureNotificationBroker()
         for (task, watch) in await taskStore.allWatches() {
+            // A watch cancelled before this runtime existed had no one to withdraw its handed-off
+            // firings, and the persisted Smith queue this start just reloaded may still hold one.
+            var cancelledButHeld: [NotificationID] = []
+            for firing in watch.recentFirings where firing.state == .cancelled {
+                let id = TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)
+                if await broker.isHoldingForDelivery(id) { cancelledButHeld.append(id) }
+            }
+            if !cancelledButHeld.isEmpty {
+                await broker.withdraw(cancelledButHeld, reason: "the watch was cancelled")
+            }
             for firing in watch.recentFirings where !firing.state.isSettled {
                 let id = TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)
                 if let settled = Self.firingState(adopting: await broker.deliveryStatus(id)) {

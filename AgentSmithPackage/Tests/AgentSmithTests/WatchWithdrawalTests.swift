@@ -171,4 +171,54 @@ struct WatchWithdrawalTests {
         try? await Task.sleep(for: .milliseconds(1_500))
         #expect(await target.attempts == 1, "no retry after the withdrawal")
     }
+
+    @Test("A withdrawal that lands while a Smith delivery's enqueue is being written takes it back out")
+    func withdrawDuringPullEnqueueWrite() async {
+        actor GatedDisk {
+            private var gate: CheckedContinuation<Void, Never>?
+            private var entered: CheckedContinuation<Void, Never>?
+            private var hasEntered = false
+            private var blockNext = true
+            func write(_ items: [QueuedDelivery]) async {
+                guard blockNext else { return }
+                blockNext = false
+                hasEntered = true
+                entered?.resume(); entered = nil
+                await withCheckedContinuation { gate = $0 }
+            }
+            func waitUntilEntered() async {
+                guard !hasEntered else { return }
+                await withCheckedContinuation { entered = $0 }
+            }
+            func release() { gate?.resume(); gate = nil }
+        }
+        let disk = GatedDisk()
+        let broker = NotificationBroker(runtime: NoopRuntime(), persistPendingDelivery: { await disk.write($0) })
+        await broker.registerHandler(type: KnownNotificationType.taskBriefing.rawValue, TaskBriefingNotificationHandler())
+        await broker.registerPullRecipient(.smith)
+        let note = smithNote("mid-enqueue")
+        let submission = Task { await broker.submit(note) }
+        await disk.waitUntilEntered()
+        // The withdrawal's own queue save waits behind the gated write, so it can't be awaited
+        // before release; its claim is synchronous, which the settled status shows.
+        let withdrawal = Task { await broker.withdraw([note.id], reason: "cancelled") }
+        for _ in 0..<200 where await broker.deliveryStatus(note.id) == .pending {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        await disk.release()
+        _ = await submission.value
+        #expect(await withdrawal.value == [note.id])
+        #expect(await broker.deliveryStatus(note.id) == .dropped(reason: .withdrawn))
+        #expect(await broker.drainPendingDeliveries(for: .smith).isEmpty, "Smith is never handed it")
+    }
+
+    @Test("A withdrawal that reaches the broker before the submit tombstones the id, so the submit does nothing")
+    func withdrawBeforeSubmitTombstones() async {
+        let broker = await pullBroker()
+        let note = smithNote("early")
+        #expect(await broker.withdraw([note.id], reason: "cancelled") == [note.id])
+        #expect(await broker.submit(note), "a settled id is owned: nothing to retry")
+        #expect(await broker.drainPendingDeliveries(for: .smith).isEmpty)
+        #expect(await broker.deliveryStatus(note.id) == .dropped(reason: .withdrawn))
+    }
 }

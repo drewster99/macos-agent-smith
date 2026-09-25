@@ -286,7 +286,9 @@ public actor TaskStore {
     }
 
     /// Takes back firings a cancelled watch had already handed to the broker. Set by the runtime,
-    /// which owns the broker; nil in a store with no runtime (nothing was handed off then).
+    /// which owns the broker. Nil in a store with no runtime yet (before Start): a firing restored
+    /// in flight after a crash may then still sit in the persisted Smith queue, and the runtime
+    /// withdraws it at start (`reconcileInFlightWatchFirings`).
     private var withdrawHandedOffFirings: (@Sendable (UUID, [Int]) async -> Void)?
 
     public func setWatchWithdrawal(_ handler: @escaping @Sendable (_ watchID: UUID, _ occurrences: [Int]) async -> Void) {

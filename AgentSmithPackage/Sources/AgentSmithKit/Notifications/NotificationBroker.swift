@@ -298,35 +298,43 @@ public actor NotificationBroker {
     }
 
     /// Takes back notifications that have not reached their recipient: queued for a pull recipient
-    /// but not yet handed out, or waiting on a push retry. Each is settled `.dropped(.withdrawn)`.
-    /// One already handed to its recipient, or mid-delivery, cannot be recalled and is left alone.
-    /// Returns the ids actually withdrawn.
+    /// but not yet handed out, or waiting on a push retry — each settled `.dropped(.withdrawn)`. One
+    /// mid-delivery is withdrawn when its attempt ends without reaching the recipient. One the broker
+    /// has not seen yet is tombstoned, so a submit still on its way dedups instead of delivering.
+    /// One already handed to its recipient cannot be recalled and is left alone.
+    /// Returns the ids settled here.
     @discardableResult
     public func withdraw(_ ids: [NotificationID], reason: String) async -> [NotificationID] {
         // Claim EVERY eligible id before the first suspension: settling awaits a ledger write, and a
         // later id in the batch must not be leased to Smith or enter push delivery meanwhile.
         var claimed: [AgentNotification] = []
+        var tombstoned: [NotificationID] = []
         for id in ids where !ledger.isSettled(id) {
-            if inFlight.contains(id) {
-                withdrawalsPending[id] = reason
-                continue
-            }
             let leasedNow = leased.values.contains { $0.contains(id) }
-            if let queued = pendingDelivery.first(where: { $0.notification.id == id }), !leasedNow {
+            // Checked BEFORE in-flight: a pull delivery is queued while its enqueue is still being
+            // written, and taking it out of the queue is the only way to stop it then.
+            if let queued = pendingDelivery.first(where: { $0.notification.id == id }) {
+                guard !leasedNow else { continue }
                 pendingDelivery.removeAll { $0.notification.id == id }
                 claimed.append(queued.notification)
+            } else if inFlight.contains(id) {
+                withdrawalsPending[id] = reason
             } else if let notification = pushRetryNotifications[id], pushRetryAttempts[id] != nil {
                 // Clearing the retry state now stops the scheduled retry (it checks for it).
                 pushRetryAttempts[id] = nil
                 pushRetryNotifications[id] = nil
                 claimed.append(notification)
+            } else {
+                ledger.markDropped(id, reason: .withdrawn)
+                tombstoned.append(id)
             }
         }
         for notification in claimed {
             await settle(notification, .dropped(reason: .withdrawn), reason: reason)
         }
         if !claimed.isEmpty { await flushPendingDelivery() }
-        return claimed.map(\.id)
+        if !tombstoned.isEmpty { await flushLedger() }
+        return claimed.map(\.id) + tombstoned
     }
 
     /// Whether the broker is still holding `id` — queued for a pull recipient, being delivered, or
@@ -537,7 +545,10 @@ public actor NotificationBroker {
         let now = Date()
         let settled = pendingDelivery.filter { acknowledged.contains($0.notification.id) }
         pendingDelivery.removeAll { acknowledged.contains($0.notification.id) }
-        for id in acknowledged { ledger.markDelivered(id, at: now) }
+        for id in acknowledged {
+            ledger.markDelivered(id, at: now)
+            withdrawalsPending[id] = nil
+        }
         for item in settled { onSettled?(item.notification, .delivered(now)) }
         leased[kind]?.subtract(acknowledged)
         await flushPendingDelivery()

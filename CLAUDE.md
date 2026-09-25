@@ -503,10 +503,13 @@ Decisions:
   (and asks for permission in the background) instead of awaiting the permission prompt.
 - **Brown's first-turn acknowledgement never writes a status** (`TaskStore.acknowledgeTask`). Every
   start path sets `.running` before the briefing.
-- **Cancelling a watch withdraws its handed-off deliveries** (`TaskStoreEvent.watchCancelled` →
-  `NotificationBroker.withdraw`, settled `.dropped(.withdrawn)`): anything still queued or waiting
-  on a push retry is taken back. A note Smith has already been handed, or a start already under
-  way, cannot be recalled — that is the one residual.
+- **Cancelling a watch withdraws its handed-off deliveries before `cancelWatch` returns**
+  (`TaskStore.setWatchWithdrawal`, installed by the runtime → `NotificationBroker.withdraw`, settled
+  `.dropped(.withdrawn)`): anything still queued (even while its enqueue is being written) or
+  waiting on a push retry is taken back, one mid-attempt is withdrawn when the attempt ends, and an
+  id the broker has not seen yet is tombstoned so a submit still on its way dedups. A cancel before
+  Start (no runtime yet) is caught at start by `reconcileInFlightWatchFirings`. A note Smith has
+  already been handed, or a start already under way, cannot be recalled — that is the one residual.
 - **Archive and delete cancel ALL of a task's wakes**, including `survivesTaskTermination` ones
   (`WakeScheduler.cancelAllWakes(forRemovedTask:)`). Only a terminal status spares those.
 
