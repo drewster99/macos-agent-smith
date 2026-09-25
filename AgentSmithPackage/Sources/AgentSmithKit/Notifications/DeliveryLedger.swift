@@ -13,6 +13,7 @@ public enum DeliveryStatus: Sendable, Codable, Equatable {
         case handlerError       // malformed data for a type we own
         case runtimeRefused     // well-formed, but the runtime declined the effect (HandlerOutcome.refused)
         case recipientRefused   // the push target refused it, or kept failing past the retry bound
+        case withdrawn          // its producer took it back before it reached the recipient
     }
 }
 

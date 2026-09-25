@@ -1431,6 +1431,14 @@ public actor OrchestrationRuntime {
             await autoCompactSmithIfNeeded()
         case .effectsReady:
             await deliverReadyTaskEffects()
+        case .watchCancelled(_, let watchID, let occurrences):
+            // Firings already handed off: take back whatever has not reached its recipient. One
+            // Smith has already been handed, or a start already under way, cannot be recalled.
+            let broker = await ensureNotificationBroker()
+            await broker.withdraw(
+                occurrences.map { TaskWatchDelivery.notificationID(watchID: watchID, occurrence: $0) },
+                reason: "the watch was cancelled"
+            )
         case .lifecycle(let lifecycle):
             switch lifecycle {
             case .leftActive, .permanentlyDeleted:

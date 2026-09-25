@@ -241,6 +241,7 @@ public actor TaskStore {
     /// removed, so nothing it already produced acts after this returns. The watch itself is kept
     /// (state `.cancelled`) as the audit record.
     public func cancelWatch(_ watchID: UUID, on taskID: UUID) async -> String? {
+        var handedOff: [Int] = []
         let refusal = await mutateTaskOrTemplate(id: taskID) { task in
             guard let index = task.watches.firstIndex(where: { $0.id == watchID }) else {
                 return "Task \(taskID.uuidString) has no watch \(watchID.uuidString)."
@@ -251,6 +252,7 @@ public actor TaskStore {
                 task.watches[index].state = .cancelled(at: Date())
             }
             for firing in task.watches[index].recentFirings where !firing.state.isSettled {
+                if firing.state == .inFlight { handedOff.append(firing.occurrence) }
                 task.watches[index].setFiringState(occurrence: firing.occurrence, .cancelled)
             }
             for record in task.pendingEffects {
@@ -272,6 +274,9 @@ public actor TaskStore {
                 tasks[heldID] = updated
             }
             return nil
+        }
+        if refusal == nil, !handedOff.isEmpty {
+            emit(.watchCancelled(taskID: taskID, watchID: watchID, handedOffOccurrences: handedOff))
         }
         return refusal
     }

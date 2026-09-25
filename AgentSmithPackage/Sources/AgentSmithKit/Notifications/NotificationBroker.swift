@@ -76,6 +76,8 @@ public actor NotificationBroker {
     private var onSettled: (@Sendable (AgentNotification, NotificationSettlement) -> Void)?
     /// Push deliveries a target asked to retry: attempts so far. Cleared when the id settles.
     private var pushRetryAttempts: [NotificationID: Int] = [:]
+    /// The notification each pending push retry will deliver, so it can be withdrawn.
+    private var pushRetryNotifications: [NotificationID: AgentNotification] = [:]
     /// Push attempts before a `.retryable` delivery is settled as refused (decision R3).
     static let maxPushAttempts = 5
     private var failingStores: Set<PersistedStore> = []
@@ -292,6 +294,28 @@ public actor NotificationBroker {
         }
     }
 
+    /// Takes back notifications that have not reached their recipient: queued for a pull recipient
+    /// but not yet handed out, or waiting on a push retry. Each is settled `.dropped(.withdrawn)`.
+    /// One already handed to its recipient, or mid-delivery, cannot be recalled and is left alone.
+    /// Returns the ids actually withdrawn.
+    @discardableResult
+    public func withdraw(_ ids: [NotificationID], reason: String) async -> [NotificationID] {
+        var withdrawn: [NotificationID] = []
+        for id in ids where !ledger.isSettled(id) && !inFlight.contains(id) {
+            let leasedNow = leased.values.contains { $0.contains(id) }
+            if let queued = pendingDelivery.first(where: { $0.notification.id == id }), !leasedNow {
+                pendingDelivery.removeAll { $0.notification.id == id }
+                await settle(queued.notification, .dropped(reason: .withdrawn), reason: reason)
+                withdrawn.append(id)
+            } else if pushRetryAttempts[id] != nil, let notification = pushRetryNotifications[id] {
+                await settle(notification, .dropped(reason: .withdrawn), reason: reason)
+                withdrawn.append(id)
+            }
+        }
+        if !withdrawn.isEmpty { await flushPendingDelivery() }
+        return withdrawn
+    }
+
     /// Whether the broker is still holding `id` — queued for a pull recipient, being delivered, or
     /// waiting on a push retry.
     public func isHoldingForDelivery(_ id: NotificationID) -> Bool {
@@ -398,6 +422,7 @@ public actor NotificationBroker {
         case .retryable(let reason):
             let attempts = (pushRetryAttempts[notification.id] ?? 0) + 1
             pushRetryAttempts[notification.id] = attempts
+            pushRetryNotifications[notification.id] = notification
             guard attempts < Self.maxPushAttempts else {
                 await settle(notification, .dropped(reason: .recipientRefused), reason: "delivery kept failing (\(reason))")
                 return true
@@ -413,12 +438,15 @@ public actor NotificationBroker {
     }
 
     private func retryDelivery(_ notification: AgentNotification) async {
+        // Withdrawn (or otherwise settled) while it waited: nothing to retry.
+        guard pushRetryAttempts[notification.id] != nil else { return }
         await deliver(notification, isPushRetry: true)
     }
 
     private func settle(_ notification: AgentNotification, _ status: DeliveryStatus, reason: String?) async {
         let id = notification.id
         pushRetryAttempts[id] = nil
+        pushRetryNotifications[id] = nil
         switch status {
         case .delivered(let date):
             ledger.markDelivered(id, at: date)
