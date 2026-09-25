@@ -132,6 +132,21 @@ struct EvidenceSweepTests {
         #expect(deliverableIDs == Set(stored.resultAttachments.map(\.id)), "the deliverable points at the one stored attachment")
     }
 
+    @Test("a distinct evidence file sharing a name with another attachment is still ingested")
+    func sameNameDifferentContentIngested() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "evidence".write(to: dir.appendingPathComponent("report.md"), atomically: true, encoding: .utf8)
+
+        let recorder = IngestRecorder()
+        let context = makeContext(evidenceDir: dir, recorder: recorder)
+        let other = Attachment(filename: "report.md", mimeType: "text/plain", byteCount: 5, data: Data("other".utf8))
+        let ingested = await TaskCompleteTool.ingestEvidenceDirectory(context: context, existing: [other])
+        #expect(ingested.map(\.filename) == ["report.md"])
+    }
+
     @Test("no evidence directory → no-op")
     func noEvidenceDir() async {
         let recorder = IngestRecorder()

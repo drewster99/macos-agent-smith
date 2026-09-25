@@ -178,4 +178,44 @@ struct NonAgentModelRefreshTests {
         #expect(await runtime.nonAgentModelConfigurations().security.allSatisfy { $0?.modelID == "security-2" })
         await runtime.stopAll()
     }
+
+    @Test("A summarizer provider arriving with a configuration merged earlier still builds the summarizer")
+    func summarizerProviderArrivalIsAChange() async {
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-nonagent-refresh", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        let configuration = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+        let runtime = OrchestrationRuntime(
+            providers: [
+                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
+                .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
+                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")])
+            ],
+            configurations: [.smith: configuration, .securityAgent: configuration, .brown: configuration],
+            providerAPITypes: [:],
+            agentTuning: [
+                .brown: AgentTuningConfig(pollInterval: 3600),
+                .smith: AgentTuningConfig(pollInterval: 3600),
+                .securityAgent: AgentTuningConfig(pollInterval: 3600)
+            ],
+            semanticSearchEngine: SemanticSearchEngine(),
+            usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
+            autoAdvanceEnabled: false,
+            autoRunInterruptedTasks: false,
+            memoryStore: nil
+        )
+        await runtime.start()
+        #expect(await runtime.nonAgentModelConfigurations().summarizer == nil)
+        let summarizerConfig = ModelConfiguration(name: "sum", providerID: "test", modelID: "summary-1")
+        // The build fails first: the configuration lands with no provider.
+        await runtime.setProviders(providers: [:], configurations: [.summarizer: summarizerConfig], apiTypes: [:])
+        await runtime.setProviders(
+            providers: [.summarizer: MockLLMProvider(responses: [LLMResponse(text: "s")])],
+            configurations: [.summarizer: summarizerConfig],
+            apiTypes: [:]
+        )
+        #expect(await runtime.nonAgentModelConfigurations().summarizer?.modelID == "summary-1")
+        await runtime.stopAll()
+    }
 }

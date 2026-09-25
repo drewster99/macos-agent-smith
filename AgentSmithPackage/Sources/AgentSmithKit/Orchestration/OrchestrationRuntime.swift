@@ -2279,12 +2279,16 @@ public actor OrchestrationRuntime {
         // failed arrives with a new config and no provider, and pairing that config with the old
         // provider would call one model while recording and sizing requests for another.
         // A capability-only change (vision / PDF overrides) counts too: evaluators gate attachments on it.
+        // A provider arriving for a role that had none is a change even with an equal configuration:
+        // that configuration may have been merged earlier without a provider (see `accepts` below).
         let securityModelChanged = providers[.securityAgent] != nil
-            && ((configurations[.securityAgent].map { $0 != llmConfigs[.securityAgent] } ?? false)
+            && (llmProviders[.securityAgent] == nil
+                || (configurations[.securityAgent].map { $0 != llmConfigs[.securityAgent] } ?? false)
                 || (supportsVisionByRole[.securityAgent].map { $0 != self.supportsVisionByRole[.securityAgent] } ?? false)
                 || (supportsDocumentsByRole[.securityAgent].map { $0 != self.supportsDocumentsByRole[.securityAgent] } ?? false))
         let summarizerModelChanged = providers[.summarizer] != nil
-            && (configurations[.summarizer].map { $0 != llmConfigs[.summarizer] } ?? false)
+            && (llmProviders[.summarizer] == nil
+                || (configurations[.summarizer].map { $0 != llmConfigs[.summarizer] } ?? false))
 
         var retunes: [AgentRole: AgentActor.ModelRetune] = [:]
         for (role, newConfig) in configurations {

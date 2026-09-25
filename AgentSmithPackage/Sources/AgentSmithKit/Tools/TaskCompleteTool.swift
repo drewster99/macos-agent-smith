@@ -198,21 +198,30 @@ public struct TaskCompleteTool: AgentTool {
         guard let entries = try? fm.contentsOfDirectory(at: evidenceDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
             return []
         }
-        var existingNames = Set(existing.map { $0.filename })
         var ingested: [Attachment] = []
         for fileURL in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             let isRegular = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
             guard isRegular else { continue }
             let filename = fileURL.lastPathComponent
-            guard !existingNames.contains(filename), let data = try? Data(contentsOf: fileURL) else { continue }
+            guard let data = try? Data(contentsOf: fileURL) else { continue }
+            // Skip only the SAME file already attached, not merely one sharing its name: a distinct
+            // file that happens to share a name with another attachment is still evidence.
+            guard !(existing + ingested).contains(where: { Self.isSameFile($0, filename: filename, data: data) }) else { continue }
             let mimeType = Self.mimeType(forExtension: fileURL.pathExtension)
             let (attachment, _) = await context.ingestAttachmentData(data, filename, mimeType)
             if let attachment {
                 ingested.append(attachment)
-                existingNames.insert(filename)
             }
         }
         return ingested
+    }
+
+    /// Whether `attachment` is this file: same name and same bytes. An attachment resolved by id may
+    /// not have its bytes loaded; its recorded size stands in for them then.
+    private static func isSameFile(_ attachment: Attachment, filename: String, data: Data) -> Bool {
+        guard attachment.filename == filename else { return false }
+        if let attachedData = attachment.data { return attachedData == data }
+        return attachment.byteCount == data.count
     }
 
     /// Minimal extension→MIME mapping for evidence ingest. Unknown types fall back to
