@@ -48,7 +48,7 @@ struct AgentInspectorWindow: View {
         // Single-pass message bucketing per body, sharing InspectorView's rules
         // (role-attributed system diagnostics included) so the standalone window
         // and the sidebar card never disagree.
-        let roleMessages = InspectorView.bucketMessagesByRole(viewModel.messages)[role] ?? []
+        let roleMessages = InspectorLiveState.bucketMessagesByRole(viewModel.messages)[role] ?? []
         // The Validator has no messages or call log of its own; like its card, its dot says whether
         // a model is assigned to judge with.
         let hasActivity = role == .validator

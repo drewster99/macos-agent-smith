@@ -18,6 +18,9 @@ final class FilteredTranscriptProvider {
 
     /// The messages this pane shows, newest last. Mutated at most once per store update.
     private(set) var messages: [ChannelMessage] = []
+    /// Bumped on every write to `messages`, so a consumer can tell "changed" without comparing
+    /// thousands of messages (`InspectorLiveState` re-buckets only when this moves).
+    private(set) var revision = 0
     /// `requestID`s of every resident `tool_request` in `messages`, maintained incrementally so
     /// `ChannelLogView` can fold tool-output / security-review follow-ups into their parent row without
     /// rebuilding this set over the whole array each render. (Mirrors the old `renderedToolRequestIDs`.)
@@ -124,6 +127,7 @@ final class FilteredTranscriptProvider {
             let newIDs = Set(update.messages.compactMap(Self.toolRequestID(of:)))
             if newIDs != toolRequestIDs { toolRequestIDs = newIDs }
             messages = update.messages
+            revision &+= 1
             return
         }
 
@@ -143,6 +147,7 @@ final class FilteredTranscriptProvider {
         }
         if newIDs != toolRequestIDs { toolRequestIDs = newIDs }
         messages = updated
+        revision &+= 1
     }
 
     /// The `requestID` of `message` if it is a `tool_request`, else nil. Also used by the file-backed

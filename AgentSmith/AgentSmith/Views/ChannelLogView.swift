@@ -523,8 +523,8 @@ struct ChannelLogView: View, Equatable {
 
     /// Rebuilds the window, the visible slice, and the grouping index.
     ///
-    /// Synchronous, and deliberately not routed through the deferred `RecomputeCoalescer` the
-    /// inspector uses: this cache feeds the `ForEach` that the auto-scroll handler above targets
+    /// Synchronous, and deliberately not deferred to a later main-queue turn: this cache feeds the
+    /// `ForEach` that the auto-scroll handler above targets
     /// with `proxy.scrollTo`, so a main-queue turn of delay would put the rebuild behind the scroll
     /// in a view where the two are already tightly interleaved. The signature check removes the
     /// duplicate work without moving anything in time, which is the property that matters here.

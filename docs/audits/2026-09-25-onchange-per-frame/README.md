@@ -1,6 +1,8 @@
 # SwiftUI "onChange(of:) action tried to update multiple times per frame" — investigation (2026-09-25)
 
-Status: **open**. The harness mechanism below is real but is NOT what the app hits: the frame-batching
+Status: **fixed 2026-09-26** by moving the inspector's derived state into the model (`InspectorLiveState`; see CLAUDE.md). One-task runs: 11 warning sites before, 0 after. History below.
+
+Previous status: open. The harness mechanism below is real but is NOT what the app hits: the frame-batching
 fix built on it made the app worse (live A/B, 2026-09-25). The warning sites are now identified
 exactly (below). Nothing here is committed to the app.
 

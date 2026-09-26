@@ -446,6 +446,28 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
   snapshots; mutations are published only after commit, with typed `MemoryActivityOrigin`. Callers
   never synthesize memory events.
 
+### The inspector's display state is derived in the model (decided 2026-09-26)
+
+**User decision: "Model-side snapshots."** The agent cards and the Live section read finished,
+`Equatable` values from `AppViewModel.inspectorLive` (`InspectorLiveState`): per-role
+`RoleCardState.data` (`AgentRoleData`, including the processing / tools-running start dates),
+`summarizerCard`, and `liveRows`. `InspectorLiveState.rebuild()` reads every input inside
+`withObservationTracking`, schedules ONE rebuild on the next main-queue turn when any of them
+changes, re-arms, and assigns each output only when it changed. The views watch NOTHING.
+
+- **Why:** every SwiftUI "onChange(of:) action tried to update multiple times per frame" warning in
+  the app came from the `.onChange` watchers those views used to drive their own `@State` caches
+  (identified site by site with per-site wrapper types), a single input change was enough to
+  trigger one, and SwiftUI SKIPS the action it warns about, so a card sat stale until its 2 s
+  heartbeat. Measured on one small task: 11 warning sites before, 0 after. Frame-batching the
+  sources instead made it WORSE (17). Details: `docs/audits/2026-09-25-onchange-per-frame/`.
+- **Don't add `.onChange` watchers (or a `@State` cache rebuilt by them) back to these views.** A new
+  input to a card or the Live section is read inside `InspectorLiveState.computeOutputs()`; the
+  tracking picks it up automatically.
+- The transcript is re-bucketed by role only when `AppViewModel.messagesRevision` moves
+  (`FilteredTranscriptProvider.revision`, bumped on every `messages` write) — the one expensive step.
+- The 10 s aging rebuild stays: Live rows age out on a clock, which no observed value reports.
+
 ### Task state events and task watches (decided 2026-09-24, revised 2026-09-25 — see TaskStateEventsPlan.md)
 
 **One event source, two kinds of subscriber.** Every live task status change goes through ONE

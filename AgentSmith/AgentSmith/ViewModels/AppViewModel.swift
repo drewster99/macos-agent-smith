@@ -96,6 +96,8 @@ final class AppViewModel {
     /// The resident transcript tail shown in the main pane — a forward to the primary provider (the
     /// store owns the array off-main). Still `[ChannelMessage]`, so every existing reader is unchanged.
     var messages: [ChannelMessage] { primaryTranscriptProvider.messages }
+    /// Changes whenever `messages` does; see `FilteredTranscriptProvider.revision`.
+    var messagesRevision: Int { primaryTranscriptProvider.revision }
 
     /// `requestID`s of every resident `tool_request`, maintained incrementally by the primary provider
     /// so `ChannelLogView` folds tool-output / security-review follow-ups into their parent row without
@@ -328,6 +330,9 @@ final class AppViewModel {
     var showInspector = false
     /// Dedicated observable store for inspector data, updated via push callbacks.
     let inspectorStore = AgentInspectorStore()
+    /// The inspector's derived display state (agent cards, Live rows), computed from the
+    /// properties above. Lazy because it holds this view model weakly and so needs `self`.
+    @ObservationIgnored private(set) lazy var inspectorLive = InspectorLiveState(viewModel: self)
 
     /// Per-session idle poll intervals for each agent role (seconds).
     var agentPollIntervals: [AgentRole: TimeInterval] = [

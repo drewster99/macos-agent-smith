@@ -5,53 +5,13 @@ import AgentSmithKit
 
 /// Inspector panel showing per-agent status: activity, context, tools, and direct messaging.
 ///
-/// **Performance design.** The inspector watches ~9 high-frequency view-model dependencies.
-/// To avoid the trap where every body evaluation re-computes ~27 derived values:
-///
-/// 1. The parent owns three per-role `@State` message buckets, populated once per
-///    `viewModel.messages` tick. Each child card receives only its own slice as a direct
-///    `@State` value.
-/// 2. Each `RoleAgentCard` owns its own cached `AgentRoleData?` and its own narrow
-///    `.onChange` watchers (one per source dictionary, narrowed to that role's key).
-///    The card body reads only the cached `@State` — never `viewModel.inspectorStore.*`
-///    or `viewModel.*` directly. SwiftUI's view-diff short-circuits AgentCard's body when
-///    the cached struct hasn't changed.
-/// 3. Cross-role keys (e.g. `callLogsByRole`) still cause every card's outer body to
-///    re-evaluate (the Observation framework propagates whole-property changes), but the
-///    only work is "read 1 stable @State, hand to child View, SwiftUI diffs and skips."
-///    The heavy AgentCard body re-eval is avoided when the per-role narrowing
-///    (`callLogsByRole[role]`) didn't change.
+/// **Where the data comes from.** Every card and the Live section read finished values from
+/// `AppViewModel.inspectorLive` (`InspectorLiveState`), which derives them in the model. The views
+/// here watch nothing: the `.onChange`-driven caches they used to keep were the source of every
+/// SwiftUI "tried to update multiple times per frame" warning, and SwiftUI skipped the rebuild each
+/// one warned about. See `InspectorLiveState`.
 struct InspectorView: View {
     let viewModel: AppViewModel
-
-    // Per-role message slices. Populated once when `viewModel.messages` ticks; each card
-    // watches only its own slice, so a Brown-only message doesn't dirty Smith or Security Agent.
-    // The summarizer slice is also bucketed here so SummarizerAgentCard doesn't need to
-    // run its own `viewModel.messages` watcher — having two watchers on the same source
-    // array led to SwiftUI's "tried to update multiple times per frame" warnings.
-    @State private var smithMessages: [ChannelMessage] = []
-    @State private var brownMessages: [ChannelMessage] = []
-    @State private var securityAgentMessages: [ChannelMessage] = []
-    @State private var summarizerMessages: [ChannelMessage] = []
-
-    /// Buckets channel messages by the agent role they belong to, in one pass.
-    /// One deliberate deviation from "sender == role": role-attributed SYSTEM diagnostics are
-    /// INCLUDED (metadata `agentRole`, e.g. "Security Agent error (3/5): failed to parse security
-    /// response") — these are exactly the errors/warnings a user opens the agent card to find, and
-    /// they previously never surfaced in the inspector at all.
-    static func bucketMessagesByRole(_ messages: [ChannelMessage]) -> [AgentRole: [ChannelMessage]] {
-        var buckets: [AgentRole: [ChannelMessage]] = [:]
-        for message in messages {
-            if case .agent(let role) = message.sender {
-                buckets[role, default: []].append(message)
-            } else if case .system = message.sender,
-                      case .string(let attributed) = message.metadata?["agentRole"],
-                      let role = AgentRole(rawValue: attributed) {
-                buckets[role, default: []].append(message)
-            }
-        }
-        return buckets
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,7 +21,7 @@ struct InspectorView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    NowLiveSection(viewModel: viewModel)
+                    NowLiveSection(live: viewModel.inspectorLive)
 
                     Text("Agents")
                         .font(AppFonts.sectionHeader)
@@ -74,18 +34,18 @@ struct InspectorView: View {
 
                     Divider()
 
-                    RoleAgentCard(viewModel: viewModel, role: .smith, roleMessages: smithMessages)
-                    RoleAgentCard(viewModel: viewModel, role: .brown, roleMessages: brownMessages)
-                    RoleAgentCard(viewModel: viewModel, role: .securityAgent, roleMessages: securityAgentMessages)
+                    RoleAgentCard(viewModel: viewModel, card: viewModel.inspectorLive.card(for: .smith))
+                    RoleAgentCard(viewModel: viewModel, card: viewModel.inspectorLive.card(for: .brown))
+                    RoleAgentCard(viewModel: viewModel, card: viewModel.inspectorLive.card(for: .securityAgent))
                     ValidatorAgentCard(viewModel: viewModel)
-                    SummarizerAgentCard(viewModel: viewModel, summarizerMessages: summarizerMessages)
+                    SummarizerAgentCard(viewModel: viewModel, live: viewModel.inspectorLive)
                     MemoryActivityCard(shared: viewModel.shared)
                 }
             }
         }
         .inspectorColumnWidth(min: 280, ideal: 320, max: 460)
         .task {
-            rebucket()
+            viewModel.inspectorLive.activate()
             // Refresh boundaries on every view appear so an app that was idle past
             // local midnight rolls today → prior immediately when the inspector becomes
             // visible, rather than waiting up to a minute for the watcher timer.
@@ -93,129 +53,39 @@ struct InspectorView: View {
                 await board.refreshIfBoundariesElapsed()
             }
         }
-        .onChange(of: viewModel.messages) { _, _ in rebucket() }
     }
-
-    /// Re-buckets `viewModel.messages` and assigns each per-role @State only if its slice
-    /// actually changed. Mutations are deferred via `DispatchQueue.main.async` per the
-    /// project rule (no synchronous @State mutation inside .onChange / .task closures).
-    private func rebucket() {
-        let buckets = Self.bucketMessagesByRole(viewModel.messages)
-        let nextSmith = buckets[.smith] ?? []
-        let nextBrown = buckets[.brown] ?? []
-        let nextSecurityAgent = buckets[.securityAgent] ?? []
-        let nextSummarizer = buckets[.summarizer] ?? []
-        DispatchQueue.main.async {
-            if smithMessages != nextSmith { smithMessages = nextSmith }
-            if brownMessages != nextBrown { brownMessages = nextBrown }
-            if securityAgentMessages != nextSecurityAgent { securityAgentMessages = nextSecurityAgent }
-            if summarizerMessages != nextSummarizer { summarizerMessages = nextSummarizer }
-        }
-    }
-}
-
-// MARK: - Cached Data Structures
-
-/// Pre-computed data for a single agent role. Equatable so SwiftUI can short-circuit
-/// AgentCard's body re-evaluation when the cached struct is unchanged.
-private struct AgentRoleData: Equatable {
-    let role: AgentRole
-    let roleMessages: [ChannelMessage]
-    let contextMessages: [LLMMessage]
-    let callLog: InspectorCallLog?
-    let pollInterval: TimeInterval
-    let maxToolCalls: Int
-    let currentSystemPrompt: String
-    let hasActivity: Bool
-    let availableTools: [String]
-    let evaluationRecords: [EvaluationRecord]
-    let evaluationLifetimeCount: Int
-    let sessionCost: Double
-    let isProcessing: Bool
-    let executingTools: [String]
-    let modelConfig: ModelConfiguration?
-}
-
-/// Pre-computed data for the summarizer role.
-private struct SummarizerData: Equatable {
-    let currentSystemPrompt: String
-    let pollInterval: TimeInterval
-    let maxToolCalls: Int
-    let isProcessing: Bool
-    let executingTools: [String]
-    let messages: [ChannelMessage]
 }
 
 // MARK: - Per-Role Card Wrappers
-//
-// Each wrapper owns its own cached `AgentRoleData?` (or `SummarizerData?`) populated only
-// via `.onChange` callbacks that narrow to a single key per source dictionary. The body
-// reads ONLY the cache — never `viewModel.*` or `viewModel.inspectorStore.*` directly —
-// so AgentCard's body re-evaluation is gated by the cache changing, which only happens
-// when this role's specific slice of any source actually changed.
 
-/// Wraps `AgentCard` with per-role @State caching and narrowed dependency watchers.
+/// Shows one role's card from the model-side data (`RoleCardState`), once the first rebuild has
+/// produced it.
 private struct RoleAgentCard: View {
-    @Bindable var viewModel: AppViewModel
-    let role: AgentRole
-    let roleMessages: [ChannelMessage]
-
-    @State private var cached: AgentRoleData?
-    /// All the watchers below funnel through this so a frame in which several inputs change
-    /// rebuilds this card once. See `RecomputeCoalescer`.
-    @State private var coalescer = RecomputeCoalescer()
-
-    /// Cadence of the `.task` reconciliation heartbeat below (shared with
-    /// `SummarizerAgentCard`). Two seconds keeps a stuck badge's worst-case staleness in
-    /// line with the second-granularity elapsed timer it sits next to.
-    fileprivate static let reconcileHeartbeat: Duration = .seconds(2)
+    let viewModel: AppViewModel
+    let card: RoleCardState
 
     var body: some View {
-        // The Group wrapper gives the view-modifier chain (.onChange) a stable parent View
-        // to attach to even when the conditional `if let cached` is unsatisfied.
-        Group {
-            if let cached {
-                cardView(for: cached)
-            }
+        if let data = card.data {
+            RoleAgentCardContent(viewModel: viewModel, data: data)
         }
-        // Each .onChange watcher narrows to a per-role key where possible. Cross-role
-        // dictionaries (`callLogsByRole`, `liveContexts`) still cause every card's outer body
-        // to re-evaluate when any role changes (Observation propagates whole-property
-        // changes), but the `[role]` subscript narrows the *callback* — recompute() fires
-        // only when this role's entry differs.
-        //
-        // Initial population is via `.task`, not `.onChange(initial: true)`. Two synchronous
-        // initial-fires per modifier (one for each watcher) on first body eval was
-        // contributing to SwiftUI's "tried to update multiple times per frame" warnings on
-        // the Array<ChannelMessage>-typed watchers.
-        //
-        // The `.task` is also a reconciliation heartbeat (NowLiveSection's stale sweep, same
-        // reasoning). This card's body reads ONLY the @State cache, so the watchers below are
-        // its entire link to live state — and observation registrations are one-shot. A
-        // dirty-mark that gets dropped (observed 2026-08-06: every agent card froze mid-evening
-        // and rendered 20-hour-old "Thinking" badges while the engine ran on) leaves the card
-        // with no observable read left to re-register, and nothing can ever wake it again. The
-        // heartbeat recomputes from live state regardless of observation; `recompute()` skips
-        // the assignment when nothing changed, so a quiet tick costs one struct compare.
-        .modifier(RoleAgentCardWatchers(viewModel: viewModel, role: role,
-                                        roleMessages: roleMessages,
-                                        onRecompute: scheduleRecompute))
     }
+}
 
-    /// Helper extracted to keep the AgentCard call out of the body's `@ViewBuilder`
-    /// type-checking context. It was seventeen parameters and four trailing closures that blew the
-    /// type-checker's exponential overload-resolution budget when inlined; the fifteen data fields
-    /// are now one `AgentRoleData`, but the four handler closures remain, so this stays.
-    @ViewBuilder
-    private func cardView(for cached: AgentRoleData) -> some View {
-        let speechController = viewModel.shared.speechController
+/// Builds the `AgentCard` for one role's data, with the handlers that write its settings back.
+/// Separate from `RoleAgentCard` to keep the AgentCard call out of a `@ViewBuilder` conditional:
+/// with its handler closures inline, the call blew the type-checker's overload-resolution budget.
+private struct RoleAgentCardContent: View {
+    let viewModel: AppViewModel
+    let data: AgentRoleData
+
+    var body: some View {
         AgentCard(
             viewModel: viewModel,
-            data: cached,
-            speechController: speechController,
-            onUpdateSystemPrompt: makeUpdateSystemPromptHandler(role: cached.role),
-            onUpdatePollInterval: makeUpdatePollIntervalHandler(role: cached.role),
-            onUpdateMaxToolCalls: makeUpdateMaxToolCallsHandler(role: cached.role)
+            data: data,
+            speechController: viewModel.shared.speechController,
+            onUpdateSystemPrompt: makeUpdateSystemPromptHandler(role: data.role),
+            onUpdatePollInterval: makeUpdatePollIntervalHandler(role: data.role),
+            onUpdateMaxToolCalls: makeUpdateMaxToolCallsHandler(role: data.role)
         )
     }
 
@@ -236,99 +106,34 @@ private struct RoleAgentCard: View {
             Task { await viewModel.updateMaxToolCalls(for: role, count: count) }
         }
     }
+}
 
-    /// Asks for a rebuild on the next main-queue turn. Nothing calls `recompute()` directly —
-    /// that is what produced several `cached` assignments inside one frame.
-    private func scheduleRecompute() {
-        coalescer.schedule { recompute() }
-    }
+/// Shows the summarizer's card from the model-side data, once the first rebuild has produced it.
+private struct SummarizerAgentCard: View {
+    let viewModel: AppViewModel
+    let live: InspectorLiveState
 
-    private func recompute() {
-        let store = viewModel.inspectorStore
-        let next = AgentRoleData(
-            role: role,
-            roleMessages: roleMessages,
-            contextMessages: store.contextMessages(for: role),
-            callLog: store.callLogsByRole[role],
-            pollInterval: viewModel.agentPollIntervals[role] ?? 5,
-            maxToolCalls: viewModel.agentMaxToolCalls[role] ?? 100,
-            currentSystemPrompt: store.systemPrompt(for: role),
-            hasActivity: !roleMessages.isEmpty || viewModel.hasAgentActivity(role),
-            availableTools: viewModel.agentToolNames[role] ?? [],
-            evaluationRecords: role == .securityAgent ? store.evaluationRecords : [],
-            evaluationLifetimeCount: role == .securityAgent ? store.evaluationLifetimeCount : 0,
-            sessionCost: viewModel.sessionCost(for: role),
-            isProcessing: role == .securityAgent ? viewModel.isSecurityAgentBusy : viewModel.processingRoles.contains(role),
-            executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[role]),
-            modelConfig: viewModel.resolvedAgentConfigs[role]
-        )
-        // Skip the assignment if the struct didn't change — keeps body output stable and lets
-        // SwiftUI's diff short-circuit AgentCard's body. Already deferred off the .onChange
-        // closure by the coalescer, so this assigns directly.
-        if cached != next { cached = next }
-    }
-
-    /// Flattens the `[toolName: count]` multiset into an ordered, repeated-name list so
-    /// the card's status badge can show "Working — run_applescript" for a single call,
-    /// "Working — 2 tools" for a parallel batch.
-    static func executingToolNames(_ counts: [String: Int]?) -> [String] {
-        guard let counts else { return [] }
-        var out: [String] = []
-        for name in counts.keys.sorted() {
-            for _ in 0..<(counts[name] ?? 0) { out.append(name) }
+    var body: some View {
+        if let data = live.summarizerCard {
+            SummarizerAgentCardContent(viewModel: viewModel, data: data)
         }
-        return out
     }
 }
 
-/// Wraps `SummarizerCard` with @State caching and narrowed dependency watchers.
-///
-/// `summarizerMessages` is the parent's pre-bucketed slice (sender == `.agent(.summarizer)`),
-/// so this card watches only its own slice — not the full `viewModel.messages` array — and
-/// avoids fighting with the parent's watcher for the same source.
-private struct SummarizerAgentCard: View {
-    @Bindable var viewModel: AppViewModel
-    let summarizerMessages: [ChannelMessage]
-
-    @State private var cached: SummarizerData?
-    @State private var coalescer = RecomputeCoalescer()
+private struct SummarizerAgentCardContent: View {
+    let viewModel: AppViewModel
+    let data: SummarizerCardData
 
     var body: some View {
-        Group {
-            if let cached {
-                cardView(for: cached)
-            }
-        }
-        // Initial population + the same reconciliation heartbeat as `RoleAgentCard` (see the
-        // comment there): a cache-only body cannot survive a lost observation dirty-mark
-        // without one.
-        .task {
-            scheduleRecompute()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: RoleAgentCard.reconcileHeartbeat)
-                guard !Task.isCancelled else { return }
-                scheduleRecompute()
-            }
-        }
-        .onChange(of: summarizerMessages)                              { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.processingRoles.contains(.summarizer)) { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.toolExecutingByRole[.summarizer])      { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.agentPollIntervals[.summarizer])       { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.agentMaxToolCalls[.summarizer])        { _, _ in scheduleRecompute() }
-    }
-
-    @ViewBuilder
-    private func cardView(for cached: SummarizerData) -> some View {
-        let speechController = viewModel.shared.speechController
         SummarizerCard(
             viewModel: viewModel,
-            messages: cached.messages,
-            isProcessing: cached.isProcessing,
-            executingTools: cached.executingTools,
-            currentSystemPrompt: cached.currentSystemPrompt,
-            pollInterval: cached.pollInterval,
-            maxToolCalls: cached.maxToolCalls,
-            speechController: speechController,
+            messages: data.messages,
+            isProcessing: data.isProcessing,
+            executingTools: data.executingTools,
+            currentSystemPrompt: data.currentSystemPrompt,
+            pollInterval: data.pollInterval,
+            maxToolCalls: data.maxToolCalls,
+            speechController: viewModel.shared.speechController,
             onUpdateSystemPrompt: { [viewModel] prompt in
                 Task { await viewModel.updateSystemPrompt(for: .summarizer, prompt: prompt) }
             },
@@ -339,26 +144,6 @@ private struct SummarizerAgentCard: View {
                 Task { await viewModel.updateMaxToolCalls(for: .summarizer, count: count) }
             }
         )
-    }
-
-    /// Asks for a rebuild on the next main-queue turn. Nothing calls `recompute()` directly —
-    /// that is what produced several `cached` assignments inside one frame.
-    private func scheduleRecompute() {
-        coalescer.schedule { recompute() }
-    }
-
-    private func recompute() {
-        let store = viewModel.inspectorStore
-        let next = SummarizerData(
-            currentSystemPrompt: store.systemPrompt(for: .summarizer),
-            pollInterval: viewModel.agentPollIntervals[.summarizer] ?? 5,
-            maxToolCalls: viewModel.agentMaxToolCalls[.summarizer] ?? 100,
-            isProcessing: viewModel.processingRoles.contains(.summarizer),
-            executingTools: RoleAgentCard.executingToolNames(viewModel.toolExecutingByRole[.summarizer]),
-            messages: summarizerMessages
-        )
-        // Already deferred off the .onChange closure by the coalescer, so this assigns directly.
-        if cached != next { cached = next }
     }
 }
 
@@ -380,8 +165,6 @@ private struct AgentCard: View {
     /// demand rather than filling the panel by default (Security Agent in particular used to open with
     /// its full evaluation log expanded).
     @State private var expanded = false
-    @State private var processingStartDate: Date?
-    @State private var toolExecutingStartDate: Date?
     @State private var showingConfig = false
 
 
@@ -445,8 +228,8 @@ private struct AgentCard: View {
                 isProcessing: isProcessing, hasActivity: hasActivity,
                 isSecurityAgent: role == .securityAgent,
                 isTerminated: role != .securityAgent && isTerminated,
-                executingTools: executingTools, processingStartDate: processingStartDate,
-                toolExecutingStartDate: toolExecutingStartDate
+                executingTools: executingTools, processingStartDate: data.processingSince,
+                toolExecutingStartDate: data.toolsRunningSince
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 28).padding(.trailing, 12).padding(.bottom, 6)
@@ -469,14 +252,6 @@ private struct AgentCard: View {
             }
             Divider()
         }
-        .modifier(AgentCardActivityTimers(
-            isProcessing: isProcessing, executingTools: executingTools,
-            processingStartDate: $processingStartDate,
-            toolExecutingStartDate: $toolExecutingStartDate
-        ))
-        // The sheet sits BELOW the lifecycle/change handlers deliberately (project SwiftUI
-        // rule): placed above them, the handlers can silently stop firing — which is how a
-        // card rendered "Thinking" with a never-seeded elapsed timer (2026-08-07).
         .sheet(isPresented: $showingConfig) {
             AgentConfigSheet(
                 viewModel: viewModel, role: role, roleColor: roleColor,
@@ -610,99 +385,6 @@ private struct AgentCardSessionCostLine: View {
         .padding(.leading, 28)
         .padding(.trailing, 12)
         .padding(.bottom, 6)
-    }
-}
-
-/// Seeds and clears the two "how long has this been going" start dates the status badge reads.
-///
-/// `executingTools.isEmpty` is what is watched, NOT the array: the badge only needs to know
-/// whether a tool is running, and watching the array restarts the timer every time the SET of
-/// tools changes while one is still executing.
-private struct AgentCardActivityTimers: ViewModifier {
-    let isProcessing: Bool
-    let executingTools: [String]
-    @Binding var processingStartDate: Date?
-    @Binding var toolExecutingStartDate: Date?
-
-    func body(content: Content) -> some View {
-        content
-            .onAppear {
-                // Project rule: defer @State mutations out of lifecycle closures.
-                if isProcessing {
-                    DispatchQueue.main.async { processingStartDate = Date() }
-                }
-                if !executingTools.isEmpty {
-                    DispatchQueue.main.async { toolExecutingStartDate = Date() }
-                }
-            }
-            .onChange(of: isProcessing) { _, newValue in
-                DispatchQueue.main.async { processingStartDate = newValue ? Date() : nil }
-            }
-            .onChange(of: executingTools.isEmpty) { _, isEmpty in
-                DispatchQueue.main.async { toolExecutingStartDate = isEmpty ? nil : Date() }
-            }
-    }
-}
-
-/// Everything that can wake a role card.
-///
-/// The card's body reads ONLY its @State cache, so these watchers are its entire link to live
-/// state — and observation registrations are one-shot. A dropped dirty-mark (observed 2026-08-06:
-/// every agent card froze mid-evening and rendered 20-hour-old "Thinking" badges while the engine
-/// ran on) leaves the card with no observable read left to re-register, and nothing can wake it
-/// again. The `.task` is the reconciliation heartbeat against exactly that; `recompute()` skips the
-/// assignment when nothing changed, so a quiet tick costs one struct compare.
-///
-/// Initial population is the `.task`, NOT `.onChange(initial: true)`: two synchronous initial
-/// fires per modifier on first body eval was contributing to SwiftUI's "tried to update multiple
-/// times per frame" warnings on the `[ChannelMessage]`-typed watchers.
-///
-/// Each watcher narrows to a per-role key where it can. Cross-role dictionaries still re-evaluate
-/// every card's outer body when any role changes (Observation propagates whole-property changes),
-/// but the `[role]` subscript narrows the CALLBACK.
-private struct RoleAgentCardWatchers: ViewModifier {
-    let viewModel: AppViewModel
-    let role: AgentRole
-    let roleMessages: [ChannelMessage]
-    let onRecompute: () -> Void
-
-    func body(content: Content) -> some View {
-        content
-            .task {
-                onRecompute()
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: RoleAgentCard.reconcileHeartbeat)
-                    guard !Task.isCancelled else { return }
-                    onRecompute()
-                }
-            }
-            .onChange(of: roleMessages) { _, _ in onRecompute() }
-            .onChange(of: viewModel.inspectorStore.callLogsByRole[role]) { _, _ in onRecompute() }
-            .onChange(of: viewModel.inspectorStore.liveContexts[role]) { _, _ in onRecompute() }
-            .onChange(of: role == .securityAgent ? viewModel.inspectorStore.evaluationLifetimeCount : 0) { _, _ in onRecompute() }
-            .onChange(of: viewModel.processingRoles.contains(role)) { _, _ in onRecompute() }
-            // The Security Agent's busy state also comes from the evaluation registry, so that has
-            // to wake the recompute too or its card stays dark through every per-call review.
-            .onChange(of: role == .securityAgent ? viewModel.shared.liveActivitySnapshot.securityEvaluations : 0) { _, _ in onRecompute() }
-            .onChange(of: viewModel.toolExecutingByRole[role]) { _, _ in onRecompute() }
-            .modifier(RoleAgentCardSettingsWatchers(viewModel: viewModel, role: role, onRecompute: onRecompute))
-    }
-}
-
-/// The role card's slower-moving inputs — its settings, tool set, model, and cost — split from
-/// `RoleAgentCardWatchers` only to keep each body short. Same narrowing rules apply.
-private struct RoleAgentCardSettingsWatchers: ViewModifier {
-    let viewModel: AppViewModel
-    let role: AgentRole
-    let onRecompute: () -> Void
-
-    func body(content: Content) -> some View {
-        content
-            .onChange(of: viewModel.agentPollIntervals[role]) { _, _ in onRecompute() }
-            .onChange(of: viewModel.agentMaxToolCalls[role]) { _, _ in onRecompute() }
-            .onChange(of: viewModel.agentToolNames[role]) { _, _ in onRecompute() }
-            .onChange(of: viewModel.resolvedAgentConfigs[role]) { _, _ in onRecompute() }
-            .onChange(of: viewModel.sessionCost(for: role)) { _, _ in onRecompute() }
     }
 }
 

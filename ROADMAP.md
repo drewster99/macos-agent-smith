@@ -2747,7 +2747,7 @@ Re-key the data pipeline; keep the CURRENT `InspectorView` working via compatibi
 #### Phase 3 — the "Now" panel view (the visible flip)
 
 - Replace `InspectorView`'s role cards with the outline: Orchestration group + Live-tasks tree (task → agent → tool calls → nested `Security` while active), per the settled rules above.
-- **Preserve the observation discipline** the current file documents (anti "update multiple times per frame"): `ForEach` over stable `AgentInstanceRef` ids; per-row `Equatable` cached structs; narrowed `.onChange` watchers. **Collapsed rows cache only a light summary; heavy detail (context/turns) is fetched on expand or window-open — stored detail must NOT drive sidebar updates** (your item-3 directive). Don't fan out heavy per-instance caches.
+- **Preserve the observation discipline** the current file documents (anti "update multiple times per frame"): `ForEach` over stable `AgentInstanceRef` ids; per-row `Equatable` structs. **Superseded 2026-09-26:** the narrowed `.onChange` watchers were themselves the source of the warnings — derived inspector state now lives in the model (`InspectorLiveState`, see CLAUDE.md) and the views watch nothing. **Collapsed rows cache only a light summary; heavy detail (context/turns) is fetched on expand or window-open — stored detail must NOT drive sidebar updates** (your item-3 directive). Don't fan out heavy per-instance caches.
 - Move per-agent config out to **Settings**; retire the per-card gear sheets.
 - Build the **click-into-a-task** detail view (task-centric layout) as the home for the heavy per-task history (may split to a follow-up commit).
 - Build-green + smoke + screenshot review. Commit.
