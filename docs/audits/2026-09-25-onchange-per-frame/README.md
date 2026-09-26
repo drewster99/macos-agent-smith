@@ -1,9 +1,8 @@
 # SwiftUI "onChange(of:) action tried to update multiple times per frame" — investigation (2026-09-25)
 
-Status: **open**. The mechanism below is proven in isolation; a fix built on it did not change the
-three warnings seen at app launch, and a live A/B measurement was blocked (screen locked, and the
-ChatGPT-subscription provider returning HTTP 401 so no task could run). Nothing here is committed
-to the app.
+Status: **open**. The harness mechanism below is real but is NOT what the app hits: the frame-batching
+fix built on it made the app worse (live A/B, 2026-09-25). The warning sites are now identified
+exactly (below). Nothing here is committed to the app.
 
 ## What the harnesses measured
 
@@ -59,11 +58,50 @@ right after a batch, before any `onChange` action runs, and that `NowLiveSection
 did not run in that pass — i.e. a flagged action appears to be SKIPPED, not merely logged, which
 makes this more than log noise (its 10 s sweep recovers).
 
-## Next step
+## Live A/B (screen unlocked, one small task per run)
 
-Re-run the A/B with the screen unlocked and a working Smith provider: the same small task with and
-without `batcher-app-changes.patch`, counting warning sites. The pre-fix baseline for a two-task run
-was 25 sites (8 `Bool`, 4 `Array<ChannelMessage>`, 3 `Optional<InspectorCallLog>`, 2 each of
-`Optional<Dictionary<String, Int>>`, `Optional<Array<LLMMessage>>`, `Int`, and 1 each of `Snapshot`,
-`Set<AgentInstanceRef>`, `Dictionary<AgentInstanceRef, Dictionary<String, Int>>`, `Array<String>`).
-The launch-time residual needs its own probe with the window actually on screen.
+| Build | Warning sites |
+|---|---|
+| main (baseline) | 11 |
+| + `batcher-app-changes.patch` | 17 |
+
+Batching does not help; it made it worse. Reverted.
+
+## Exact sites (per-site tagging)
+
+Each watched value was temporarily wrapped in a per-site generic type (`OnChangeSite<Tag, T>`), so
+the log line names the site. One run, 19 warnings, 12 distinct sites — ALL on two views:
+
+- `RoleAgentCard` / `RoleAgentCardWatchers` / `AgentCardActivityTimers` (`InspectorView.swift`):
+  `isProcessing`, `roleMessages`, `callLogsByRole[role]`, `liveContexts[role]`,
+  `evaluationLifetimeCount`, `processingRoles.contains(role)`, `securityEvaluations`.
+- `NowLiveSection`: `taskSignature`, `messages`, `processingInstances`, `toolExecutingByInstance`,
+  `liveActivitySnapshot`.
+
+Never: `SummarizerAgentCard` (same pattern, idle in these runs), `InspectorView`'s own `messages`
+watcher, and every other `.onChange` in the app.
+
+## What the probe timeline shows
+
+With body-evaluation and source-write probes, a SINGLE change warns: at 23:37:48.560 one
+processing-state change (the previous one 16 s earlier) warned on `processingRoles.contains(role)`
+and `processingInstances` at once. So these warnings are not "two changes within one frame".
+
+The flagged action is skipped: after that warning the card's cache was not rebuilt until the 2 s
+reconciliation heartbeat (`write cached` at 23:37:50.481). So the warning has a visible cost — card
+state lags up to 2 s (the Live section up to its 10 s sweep) — and the heartbeats are what hide it.
+
+## Harness hypotheses that did NOT reproduce it (all 0 warnings)
+
+`harness3` several watchers on one view in one turn (with/without `@State` writes) · `harness4` a
+value computed from two sources; a slice passed down from a parent's `@State` · `harness5` forced
+`layoutSubtreeIfNeeded` / `displayIfNeeded` between two writes in one turn · `harness6` watchers on
+a `Group` (two children, toggling child, `VStack` child) · `harness7` the window offscreen.
+
+## Recommended direction (not started — needs a decision)
+
+Take `.onChange` out of these two views: have the view model (or `AgentInspectorStore`) publish
+the derived per-role card snapshot and the live rows as stored `Equatable` properties, rebuilt
+where the inputs change, and let the views read them directly. This is the "per-role Equatable
+snapshot" `4ec1756` proposed, and it removes the heartbeat-hidden lag along with the warnings.
+It changes where the inspector's derived state lives, so it is an architecture decision.
