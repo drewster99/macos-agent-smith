@@ -43,9 +43,13 @@ final class InspectorLiveState {
     @ObservationIgnored private var bucketedRevision: Int?
     @ObservationIgnored private var bucketed: [AgentRole: [ChannelMessage]] = [:]
     /// When each role's current busy spell began — the card's elapsed timers. Kept here, beside
-    /// the flags they time, so no view has to watch the flags to seed them.
-    @ObservationIgnored private var processingSince: [AgentRole: Date] = [:]
-    @ObservationIgnored private var toolsRunningSince: [AgentRole: Date] = [:]
+    /// the flags they time, so no view has to watch the flags to seed them. Tracked (not
+    /// `@ObservationIgnored`) and covers every role, not just the three with a card: the
+    /// standalone `AgentInspectorWindow` (opened for Summarizer and Validator too) reads these
+    /// directly instead of keeping its own `@State` + `.onChange` pair, which was the last
+    /// leftover copy of the bug this file exists to close (see the type doc above).
+    private(set) var processingSince: [AgentRole: Date] = [:]
+    private(set) var toolsRunningSince: [AgentRole: Date] = [:]
 
     init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -126,6 +130,15 @@ final class InspectorLiveState {
         var cards: [AgentRole: AgentRoleData] = [:]
         for role in roleCards.keys {
             cards[role] = roleCardData(for: role, viewModel: viewModel, now: now)
+        }
+        // The three card roles just updated their own timers above. Summarizer and Validator have
+        // no card but are still valid `AgentInspectorWindow` targets, so their timers need keeping
+        // too — neither is ever `.securityAgent`, so the plain `processingRoles` check applies.
+        for role in [AgentRole.summarizer, .validator] {
+            let processing = viewModel.processingRoles.contains(role)
+            let tools = Self.executingToolNames(viewModel.toolExecutingByRole[role])
+            processingSince[role] = processing ? (processingSince[role] ?? now) : nil
+            toolsRunningSince[role] = tools.isEmpty ? nil : (toolsRunningSince[role] ?? now)
         }
         return Outputs(
             roleCards: cards,

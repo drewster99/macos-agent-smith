@@ -9,8 +9,6 @@ struct AgentInspectorWindow: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var expandedTurnIDs: Set<UUID> = []
-    @State private var processingStartDate: Date?
-    @State private var toolExecutingStartDate: Date?
 
     private var roleColor: Color { AppColors.color(for: .agent(role)) }
 
@@ -64,8 +62,8 @@ struct AgentInspectorWindow: View {
                 isProcessing: isProcessing,
                 isTerminated: isTerminated,
                 executingTools: executingTools,
-                processingStartDate: processingStartDate,
-                toolExecutingStartDate: toolExecutingStartDate,
+                processingStartDate: viewModel.inspectorLive.processingSince[role],
+                toolExecutingStartDate: viewModel.inspectorLive.toolsRunningSince[role],
                 onDone: { dismiss() }
             )
             InspectorModelCostLine(viewModel: viewModel, role: role)
@@ -81,23 +79,10 @@ struct AgentInspectorWindow: View {
         }
         .frame(minWidth: 600, idealWidth: 800, minHeight: 500, idealHeight: 700)
         .onAppear {
-            // Project rule: defer @State mutations out of lifecycle closures.
-            if isProcessing {
-                DispatchQueue.main.async { processingStartDate = Date() }
-            }
-            if !executingTools.isEmpty {
-                DispatchQueue.main.async { toolExecutingStartDate = Date() }
-            }
-        }
-        .onChange(of: isProcessing) { _, newValue in
-            DispatchQueue.main.async {
-                processingStartDate = newValue ? Date() : nil
-            }
-        }
-        .onChange(of: executingTools.isEmpty) { _, isEmpty in
-            DispatchQueue.main.async {
-                toolExecutingStartDate = isEmpty ? nil : Date()
-            }
+            // This window can open before the sidebar inspector ever has (e.g. from
+            // `SummarizerCard`/`ValidatorAgentCard`'s own pop-out button), so it must activate the
+            // shared derived state itself. Idempotent — a no-op if the sidebar already did.
+            viewModel.inspectorLive.activate()
         }
     }
 
