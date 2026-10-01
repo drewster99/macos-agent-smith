@@ -8,7 +8,7 @@ import Foundation
 /// AND-composed, so `.all` (all defaults) matches every message.
 ///
 /// The axes cover what the two panes need — a task-scoped top pane (`taskScope`) and a
-/// Smith↔user-plus-configurables bottom pane (`allowedSenders` + `kinds` + `visibility`). The filter is
+/// Smith↔user-plus-configurables bottom pane (`hiddenParticipants` + `kindsBySender`). The filter is
 /// deliberately a plain value with a single `matches(_:)` predicate: no state, no I/O, no ordering — a
 /// message either passes or it doesn't, independent of every other message, which is what lets a new
 /// message be tested against a subscriber's filter in O(1) instead of re-scanning the whole transcript.
@@ -40,21 +40,15 @@ public struct TranscriptFilter: Sendable, Equatable {
         case matchNone
     }
 
-    /// Public (channel-wide) vs private (addressed to a specific agent) messages.
-    public enum Visibility: String, Sendable, Equatable, Codable, CaseIterable {
-        case all
-        case publicOnly
-        case privateOnly
-    }
-
-    /// Which senders pass. `nil` = every sender. A non-nil set matches a message iff its `sender` is a
-    /// member — `ChannelMessage.Sender` is `Hashable`, so `.agent(.smith)`, `.user`, etc. are set members.
-    public var allowedSenders: Set<ChannelMessage.Sender>?
-    /// Which recipients pass. `nil` = every recipient. A non-nil set filters PRIVATE (addressed) messages
-    /// by their `recipient`; a PUBLIC message (no recipient) always passes. This is the axis that lets a
-    /// view hide everything addressed TO a worker, which the sender axis can't (a Security-Agent-to-Brown
-    /// message has an ALLOWED sender).
-    public var allowedRecipients: Set<MessageRecipient>?
+    /// Participants whose messages are hidden — every message FROM one, and every private message
+    /// addressed TO one. Empty = everyone shows.
+    ///
+    /// One axis for both directions because that is what "hide Brown" means to a reader: a
+    /// Security-Agent verdict addressed to Brown is Brown's business even though Brown didn't send
+    /// it. This replaced separate sender and recipient allow-lists (plus a public/private switch)
+    /// that had to be kept in step by hand to express exactly this. Stored as the HIDDEN set so a
+    /// sender this build doesn't list is visible rather than silently filtered out.
+    public var hiddenParticipants: Set<ChannelMessage.Sender>
     /// The DEFAULT kind rule — applies to any sender without an entry in `kindsBySender`.
     public var kinds: KindRule
     /// Per-sender kind rules. A sender with an entry uses ITS rule instead of `kinds`; a sender
@@ -63,7 +57,6 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// tool output from Smith while hiding it from Brown.
     public var kindsBySender: [ChannelMessage.Sender: KindRule]
     public var taskScope: TaskScope
-    public var visibility: Visibility
     /// When true, messages at `.error` severity are hidden. Errors are a cross-cutting axis, not a
     /// kind. Default false — errors show.
     ///
@@ -101,23 +94,19 @@ public struct TranscriptFilter: Sendable, Equatable {
     public var hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>]
 
     public init(
-        allowedSenders: Set<ChannelMessage.Sender>? = nil,
-        allowedRecipients: Set<MessageRecipient>? = nil,
+        hiddenParticipants: Set<ChannelMessage.Sender> = [],
         kinds: KindRule = .all,
         kindsBySender: [ChannelMessage.Sender: KindRule] = [:],
         taskScope: TaskScope = .any,
-        visibility: Visibility = .all,
         hideErrors: Bool = false,
         alwaysShowAtOrAbove: MessageSeverity? = .warning,
         hiddenToolNames: Set<String> = [],
         hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>] = [:]
     ) {
-        self.allowedSenders = allowedSenders
-        self.allowedRecipients = allowedRecipients
+        self.hiddenParticipants = hiddenParticipants
         self.kinds = kinds
         self.kindsBySender = kindsBySender
         self.taskScope = taskScope
-        self.visibility = visibility
         self.hideErrors = hideErrors
         self.alwaysShowAtOrAbove = alwaysShowAtOrAbove
         self.hiddenToolNames = hiddenToolNames
@@ -153,23 +142,16 @@ public struct TranscriptFilter: Sendable, Equatable {
         case .matchNone:
             return false
         }
-        switch visibility {
-        case .all:
-            break
-        case .publicOnly:
-            if message.isPrivate { return false }
-        case .privateOnly:
-            if !message.isPrivate { return false }
-        }
 
         // The floor. Everything below is a NOISE exclusion — a category the user chose not to
         // read — so returning true here is the only way a message those axes hide still lands.
         if let alwaysShowAtOrAbove, severity >= alwaysShowAtOrAbove { return true }
 
-        if let allowedSenders, !allowedSenders.contains(message.sender) { return false }
-        // Recipient axis filters PRIVATE messages; a public message (no recipient) always passes.
-        if let allowedRecipients, let recipient = message.recipient, !allowedRecipients.contains(recipient) {
-            return false
+        if !hiddenParticipants.isEmpty {
+            if hiddenParticipants.contains(message.sender) { return false }
+            if let recipient = message.recipient, hiddenParticipants.contains(recipient.participant) {
+                return false
+            }
         }
         // Covers BOTH the request and the output row: each carries the same `tool` name, so hiding
         // a tool hides the whole exchange rather than leaving an orphaned output under a request
@@ -193,5 +175,16 @@ public struct TranscriptFilter: Sendable, Equatable {
         }
 
         return true
+    }
+}
+
+extension MessageRecipient {
+    /// The participant this recipient names, in sender terms — the identity the participant axis
+    /// keys on, so "hide Brown" catches messages addressed to Brown as well as Brown's own.
+    public var participant: ChannelMessage.Sender {
+        switch self {
+        case .user: return .user
+        case .agent(let role): return .agent(role)
+        }
     }
 }

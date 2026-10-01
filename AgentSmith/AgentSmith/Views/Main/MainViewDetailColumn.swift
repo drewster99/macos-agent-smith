@@ -259,7 +259,7 @@ private struct BottomTranscriptPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TranscriptFilterBar(config: $viewModel.transcriptViewConfig)
+            TranscriptFilterBar(config: $viewModel.transcriptViewConfig, statsSource: statsSource)
             ChannelLogView(
                 messages: viewModel.bottomTranscriptProvider.messages,
                 toolRequestIDs: viewModel.bottomTranscriptProvider.toolRequestIDs,
@@ -278,6 +278,12 @@ private struct BottomTranscriptPane: View {
             .equatable()
             .environment(\.transcriptTaskActionHandler, viewModel.transcriptTaskActionHandler)
         }
+    }
+
+    /// Counts the whole resident session; the config's own scope switch decides what's in scope.
+    private var statsSource: TranscriptFilterStatsSource {
+        TranscriptFilterStatsSource(messages: { [viewModel] in viewModel.messages },
+                                    universe: .any, fixedScope: nil)
     }
 }
 
@@ -350,13 +356,29 @@ private struct TaskTranscriptContent: View {
     let onOpenMCPSettings: () -> Void
     @Binding var selectedImageAttachment: Attachment?
 
+    /// The task whose ORIGIN log must be read, because the live provider can't be trusted to have its
+    /// messages: a task not resident here (archived/deleted, or cross-session and not restored), or a
+    /// finished drilled run (its messages trimmed from the bounded resident tail). nil = live.
+    ///
+    /// Resident in THIS session's live store → its messages are (or are becoming) current here, so
+    /// the live streaming provider is right — even for a task restored from another origin session
+    /// and re-running in this window.
+    private var logBackedTask: (task: AgentTask, originSessionID: UUID)? {
+        guard let effectiveTask, let origin = effectiveTask.sessionID else { return nil }
+        let residentHere = viewModel.tasks.contains { $0.id == effectiveTask.id }
+        let finishedDrilledRun = showBackToRuns && !effectiveTask.status.isInProgress
+        return !residentHere || finishedDrilledRun ? (effectiveTask, origin) : nil
+    }
+
+    /// Counts for the header's filter: only when the live provider has this task's messages.
+    private var statsSource: TranscriptFilterStatsSource? {
+        guard let effectiveTask, logBackedTask == nil else { return nil }
+        let scope = TranscriptFilter.TaskScope.task(effectiveTask.id)
+        return TranscriptFilterStatsSource(messages: { [viewModel] in viewModel.messages },
+                                           universe: scope, fixedScope: scope)
+    }
+
     var body: some View {
-        // Resident in THIS session's live store → its messages are (or are becoming) current here, so
-        // the live streaming provider is right — even for a task restored from another origin session
-        // and re-running in this window. A finished drilled run is the exception: it's resident but its
-        // messages have been trimmed from the bounded resident tail, so it must be read from the log.
-        let residentHere = effectiveTask.map { e in viewModel.tasks.contains { $0.id == e.id } } ?? false
-        let finishedDrilledRun = showBackToRuns && (effectiveTask?.status.isInProgress == false)
         VStack(spacing: 0) {
             if showBackToRuns {
                 DrilledRunHeader { viewModel.selectedTemplateRunID = nil }
@@ -367,15 +389,12 @@ private struct TaskTranscriptContent: View {
             // Its funnel edits THIS pane's own config, not the session pane's — see
             // `taskTranscriptViewConfig`. One header per pane, each with its own control.
             TaskTranscriptHeader(task: effectiveTask,
-                                 config: $viewModel.taskTranscriptViewConfig)
-            // Read the origin session's LOG when the live provider can't be trusted to have the
-            // messages: a task not resident here (archived/deleted, or cross-session and not
-            // restored), or a finished drilled run (trimmed from the bounded tail). Otherwise the
-            // live streaming provider — a resident, still-running task, drilled runs included.
-            if let effectiveTask, let origin = effectiveTask.sessionID,
-               !residentHere || finishedDrilledRun {
+                                 config: $viewModel.taskTranscriptViewConfig,
+                                 statsSource: statsSource)
+            if let logBackedTask {
                 CrossSessionTranscriptView(
-                    originSessionID: origin, taskID: effectiveTask.id, viewModel: viewModel,
+                    originSessionID: logBackedTask.originSessionID, taskID: logBackedTask.task.id,
+                    viewModel: viewModel,
                     // The log-reading branch filters CLIENT-SIDE: it bypasses `topTranscriptProvider`
                     // entirely, so without this the bar above it would be an inert control.
                     filterConfig: viewModel.taskTranscriptViewConfig,

@@ -198,6 +198,21 @@ enum AppColors {
     static let toolChipBackground = Color.blue.opacity(0.12)
     static let toolChipBorder = Color.blue.opacity(0.40)
 
+    // MARK: - Transcript filter
+
+    /// A shown participant chip's fill, in that participant's own color.
+    static func participantChipFill(for sender: ChannelMessage.Sender) -> Color {
+        color(for: sender).opacity(0.15)
+    }
+
+    /// A shown participant chip's outline.
+    static func participantChipStroke(for sender: ChannelMessage.Sender) -> Color {
+        color(for: sender).opacity(0.40)
+    }
+
+    /// A hidden participant chip's outline.
+    static let participantChipOffStroke = Color(.separatorColor)
+
     /// Returns the color for a given channel message sender.
     static func color(for sender: ChannelMessage.Sender) -> Color {
         switch sender {
@@ -283,6 +298,17 @@ enum AppFonts {
     static let aiCommentaryTitle = Font.subheadline.weight(.semibold)
     /// Body font for the AI Commentary inset.
     static let aiCommentaryBody = Font.callout
+
+    // MARK: Transcript filter
+
+    /// 11pt semibold — a filter section's uppercase label ("WHO", "ACTIVITY").
+    static let filterSectionLabel = Font.system(size: 11, weight: .semibold)
+    /// Caption with tabular digits — message counts, so columns of numbers align.
+    static let filterCount = Font.caption.monospacedDigit()
+    /// A tool name in the activity list.
+    static let filterToolName = Font.system(.callout, design: .monospaced)
+    /// A participant column header in the by-participant grid.
+    static let filterMatrixHeader = Font.caption2.weight(.medium)
 
     // MARK: Inspector "Live" section (NowLiveSection)
     /// 11pt semibold — the "Live" section header.

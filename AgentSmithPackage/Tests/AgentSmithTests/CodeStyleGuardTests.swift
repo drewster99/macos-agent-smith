@@ -510,7 +510,6 @@ struct CodeStyleGuardTests {
         "Views/LLMTurnViews.swift": 2,
         "Views/MCPServerEditorSheet.swift": 2,
         "Views/MCPServerManagementView.swift": 2,
-        "Views/Main/TranscriptFilterPopover.swift": 2,
         "Views/MainView.swift": 2,
         "Views/MarkdownText.swift": 2,
         "Views/OrchestrationSettingsView.swift": 2,
@@ -560,9 +559,10 @@ struct CodeStyleGuardTests {
     /// The sum of the ceilings, pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number and unused headroom cannot quietly accumulate. See `someViewFunctionTotal`.
     /// Lowered from 130: `NowLiveSection.swift` dropped one oversized body in the 2026-09-26
-    /// "derive the inspector's display state in the model" work. The ratchet was not re-checked in
-    /// that commit; paid down here.
-    private static let oversizedBodyTotal = 129
+    /// "derive the inspector's display state in the model" work. Lowered from 129: the transcript
+    /// filter redesign replaced `Views/Main/TranscriptFilterPopover.swift` (two oversized bodies)
+    /// with views that fit the limit.
+    private static let oversizedBodyTotal = 127
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.

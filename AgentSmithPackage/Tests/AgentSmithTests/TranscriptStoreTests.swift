@@ -38,7 +38,7 @@ import Foundation
 
     @Test func filterExcludesNonMatchingSenders() async {
         let store = TranscriptStore()
-        let (_, stream) = await store.subscribe(filter: TranscriptFilter(allowedSenders: [.user]))
+        let (_, stream) = await store.subscribe(filter: TranscriptFilter(hiddenParticipants: [.agent(.smith)]))
         var it = stream.makeAsyncIterator()
         _ = await it.next()
 
@@ -126,7 +126,7 @@ import Foundation
         let all = await it.next()
         #expect(all?.messages.count == 2)   // .all sees both
 
-        await store.updateFilter(id, to: TranscriptFilter(allowedSenders: [.user]))
+        await store.updateFilter(id, to: TranscriptFilter(hiddenParticipants: [.agent(.smith)]))
         let filtered = await it.next()
         #expect(filtered?.replaces == true)
         #expect(filtered?.messages.count == 1)

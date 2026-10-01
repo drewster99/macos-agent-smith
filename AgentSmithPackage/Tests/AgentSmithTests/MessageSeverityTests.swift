@@ -133,7 +133,7 @@ struct TranscriptFilterSeverityFloorTests {
 
     @Test("The floor defeats the sender and tool axes too")
     func floorDefeatsEveryExclusionAxis() {
-        let bySender = TranscriptFilter(allowedSenders: [.agent(.brown)])
+        let bySender = TranscriptFilter(hiddenParticipants: [.agent(.smith)])
         #expect(bySender.matches(toolOutput(succeeded: true)) == false)
         #expect(bySender.matches(toolOutput(succeeded: false)))
 
@@ -218,17 +218,22 @@ struct TranscriptFilterSeverityFloorTests {
         #expect(TranscriptFilter(taskScope: .matchNone).matches(failureInTask(nil)) == false)
     }
 
-    /// Public/private is a scope boundary too — an error addressed privately must not appear in a
-    /// pane that shows only public traffic.
-    @Test("The floor respects the public/private boundary")
-    func floorRespectsVisibility() {
+    /// Hiding a participant is a NOISE choice, so the floor still surfaces a failure addressed to
+    /// them — the same contract as a hidden kind, sender, or tool.
+    @Test("The floor defeats the participant axis for messages addressed to a hidden participant")
+    func floorDefeatsHiddenRecipient() {
         let privateFailure = ChannelMessage(
             sender: .system, recipientID: UUID(), recipient: .agent(.brown),
             content: "blocked",
             metadata: ["messageKind": .kind(.securityReview), "severity": .severity(.error)]
         )
-        #expect(TranscriptFilter(visibility: .publicOnly).matches(privateFailure) == false)
-        #expect(TranscriptFilter(visibility: .privateOnly).matches(privateFailure))
+        let routine = ChannelMessage(
+            sender: .system, recipientID: UUID(), recipient: .agent(.brown),
+            content: "ok", metadata: ["messageKind": .kind(.securityReview)]
+        )
+        let pane = TranscriptFilter(hiddenParticipants: [.agent(.brown)])
+        #expect(pane.matches(privateFailure))
+        #expect(pane.matches(routine) == false)
     }
 }
 
@@ -346,38 +351,42 @@ struct SecurityDispositionSeverityTests {
 
 /// The config is the persisted surface, and it hand-writes its `Codable` — a property added to
 /// the struct but not to those keys is silently never saved.
-@Suite("TranscriptViewConfig severity floor persistence")
+@Suite("TranscriptViewConfig problem policy persistence")
 struct TranscriptViewConfigSeverityFloorTests {
 
     private func roundTrip(_ config: TranscriptViewConfig) throws -> TranscriptViewConfig {
         try JSONDecoder().decode(TranscriptViewConfig.self, from: JSONEncoder().encode(config))
     }
 
-    @Test("The floor survives a round trip at every setting")
-    func floorRoundTrips() throws {
-        for floor: MessageSeverity? in [.warning, .error, nil] {
+    @Test("Every problem policy survives a round trip")
+    func policyRoundTrips() throws {
+        for policy in TranscriptProblemPolicy.allCases {
             var config = TranscriptViewConfig()
-            config.alwaysShowAtOrAbove = floor
-            #expect(try roundTrip(config).alwaysShowAtOrAbove == floor)
+            config.problems = policy
+            #expect(try roundTrip(config).problems == policy)
         }
     }
 
     /// A config written before the floor existed is exactly one that was hiding failures. It must
-    /// adopt the default rather than decoding to `nil` — an upgrade must not preserve the broken
+    /// adopt the default rather than "filter normally" — an upgrade must not preserve the broken
     /// behavior it is fixing.
-    @Test("A config predating the floor adopts the default, not nil")
-    func legacyConfigAdoptsDefaultFloor() throws {
+    @Test("A config predating the floor adopts the default policy")
+    func legacyConfigAdoptsDefaultPolicy() throws {
         let legacy = Data(#"{"showsChat":true,"showErrors":true,"hideTaskScoped":false}"#.utf8)
         let decoded = try JSONDecoder().decode(TranscriptViewConfig.self, from: legacy)
-        #expect(decoded.alwaysShowAtOrAbove == .warning)
+        #expect(decoded.problems == .alwaysShowWarningsAndErrors)
     }
 
-    /// The floor has to reach the filter, not just the struct.
-    @Test("makeFilter carries the floor through")
-    func makeFilterCarriesFloor() {
+    /// The policy has to reach the filter, not just the struct.
+    @Test("makeFilter carries the policy through")
+    func makeFilterCarriesPolicy() {
         var config = TranscriptViewConfig()
-        config.alwaysShowAtOrAbove = .error
+        config.problems = .alwaysShowErrors
         #expect(config.makeFilter().alwaysShowAtOrAbove == .error)
+        #expect(config.makeFilter().hideErrors == false)
+        config.problems = .hideErrors
+        #expect(config.makeFilter().alwaysShowAtOrAbove == nil)
+        #expect(config.makeFilter().hideErrors)
     }
 }
 

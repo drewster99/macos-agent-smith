@@ -84,15 +84,15 @@ struct SessionStateCodingTests {
         var state = Self.fullyPopulated()
         // Distinct values, so a mix-up between the two fields cannot pass.
         var topConfig = TranscriptViewConfig.everything
-        topConfig.defaultKinds.setTool("bash", visible: false)
+        topConfig.setVisible(false, targets: [.tool("bash")], for: [.agent(.brown)])
         state.taskTranscriptViewConfig = topConfig
         state.transcriptViewConfig = .conversation
 
         let back = try JSONDecoder().decode(SessionState.self, from: JSONEncoder().encode(state))
         #expect(back.taskTranscriptViewConfig == topConfig)
-        #expect(back.taskTranscriptViewConfig?.defaultKinds.hiddenToolNames == ["bash"])
+        #expect(back.taskTranscriptViewConfig?.selection(for: .agent(.brown)).hiddenToolNames == ["bash"])
         #expect(back.transcriptViewConfig == .conversation)
-        #expect(back.transcriptViewConfig?.defaultKinds.hiddenToolNames.isEmpty == true,
+        #expect(back.transcriptViewConfig?.selection(for: .agent(.brown)).hiddenToolNames.isEmpty == true,
                 "the bottom pane's config must not pick up the top pane's hidden tools")
     }
 
