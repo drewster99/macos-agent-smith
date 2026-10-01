@@ -535,6 +535,11 @@ public actor AgentActor {
     /// Applying it mid-turn would let one turn's LLM call, its tool results and its usage record
     /// describe two different configurations.
     private var pendingModelRetune: ModelRetune?
+    /// When true, the pending model update is an identity swap (provider/model changed), so the
+    /// run-loop boundary must reset history before the next provider call.
+    private var pendingModelSwapResetRequired = false
+    /// Optional orientation to inject when applying a pending identity swap reset.
+    private var pendingModelSwapOrientation: String?
 
     /// A new provider build for the model this agent is already running.
     struct ModelRetune: Sendable {
@@ -562,15 +567,38 @@ public actor AgentActor {
     /// false when the retune was refused.
     @discardableResult
     func scheduleModelRetune(_ retune: ModelRetune) -> Bool {
-        let current = configuration.llmConfig
+        // A queued identity swap already carries the required history reset. Coalesce a
+        // retune of its destination rather than rejecting it against the pre-swap identity.
+        let current = pendingModelRetune?.llmConfig ?? configuration.llmConfig
         guard retune.llmConfig.providerID == current.providerID,
               retune.llmConfig.modelID == current.modelID else {
             let roleName = configuration.role.rawValue
-            Self.agentLogger.error("Agent \(roleName, privacy: .public): refused a model retune changing identity from \(current.providerID, privacy: .public)/\(current.modelID, privacy: .public) to \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public) — a model change requires a fresh agent.")
+            Self.agentLogger.error("Agent \(roleName, privacy: .public): refused a model retune changing identity from \(current.providerID, privacy: .public)/\(current.modelID, privacy: .public) to \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public) — a model change requires an explicit history reset.")
             return false
         }
-        pendingModelRetune = retune
+        stagePendingModelUpdate(retune, requiresReset: false, orientation: nil)
         return true
+    }
+
+    /// Stages a provider/model identity swap. Unlike `scheduleModelRetune`, this allows identity
+    /// change and pairs it with an explicit history reset at the same run-loop boundary.
+    func scheduleModelSwap(_ update: ModelRetune, orientation: String?) {
+        stagePendingModelUpdate(update, requiresReset: true, orientation: orientation)
+    }
+
+    private func stagePendingModelUpdate(
+        _ update: ModelRetune,
+        requiresReset: Bool,
+        orientation: String?
+    ) {
+        let hadPendingReset = pendingModelSwapResetRequired
+        pendingModelRetune = update
+        pendingModelSwapResetRequired = hadPendingReset || requiresReset
+        if requiresReset {
+            pendingModelSwapOrientation = orientation
+        } else if !hadPendingReset {
+            pendingModelSwapOrientation = nil
+        }
     }
 
     /// Applies a staged retune. Called at the top of the run-loop iteration, BEFORE this
@@ -584,6 +612,11 @@ public actor AgentActor {
     private func applyPendingModelRetune() {
         guard let retune = pendingModelRetune else { return }
         pendingModelRetune = nil
+        let requiresReset = pendingModelSwapResetRequired
+        pendingModelSwapResetRequired = false
+        let resetOrientation = pendingModelSwapOrientation
+        pendingModelSwapOrientation = nil
+        let previousConfig = configuration.llmConfig
         provider = retune.provider
         configuration.applyRetunedModel(
             llmConfig: retune.llmConfig,
@@ -596,7 +629,18 @@ public actor AgentActor {
         toolContext.currentConfiguration = retune.llmConfig
         toolContext.currentProviderType = retune.providerAPIType.rawValue
         let roleName = configuration.role.rawValue
-        Self.agentLogger.info("Agent \(roleName, privacy: .public): applied a model retune for \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public)")
+        if requiresReset {
+            learnedMaxOutputCeiling = nil
+            performReset(orientation: resetOrientation)
+            Self.agentLogger.info("Agent \(roleName, privacy: .public): applied a model/provider identity swap with context reset from \(previousConfig.providerID, privacy: .public)/\(previousConfig.modelID, privacy: .public) to \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public)")
+        } else {
+            Self.agentLogger.info("Agent \(roleName, privacy: .public): applied a model retune for \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public)")
+        }
+    }
+
+    /// The agent's current live model configuration (post-retunes/swaps).
+    public func currentModelConfiguration() -> ModelConfiguration {
+        configuration.llmConfig
     }
 
     /// Injects the security evaluator used for Brown's tool approval flow.

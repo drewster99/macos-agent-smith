@@ -330,8 +330,10 @@ final class AppViewModel {
     var showInspector = false
     /// Dedicated observable store for inspector data, updated via push callbacks.
     let inspectorStore = AgentInspectorStore()
-    /// The inspector's derived display state (agent cards, Live rows), computed from the
-    /// properties above. Lazy because it holds this view model weakly and so needs `self`.
+    /// Live model configuration per role as currently held by the runtime (agent/evaluator/summarizer),
+    /// used by inspector model rows so they reflect what is actually running now.
+    var inspectorLiveModelConfigs: [AgentRole: ModelConfiguration] = [:]
+    /// Derived inspector display state, retained alongside the live runtime model snapshots.
     @ObservationIgnored private(set) lazy var inspectorLive = InspectorLiveState(viewModel: self)
 
     /// Per-session idle poll intervals for each agent role (seconds).
@@ -1090,6 +1092,7 @@ final class AppViewModel {
                 self.toolExecutingByInstance.removeAll()
                 self.agentToolNames.removeAll()
                 self.agentToolNamesByInstance.removeAll()
+                self.inspectorLiveModelConfigs.removeAll()
                 self.inspectorStore.clearAll()
                 self.inspectedRunIDs = []
                 self.runtime = nil
@@ -1238,6 +1241,7 @@ final class AppViewModel {
             Task { @MainActor [weak self] in
                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
                 self.inspectorStore.appendCall(event, for: ref)
+                await self.refreshInspectorLiveModelConfig(for: ref.role)
             }
         }
 
@@ -1245,6 +1249,7 @@ final class AppViewModel {
             Task { @MainActor [weak self] in
                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
                 self.inspectorStore.updateLiveContext(messages, for: ref)
+                await self.refreshInspectorLiveModelConfig(for: ref.role)
             }
         }
 
@@ -1267,6 +1272,8 @@ final class AppViewModel {
                 self?.shared.learnModelOutputLimit(providerID: providerID, modelID: modelID, limit: limit)
             }
         }
+
+        await refreshAllInspectorLiveModelConfigs()
 
         // Restore prior timer history into the runtime's event log so subsequent appends
         // join an existing series rather than start fresh on each launch.
@@ -2078,10 +2085,9 @@ final class AppViewModel {
     }
 
     /// Rebuilds this session's per-role LLM providers from the current model assignments and pushes
-    /// them to the live runtime without a session restart: a retune reaches live agents at their
-    /// next turn; a model change reaches Brown at its next spawn and Smith at the next runtime start;
-    /// the Security Agent's evaluators and the summarizer take either change on their next call. A per-role build failure is logged and skipped — the runtime keeps that role's
-    /// existing provider — so one misconfigured model can't break the others.
+    /// them to the live runtime so Settings edits take effect without a session restart. A per-role
+    /// build failure is logged and skipped — the runtime keeps that role's existing provider — so one
+    /// misconfigured model can't break the others.
     /// Resolves a model's image/document injection capability from the catalog. When the model is
     /// ABSENT from the catalog we can't know: vision fails OPEN (images have no text fallback) and
     /// documents fail CLOSED (a wrong PDF block is a hard API 400; the agent reads the extracted
@@ -2134,6 +2140,7 @@ final class AppViewModel {
         }
         guard !providers.isEmpty else { return }
         await runtime.setProviders(providers: providers, configurations: configurations, apiTypes: apiTypes, supportsVisionByRole: visionByRole, supportsDocumentsByRole: documentsByRole)
+        await refreshAllInspectorLiveModelConfigs()
         logger.info("Refreshed LLM providers for roles: \(providers.keys.map(\.displayName).sorted().joined(separator: ", "), privacy: .public)")
     }
 
@@ -2394,6 +2401,7 @@ final class AppViewModel {
         toolExecutingByInstance.removeAll()
         agentToolNames.removeAll()
         agentToolNamesByInstance.removeAll()
+        inspectorLiveModelConfigs.removeAll()
         inspectorStore.clearAll()
         inspectedRunIDs = []
         // The channel stream is cancelled + awaited inside flushPersistence() below
@@ -2750,6 +2758,16 @@ final class AppViewModel {
         return result
     }
 
+    /// Inspector-facing role configs: assignment-resolved by default, but replaced with a live
+    /// runtime holder's config when available.
+    var inspectorResolvedAgentConfigs: [AgentRole: ModelConfiguration] {
+        var result = resolvedAgentConfigs
+        for (role, config) in inspectorLiveModelConfigs {
+            result[role] = config
+        }
+        return result
+    }
+
     /// Whether all required agent roles in this session are assigned a model whose provider is
     /// currently configured.
     var allAgentConfigsValid: Bool {
@@ -2781,6 +2799,32 @@ final class AppViewModel {
             result[role] = ModelAssignment(providerID: config.providerID, modelID: config.modelID)
         }
         return result
+    }
+
+    @MainActor
+    private func refreshInspectorLiveModelConfig(for role: AgentRole) async {
+        guard let runtime else { return }
+        let live = await runtime.liveModelConfiguration(for: role)
+        if inspectorLiveModelConfigs[role] != live {
+            if let live {
+                inspectorLiveModelConfigs[role] = live
+            } else {
+                inspectorLiveModelConfigs.removeValue(forKey: role)
+            }
+        }
+    }
+
+    @MainActor
+    private func refreshAllInspectorLiveModelConfigs() async {
+        guard let runtime else { return }
+        for role in AgentRole.allCases {
+            let live = await runtime.liveModelConfiguration(for: role)
+            if live != nil {
+                inspectorLiveModelConfigs[role] = live
+            } else {
+                inspectorLiveModelConfigs.removeValue(forKey: role)
+            }
+        }
     }
 
     // MARK: - Private

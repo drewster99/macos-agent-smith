@@ -114,7 +114,7 @@ struct InspectorModelCostLine: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if let config = viewModel.resolvedAgentConfigs[role] {
+            if let config = viewModel.inspectorResolvedAgentConfigs[role] {
                 AgentCardModelInfoLine(
                     modelConfig: config,
                     llmTurns: viewModel.inspectorStore.retainedTurns(for: role),
