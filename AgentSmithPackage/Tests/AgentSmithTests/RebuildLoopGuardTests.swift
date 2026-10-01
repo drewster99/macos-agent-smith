@@ -104,7 +104,7 @@ struct RebuildLoopGuardTests {
 
         // `rebuildContextFromTask` needs a running task assigned to the agent.
         let task = await taskStore.addTask(title: "loop test", description: "exercise the rebuild guard")
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
         await taskStore.assignAgent(taskID: task.id, agentID: agentID)
 
         await agent.start(initialInstruction: nil)

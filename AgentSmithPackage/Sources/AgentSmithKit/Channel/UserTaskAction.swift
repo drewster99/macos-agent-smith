@@ -18,6 +18,9 @@ public enum UserTaskAction: String, Codable, Sendable, Hashable, CaseIterable {
     case runAgainRequested = "run_again_requested"
     /// The user recovered a task from Recently Deleted.
     case undeleted = "undeleted"
+    /// The user lowered the worker capacity; this task's worker was stopped and the task will
+    /// resume automatically when a slot frees.
+    case deferredForCapacity = "deferred_for_capacity"
 }
 
 public extension AnyCodable {

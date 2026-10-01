@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Thread-safe storage for one session's *active* tasks.
 ///
@@ -11,14 +12,12 @@ import Foundation
 public actor TaskStore {
     private var tasks: [UUID: AgentTask] = [:]
     private var onChange: (@Sendable () -> Void)?
-    /// Fired the first time a task transitions to a terminal status (`.completed` or `.failed`).
-    /// Used by `OrchestrationRuntime` to cancel any scheduled wakes pinned to the task.
-    private var onTaskTerminated: (@Sendable (UUID) -> Void)?
-    /// Fired when a task LEAVES the active store via archive or soft-delete (i.e. `move`). Used by
-    /// `OrchestrationRuntime` to cancel any scheduled wakes pinned to the task — a disposition change
-    /// is not a terminal STATUS change, so `onTaskTerminated` never fires for it, which used to leave
-    /// an archived/deleted scheduled task's wake orphaned (it fired later and was silently skipped).
-    private var onTaskMovedToInactive: (@Sendable (UUID) -> Void)?
+    /// The single subscriber to this store's typed events — every status transition and every
+    /// lifecycle (disposition) change, in the order they happened. Called synchronously inside the
+    /// writing actor step; it must only ENQUEUE (the runtime drains a FIFO), never await, so the
+    /// store never suspends mid-transition. Replacing it (a runtime restart) drops the old one, so
+    /// callbacks can't accumulate.
+    private var eventObserver: (@Sendable (TaskStoreEvent) -> Void)?
     /// The shared global store for archived + recently-deleted tasks. See the type doc.
     private let inactiveStore: InactiveTaskStore?
     /// The shared global template library. Templates may live here (after the global migration) rather
@@ -35,9 +34,21 @@ public actor TaskStore {
     /// before the source is removed — a crash in the gap must never leave a task absent from both
     /// files. Nil in standalone/test construction (the move is then best-effort, as before).
     private var durablyPersistInactiveNow: (@Sendable () async -> Bool)?
-    /// Durably writes this session's active-task snapshot to disk *now*, returning success. Same
-    /// purpose as `durablyPersistInactiveNow`, for the restore direction (global → active).
-    private var durablyPersistActiveNow: (@Sendable ([AgentTask]) async -> Bool)?
+    /// How this store's active tasks reach disk. The store is the SINGLE writer of its session's
+    /// `tasks.json`: every mutation schedules a coalesced, in-order write of the store's own state,
+    /// so what is on disk can never be a stale mirror, and a caller can ask whether a given
+    /// mutation is durable (`awaitDurable(through:)`).
+    private var persistence: Persistence = .memoryOnly
+    /// Bumped by every mutation (`didMutate`) and every explicit durable write request.
+    private var mutationSeq: UInt64 = 0
+    /// The highest `mutationSeq` the persistence drain has finished with — success or failure.
+    private var drainedSeq: UInt64 = 0
+    /// The highest `mutationSeq` a SUCCESSFUL write covers. Each write is complete state, so a later
+    /// success makes every earlier seq durable.
+    private var durableSeq: UInt64 = 0
+    private var persistenceDrainRunning = false
+    private var durabilityWaiters: [(target: UInt64, continuation: CheckedContinuation<Void, Never>)] = []
+    private static let persistenceLogger = Logger(subsystem: "com.agentsmith", category: "TaskStore.persistence")
     /// Durably writes the global template library to disk *now*, returning success. For the cross-store
     /// moves that touch the library — promote/demote (`commitTemplateFlip`) and a template's
     /// archive/soft-delete/restore — so the destination file is durable before the source is removed.
@@ -164,28 +175,528 @@ public actor TaskStore {
         onChange = handler
     }
 
-    /// Injects the durable-write hooks that make cross-store moves crash-safe. `inactive` durably
-    /// persists the global inactive store; `active` durably persists the given snapshot of this
-    /// session's active tasks; `library` durably persists the global template library. Each returns
-    /// whether the write succeeded.
+    /// Injects the durable-write hooks for the GLOBAL stores that make cross-store moves crash-safe.
+    /// `inactive` durably persists the global inactive store; `library` durably persists the global
+    /// template library. Each returns whether the write succeeded. This session's own active tasks
+    /// are persisted by the store itself (`attachPersistence`).
     public func setDurablePersistHooks(
         inactive: @escaping @Sendable () async -> Bool,
-        active: @escaping @Sendable ([AgentTask]) async -> Bool,
         library: (@Sendable () async -> Bool)? = nil
     ) {
         durablyPersistInactiveNow = inactive
-        durablyPersistActiveNow = active
         durablyPersistLibraryNow = library
     }
 
-    /// Registers a callback fired when a task transitions to a terminal status for the first time.
-    public func setOnTaskTerminated(_ handler: @escaping @Sendable (UUID) -> Void) {
-        onTaskTerminated = handler
+    /// Sets the one subscriber to this store's typed events (see `eventObserver`), replacing any
+    /// previous one.
+    public func setEventObserver(_ handler: @escaping @Sendable (TaskStoreEvent) -> Void) {
+        eventObserver = handler
     }
 
-    /// Registers a callback fired when a task is archived or soft-deleted (leaves the active store).
-    public func setOnTaskMovedToInactive(_ handler: @escaping @Sendable (UUID) -> Void) {
-        onTaskMovedToInactive = handler
+    private func emit(_ event: TaskStoreEvent) {
+        eventObserver?(event)
+    }
+
+    /// Emits a transition, then — when the write left released effects on the task — tells the
+    /// consumer there is something to deliver.
+    private func publish(_ transition: TaskStatusTransition) {
+        emit(.transition(transition))
+        noteEffectsWritten(taskID: transition.taskID)
+    }
+
+    // MARK: - Task watches
+
+    /// Adds a watch to a task (or a library template). Refuses — returning why — a rule that could
+    /// not work: no triggers, empty instructions, a `startTask` on a template or targeting itself, a
+    /// target that is not an ordinary task in this session, or a chain that would loop.
+    public func addWatch(_ watch: TaskWatch, to taskID: UUID) async -> String? {
+        if let problem = watchProblem(watch, on: taskID) { return problem }
+        if case .startTask(let targetID) = watch.action {
+            // Both tasks are in this store (`watchProblem` checked the target; a template, which
+            // lives in the library, may not carry a startTask), so the watch and the target's hold
+            // land in one synchronous step — never one without the other.
+            guard var watched = tasks[taskID], var target = tasks[targetID] else {
+                return "Task \(taskID.uuidString) is not an active task in this session."
+            }
+            watched.watches.append(watch)
+            watched.updatedAt = Date()
+            target.startHolds.append(TaskStartHold(watchedTaskID: taskID, watchID: watch.id))
+            target.updatedAt = Date()
+            tasks[taskID] = watched
+            tasks[targetID] = target
+            didMutate()
+            return nil
+        }
+        return await mutateTaskOrTemplate(id: taskID) { task in
+            if task.isTemplate, !watch.action.isAllowedOnTemplate {
+                return "A template can't start another task: a template is shared across sessions, and the task to start lives in one. Put the watch on a task instead."
+            }
+            task.watches.append(watch)
+            task.updatedAt = Date()
+            return nil
+        }
+    }
+
+    /// Cancels a watch. Its unsettled firings are cancelled too, their undelivered effects are
+    /// removed, and firings already handed to the broker are withdrawn before this returns — so
+    /// nothing it produced acts afterwards, except a delivery that had already reached its recipient
+    /// (Smith holding the note, a start already under way), which cannot be recalled. The watch
+    /// itself is kept (state `.cancelled`) as the audit record.
+    public func cancelWatch(_ watchID: UUID, on taskID: UUID) async -> String? {
+        var handedOff: [Int] = []
+        let refusal = await mutateTaskOrTemplate(id: taskID) { task in
+            guard let index = task.watches.firstIndex(where: { $0.id == watchID }) else {
+                return "Task \(taskID.uuidString) has no watch \(watchID.uuidString)."
+            }
+            // A fired `.once` watch is no longer active, but a firing it produced may still be
+            // undelivered — cancelling must stop THAT too. Only the state flip needs an active watch.
+            if task.watches[index].isActive {
+                task.watches[index].state = .cancelled(at: Date())
+            }
+            for firing in task.watches[index].recentFirings where !firing.state.isSettled {
+                if firing.state == .inFlight { handedOff.append(firing.occurrence) }
+                task.watches[index].setFiringState(occurrence: firing.occurrence, .cancelled)
+            }
+            for record in task.pendingEffects {
+                if case .watchFiring(let id, _) = record.effect, id == watchID {
+                    effectDurabilitySeq[record.id] = nil
+                }
+            }
+            task.pendingEffects.removeAll {
+                if case .watchFiring(let id, _) = $0.effect { return id == watchID }
+                return false
+            }
+            task.updatedAt = Date()
+            // A cancelled chain link no longer holds its target — released in this same actor step,
+            // so no start in between can see the watch cancelled but its hold still in place.
+            for (heldID, held) in tasks where heldID != taskID && held.startHolds.contains(where: { $0.watchID == watchID }) {
+                var updated = held
+                updated.startHolds.removeAll { $0.watchID == watchID }
+                updated.updatedAt = Date()
+                tasks[heldID] = updated
+            }
+            return nil
+        }
+        // Awaited, so the cancel has finished taking back what it can before it returns — a caller
+        // told "cancelled" can rely on nothing withdrawable still being delivered afterwards.
+        if refusal == nil, !handedOff.isEmpty, let withdrawHandedOffFirings {
+            await withdrawHandedOffFirings(watchID, handedOff)
+        }
+        return refusal
+    }
+
+    /// Takes back firings a cancelled watch had already handed to the broker. Set by the runtime,
+    /// which owns the broker. Nil in a store with no runtime yet (before Start): a firing restored
+    /// in flight after a crash may then still sit in the persisted Smith queue, and the runtime
+    /// withdraws it at start (`reconcileInFlightWatchFirings`).
+    private var withdrawHandedOffFirings: (@Sendable (UUID, [Int]) async -> Void)?
+
+    public func setWatchWithdrawal(_ handler: @escaping @Sendable (_ watchID: UUID, _ occurrences: [Int]) async -> Void) {
+        withdrawHandedOffFirings = handler
+    }
+
+    /// Removes the hold `watchID` placed, wherever it is. Returns the holds the target still has.
+    @discardableResult
+    public func releaseStartHolds(placedBy watchID: UUID) -> [TaskStartHold] {
+        var remaining: [TaskStartHold] = []
+        for (id, task) in tasks where task.startHolds.contains(where: { $0.watchID == watchID }) {
+            var updated = task
+            updated.startHolds.removeAll { $0.watchID == watchID }
+            updated.updatedAt = Date()
+            tasks[id] = updated
+            remaining = updated.startHolds
+            didMutate()
+        }
+        return remaining
+    }
+
+    /// The state of the watch `watchID` on any active task here, or nil when no such watch exists.
+    public func watchState(_ watchID: UUID) -> TaskWatchState? {
+        for task in tasks.values {
+            if let watch = task.watch(id: watchID) { return watch.state }
+        }
+        return nil
+    }
+
+    /// The tasks waiting on `watchedTaskID` (holding a start hold its watches placed).
+    public func tasksHeld(by watchedTaskID: UUID) -> [AgentTask] {
+        allTasks().filter { $0.startHolds.contains { $0.watchedTaskID == watchedTaskID } }
+    }
+
+    /// An explicit user start overrides a task's holds: the chain links that would have started it
+    /// are spent, so their watches are cancelled (kept as audit) and the holds removed. Returns the
+    /// holds that were overridden.
+    public func overrideStartHolds(of taskID: UUID) async -> [TaskStartHold] {
+        guard let holds = tasks[taskID]?.startHolds, !holds.isEmpty else { return [] }
+        for hold in holds {
+            _ = await cancelWatch(hold.watchID, on: hold.watchedTaskID)
+        }
+        // A hold whose watch could not be cancelled (its task is gone) is removed directly. Only the
+        // holds overridden here: one added while this was suspended belongs to a watch still live.
+        let overridden = Set(holds)
+        if var task = tasks[taskID], task.startHolds.contains(where: overridden.contains) {
+            task.startHolds.removeAll(where: overridden.contains)
+            tasks[taskID] = task
+            didMutate()
+        }
+        return holds
+    }
+
+    /// Records how a firing ended (or that it was handed off). A no-op when the watch or firing is
+    /// gone, or when the firing already settled — a cancelled firing stays cancelled.
+    @discardableResult
+    public func setWatchFiringState(taskID: UUID, watchID: UUID, occurrence: Int, to state: TaskWatchFiring.State) -> Bool {
+        guard var task = tasks[taskID],
+              let index = task.watches.firstIndex(where: { $0.id == watchID }),
+              let firing = task.watches[index].firing(occurrence: occurrence),
+              !firing.state.isSettled,
+              firing.state != state else { return false }
+        task.watches[index].setFiringState(occurrence: occurrence, state)
+        tasks[taskID] = task
+        didMutate()
+        return true
+    }
+
+    /// Every watch in this session's active tasks, with the task it belongs to.
+    public func allWatches() -> [(task: AgentTask, watch: TaskWatch)] {
+        allTasks().flatMap { task in task.watches.map { (task, $0) } }
+    }
+
+    private func watchProblem(_ watch: TaskWatch, on taskID: UUID) -> String? {
+        if watch.triggers.isEmpty { return "A watch needs at least one state to react to." }
+        switch watch.action {
+        case .instructSmith(let text) where text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            return "Instructions for Smith can't be empty."
+        case .startTask(let targetID):
+            if targetID == taskID { return "A task can't start itself." }
+            if tasks[taskID]?.isTemplate == true {
+                return "A template can't start another task: a template is shared across sessions, and the task to start lives in one. Put the watch on a task instead."
+            }
+            guard let target = tasks[targetID], target.disposition == .active else {
+                return "Task \(targetID.uuidString) is not an active task in this session, so a watch can't start it."
+            }
+            if target.isTemplate {
+                return "A watch can't start a template directly. Start a task instead."
+            }
+            guard target.status.isRunnable else {
+                return "\"\(target.title)\" is \(target.status.displayName.lowercased()). A watch only starts a pending, paused or interrupted task, and never reopens or resets one."
+            }
+            if let watched = tasks[taskID], watched.status.isTerminal {
+                return "\"\(watched.title)\" has already \(watched.status == .completed ? "completed" : "failed"), so this watch would only fire if it ran again — and \"\(target.title)\" would wait until then. Start it now instead, or re-run the first task before adding the watch."
+            }
+            if startChainReaches(taskID, from: targetID) {
+                return "Starting \"\(target.title)\" from this task would create a loop: it already leads back here."
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    /// Whether following active `startTask` watches from `start` reaches `goal`.
+    private func startChainReaches(_ goal: UUID, from start: UUID) -> Bool {
+        var visited: Set<UUID> = []
+        var frontier = [start]
+        while let current = frontier.popLast() {
+            if current == goal { return true }
+            guard visited.insert(current).inserted, let task = tasks[current] else { continue }
+            for watch in task.watches where watch.isActive {
+                if case .startTask(let next) = watch.action { frontier.append(next) }
+            }
+        }
+        return false
+    }
+
+    // MARK: - Transition effects
+
+    /// The store mutation after which each pending effect record was written or released. The
+    /// consumer delivers a record only once that mutation is durable. In memory only: a record read
+    /// back from disk is durable by definition.
+    private var effectDurabilitySeq: [String: UInt64] = [:]
+    /// Tickets for effects written `held`, with the watchdog that releases a forgotten one.
+    private var heldEffectTickets: [TransitionEffectTicket: Task<Void, Never>] = [:]
+    /// How long a held effect may wait for its writer's `releaseEffects` before the store releases
+    /// it and logs the missing release as the bug it is (decision R2).
+    private var heldEffectReleaseDeadline: Duration = .seconds(30)
+
+    /// Shortens the held-effect deadline so a test can observe the watchdog.
+    func setHeldEffectReleaseDeadline(_ deadline: Duration) {
+        heldEffectReleaseDeadline = deadline
+    }
+
+    /// Records, for every effect on `taskID` written by the mutation just made, the mutation that
+    /// must be durable before it is delivered — and signals the consumer when any are released.
+    private func noteEffectsWritten(taskID: UUID) {
+        guard let effects = tasks[taskID]?.pendingEffects, !effects.isEmpty else { return }
+        for record in effects where effectDurabilitySeq[record.id] == nil {
+            effectDurabilitySeq[record.id] = mutationSeq
+        }
+        if effects.contains(where: { $0.release == .released }) {
+            emit(.effectsReady)
+        }
+    }
+
+    /// As the CAS `updateStatus(id:to:ifCurrentlyIn:ifValidationRoundIs:cause:)`, but the
+    /// transition's effects are written HELD: the caller releases them (`releaseEffects`) once the
+    /// facts they describe exist — the completion banner, the worker's briefing. Returns nil when
+    /// the transition did not happen.
+    public func updateStatusHoldingEffects(
+        id: UUID,
+        to newStatus: AgentTask.Status,
+        ifCurrentlyIn allowed: Set<AgentTask.Status>,
+        ifValidationRoundIs token: ValidationRoundToken? = nil,
+        cause: TaskTransitionCause
+    ) -> TransitionEffectTicket? {
+        guard var task = tasks[id], allowed.contains(task.status) else { return nil }
+        guard validationRoundIsCurrent(token, on: task) else { return nil }
+        guard case .applied(let transition) = changeStatus(of: &task, to: newStatus, cause: cause, effectRelease: .held) else { return nil }
+        tasks[id] = task
+        didMutate()
+        publish(transition)
+        let ticket = TransitionEffectTicket(taskID: id, statusRevision: transition.statusRevision)
+        if task.pendingEffects.contains(where: { $0.transition.statusRevision == transition.statusRevision }) {
+            let deadline = heldEffectReleaseDeadline
+            heldEffectTickets[ticket] = Task { [weak self] in
+                try? await Task.sleep(for: deadline)
+                guard !Task.isCancelled else { return }
+                await self?.releaseOverdueEffects(ticket)
+            }
+        }
+        return ticket
+    }
+
+    /// Releases the effects a `updateStatusHoldingEffects` write held. Idempotent.
+    public func releaseEffects(_ ticket: TransitionEffectTicket) {
+        heldEffectTickets.removeValue(forKey: ticket)?.cancel()
+        guard var task = tasks[ticket.taskID] else { return }
+        var released = false
+        for index in task.pendingEffects.indices
+        where task.pendingEffects[index].transition.statusRevision == ticket.statusRevision
+            && task.pendingEffects[index].release == .held {
+            task.pendingEffects[index].release = .released
+            released = true
+        }
+        guard released else { return }
+        tasks[ticket.taskID] = task
+        didMutate()
+        for record in task.pendingEffects where record.transition.statusRevision == ticket.statusRevision {
+            effectDurabilitySeq[record.id] = mutationSeq
+        }
+        emit(.effectsReady)
+    }
+
+    private func releaseOverdueEffects(_ ticket: TransitionEffectTicket) {
+        guard heldEffectTickets[ticket] != nil else { return }
+        Self.statusLogger.error("Effects of task \(ticket.taskID.uuidString, privacy: .public) revision \(ticket.statusRevision, privacy: .public) were never released by their writer — releasing them now")
+        releaseEffects(ticket)
+    }
+
+    /// Every released, undelivered effect in this store, oldest transition first.
+    public func readyEffects() -> [ReadyTaskEffect] {
+        tasks.values
+            .flatMap { task in
+                task.pendingEffects
+                    .filter { $0.release == .released }
+                    .map { ReadyTaskEffect(taskID: task.id, record: $0, durableThrough: effectDurabilitySeq[$0.id] ?? 0) }
+            }
+            .sorted {
+                if $0.record.transition.at != $1.record.transition.at { return $0.record.transition.at < $1.record.transition.at }
+                if $0.taskID != $1.taskID { return $0.taskID.uuidString < $1.taskID.uuidString }
+                return $0.record.transition.statusRevision < $1.record.transition.statusRevision
+            }
+    }
+
+    /// Removes a delivered effect. A no-op when the task or record is gone.
+    public func completeEffect(taskID: UUID, recordID: String) {
+        guard var task = tasks[taskID], let index = task.pendingEffects.firstIndex(where: { $0.id == recordID }) else { return }
+        task.pendingEffects.remove(at: index)
+        tasks[taskID] = task
+        effectDurabilitySeq[recordID] = nil
+        didMutate()
+    }
+
+    /// At launch no writer survives to release a held effect: release them all. Returns whether
+    /// anything changed.
+    private func releaseEffectsHeldAcrossLaunch() -> Bool {
+        // Their writers are gone, so their watchdogs would only log a false "never released".
+        for (_, watchdog) in heldEffectTickets { watchdog.cancel() }
+        heldEffectTickets.removeAll()
+        var changed = false
+        for (id, task) in tasks where task.pendingEffects.contains(where: { $0.release == .held }) {
+            var updated = task
+            for index in updated.pendingEffects.indices { updated.pendingEffects[index].release = .released }
+            tasks[id] = updated
+            changed = true
+        }
+        if changed {
+            didMutate()
+            for task in tasks.values {
+                for record in task.pendingEffects { effectDurabilitySeq[record.id] = mutationSeq }
+            }
+            emit(.effectsReady)
+        }
+        return changed
+    }
+
+    /// A task leaving the active store takes no undelivered effects with it: they describe a run
+    /// the user has now archived or deleted, and a later restore must not replay them.
+    /// Pure: the caller forgets the dropped records' durability tracking (`forgetEffects(of:)`) only
+    /// once the move has succeeded — a failed move leaves the task active with its effects, which
+    /// must still wait for disk.
+    private func droppingPendingEffects(_ task: AgentTask) -> AgentTask {
+        guard !task.pendingEffects.isEmpty else { return task }
+        var stripped = task
+        stripped.pendingEffects.removeAll()
+        return stripped
+    }
+
+    private func forgetEffects(of task: AgentTask) {
+        for record in task.pendingEffects { effectDurabilitySeq[record.id] = nil }
+    }
+
+    // MARK: - Persistence
+
+    /// How a store's active tasks reach disk.
+    public enum Persistence: Sendable {
+        /// No disk: memory IS the store's storage, so a mutation is durable the moment it is applied.
+        /// Tests and standalone construction.
+        case memoryOnly
+        /// Every mutation schedules a coalesced, in-order write of the store's full active snapshot.
+        case disk(save: @Sendable ([AgentTask]) async throws -> Void)
+        /// A retired store (replaced by another that now owns the file). Nothing is written and
+        /// nothing is ever durable, so a straggling mutation can't overwrite its successor's file.
+        case retired
+    }
+
+    /// Makes this store the writer of its session's `tasks.json`. With `writeNow`, the current state
+    /// is written at once; without it, the file is left as it is until the next mutation (the loader
+    /// uses this when stripping the session file isn't yet safe).
+    public func attachPersistence(save: @escaping @Sendable ([AgentTask]) async throws -> Void, writeNow: Bool) {
+        persistence = .disk(save: save)
+        // Whatever the store held before attaching is NOT on disk; only a write can make it so.
+        durableSeq = 0
+        drainedSeq = 0
+        if writeNow {
+            mutationSeq += 1
+            schedulePersistenceDrain()
+        } else {
+            drainedSeq = mutationSeq
+        }
+    }
+
+    /// Stops this store from writing, after its in-flight write (if any) lands. Used when another
+    /// store takes over the same file, so a late write from this one can never clobber it.
+    public func retirePersistence() async {
+        let target = mutationSeq
+        if case .disk = persistence, drainedSeq < target {
+            await withCheckedContinuation { continuation in
+                durabilityWaiters.append((target, continuation))
+            }
+        }
+        persistence = .retired
+        resumeAllDurabilityWaiters()
+    }
+
+    /// The seq of the latest mutation — pass it to `awaitDurable(through:)`.
+    public var currentMutationSeq: UInt64 { mutationSeq }
+
+    /// Waits until the write covering mutation `target` has been attempted and reports whether a
+    /// successful write covers it. A `false` stays recoverable: a later mutation's successful write
+    /// covers every earlier seq.
+    public func awaitDurable(through target: UInt64) async -> Bool {
+        if durableSeq >= target { return true }
+        switch persistence {
+        case .memoryOnly:
+            return true
+        case .retired:
+            return false
+        case .disk:
+            if drainedSeq < target {
+                await withCheckedContinuation { continuation in
+                    durabilityWaiters.append((target, continuation))
+                }
+            } else if durableSeq < target {
+                // The write covering `target` was attempted and failed. Nothing else may ever
+                // mutate this store again, so ask for another attempt rather than wait on one;
+                // the caller retries and a successful write covers every earlier seq.
+                mutationSeq += 1
+                schedulePersistenceDrain()
+            }
+            return durableSeq >= target
+        }
+    }
+
+    /// Writes the CURRENT state now (in order with every other write) and reports whether it is on
+    /// disk. The cross-store moves use this to land the destination before removing the source.
+    public func persistDurablyNow() async -> Bool {
+        mutationSeq += 1
+        let target = mutationSeq
+        switch persistence {
+        case .memoryOnly:
+            durableSeq = target
+            drainedSeq = target
+            return true
+        case .retired:
+            return false
+        case .disk:
+            schedulePersistenceDrain()
+            return await awaitDurable(through: target)
+        }
+    }
+
+    /// Records a mutation: schedules its write and tells the observer. Every change to `tasks` that
+    /// should survive a restart goes through here.
+    private func didMutate() {
+        mutationSeq += 1
+        switch persistence {
+        case .memoryOnly:
+            durableSeq = mutationSeq
+            drainedSeq = mutationSeq
+        case .disk:
+            schedulePersistenceDrain()
+        case .retired:
+            break
+        }
+        onChange?()
+    }
+
+    private func schedulePersistenceDrain() {
+        guard !persistenceDrainRunning else { return }
+        persistenceDrainRunning = true
+        Task { await self.drainPersistence() }
+    }
+
+    /// Single-flight drain: writes the store's CURRENT state (captured synchronously, so a snapshot
+    /// is always one consistent actor state) until every mutation has been attempted. Runs on the
+    /// actor; while a write is awaited the store stays free for other work, and anything mutated in
+    /// the meantime is picked up by the next iteration.
+    private func drainPersistence() async {
+        defer { persistenceDrainRunning = false }
+        while drainedSeq < mutationSeq, case .disk(let save) = persistence {
+            let target = mutationSeq
+            let snapshot = allTasks()
+            do {
+                try await save(snapshot)
+                durableSeq = max(durableSeq, target)
+            } catch {
+                Self.persistenceLogger.error("tasks.json write failed: \(error.localizedDescription, privacy: .public)")
+            }
+            drainedSeq = max(drainedSeq, target)
+            resumeReadyDurabilityWaiters()
+        }
+    }
+
+    private func resumeReadyDurabilityWaiters() {
+        guard !durabilityWaiters.isEmpty else { return }
+        let ready = durabilityWaiters.filter { drainedSeq >= $0.target }
+        durabilityWaiters.removeAll { drainedSeq >= $0.target }
+        for waiter in ready { waiter.continuation.resume() }
+    }
+
+    private func resumeAllDurabilityWaiters() {
+        let waiters = durabilityWaiters
+        durabilityWaiters.removeAll()
+        for waiter in waiters { waiter.continuation.resume() }
     }
 
     /// All tasks, newest first.
@@ -243,15 +754,22 @@ public actor TaskStore {
             }
             let wasTemplate = task.isTemplate
             task.isTemplate = isTemplate
+            var normalization: TaskStatusTransition?
             if isTemplate {
                 preservePriorRunAsTemplateChildIfNeeded(&task, wasTemplate: wasTemplate)
                 task.templateInputValues = [:]
-                normalizeTemplateLauncher(&task)
+                normalization = normalizeTemplateLauncher(&task)
             } else {
                 clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
             }
+            let spentChainLinks = isTemplate && !wasTemplate ? stripRunStateForTemplatePromotion(&task) : []
             task.updatedAt = Date()
-            return await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
+            let refusal = await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
+            if refusal == nil {
+                if let normalization { publish(normalization) }
+                for watchID in spentChainLinks { releaseStartHolds(placedBy: watchID) }
+            }
+            return refusal
             }
         }
     }
@@ -269,7 +787,7 @@ public actor TaskStore {
         // task with nowhere to put it (that would lose it). `wasInLibrary` is always false here.
         guard let templateLibrary else {
             tasks[id] = task
-            onChange?()
+            didMutate()
             return nil
         }
         if isTemplate, !wasInLibrary {
@@ -288,13 +806,13 @@ public actor TaskStore {
             if let durablyPersistLibraryNow, await durablyPersistLibraryNow() == false {
                 await templateLibrary.removeTemplate(id: id)
                 tasks[id] = task
-                onChange?()
+                didMutate()
                 return nil
             }
             // Destination durable. Now remove the source and make that durable too.
             tasks.removeValue(forKey: id)
-            onChange?()
-            _ = await durablyPersistActiveNow?(Array(tasks.values))
+            didMutate()
+            _ = await persistDurablyNow()
             return nil
         } else if !isTemplate, wasInLibrary {
             // Demote (library → session): land it DURABLY in this session (destination) BEFORE removing the
@@ -304,12 +822,13 @@ public actor TaskStore {
             // cosmetic (deduped by the combined readers).
             task.sessionID = sessionID
             tasks[id] = task
-            if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
+            if await persistDurablyNow() == false {
                 tasks.removeValue(forKey: id)
+                didMutate()
                 return "Couldn't save the change durably, so the task was NOT converted from a template. Please try again."
             }
             _ = await templateLibrary.removeTemplate(id: id)
-            onChange?()
+            didMutate()
             _ = await durablyPersistLibraryNow?()
             return nil
         } else if wasInLibrary {
@@ -317,7 +836,7 @@ public actor TaskStore {
             return nil
         } else {
             tasks[id] = task                     // still a per-session task — write in place
-            onChange?()
+            didMutate()
             return nil
         }
     }
@@ -444,6 +963,7 @@ public actor TaskStore {
 
         let wasTemplate = task.isTemplate
         task.isTemplate = isTemplate
+        var normalization: TaskStatusTransition?
         if isTemplate {
             // Archive the prior run BEFORE the new title/description land, so the preserved
             // child records the text the run actually executed under — not the edit that
@@ -452,16 +972,22 @@ public actor TaskStore {
             task.templateInputDefinitions = templateInputDefinitions
             task.templateInstanceTitleTemplate = normalizedTitleTemplate?.isEmpty == false ? normalizedTitleTemplate : nil
             task.templateInputValues = [:]
-            normalizeTemplateLauncher(&task)
+            normalization = normalizeTemplateLauncher(&task)
         } else {
             clearTemplateAuthoringFieldsIfDemoting(&task, wasTemplate: wasTemplate)
         }
+        let spentChainLinks = isTemplate && !wasTemplate ? stripRunStateForTemplatePromotion(&task) : []
         task.title = title
         task.description = description
         let now = Date()
         task.updatedAt = now
         task.lastEditedAt = now
-        return await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
+        let refusal = await commitTemplateFlip(id: id, task: &task, isTemplate: isTemplate, wasInLibrary: inLibrary)
+        if refusal == nil {
+            if let normalization { publish(normalization) }
+            for watchID in spentChainLinks { releaseStartHolds(placedBy: watchID) }
+        }
+        return refusal
         }
     }
 
@@ -487,13 +1013,49 @@ public actor TaskStore {
         historicalRun.templateInstanceTitleTemplate = nil
         historicalRun.templateInputValues = [:]
         historicalRun.scheduledRunAt = nil
+        // A preserved record of a past run carries no live rules or undelivered effects: those
+        // belong to the task that continues.
+        historicalRun.watches = []
+        historicalRun.pendingEffects = []
+        historicalRun.startHolds = []
         historicalRun.updatedAt = Date()
         tasks[historicalRun.id] = historicalRun
         appendUpdate(to: &task, "Converted this task into a template. Preserved the prior run as child task \(historicalRun.id.uuidString).")
     }
 
-    private func normalizeTemplateLauncher(_ task: inout AgentTask) {
-        task.status = .pending
+    /// A task becoming a template leaves its run state behind (decision 10: a template is global, a
+    /// chain link targets one session's task). Its `startTask` watches are cancelled — their firings
+    /// too — and returned so the caller can release their targets' holds once the flip lands; holds
+    /// ON the task are dropped (a template is never a chain target); undelivered effects are dropped
+    /// (they describe a run, and the template leaves this store). Notifying watches stay as
+    /// blueprints.
+    private func stripRunStateForTemplatePromotion(_ task: inout AgentTask) -> [UUID] {
+        var cancelled: [UUID] = []
+        let now = Date()
+        for index in task.watches.indices {
+            guard case .startTask = task.watches[index].action else { continue }
+            if task.watches[index].isActive { task.watches[index].state = .cancelled(at: now) }
+            for firing in task.watches[index].recentFirings where !firing.state.isSettled {
+                task.watches[index].setFiringState(occurrence: firing.occurrence, .cancelled)
+            }
+            cancelled.append(task.watches[index].id)
+        }
+        task.startHolds.removeAll()
+        forgetEffects(of: task)
+        task.pendingEffects.removeAll()
+        return cancelled
+    }
+
+    /// Returns the transition when the status actually changed; the caller emits it once the task is
+    /// written back.
+    @discardableResult
+    private func normalizeTemplateLauncher(_ task: inout AgentTask) -> TaskStatusTransition? {
+        let transition: TaskStatusTransition?
+        if case .applied(let applied) = changeStatus(of: &task, to: .pending, cause: .templateLauncherNormalized) {
+            transition = applied
+        } else {
+            transition = nil
+        }
         task.result = nil
         task.commentary = nil
         task.resultAttachments = []
@@ -503,6 +1065,7 @@ public actor TaskStore {
         task.validation = nil
         task.assigneeIDs = []
         task.helpRequest = nil
+        return transition
     }
 
     /// Clones a template into a fresh, runnable INSTANCE and adds it to the store.
@@ -555,7 +1118,7 @@ public actor TaskStore {
             if var task = tasks[id] {
                 if let problem = body(&task) { return problem }
                 tasks[id] = task
-                onChange?()
+                didMutate()
                 return nil
             }
             guard let templateLibrary else { return "Task not found: \(id.uuidString)" }
@@ -703,9 +1266,13 @@ public actor TaskStore {
             templateInputDefinitions: template.templateInputDefinitions,
             templateInputValues: resolvedInputs.values
         )
-        tasks[instance.id] = instance
-        onChange?()
-        return .success(instance)
+        var withWatches = instance
+        // A template's watches are blueprints: each run gets its own copy, with fresh identity and
+        // no history (decision 5).
+        withWatches.watches = template.watches.compactMap { $0.blueprintCopy() }
+        tasks[withWatches.id] = withWatches
+        didMutate()
+        return .success(withWatches)
     }
 
     /// Adds a new task and returns it. When auto-archive is enabled (Settings), also sweeps any
@@ -744,7 +1311,7 @@ public actor TaskStore {
             await templateLibrary.upsert(task)
         } else {
             tasks[task.id] = task
-            onChange?()
+            didMutate()
         }
         return task
     }
@@ -754,12 +1321,8 @@ public actor TaskStore {
     /// the caller didn't ask to bypass.
     @discardableResult
     public func promoteScheduledToPending(id: UUID) -> Bool {
-        guard var task = tasks[id], task.status == .scheduled else { return false }
-        task.status = .pending
-        task.updatedAt = Date()
-        tasks[id] = task
-        onChange?()
-        return true
+        guard tasks[id]?.status == .scheduled else { return false }
+        return applyStatus(id: id, to: .pending, cause: .scheduledTimeReached)
     }
 
     /// Archives all active completed tasks whose `updatedAt` is older than `interval` seconds,
@@ -779,7 +1342,8 @@ public actor TaskStore {
                 moved.disposition = .archived
                 tasks[task.id] = moved
             }
-            onChange?()
+            didMutate()
+            for task in stale { emit(.lifecycle(.leftActive(taskID: task.id, disposition: .archived))) }
             return
         }
         // Batch move with the same destination-durable-before-source-removal ordering as `move`,
@@ -791,7 +1355,7 @@ public actor TaskStore {
         // bumped, preserving the original completion time as the archive sort key (and letting the
         // reconciliation's `>=` tiebreak still resolve an equal-timestamp crash-duplicate).
         for task in stale {
-            var moved = task
+            var moved = droppingPendingEffects(task)
             moved.disposition = .archived
             await inactiveStore.insert(moved)
         }
@@ -799,50 +1363,24 @@ public actor TaskStore {
             for task in stale { await inactiveStore.remove(id: task.id) }
             return
         }
-        for task in stale { tasks.removeValue(forKey: task.id) }
-        onChange?()
+        for task in stale {
+            tasks.removeValue(forKey: task.id)
+            forgetEffects(of: task)
+        }
+        didMutate()
+        for task in stale { emit(.lifecycle(.leftActive(taskID: task.id, disposition: .archived))) }
     }
 
-    /// Updates a task's status.
-    /// If the new status is in-progress (pending, running, paused), the task is automatically
-    /// restored to the active disposition — it cannot remain archived or deleted while active.
-    /// The first transition to a terminal status (`.completed`/`.failed`) fires `onTaskTerminated`
-    /// so the runtime can dispose any wakes scoped to the task.
-    public func updateStatus(id: UUID, status: AgentTask.Status) {
-        guard var task = tasks[id] else { return }
-
-        // Invariant: a task in `.awaitingReview` MUST have a non-empty result. The only
-        // legitimate caller setting this status is `TaskCompleteTool`, which always calls
-        // `setResult` first. Refuse the transition if the invariant would be violated —
-        // this prevents the "Task Completed" banner from being posted with no body to
-        // deliver, regardless of how a future bug might land us here.
-        if status == .awaitingReview {
-            let trimmed = task.result?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if trimmed.isEmpty {
-                assertionFailure("TaskStore.updateStatus(.awaitingReview) called for task \(id) with no stored result. Refusing transition.")
-                return
-            }
-        }
-
-        let now = Date()
-        let wasTerminal = task.status == .completed || task.status == .failed
-        let isTerminal = status == .completed || status == .failed
-        task.status = status
-        task.updatedAt = now
-        if status == .running && task.startedAt == nil {
-            task.startedAt = now
-        }
-        if isTerminal {
-            task.completedAt = now
-        }
-        if status.isInProgress {
-            task.disposition = .active
-        }
-        tasks[id] = task
-        onChange?()
-        if isTerminal && !wasTerminal {
-            onTaskTerminated?(id)
-        }
+    /// Changes a task's status for `cause`. Returns whether the task is now in `status`: true when
+    /// the write happened (or the task was already there — a no-op, which emits nothing), false when
+    /// the task is missing or the change was refused.
+    ///
+    /// Refused when `cause` does not permit this move (`TaskTransitionCause.permits`) — a wrong
+    /// cause is a bug and must not silently steer the subscribers that read it — or when entering
+    /// `.awaitingReview` with no stored result (a validator park always carries the submission).
+    @discardableResult
+    public func updateStatus(id: UUID, status: AgentTask.Status, cause: TaskTransitionCause) -> Bool {
+        applyStatus(id: id, to: status, cause: cause)
     }
 
     /// Atomically transitions a task to `newStatus` only if its current status equals
@@ -850,14 +1388,108 @@ public actor TaskStore {
     /// run in a single synchronous actor hop (no `await` between them), so a caller acting on
     /// a stale snapshot cannot clobber a task that has since moved off `expected` — e.g. a
     /// `task_complete` landing `.completed` after a self-terminating agent snapshotted the
-    /// task as `.running` and tried to fail it. Routes through `updateStatus` so terminal
-    /// side-effects (`completedAt`, `onTaskTerminated`) stay consistent.
+    /// task as `.running` and tried to fail it. Returns false when the write itself was refused,
+    /// not only when the compare failed.
     @discardableResult
-    public func updateStatus(id: UUID, ifCurrentlyEquals expected: AgentTask.Status, to newStatus: AgentTask.Status) -> Bool {
+    public func updateStatus(id: UUID, ifCurrentlyEquals expected: AgentTask.Status, to newStatus: AgentTask.Status, cause: TaskTransitionCause) -> Bool {
         guard tasks[id]?.status == expected else { return false }
-        updateStatus(id: id, status: newStatus)
-        return true
+        return applyStatus(id: id, to: newStatus, cause: cause)
     }
+
+    // MARK: - The status funnel
+
+    /// The outcome of one status write.
+    enum StatusChange {
+        case applied(TaskStatusTransition)
+        /// Already in the requested status: nothing written, nothing emitted.
+        case unchanged
+        case refused
+    }
+
+    /// THE status writer: every live status change in this store goes through here (the only other
+    /// writer is `restore`, which replays persisted state and is not a live event). Writes the task
+    /// back and emits the transition.
+    @discardableResult
+    private func applyStatus(id: UUID, to newStatus: AgentTask.Status, cause: TaskTransitionCause) -> Bool {
+        guard var task = tasks[id] else { return false }
+        switch changeStatus(of: &task, to: newStatus, cause: cause) {
+        case .applied(let transition):
+            tasks[id] = task
+            didMutate()
+            publish(transition)
+            return true
+        case .unchanged:
+            return true
+        case .refused:
+            return false
+        }
+    }
+
+    /// The status change itself, on a task VALUE: validation against the cause matrix, the
+    /// bookkeeping every transition shares (`updatedAt`, `startedAt`, `completedAt`, disposition,
+    /// `statusRevision`), and the transition record. Callers that change other fields in the same
+    /// write (reset, reopen, help, validation park/release, template normalization) use this and
+    /// then write the task back and `emit` the transition themselves — `applyStatus` for everyone
+    /// else.
+    func changeStatus(
+        of task: inout AgentTask,
+        to newStatus: AgentTask.Status,
+        cause: TaskTransitionCause,
+        effectRelease: TaskEffectRecord.Release = .released,
+        now: Date = Date()
+    ) -> StatusChange {
+        let from = task.status
+        let taskID = task.id
+        guard from != newStatus else { return .unchanged }
+        guard cause.permits(from: from, to: newStatus) else {
+            Self.statusLogger.fault("Refused status change \(from.rawValue, privacy: .public) → \(newStatus.rawValue, privacy: .public) for task \(taskID.uuidString, privacy: .public): cause \(String(describing: cause), privacy: .public) does not permit it")
+            return .refused
+        }
+        // A task in `.awaitingReview` MUST carry a non-empty result: validation parks a SUBMISSION
+        // there, and the completion banner and the user's Accept both deliver it.
+        if newStatus == .awaitingReview, !task.hasSubmittedResult {
+            Self.statusLogger.fault("Refused .awaitingReview for task \(taskID.uuidString, privacy: .public): no stored result")
+            return .refused
+        }
+        task.status = newStatus
+        task.updatedAt = now
+        if newStatus == .running && task.startedAt == nil {
+            task.startedAt = now
+        }
+        if newStatus.isTerminal {
+            task.completedAt = now
+        }
+        if newStatus.isInProgress {
+            task.disposition = .active
+        }
+        task.statusRevision += 1
+        let transition = TaskStatusTransition(
+            taskID: task.id,
+            statusRevision: task.statusRevision,
+            from: from,
+            to: newStatus,
+            at: now,
+            cause: cause
+        )
+        // The durable subscribers record their effects in THIS write, so the status and its effects
+        // reach disk together.
+        if let note = SmithTaskBriefing.note(for: transition, task: task) {
+            task.pendingEffects.append(TaskEffectRecord(transition: transition, effect: .smithBriefing(note: note), release: effectRelease))
+        }
+        if let trigger = TaskWatchTrigger(transition: transition) {
+            for index in task.watches.indices where task.watches[index].isActive && task.watches[index].triggers.contains(trigger) {
+                let occurrence = task.watches[index].recordFiring(trigger: trigger, transition: transition)
+                task.pendingEffects.append(TaskEffectRecord(
+                    transition: transition,
+                    effect: .watchFiring(watchID: task.watches[index].id, occurrence: occurrence),
+                    release: effectRelease
+                ))
+            }
+        }
+        return .applied(transition)
+    }
+
+    private static let statusLogger = Logger(subsystem: "com.agentsmith", category: "TaskStore.status")
 
     /// Appends an update to a task copy. Caller writes back. Update history is unbounded.
     private func appendUpdate(to task: inout AgentTask, _ message: String) {
@@ -884,11 +1516,11 @@ public actor TaskStore {
     @discardableResult
     public func resetFailedTask(id: UUID) -> Bool {
         guard var task = tasks[id], task.status == .failed else { return false }
+        guard case .applied(let transition) = changeStatus(of: &task, to: .pending, cause: .resetForRun) else { return false }
         preserveResultIntoHistory(&task)
         task.result = nil
         task.commentary = nil
         task.completedAt = nil
-        task.status = .pending
         task.disposition = .active
         // A retry is a fresh attempt at the whole plan, so the plan starts unstarted. Without
         // this the retry's worker inherits a fully-checked list from the run that FAILED and
@@ -907,9 +1539,9 @@ public actor TaskStore {
             validation.verdictRecords.removeAll()
             task.validation = validation
         }
-        task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
+        publish(transition)
         return true
     }
 
@@ -925,11 +1557,11 @@ public actor TaskStore {
     @discardableResult
     public func reopenCompletedTask(id: UUID) -> Bool {
         guard var task = tasks[id], task.status == .completed else { return false }
+        guard case .applied(let transition) = changeStatus(of: &task, to: .pending, cause: .reopenedForRun) else { return false }
         preserveResultIntoHistory(&task)
         task.result = nil
         task.commentary = nil
         task.completedAt = nil
-        task.status = .pending
         task.disposition = .active
         // Re-running a completed task is a NEW run against a discarded result, so its verdict ledger
         // is reset just like a failed-task retry (`resetFailedTask`): drop the sticky ACCEPTs so every
@@ -941,9 +1573,9 @@ public actor TaskStore {
             validation.verdictRecords.removeAll()
             task.validation = validation
         }
-        task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
+        publish(transition)
         return true
     }
 
@@ -1010,7 +1642,7 @@ public actor TaskStore {
             task.assigneeIDs.append(agentID)
             task.updatedAt = Date()
             tasks[taskID] = task
-            onChange?()
+            didMutate()
         }
     }
 
@@ -1022,7 +1654,7 @@ public actor TaskStore {
         task.assigneeIDs.remove(at: idx)
         task.updatedAt = Date()
         tasks[taskID] = task
-        onChange?()
+        didMutate()
     }
 
     /// Removes an agent from every task's assignee list. Called when an agent is
@@ -1042,7 +1674,7 @@ public actor TaskStore {
             modified.append(taskID)
         }
         if !modified.isEmpty {
-            onChange?()
+            didMutate()
         }
         return modified
     }
@@ -1520,7 +2152,7 @@ public actor TaskStore {
         guard tasks[taskID] != nil else { return false }
         tasks[taskID]?.pendingWorkerMessages.append(message)
         tasks[taskID]?.updatedAt = Date()
-        onChange?()
+        didMutate()
         return true
     }
 
@@ -1534,7 +2166,7 @@ public actor TaskStore {
         guard let queued = tasks[taskID]?.pendingWorkerMessages, !queued.isEmpty else { return [] }
         tasks[taskID]?.pendingWorkerMessages = []
         tasks[taskID]?.updatedAt = Date()
-        onChange?()
+        didMutate()
         return queued
     }
 
@@ -1551,7 +2183,7 @@ public actor TaskStore {
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return validation.currentRoundToken
     }
 
@@ -1576,7 +2208,7 @@ public actor TaskStore {
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Records whether a rejection round newly APPROVED anything (reached ACCEPT or WAIVE on any
@@ -1601,7 +2233,7 @@ public actor TaskStore {
         validation.consecutiveValidationsWithoutNewApprovals = updated
         task.validation = validation
         tasks[id] = task
-        onChange?()
+        didMutate()
         return updated
     }
 
@@ -1655,7 +2287,7 @@ public actor TaskStore {
         task.validation = validation
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
         return .recorded(fresh)
     }
 
@@ -1672,16 +2304,21 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
-    public func requestHelp(id: UUID, request: String) {
-        guard var task = tasks[id] else { return }
+    /// Parks a task on a help request. Returns whether it is now awaiting help.
+    @discardableResult
+    public func requestHelp(id: UUID, request: String) -> Bool {
+        guard var task = tasks[id] else { return false }
+        let change = changeStatus(of: &task, to: .awaitingHelp, cause: .helpRequested)
+        if case .refused = change { return false }
         task.helpRequest = request
-        task.status = .awaitingHelp
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
+        if case .applied(let transition) = change { publish(transition) }
+        return true
     }
 
     /// Clears a task's pending help request. Called when Smith answers via `provide_help`
@@ -1691,7 +2328,7 @@ public actor TaskStore {
         task.helpRequest = nil
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Parks a task that cannot be validated for a CONFIGURATION reason. CAS-guarded on
@@ -1701,10 +2338,10 @@ public actor TaskStore {
     public func blockValidation(id: UUID, reason: String) -> Bool {
         guard var task = tasks[id], task.status == .validating else { return false }
         task.validationBlockedReason = reason
-        task.status = .awaitingReview
-        task.updatedAt = Date()
+        guard case .applied(let transition) = changeStatus(of: &task, to: .awaitingReview, cause: .validationBlocked) else { return false }
         tasks[id] = task
-        onChange?()
+        didMutate()
+        publish(transition)
         return true
     }
 
@@ -1715,16 +2352,43 @@ public actor TaskStore {
     @discardableResult
     public func releaseValidationBlockedTasks() -> [UUID] {
         var released: [UUID] = []
+        var transitions: [TaskStatusTransition] = []
         for (id, task) in tasks where task.validationBlockedReason != nil && task.status == .awaitingReview {
             var updated = task
+            guard case .applied(let transition) = changeStatus(of: &updated, to: .validating, cause: .validationReleased) else { continue }
             updated.validationBlockedReason = nil
-            updated.status = .validating
-            updated.updatedAt = Date()
             tasks[id] = updated
             released.append(id)
+            transitions.append(transition)
         }
-        if !released.isEmpty { onChange?() }
+        if !released.isEmpty { didMutate() }
+        for transition in transitions { publish(transition) }
         return released
+    }
+
+    /// Sets the task's opt-in user-acceptance gate (`set_acceptance_criteria`'s
+    /// `requires_user_acceptance`). Gated the same as any other edit to the acceptance contract —
+    /// the gate decides how that contract's "all settled" outcome is handled, so it is part of it.
+    public func setRequiresUserAcceptance(id: UUID, value: Bool) -> String? {
+        guard var task = tasks[id] else { return "No task with id \(id.uuidString)." }
+        guard task.status.isValidationContractEditable else {
+            return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance contract can't be edited while a worker or validator is active."
+        }
+        task.requiresUserAcceptance = value
+        task.updatedAt = Date()
+        tasks[id] = task
+        didMutate()
+        return nil
+    }
+
+    /// Records WHY a task sits in `.awaitingReview` (validator error vs. a `requiresUserAcceptance`
+    /// park) — cosmetic banner/routing information only, read by the UI and by Smith's conversational
+    /// resolution tool. It never gates the four user-resolution actions themselves.
+    public func setAwaitingReviewReason(id: UUID, reason: AgentTask.AwaitingReviewReason?) {
+        guard var task = tasks[id] else { return }
+        task.awaitingReviewReason = reason
+        tasks[id] = task
+        didMutate()
     }
 
     /// Stores a result (and optional commentary) on a task.
@@ -1736,7 +2400,7 @@ public actor TaskStore {
         task.resultItems = resultItems
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Records the security-approved tool set on a task (per-task tool scoping). This is a
@@ -1763,7 +2427,7 @@ public actor TaskStore {
         }
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Sets (or clears) a per-task user override for a single tool. `enabled == nil` removes the
@@ -1810,7 +2474,7 @@ public actor TaskStore {
         task.lastBrownContext = context
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Increments the task's acknowledgment counter and returns the new value. Called
@@ -1818,13 +2482,17 @@ public actor TaskStore {
     /// distinguish a first-time ack (count == 1) from a continuation (count > 1) without relying
     /// on the fragile `updates.isEmpty` heuristic.
     @discardableResult
-    public func incrementAcknowledgmentCount(id: UUID) -> Int {
-        guard var task = tasks[id] else { return 0 }
+    /// Records a worker's first-turn acknowledgement and returns the new count — but only while the
+    /// task is still `.running` AND assigned to that worker, checked in the same actor step as the
+    /// write. Nil otherwise: a task paused, stopped or finished since the worker was briefed is not
+    /// acknowledged, and its status is never touched here (an acknowledgement is not a transition).
+    public func acknowledgeTask(id: UUID, byAgent agentID: UUID) -> Int? {
+        guard var task = tasks[id], task.status == .running, task.assigneeIDs.contains(agentID) else { return nil }
         task.acknowledgmentCount += 1
         task.updatedAt = Date()
         let newCount = task.acknowledgmentCount
         tasks[id] = task
-        onChange?()
+        didMutate()
         return newCount
     }
 
@@ -1839,7 +2507,7 @@ public actor TaskStore {
         task.summary = summary
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Stores relevant memories and prior tasks on a task (set at creation time).
@@ -1853,7 +2521,7 @@ public actor TaskStore {
         task.relevantPriorTasks = priorTasks
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     /// Clears the stored result and commentary on a task. Preserves the prior result into the
@@ -1866,7 +2534,7 @@ public actor TaskStore {
         task.commentary = nil
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 
     // MARK: - Disposition management
@@ -1880,6 +2548,7 @@ public actor TaskStore {
             guard !task.status.isInProgress else { return false }
             guard let inactiveStore else {
                 setDisposition(id: id, disposition: .archived)
+                emit(.lifecycle(.leftActive(taskID: id, disposition: .archived)))
                 return true
             }
             return await move(task, to: .archived, in: inactiveStore)
@@ -1901,7 +2570,7 @@ public actor TaskStore {
     /// active-file write leaves the task in both files; load-time reconciliation drops the duplicate
     /// by newest `updatedAt`, which the global copy always wins here.
     private func move(_ task: AgentTask, to disposition: AgentTask.TaskDisposition, in inactiveStore: InactiveTaskStore) async -> Bool {
-        var moved = task
+        var moved = droppingPendingEffects(task)
         moved.disposition = disposition
         moved.updatedAt = Date()
         await inactiveStore.insert(moved)
@@ -1910,10 +2579,9 @@ public actor TaskStore {
             return false
         }
         tasks.removeValue(forKey: task.id)
-        onChange?()
-        // Archive / soft-delete must cancel the task's scheduled wakes: a disposition move is not a
-        // terminal STATUS change, so `onTaskTerminated` does not fire here.
-        onTaskMovedToInactive?(task.id)
+        forgetEffects(of: task)
+        didMutate()
+        emit(.lifecycle(.leftActive(taskID: task.id, disposition: disposition)))
         return true
     }
 
@@ -1946,7 +2614,7 @@ public actor TaskStore {
                 // file would show the template in both the Library and Recently Deleted/Archived. Making
                 // the removal durable closes that window. (Same reasoning at the other library moves.)
                 _ = await durablyPersistLibraryNow?()
-                onTaskMovedToInactive?(id)
+                emit(.lifecycle(.leftActive(taskID: id, disposition: disposition)))
                 result = true
             }
         } else {
@@ -1965,6 +2633,7 @@ public actor TaskStore {
             guard !task.status.isInProgress else { return false }
             guard let inactiveStore else {
                 setDisposition(id: id, disposition: .recentlyDeleted)
+                emit(.lifecycle(.leftActive(taskID: id, disposition: .recentlyDeleted)))
                 return true
             }
             return await move(task, to: .recentlyDeleted, in: inactiveStore)
@@ -2008,6 +2677,7 @@ public actor TaskStore {
         guard let inactiveStore else {
             guard tasks[id] != nil else { return false }
             setDisposition(id: id, disposition: .active)
+            emit(.lifecycle(.restoredToActive(taskID: id)))
             return true
         }
         guard let existing = await inactiveStore.task(id: id) else { return false }
@@ -2030,6 +2700,7 @@ public actor TaskStore {
             await inactiveStore.remove(id: id)
             _ = await durablyPersistInactiveNow?()   // make the source removal durable (no reconciler here)
             await templateLibrary.releaseEditLock(id)
+            emit(.lifecycle(.restoredToActive(taskID: id)))
             return true
         }
         var task = existing
@@ -2042,12 +2713,14 @@ public actor TaskStore {
         // roll back and leave it in the global store. A crash between the durable active write and
         // the (coalesced) global-removal write leaves it in both files; load-time reconciliation
         // keeps the newer copy, which the freshly-stamped active copy always wins here.
-        if let durablyPersistActiveNow, await durablyPersistActiveNow(Array(tasks.values)) == false {
+        if await persistDurablyNow() == false {
             tasks.removeValue(forKey: task.id)
+            didMutate()
             return false
         }
         await inactiveStore.remove(id: id)
-        onChange?()
+        didMutate()
+        emit(.lifecycle(.restoredToActive(taskID: id)))
         return true
     }
 
@@ -2059,7 +2732,9 @@ public actor TaskStore {
         if let task = tasks[id] {
             guard !task.status.isInProgress else { return false }
             tasks.removeValue(forKey: id)
-            onChange?()
+            forgetEffects(of: task)
+            didMutate()
+            emit(.lifecycle(.permanentlyDeleted(taskID: id)))
             return true
         }
         // A library-resident template → gone from the library. Under the library edit lock so a concurrent
@@ -2072,20 +2747,16 @@ public actor TaskStore {
                 _ = await durablyPersistLibraryNow?()   // durable removal, so a crash can't resurrect it
             }
             await templateLibrary.releaseEditLock(id)
-            if let handled { return handled }
+            if let handled {
+                if handled { emit(.lifecycle(.permanentlyDeleted(taskID: id))) }
+                return handled
+            }
         }
-        if let inactiveStore { return await inactiveStore.permanentlyDelete(id: id) }
+        if let inactiveStore, await inactiveStore.permanentlyDelete(id: id) {
+            emit(.lifecycle(.permanentlyDeleted(taskID: id)))
+            return true
+        }
         return false
-    }
-
-    /// Sets a running task to paused.
-    public func pause(id: UUID) {
-        updateStatus(id: id, status: .paused)
-    }
-
-    /// Marks a running task as interrupted so it can be resumed later.
-    public func stop(id: UUID) {
-        updateStatus(id: id, status: .interrupted)
     }
 
     /// Atomically transition a task's status ONLY IF it is currently one of `allowed`,
@@ -2106,12 +2777,12 @@ public actor TaskStore {
         id: UUID,
         to newStatus: AgentTask.Status,
         ifCurrentlyIn allowed: Set<AgentTask.Status>,
-        ifValidationRoundIs token: ValidationRoundToken? = nil
+        ifValidationRoundIs token: ValidationRoundToken? = nil,
+        cause: TaskTransitionCause
     ) -> Bool {
         guard let task = tasks[id], allowed.contains(task.status) else { return false }
         guard validationRoundIsCurrent(token, on: task) else { return false }
-        updateStatus(id: id, status: newStatus)
-        return true
+        return applyStatus(id: id, to: newStatus, cause: cause)
     }
 
     // MARK: - Bulk operations
@@ -2134,13 +2805,48 @@ public actor TaskStore {
             }
             tasks[task.id] = task
         }
-        onChange?()
+        didMutate()
+        // Restored effects are delivered only once THIS store's copy is durable: the state being
+        // restored may have come from a store whose last write had not landed.
+        for task in persistedTasks {
+            for record in task.pendingEffects { effectDurabilitySeq[record.id] = mutationSeq }
+        }
+        if persistedTasks.contains(where: { $0.pendingEffects.contains { $0.release == .released } }) {
+            emit(.effectsReady)
+        }
+    }
+
+    /// Applies the launch-time repairs to tasks whose worker cannot have survived: a `.running` task
+    /// gets `ColdBootRunningRecovery` (a durably submitted result resumes validation, anything else
+    /// is interrupted), and a `.starting` task returns to `.pending` for a fresh start. Each repair is
+    /// an ordinary transition with a typed cause, so subscribers see it. Runs at session load and
+    /// again at runtime start (a task can reach `.running` in between, and a runtime restart leaves
+    /// its workers behind). Returns whether anything changed.
+    @discardableResult
+    public func reconcileAfterLaunch(excluding excludedTaskID: UUID? = nil) -> Bool {
+        var changed = releaseEffectsHeldAcrossLaunch()
+        for task in allTasks() where task.disposition == .active && task.id != excludedTaskID {
+            if let recovery = ColdBootRunningRecovery.recovery(for: task) {
+                guard var updated = tasks[task.id],
+                      case .applied(let transition) = changeStatus(of: &updated, to: recovery.recoveredStatus, cause: .coldBootRecovery(recovery)) else { continue }
+                if let note = recovery.progressNote {
+                    appendUpdate(to: &updated, note)
+                }
+                tasks[task.id] = updated
+                didMutate()
+                publish(transition)
+                changed = true
+            } else if task.status == .starting {
+                changed = applyStatus(id: task.id, to: .pending, cause: .coldBootSpawnAbandoned) || changed
+            }
+        }
+        return changed
     }
 
     /// Removes all tasks.
     public func clear() {
         tasks.removeAll()
-        onChange?()
+        didMutate()
     }
 
     // MARK: - Private
@@ -2150,6 +2856,6 @@ public actor TaskStore {
         task.disposition = disposition
         task.updatedAt = Date()
         tasks[id] = task
-        onChange?()
+        didMutate()
     }
 }

@@ -71,7 +71,8 @@ struct TerminateAgentTool: AgentTool {
             let markedFailed = await context.taskStore.updateStatus(
                 id: taskID,
                 to: .failed,
-                ifCurrentlyIn: [.running, .awaitingHelp]
+                ifCurrentlyIn: [.running, .awaitingHelp],
+                cause: .smithTerminatedWorker
             )
             if markedFailed {
                 await context.taskStore.addUpdate(

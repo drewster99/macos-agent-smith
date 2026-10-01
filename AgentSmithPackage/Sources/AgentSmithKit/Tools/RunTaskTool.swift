@@ -151,6 +151,19 @@ struct RunTaskTool: AgentTool {
         // live in the GLOBAL library rather than this session's store (`taskOrLibraryTemplate`
         // resolved it above), and asking a per-session method about it would refuse a template that
         // runs perfectly well.
+        // A task a watch is waiting to start is not Smith's to start: only the user's explicit Play
+        // overrides a hold. Checked BEFORE `prepareForRun`, which would otherwise reset or reopen it.
+        if !task.startHolds.isEmpty {
+            var waitingOn: [String] = []
+            for hold in task.startHolds {
+                waitingOn.append(await context.taskStore.task(id: hold.watchedTaskID).map { "\"\($0.title)\"" } ?? hold.watchedTaskID.uuidString)
+            }
+            return .failure("""
+                Cannot run this task: it is waiting on \(waitingOn.joined(separator: " and ")) — a watch starts it \
+                when that happens. Tell the user; they can press Play to start it now (which cancels that \
+                watch), or remove the watch.
+                """)
+        }
         if !task.isTemplate {
             if case .refused(let reason) = await context.taskStore.prepareForRun(id: taskID) {
                 return .failure("""

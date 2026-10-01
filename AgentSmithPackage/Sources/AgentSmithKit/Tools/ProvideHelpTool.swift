@@ -83,7 +83,7 @@ struct ProvideHelpTool: AgentTool {
             return .failure("Couldn't spawn a Brown to resume this task — worker slots may all be busy, or a provider is misconfigured. The task stays parked awaiting help; try again once a slot frees.")
         }
         await context.taskStore.clearHelpRequest(id: taskID)
-        await context.taskStore.updateStatus(id: taskID, status: .running)
+        await context.taskStore.updateStatus(id: taskID, status: .running, cause: .helpProvided)
 
         let content: String
         if brownWasSpawned {

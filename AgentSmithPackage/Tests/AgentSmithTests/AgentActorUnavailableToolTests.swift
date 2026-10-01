@@ -119,7 +119,7 @@ struct AgentActorUnavailableToolTests {
 
         // A running task gives Brown a reason to be in the loop.
         let task = await taskStore.addTask(title: "unavailable-tool test", description: "exercise the dispatch-time guard")
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
         await taskStore.assignAgent(taskID: task.id, agentID: agentID)
 
         // `start` only schedules an LLM call when there is unprocessed input.

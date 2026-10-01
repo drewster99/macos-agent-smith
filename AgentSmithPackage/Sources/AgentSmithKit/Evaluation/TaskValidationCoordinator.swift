@@ -240,7 +240,7 @@ extension OrchestrationRuntime {
         // here; validation simply doesn't run. Checked BEFORE the missing-model park: if the user turned
         // validation off, a missing validator model is moot.
         guard orchestrationSettings.enableTaskCompletionValidators else {
-            _ = await completeValidatedTask(taskID: taskID, validationWasRun: false)
+            _ = await completeValidatedTask(taskID: taskID, validationWasRun: false, cause: .validationPassed(validationWasRun: false))
             return
         }
 
@@ -274,7 +274,16 @@ extension OrchestrationRuntime {
         let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
         let pending = task.acceptanceCriteria.filter { !settled.contains($0.id) }
         guard !pending.isEmpty else {
-            await completeValidatedTask(taskID: taskID, judgedInRound: token)
+            if task.requiresUserAcceptance {
+                await escalateValidation(
+                    taskID: taskID,
+                    reason: "All acceptance criteria passed.",
+                    judgedInRound: token,
+                    awaitingReviewReason: .userAcceptanceRequested
+                )
+            } else {
+                await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
+            }
             return
         }
 
@@ -385,8 +394,23 @@ extension OrchestrationRuntime {
         }
 
         if unjudged == 0 && errored.isEmpty && rejected.isEmpty {
-            mirrorRoundOutcome("completed")
-            await completeValidatedTask(taskID: taskID, judgedInRound: token)
+            // All criteria settled — the machine says the result is correct. A task marked
+            // `requiresUserAcceptance` still doesn't auto-complete: it parks for the user's
+            // explicit sign-off, exactly like a validator-error escalation, so Brown is torn
+            // down (the worker's job here is done either way) and the four resolution actions
+            // (plus, uniquely for this reason, a plain chat reply) apply identically.
+            if judged.requiresUserAcceptance {
+                mirrorRoundOutcome("escalated", detail: "all criteria settled; awaiting the user's acceptance")
+                await escalateValidation(
+                    taskID: taskID,
+                    reason: "All acceptance criteria passed.",
+                    judgedInRound: token,
+                    awaitingReviewReason: .userAcceptanceRequested
+                )
+            } else {
+                mirrorRoundOutcome("completed")
+                await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
+            }
         } else if !errored.isEmpty {
             let messages = errored.map { record -> String in
                 if case .error(let message) = record.verdict { return message }
@@ -445,9 +469,21 @@ extension OrchestrationRuntime {
         // CAS: only fail if still validating AND this round's contract is still the live one — never
         // overwrite a pause/stop that landed after the coordinator's status snapshot, and never fail
         // a task for not converging on a contract that has since been rewritten.
-        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
-        guard let task = await taskStore.task(id: taskID) else { return }
-        let reason = "No acceptance criterion was newly approved for \(validationsWithoutNewApprovals) validation rounds in a row — \(stillRejected) criterion(s) still rejected."
+        //
+        // Smith's briefing is written with the status but HELD until the failure's own update and
+        // banner exist, then released below.
+        guard let effects = await taskStore.updateStatusHoldingEffects(
+            id: taskID,
+            to: .failed,
+            ifCurrentlyIn: [.validating],
+            ifValidationRoundIs: token,
+            cause: .validationFailedNoProgress(roundsWithoutNewApprovals: validationsWithoutNewApprovals, stillRejected: stillRejected)
+        ) else { return }
+        guard let task = await taskStore.task(id: taskID) else {
+            await taskStore.releaseEffects(effects)
+            return
+        }
+        let reason = SmithTaskBriefing.noProgressReason(roundsWithoutNewApprovals: validationsWithoutNewApprovals, stillRejected: stillRejected)
         await taskStore.addUpdate(id: taskID, message: "Task FAILED validation: \(reason)")
         for agentID in task.assigneeIDs {
             _ = await terminateAgent(id: agentID)
@@ -463,17 +499,7 @@ extension OrchestrationRuntime {
                 "severity": .severity(.warning)
             ]
         ))
-        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-            await smithAgent.appendUserMessage("""
-                [System: Task "\(task.title)" (ID: \(taskID.uuidString)) FAILED acceptance validation. \(reason) \
-                The result was NOT delivered. Tell the user briefly. Then decide WHY it stalled by reading the \
-                rejection reasons in the task updates: if the criteria themselves were too strict, ambiguous, or \
-                demanded evidence the worker's tools cannot produce, fix them with `set_acceptance_criteria` before \
-                retrying; if the worker simply kept resubmitting incomplete work, a `run_task` retry (which resets \
-                the validation counters) with clearer instructions may be enough. Do NOT re-run it unchanged and \
-                expect a different outcome.]
-                """)
-        }
+        await taskStore.releaseEffects(effects)
     }
 
     /// Hard ceiling on items a prepare function may emit for one criterion. Exceeding it
@@ -1268,13 +1294,22 @@ extension OrchestrationRuntime {
         taskID: UUID,
         from allowedStatuses: Set<AgentTask.Status> = [.validating],
         judgedInRound token: ValidationRoundToken? = nil,
-        validationWasRun: Bool = true
+        validationWasRun: Bool = true,
+        cause: TaskTransitionCause
     ) async -> Bool {
         // CAS: only complete from an allowed state under the contract we judged — a pause/stop/
         // re-validate or a criteria edit that landed after the caller's snapshot must not be
         // overwritten by this completion.
-        guard await taskStore.updateStatus(id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token) else { return false }
-        guard let completed = await taskStore.task(id: taskID) else { return false }
+        //
+        // Smith's briefing is written with the status but HELD until the worker is torn down and the
+        // Task Completed banner (which it says already delivered the result) exists.
+        guard let effects = await taskStore.updateStatusHoldingEffects(
+            id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token, cause: cause
+        ) else { return false }
+        guard let completed = await taskStore.task(id: taskID) else {
+            await taskStore.releaseEffects(effects)
+            return false
+        }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
         }
@@ -1294,17 +1329,11 @@ extension OrchestrationRuntime {
             bannerMetadata["validationSkipped"] = .bool(true)
         }
         await channel.post(ChannelMessage(sender: .system, content: completed.title, metadata: bannerMetadata))
+        // Released once the banner exists and the worker is gone — BEFORE summarization, an LLM call
+        // that can take arbitrarily long (retries) and would otherwise hold every completion watch
+        // and Smith's note hostage, and trip the held-effect watchdog.
+        await taskStore.releaseEffects(effects)
         await summarizeAndEmbedTask(taskID: taskID)
-        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-            let completionNote = validationWasRun
-                ? "passed acceptance validation and is COMPLETE"
-                : "is COMPLETE — acceptance validation is disabled, so its criteria were NOT judged"
-            await smithAgent.appendUserMessage("""
-                [System: Task "\(completed.title)" (ID: \(taskID.uuidString)) \(completionNote). \
-                The result was already delivered to the user in the Task Completed banner — do not repeat it. \
-                No action is needed from you.]
-                """)
-        }
         return true
     }
 
@@ -1341,7 +1370,7 @@ extension OrchestrationRuntime {
             // Status first, then clear: a `.pending` task with a stale result is
             // consistent; a `.validating` task with no result is the invariant-violating
             // shape observers must never see (agy review finding).
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .rejectionsReturned) else { return }
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Validation rejected \(rejected.count) criterion(s); no worker slot was free for the rework, so the task is re-queued:\n\(punchList)")
             await channel.post(ChannelMessage(
@@ -1357,7 +1386,7 @@ extension OrchestrationRuntime {
 
         // CAS: if a pause/stop or a criteria edit landed after our snapshot, don't flip to .running —
         // and if we just spawned a worker for the rework, tear it back down so it doesn't orphan.
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else {
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .rejectionsReturned) else {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
             return
         }
@@ -1415,7 +1444,7 @@ extension OrchestrationRuntime {
         // Claim the transition BEFORE zeroing the convergence budget, so a lost race can't leave a
         // task the winner moved elsewhere with a reset counter. Nothing consumes the counter between
         // here and `startTaskValidation` below.
-        guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview]) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview], cause: .userRevalidated) else { return }
         await taskStore.resetValidationRound(id: taskID)
         await taskStore.addUpdate(id: taskID, message: "Re-running acceptance validation at the user's request.")
         startTaskValidation(taskID: taskID)
@@ -1436,7 +1465,7 @@ extension OrchestrationRuntime {
         // the task off `.awaitingReview` — returns false, so a sticky ACCEPT override can never land on
         // a task this call didn't complete (which a later re-validation would then wrongly skip), and
         // we never complete a task that a concurrent Re-validate put back into `.validating`.
-        guard await completeValidatedTask(taskID: taskID, from: [.awaitingReview]) else { return }
+        guard await completeValidatedTask(taskID: taskID, from: [.awaitingReview], cause: .userAccepted) else { return }
         if !unsettled.isEmpty {
             _ = await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
                 CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
@@ -1449,7 +1478,7 @@ extension OrchestrationRuntime {
     /// User fails the escalated task outright.
     public func failEscalatedTask(taskID: UUID) async {
         guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
-        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.awaitingReview]) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.awaitingReview], cause: .userFailed) else { return }
         for agentID in task.assigneeIDs { _ = await terminateAgent(id: agentID) }
         taskWorkspace(for: taskID).cleanupTemporary()
         await taskStore.addUpdate(id: taskID, message: "Failed by the user from a validation escalation.")
@@ -1475,13 +1504,13 @@ extension OrchestrationRuntime {
         }
         guard let brownID else {
             // No worker slot free: re-queue as pending; the fresh briefing carries the feedback.
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview]) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview], cause: .userSentBack) else { return }
             await taskStore.resetValidationRound(id: taskID)
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Sent back by the user (no worker slot free — re-queued):\n\(feedback)")
             return
         }
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.awaitingReview]) else {
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.awaitingReview], cause: .userSentBack) else {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
             return
         }
@@ -1506,6 +1535,42 @@ extension OrchestrationRuntime {
                 metadata: ["messageKind": .kind(.changesRequested), "taskTitle": .string(refreshed.title), "taskID": .string(taskID.uuidString)]
             ))
         }
+    }
+
+    /// Smith's conversational counterpart to the task row's Accept / Send back buttons — but ONLY
+    /// for a `requiresUserAcceptance` park. Deliberately refuses a `.validatorError` escalation:
+    /// that park means the MACHINE couldn't judge the work, and letting Smith wave it through on
+    /// its own authority is exactly the human-free pass the escalation exists to force. This tool
+    /// exists so the user can reply "looks good" or "not ready, fix X" in chat instead of clicking a
+    /// button — Smith relays the user's own decision, it does not make one.
+    public func respondToUserAcceptance(taskID: UUID, accept: Bool, feedback: String?) async -> ToolExecutionResult {
+        guard let task = await taskStore.task(id: taskID) else {
+            return .failure("No task with id \(taskID.uuidString).")
+        }
+        guard task.status == .awaitingReview, task.awaitingReviewReason == .userAcceptanceRequested else {
+            return .failure("""
+                Task '\(task.title)' is not parked for user-acceptance resolution (status: \
+                \(task.status.rawValue)). This tool only resolves a task that required the user's \
+                explicit acceptance after all criteria settled — it cannot be used to resolve a \
+                validator-error escalation; that one needs the user's own choice from the task row.
+                """)
+        }
+        if accept {
+            await acceptEscalatedTask(taskID: taskID)
+            guard let after = await taskStore.task(id: taskID), after.status == .completed else {
+                return .failure("Could not accept '\(task.title)' — another action may have resolved it first.")
+            }
+            return .success("Accepted '\(task.title)' on the user's behalf. The task is now completed.")
+        }
+        let trimmed = (feedback ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failure("A rejection needs 'feedback' — say what the user wants changed so Brown has something to act on.")
+        }
+        await sendEscalatedTaskBackToBrown(taskID: taskID, feedback: trimmed)
+        guard let after = await taskStore.task(id: taskID), after.status != .awaitingReview else {
+            return .failure("Could not send '\(task.title)' back to Brown — another action may have resolved it first.")
+        }
+        return .success("Sent '\(task.title)' back to Brown with the user's requested changes.")
     }
 
     /// Renders the rejected criteria as a numbered punch list: one block per rejection,
@@ -1590,7 +1655,12 @@ extension OrchestrationRuntime {
     /// to resolve (accept / send back / re-validate / fail), and its worker is torn down so it stops
     /// holding a slot: a park can sit indefinitely, and re-validation doesn't need Brown (it judges
     /// the persisted result). Brown's context is saved first so a user "send back" can respawn it.
-    private func escalateValidation(taskID: UUID, reason: String, judgedInRound token: ValidationRoundToken) async {
+    private func escalateValidation(
+        taskID: UUID,
+        reason: String,
+        judgedInRound token: ValidationRoundToken,
+        awaitingReviewReason: AgentTask.AwaitingReviewReason = .validatorError
+    ) async {
         // Tear the worker down FIRST, while the task is still `.validating` — a state with NO user
         // row-actions — so the user can't fire a resolution (e.g. Send Back reusing the still-live
         // Brown) during the teardown window and strand a running task with no worker. Save context
@@ -1608,21 +1678,36 @@ extension OrchestrationRuntime {
         }
         // Publish the park only after the worker is gone. CAS: a pause/stop that landed during
         // teardown must not be overwritten (such a transition tears Brown down anyway).
-        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .validationEscalated) else { return }
+        await taskStore.setAwaitingReviewReason(id: taskID, reason: awaitingReviewReason)
         // The freed slot isn't a terminal event, so `onTaskTerminated` won't fire the usual
         // auto-advance — kick it here so a pending task can take the slot.
         // Redundant since `terminateAgent` kicks the drain itself, and kept deliberately: this
         // call is the one that was RIGHT while the completion path was wrong, and deleting it
         // would erase the example. Both drains are reentrancy-guarded, so the second is a no-op.
         await advanceAfterFreedWorkerSlot()
-        await channel.post(ChannelMessage(
-            sender: .system,
-            content: "\"\(task.title)\" needs your attention: acceptance validation could not reach a verdict — \(reason) Re-validate, accept, send it back, or fail it. It also re-validates automatically on the next restart.",
-            metadata: [
-                "messageKind": .kind(.validationEscalation),
-                "taskID": .string(taskID.uuidString),
-                "severity": .severity(.warning)
-            ]
-        ))
+        switch awaitingReviewReason {
+        case .validatorError:
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(task.title)\" needs your attention: acceptance validation could not reach a verdict — \(reason) Re-validate, accept, send it back, or fail it. It also re-validates automatically on the next restart.",
+                metadata: [
+                    "messageKind": .kind(.validationEscalation),
+                    "taskID": .string(taskID.uuidString),
+                    "severity": .severity(.warning)
+                ]
+            ))
+        case .userAcceptanceRequested:
+            // Not a problem — every criterion already settled. `.info` severity, same as any other
+            // routine milestone; a `.warning` here would wrongly paint the happy path as trouble.
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(task.title)\" is ready for your acceptance: \(reason) Accept it, send it back with changes, re-validate, or fail it. You can also just reply in chat — Smith will relay your decision.",
+                metadata: [
+                    "messageKind": .kind(.userAcceptanceRequested),
+                    "taskID": .string(taskID.uuidString)
+                ]
+            ))
+        }
     }
 }

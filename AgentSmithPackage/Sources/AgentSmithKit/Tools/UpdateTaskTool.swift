@@ -82,7 +82,10 @@ struct UpdateTaskTool: AgentTool {
             return .failure("`validating` is reserved — only Brown's `task_complete` submission enters validation. Setting it directly would strand the task with no validation run attached.")
         }
 
-        await context.taskStore.updateStatus(id: taskID, status: status)
+        guard UpdateTaskStatusPolicy.settable.contains(status) else {
+            return .failure("`\(statusString)` cannot be set with update_task. Valid values: \(UpdateTaskStatusPolicy.settable.map(\.rawValue).sorted().joined(separator: ", ")).")
+        }
+        await context.taskStore.updateStatus(id: taskID, status: status, cause: .smithSetStatus)
         let templateNote = appliedTemplate.map { " (\($0 ? "now a template" : "no longer a template"))" } ?? ""
         return .success("Task \(taskIDString) updated to \(statusString)\(templateNote).")
     }

@@ -139,6 +139,15 @@ struct GetTaskDetailsTool: AgentTool {
             parts.append(toolScope)
         }
 
+        if !task.watches.isEmpty {
+            let lines = task.watches.map { "  - " + TaskWatchToolVocabulary.describe($0) { _ in nil } }
+            parts.append("Watches (cancel with watch_task action=cancel):\n\(lines.joined(separator: "\n"))")
+        }
+        if !task.startHolds.isEmpty {
+            let lines = task.startHolds.map { "  - task \($0.watchedTaskID.uuidString) (watch \($0.watchID.uuidString))" }
+            parts.append("WAITING to be started by a watch on:\n\(lines.joined(separator: "\n"))")
+        }
+
         if let commentary = task.commentary, !commentary.isEmpty {
             parts.append("Commentary: \(commentary)")
         }

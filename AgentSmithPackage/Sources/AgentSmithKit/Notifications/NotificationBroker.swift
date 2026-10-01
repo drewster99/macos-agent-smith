@@ -65,8 +65,30 @@ public actor NotificationBroker {
     /// `deliver` calls for the same id can't both pass the settled check and double-deliver.
     private var inFlight: Set<NotificationID> = []
     private let runtime: any NotificationRuntime
-    /// Flushes the ledger snapshot to disk after each settle. Nil = in-memory only (tests).
-    private let persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)?
+    /// Flushes the ledger snapshot to disk after each settle. Nil = in-memory only (tests, or a
+    /// launch whose ledger file could not be read and must not be overwritten).
+    private let persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async throws -> Void)?
+    /// Told when a save fails, once per failure streak per store (a failing disk fails every flush;
+    /// repeating the report would bury it). A later success ends the streak.
+    private var onPersistenceFailure: (@Sendable (NotificationPersistenceFailure) -> Void)?
+    /// Told how every notification finally ended, with a reason the producer can show. Called
+    /// synchronously in the settling actor step; it must only enqueue.
+    private var onSettled: (@Sendable (AgentNotification, NotificationSettlement) -> Void)?
+    /// Push deliveries a target asked to retry: attempts so far. Cleared when the id settles.
+    private var pushRetryAttempts: [NotificationID: Int] = [:]
+    /// The notification each pending push retry will deliver, so it can be withdrawn.
+    private var pushRetryNotifications: [NotificationID: AgentNotification] = [:]
+    /// Withdrawals asked for while the id was mid-delivery: honored the moment that attempt comes
+    /// back unsettled (a retry is due), so a cancelled push is never retried into delivery.
+    private var withdrawalsPending: [NotificationID: String] = [:]
+    /// Push attempts before a `.retryable` delivery is settled as refused (decision R3).
+    static let maxPushAttempts = 5
+    private var failingStores: Set<PersistedStore> = []
+
+    private enum PersistedStore: Hashable {
+        case ledger
+        case pendingDelivery
+    }
     /// Single-flight coalescing for `persistLedger` — see `flushLedger`. Only one write is in
     /// flight at a time; concurrent settles set `ledgerDirty` and the flusher re-snapshots.
     private var ledgerFlushInFlight = false
@@ -81,13 +103,15 @@ public actor NotificationBroker {
     /// outbox — persisted via `persistPendingDelivery`, so an undelivered notification survives a
     /// restart and is handed out on the next drain rather than lost.
     private var pendingDelivery: [QueuedDelivery] = []
-    /// Per-recipient LEASE: ids handed out on the recipient's LAST drain but not yet acked. They stay
-    /// in `pendingDelivery` (durable) until the recipient's NEXT drain confirms it came back around
-    /// and consumed them — the ack. This is what makes pull delivery at-LEAST-once: a crash after a
-    /// drain but before the acking next-drain leaves the items in the outbox, so a restart re-delivers
-    /// them (never a lost reminder). In-memory only: on restart the lease is empty and the still-
-    /// present outbox items are re-delivered, which is exactly the intended recovery.
+    /// Per-recipient LEASE: ids handed out but not yet acknowledged. They stay in `pendingDelivery`
+    /// (durable) until the recipient acknowledges them (`acknowledgeDeliveries`), and are not handed
+    /// out again meanwhile. A crash before the acknowledgement leaves them in the outbox, so a restart
+    /// re-delivers them (never a lost reminder). In-memory only: on restart the lease is empty and the
+    /// still-present outbox items are re-delivered, which is exactly the intended recovery.
     private var leased: [RecipientKind: Set<NotificationID>] = [:]
+    /// Bumped by every `resetLease`, so an acknowledgement from a torn-down recipient (carrying the
+    /// OLD generation) can't remove an item its successor has been re-handed and not yet acted on.
+    private var leaseGeneration: [RecipientKind: Int] = [:]
     /// Durable outbox writer. Unlike the ledger's single-flight flush (whose fast-path returns
     /// BEFORE the write lands — fine for a dedup ledger), pending-delivery is the reminder-durability
     /// FLOOR: `SerialPersistenceWriter.flush()` parks the caller until its snapshot has actually been
@@ -97,26 +121,51 @@ public actor NotificationBroker {
     /// Fired (best-effort) when something is enqueued for a pull recipient, so an idle recipient can
     /// wake and drain instead of waiting for its next scheduled tick.
     private var onPendingEnqueued: (@Sendable (RecipientKind) -> Void)?
-    /// Recipient kinds with a drain in flight. `drainPendingDeliveries` awaits a disk flush, leaving
-    /// the actor open; a SECOND concurrent drain for the same kind would ack the batch the first has
-    /// leased-but-not-yet-returned, silently breaking at-least-once. Today the sole caller (Smith's
-    /// single run loop) can't overlap, but this makes the public method safe by construction.
-    private var draining: Set<RecipientKind> = []
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "Notifications")
 
     public init(
         runtime: any NotificationRuntime,
         ledgerCapacity: Int = 5_000,
-        persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)? = nil,
-        persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)? = nil
+        persistLedger: (@Sendable ([NotificationID: DeliveryStatus]) async throws -> Void)? = nil,
+        persistPendingDelivery: (@Sendable ([QueuedDelivery]) async throws -> Void)? = nil
     ) {
         self.runtime = runtime
         self.ledger = DeliveryLedger(capacity: ledgerCapacity)
         self.persistLedger = persistLedger
         self.pendingWriter = persistPendingDelivery.map { persist in
-            SerialPersistenceWriter(label: "notification.pending", write: { snapshot in await persist(snapshot) })
+            SerialPersistenceWriter(label: "notification.pending", write: { snapshot in try await persist(snapshot) })
         }
+    }
+
+    /// Wire the settlement report (see `onSettled`).
+    public func setOnSettled(_ handler: @escaping @Sendable (AgentNotification, NotificationSettlement) -> Void) {
+        onSettled = handler
+    }
+
+    /// The first-party notification types with no registered handler. Must be empty once the
+    /// runtime has registered its handlers: a type with no handler is dropped on arrival.
+    public func typesMissingHandlers(_ types: [String]) -> [String] {
+        types.filter { handlers[$0] == nil }
+    }
+
+    /// Wire the save-failure report (see `onPersistenceFailure`).
+    public func setOnPersistenceFailure(_ handler: @escaping @Sendable (NotificationPersistenceFailure) -> Void) {
+        onPersistenceFailure = handler
+    }
+
+    /// Records a save outcome for `store`, reporting the first failure of a streak.
+    private func recordSaveOutcome(_ store: PersistedStore, failure: String?) {
+        guard let failure else {
+            failingStores.remove(store)
+            return
+        }
+        guard failingStores.insert(store).inserted else { return }
+        let reported: NotificationPersistenceFailure.Store = switch store {
+        case .ledger: .deliveryLedger
+        case .pendingDelivery: .pendingDelivery
+        }
+        onPersistenceFailure?(NotificationPersistenceFailure(store: reported, operation: .save, reason: failure))
     }
 
     // MARK: - Registration
@@ -149,15 +198,17 @@ public actor NotificationBroker {
         onPendingEnqueued = handler
     }
 
-    /// Drops a pull recipient's outstanding lease. MUST be called whenever that recipient is
-    /// re-created (e.g. Smith re-spawned by `restartForNewTask`) — the broker (and this in-memory
-    /// lease) is memoized and outlives the recipient, but the lease's ack semantics are tied to the
-    /// RECIPIENT's lifetime, not the broker's. Without this, a fresh recipient's first drain would
-    /// ack away the PRIOR recipient's still-undelivered batch (remove it from the outbox + mark it
-    /// delivered) and lose it. Clearing the lease makes the new recipient re-deliver the outbox
-    /// instead — the intended at-least-once recovery.
-    public func resetLease(for kind: RecipientKind) {
+    /// Drops a pull recipient's outstanding lease and returns the new lease generation. MUST be
+    /// called whenever that recipient is re-created (e.g. Smith re-spawned) — the broker outlives the
+    /// recipient, but a lease belongs to the recipient that was handed the items. Clearing it makes
+    /// the new recipient re-deliver whatever the old one never acknowledged. The new recipient passes
+    /// the returned generation with its acknowledgements.
+    @discardableResult
+    public func resetLease(for kind: RecipientKind) -> Int {
         leased[kind] = nil
+        let generation = (leaseGeneration[kind] ?? 0) + 1
+        leaseGeneration[kind] = generation
+        return generation
     }
 
     /// Seed the pending-delivery queue from persisted state at cold boot, so notifications that were
@@ -226,7 +277,13 @@ public actor NotificationBroker {
 
     /// Submit a pre-built notification (e.g. one produced from a fired wake by
     /// `WakeNotificationFactory`, whose deterministic id makes it dedup-safe). Dedups + routes it.
-    public func submit(_ notification: AgentNotification) async {
+    ///
+    /// Returns whether the broker now OWNS the notification durably — it is settled in the ledger,
+    /// or durably queued for its pull recipient. `false` means the producer must keep its own record
+    /// and submit again later: the pull queue could not be saved, a push is waiting on a retry, or
+    /// the same id is mid-delivery. Resubmitting is always safe (the id dedups).
+    @discardableResult
+    public func submit(_ notification: AgentNotification) async -> Bool {
         await deliver(notification)
     }
 
@@ -240,6 +297,52 @@ public actor NotificationBroker {
         }
     }
 
+    /// Takes back notifications that have not reached their recipient: queued for a pull recipient
+    /// but not yet handed out, or waiting on a push retry — each settled `.dropped(.withdrawn)`. One
+    /// mid-delivery is withdrawn when its attempt ends without reaching the recipient. One the broker
+    /// has not seen yet is tombstoned, so a submit still on its way dedups instead of delivering.
+    /// One already handed to its recipient cannot be recalled and is left alone.
+    /// Returns the ids settled here.
+    @discardableResult
+    public func withdraw(_ ids: [NotificationID], reason: String) async -> [NotificationID] {
+        // Claim EVERY eligible id before the first suspension: settling awaits a ledger write, and a
+        // later id in the batch must not be leased to Smith or enter push delivery meanwhile.
+        var claimed: [AgentNotification] = []
+        var tombstoned: [NotificationID] = []
+        for id in ids where !ledger.isSettled(id) {
+            let leasedNow = leased.values.contains { $0.contains(id) }
+            // Checked BEFORE in-flight: a pull delivery is queued while its enqueue is still being
+            // written, and taking it out of the queue is the only way to stop it then.
+            if let queued = pendingDelivery.first(where: { $0.notification.id == id }) {
+                guard !leasedNow else { continue }
+                pendingDelivery.removeAll { $0.notification.id == id }
+                claimed.append(queued.notification)
+            } else if inFlight.contains(id) {
+                withdrawalsPending[id] = reason
+            } else if let notification = pushRetryNotifications[id], pushRetryAttempts[id] != nil {
+                // Clearing the retry state now stops the scheduled retry (it checks for it).
+                pushRetryAttempts[id] = nil
+                pushRetryNotifications[id] = nil
+                claimed.append(notification)
+            } else {
+                ledger.markDropped(id, reason: .withdrawn)
+                tombstoned.append(id)
+            }
+        }
+        for notification in claimed {
+            await settle(notification, .dropped(reason: .withdrawn), reason: reason)
+        }
+        if !claimed.isEmpty { await flushPendingDelivery() }
+        if !tombstoned.isEmpty { await flushLedger() }
+        return claimed.map(\.id) + tombstoned
+    }
+
+    /// Whether the broker is still holding `id` — queued for a pull recipient, being delivered, or
+    /// waiting on a push retry.
+    public func isHoldingForDelivery(_ id: NotificationID) -> Bool {
+        inFlight.contains(id) || pushRetryAttempts[id] != nil || pendingDelivery.contains { $0.notification.id == id }
+    }
+
     public func deliveryStatus(_ id: NotificationID) -> DeliveryStatus {
         ledger.status(id)
     }
@@ -248,12 +351,22 @@ public actor NotificationBroker {
 
     /// The one path every notification flows through. Dedups on id, fans out to observers, then
     /// routes to the type handler and (for `.deliver`) the recipient target.
-    private func deliver(_ notification: AgentNotification) async {
+    ///
+    /// Returns whether the broker durably owns it afterwards (see `submit`). `isPushRetry` is set
+    /// only by the broker's own push-retry timer, which is the one caller allowed past the
+    /// waiting-on-retry check.
+    @discardableResult
+    private func deliver(_ notification: AgentNotification, isPushRetry: Bool = false) async -> Bool {
         let id = notification.id
         // Claim synchronously — before any await — so a concurrent duplicate can't also pass. A
-        // notification already queued for a pull recipient is also a duplicate (don't re-enqueue).
-        guard !ledger.isSettled(id), !inFlight.contains(id),
-              !pendingDelivery.contains(where: { $0.notification.id == id }) else { return }
+        // notification already queued for a pull recipient is also a duplicate (don't re-enqueue),
+        // but its queue save may have failed: try again, and report whether it is durable now.
+        if ledger.isSettled(id) { return true }
+        if inFlight.contains(id) { return false }
+        if !isPushRetry, pushRetryAttempts[id] != nil { return false }
+        if pendingDelivery.contains(where: { $0.notification.id == id }) {
+            return await flushPendingDelivery()
+        }
         inFlight.insert(id)
         defer { inFlight.remove(id) }
 
@@ -268,61 +381,112 @@ public actor NotificationBroker {
 
         let now = Date()
         if let expiresAt = notification.expiresAt, expiresAt <= now {
-            await settle(id, .dropped(reason: .expired))
-            return
+            await settle(notification, .dropped(reason: .expired), reason: "it expired before it could be delivered")
+            return true
         }
 
         guard let handler = handlers[notification.payload.type] else {
             // Unknown type: not an error. Persisted + observed, never acted on. Forward-compat.
-            await settle(id, .dropped(reason: .noHandler))
-            return
+            await settle(notification, .dropped(reason: .noHandler), reason: "nothing handles notifications of type '\(notification.payload.type)'")
+            return true
         }
 
+        var owned = true
         do {
             switch try await handler.handle(notification, runtime: runtime) {
             case .acted:
-                await settle(id, .delivered(now))
+                await settle(notification, .delivered(now), reason: nil)
             case .refused(let reason):
                 // A legitimate "couldn't do it", not a bug: settle it so nothing retries a spent
                 // one-shot, but as DROPPED — recording a refused effect as `.delivered` is what let
-                // a silently-discarded scheduled run look like a success in the ledger. The runtime
-                // has already surfaced this to the user; log it for the audit trail.
+                // a silently-discarded scheduled run look like a success in the ledger. The reason
+                // reaches the producer through `onSettled`.
                 Self.logger.error("Notification handler for '\(notification.payload.type, privacy: .public)' refused: \(reason, privacy: .public)")
-                await settle(id, .dropped(reason: .runtimeRefused))
+                await settle(notification, .dropped(reason: .runtimeRefused), reason: reason)
             case .deliver(let text):
                 let kind = notification.recipient.kind
                 if let target = targets[kind] {
-                    // PUSH recipient (outward bridge). A false return leaves the id unsettled; log
-                    // it so a lost commitment is visible rather than silent.
-                    if await target.deliver(text, for: notification) {
-                        await settle(id, .delivered(now))
-                    } else {
-                        Self.logger.error("Push delivery for recipient \(String(describing: kind), privacy: .public) returned false — notification \(id.description, privacy: .public) left unsettled.")
-                    }
+                    owned = await push(text, for: notification, to: target, now: now)
                 } else if pullRecipients.contains(kind) {
                     // PULL recipient: hold it in the durable pending queue until the recipient
-                    // drains. NOT settled here — it becomes `.delivered` on drain. This is the
-                    // persistence-until-delivery floor; a momentarily-absent recipient loses nothing.
-                    pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
-                    await flushPendingDelivery()
-                    onPendingEnqueued?(kind)
+                    // acknowledges it. NOT settled here — it becomes `.delivered` on acknowledgement.
+                    // This is the persistence-until-delivery floor; a momentarily-absent recipient
+                    // loses nothing.
+                    if let withdrawal = withdrawalsPending.removeValue(forKey: id) {
+                        // Withdrawn while its handler ran: never queue it.
+                        await settle(notification, .dropped(reason: .withdrawn), reason: withdrawal)
+                    } else {
+                        pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
+                        owned = await flushPendingDelivery()
+                        onPendingEnqueued?(kind)
+                    }
                 } else {
                     Self.logger.error("No target or pull registration for recipient \(String(describing: kind), privacy: .public) — dropping notification \(id.description, privacy: .public).")
-                    await settle(id, .dropped(reason: .noRecipientTarget))
+                    await settle(notification, .dropped(reason: .noRecipientTarget), reason: "nothing is set up to deliver to \(String(describing: kind))")
                 }
             }
         } catch {
             // Malformed data for a type we own — surface loudly, do NOT mark delivered.
             Self.logger.error("Notification handler for '\(notification.payload.type, privacy: .public)' threw: \(String(describing: error), privacy: .public)")
-            await settle(id, .dropped(reason: .handlerError))
+            await settle(notification, .dropped(reason: .handlerError), reason: "its data was malformed: \(error)")
+        }
+        return owned
+    }
+
+    /// Hands `text` to a push target and settles by its answer. A `.retryable` answer is retried
+    /// with backoff (1s, 2s, 4s, …) up to `maxPushAttempts`, then settled refused with the last
+    /// reason — never left unsettled forever, never silently dropped.
+    /// Returns whether it settled (false while a retry is pending).
+    private func push(_ text: String, for notification: AgentNotification, to target: any RecipientTarget, now: Date) async -> Bool {
+        switch await target.deliver(text, for: notification) {
+        case .delivered:
+            await settle(notification, .delivered(now), reason: nil)
+            return true
+        case .refused(let reason):
+            await settle(notification, .dropped(reason: .recipientRefused), reason: reason)
+            return true
+        case .retryable(let reason):
+            if let withdrawal = withdrawalsPending.removeValue(forKey: notification.id) {
+                await settle(notification, .dropped(reason: .withdrawn), reason: withdrawal)
+                return true
+            }
+            let attempts = (pushRetryAttempts[notification.id] ?? 0) + 1
+            pushRetryAttempts[notification.id] = attempts
+            pushRetryNotifications[notification.id] = notification
+            guard attempts < Self.maxPushAttempts else {
+                await settle(notification, .dropped(reason: .recipientRefused), reason: "delivery kept failing (\(reason))")
+                return true
+            }
+            Self.logger.notice("Push delivery of \(notification.id.description, privacy: .public) will be retried (attempt \(attempts, privacy: .public)): \(reason, privacy: .public)")
+            let delay = Duration.seconds(1 << (attempts - 1))
+            Task { [weak self] in
+                try? await Task.sleep(for: delay)
+                await self?.retryDelivery(notification)
+            }
+            return false
         }
     }
 
-    private func settle(_ id: NotificationID, _ status: DeliveryStatus) async {
+    private func retryDelivery(_ notification: AgentNotification) async {
+        // Withdrawn (or otherwise settled) while it waited: nothing to retry.
+        guard pushRetryAttempts[notification.id] != nil else { return }
+        await deliver(notification, isPushRetry: true)
+    }
+
+    private func settle(_ notification: AgentNotification, _ status: DeliveryStatus, reason: String?) async {
+        let id = notification.id
+        pushRetryAttempts[id] = nil
+        pushRetryNotifications[id] = nil
+        withdrawalsPending[id] = nil
         switch status {
-        case .delivered(let date): ledger.markDelivered(id, at: date)
-        case .dropped(let reason): ledger.markDropped(id, reason: reason)
-        case .pending: return
+        case .delivered(let date):
+            ledger.markDelivered(id, at: date)
+            onSettled?(notification, .delivered(date))
+        case .dropped(let code):
+            ledger.markDropped(id, reason: code)
+            onSettled?(notification, .refused(reason: reason ?? code.rawValue))
+        case .pending:
+            return
         }
         await flushLedger()
     }
@@ -340,52 +504,55 @@ public actor NotificationBroker {
         defer { ledgerFlushInFlight = false }
         repeat {
             ledgerDirty = false
-            await persistLedger(ledger.snapshot())
+            do {
+                try await persistLedger(ledger.snapshot())
+                recordSaveOutcome(.ledger, failure: nil)
+            } catch {
+                Self.logger.error("Notification ledger save failed: \(error.localizedDescription, privacy: .public)")
+                recordSaveOutcome(.ledger, failure: error.localizedDescription)
+            }
         } while ledgerDirty
     }
 
     // MARK: - Pull delivery (persistence until delivery)
 
-    /// Hands the recipient its queued notifications with AT-LEAST-ONCE durability, via lease/ack:
+    /// Hands the recipient the queued notifications it has not been handed yet, LEASING them: they
+    /// stay in the durable outbox — and are not handed out again — until the recipient ACKNOWLEDGES
+    /// them (`acknowledgeDeliveries`) once it has finished acting on them.
     ///
-    ///   1. ACK the previous lease — the ids handed out on the LAST drain. The recipient has come
-    ///      back around to this drain, so it consumed them: remove from the durable outbox and mark
-    ///      them `.delivered`. This is the acknowledgement.
-    ///   2. LEASE and return the current batch — hand it to the recipient but KEEP it in the outbox
-    ///      until the NEXT drain acks it.
-    ///
-    /// So a crash after a drain but before the acking next-drain leaves the batch in the persisted
-    /// outbox → a restart re-delivers it (never a lost reminder). The cost is at-least-once: a kill
-    /// between the recipient processing a batch and its next drain can re-deliver that batch once.
-    /// The `pendingDelivery.contains` guard in `deliver` prevents a leased id from being re-enqueued
-    /// while it's outstanding.
-    public func drainPendingDeliveries(for kind: RecipientKind) async -> [QueuedDelivery] {
-        // Enforce one in-flight drain per kind (the method awaits flushes mid-body, opening the
-        // actor): a concurrent same-kind drain returns empty rather than acking the other's batch.
-        guard !draining.contains(kind) else { return [] }
-        draining.insert(kind)
-        defer { draining.remove(kind) }
-
-        let now = Date()
-        var acked = false
-        if let previous = leased[kind], !previous.isEmpty {
-            pendingDelivery.removeAll { previous.contains($0.notification.id) }
-            for id in previous { ledger.markDelivered(id, at: now) }
-            leased[kind] = nil
-            acked = true
-        }
-
-        let batch = pendingDelivery.filter { $0.notification.recipient.kind == kind }
+    /// A crash (or a recipient torn down) between the hand-out and the acknowledgement leaves them in
+    /// the persisted outbox, so they are re-delivered to the next recipient (`resetLease`) or after a
+    /// restart — never lost. Acknowledging only after the recipient has ACTED (not on its next drain,
+    /// as this used to) shrinks the redelivery window to "crashed while acting on it": a note that was
+    /// fully acted on is not handed out again.
+    public func drainPendingDeliveries(for kind: RecipientKind) -> [QueuedDelivery] {
+        let alreadyLeased = leased[kind] ?? []
+        let batch = pendingDelivery.filter { $0.notification.recipient.kind == kind && !alreadyLeased.contains($0.notification.id) }
         if !batch.isEmpty {
-            leased[kind] = Set(batch.map(\.notification.id))
-        }
-        // Persist only when the ack actually removed items — the lease itself is in-memory (a
-        // restart re-delivers, which is the point).
-        if acked {
-            await flushPendingDelivery()
-            await flushLedger()
+            leased[kind, default: []].formUnion(batch.map(\.notification.id))
         }
         return batch
+    }
+
+    /// The recipient has finished acting on these deliveries: remove them from the durable outbox and
+    /// record them delivered. `leaseGeneration` is the value `resetLease` returned when this recipient
+    /// was wired; an acknowledgement from an older generation (a torn-down recipient) is ignored, as
+    /// are ids not currently leased.
+    public func acknowledgeDeliveries(_ ids: [NotificationID], for kind: RecipientKind, leaseGeneration generation: Int) async {
+        guard generation == (leaseGeneration[kind] ?? 0) else { return }
+        let acknowledged = Set(ids).intersection(leased[kind] ?? [])
+        guard !acknowledged.isEmpty else { return }
+        let now = Date()
+        let settled = pendingDelivery.filter { acknowledged.contains($0.notification.id) }
+        pendingDelivery.removeAll { acknowledged.contains($0.notification.id) }
+        for id in acknowledged {
+            ledger.markDelivered(id, at: now)
+            withdrawalsPending[id] = nil
+        }
+        for item in settled { onSettled?(item.notification, .delivered(now)) }
+        leased[kind]?.subtract(acknowledged)
+        await flushPendingDelivery()
+        await flushLedger()
     }
 
     /// Durably persists the CURRENT pending-delivery queue and does not return until that snapshot
@@ -393,9 +560,17 @@ public actor NotificationBroker {
     /// bursts and preserves write order like the ledger flusher, but — critically — its `flush()`
     /// waits on a sequence watermark, so a caller can't proceed (nudge / remove the source wake)
     /// before its enqueue is on disk.
-    private func flushPendingDelivery() async {
-        guard let pendingWriter else { return }
+    ///
+    /// A failed write is reported (the writer has logged it); the queue is still intact in memory,
+    /// so delivery this launch is unaffected — only a restart before the next successful save can
+    /// lose it, which is exactly what the report tells the user.
+    /// Returns whether the queue is on disk (true when there is no disk: memory is the storage).
+    @discardableResult
+    private func flushPendingDelivery() async -> Bool {
+        guard let pendingWriter else { return true }
         await pendingWriter.enqueue(pendingDelivery)
-        await pendingWriter.flush()
+        let durable = await pendingWriter.flush()
+        recordSaveOutcome(.pendingDelivery, failure: durable ? nil : "the write to disk failed")
+        return durable
     }
 }

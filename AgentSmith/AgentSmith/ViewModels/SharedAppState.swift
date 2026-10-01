@@ -441,6 +441,9 @@ final class SharedAppState {
         systemOrchestrationDefault.applying(orchestrationAppOverride)
     }
 
+    /// Posts task-watch macOS notifications and routes clicks on them (`TaskNotificationService`).
+    let taskNotifications = TaskNotificationService()
+
     /// Set when a load/decode operation fails during startup; drives the error alert.
     var startupError: String?
     /// ID of the session whose window is currently key (frontmost). Updated by
@@ -721,7 +724,7 @@ final class SharedAppState {
         // Release builds default OFF — verbose logging dumps full request/response
         // bodies (user messages, file contents, tool I/O, possibly pasted secrets)
         // to $TMPDIR. Acceptable for local Debug only until the Settings-controlled
-        // logging-levels UI lands. Tracked in RECOMMENDATIONS.md #1.
+        // logging-levels UI lands. Tracked in docs/audits/RECOMMENDATIONS.md #1.
         LLMRequestLogger.logDirectoryName = "AgentSmith-LLM-Logs"
         #if DEBUG
         llmKit.verboseLogging = true

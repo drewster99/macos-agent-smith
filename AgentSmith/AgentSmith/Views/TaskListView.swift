@@ -665,6 +665,11 @@ struct TaskRowButton: View {
     @ViewBuilder
     private func escalationMenu(task: AgentTask, viewModel: AppViewModel) -> some View {
         if task.validationBlockedReason == nil {
+            // Same four resolutions either way — only the Accept label changes. For a validator-error
+            // park ("As-Is") the user is overriding a verdict the machine never reached; for a
+            // `requiresUserAcceptance` park the machine already judged every criterion fine and this
+            // is simply the sign-off the user asked for.
+            let isUserAcceptancePark = task.awaitingReviewReason == .userAcceptanceRequested
             Button(action: { Task { await viewModel.revalidateEscalatedTask(id: task.id) } }, label: {
                 Label("Re-validate", systemImage: "arrow.clockwise")
             })
@@ -673,7 +678,7 @@ struct TaskRowButton: View {
             })
             Divider()
             Button(action: { Task { await viewModel.acceptEscalatedTask(id: task.id) } }, label: {
-                Label("Accept As-Is", systemImage: "checkmark.circle")
+                Label(isUserAcceptancePark ? "Accept" : "Accept As-Is", systemImage: "checkmark.circle")
             })
             Button(role: .destructive, action: { Task { await viewModel.failEscalatedTask(id: task.id) } }, label: {
                 Label("Fail", systemImage: "xmark.circle")

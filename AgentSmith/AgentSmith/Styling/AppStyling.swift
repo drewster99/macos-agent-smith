@@ -79,6 +79,15 @@ enum AppColors {
     static let stepSkipped = Color.orange
     static let stepRemoved = Color.gray
 
+    // Task watches ("When this task…").
+    static let watchActive = Color.accentColor
+    static let watchInactive = Color.secondary
+    static let watchRefused = Color.red
+    static let watchHold = Color.orange
+    static let watchHoldBackground = Color.orange.opacity(0.10)
+    /// An agent still calling a model other than the one assigned to its role.
+    static let runningModelMismatch = Color.orange
+
     // MARK: - Security-review dispositions
 
     static let securityApproved = Color.green

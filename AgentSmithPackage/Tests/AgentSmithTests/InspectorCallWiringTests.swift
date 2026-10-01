@@ -74,7 +74,7 @@ struct InspectorCallWiringTests {
         #expect(sessions.values.last == startedSession, "the run's session id must be pushed to observers")
 
         let task = await runtime.taskStore.addTask(title: "Read", description: "read a file")
-        await runtime.restartForNewTask(taskID: task.id)
+        await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
 
         let reviewed = await waitUntil { log.roles().contains(.securityAgent) }

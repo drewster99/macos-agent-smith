@@ -70,11 +70,11 @@ struct WorkerAddressingTests {
             var fixture = TwoWorkers()
             fixture.olderTask = await fixture.taskStore.addTask(title: "Older task", description: "first")
             await fixture.taskStore.assignAgent(taskID: fixture.olderTask.id, agentID: fixture.olderWorker)
-            await fixture.taskStore.updateStatus(id: fixture.olderTask.id, status: .running)
+            await fixture.taskStore.driveStatus(id: fixture.olderTask.id, to: .running)
 
             fixture.newerTask = await fixture.taskStore.addTask(title: "Newer task", description: "second")
             await fixture.taskStore.assignAgent(taskID: fixture.newerTask.id, agentID: fixture.newerWorker)
-            await fixture.taskStore.updateStatus(id: fixture.newerTask.id, status: .running)
+            await fixture.taskStore.driveStatus(id: fixture.newerTask.id, to: .running)
             return fixture
         }
 

@@ -89,37 +89,43 @@ public struct TaskCompleteTool: AgentTool {
             return .success("Task already submitted.")
         }
 
-        let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context)
+        // Shared by the top-level attachments and every deliverable, so a file cited in both is
+        // ingested once and the deliverable points at the same attachment.
+        let pathIngestions = AttachmentPathIngestions()
+        let resolution = await TaskUpdateTool.resolveAttachments(arguments: arguments, context: context, pathIngestions: pathIngestions)
         if let failureMessage = resolution.failure {
             return .failure(failureMessage)
         }
-        // Ingest everything the worker placed in its evidence directory (text reports, logs,
-        // screenshots it copied in) so those artifacts become clickable result attachments. This is
-        // the ONE place the sweep runs — `setResult` replaces the attachment list each submission,
-        // so a resubmission re-sweeps without accumulating. Merged AFTER the worker's explicit
-        // attachments and deduped by filename so an explicitly-referenced file isn't doubled.
-        var attachments = resolution.attachments
-        attachments += await Self.ingestEvidenceDirectory(context: context, existing: attachments)
-
         // Optional structured deliverables → resultItems (additive; empty when omitted). Each
         // entry becomes a text item and/or an attachment item/group, tagged with its `ref`. A
         // per-entry attachment-resolution failure is skipped (best-effort) rather than blocking
         // the whole submission — the plain `result` + swept evidence still carry the work.
-        let resultItems = await Self.buildDeliverables(arguments: arguments, context: context)
+        let resultItems = await Self.buildDeliverables(arguments: arguments, context: context, pathIngestions: pathIngestions)
         // Also merge any deliverable-only attachments into the canonical `resultAttachments` so
         // they show in the UI and re-register on cold boot — `resultItems` adds STRUCTURE/tags, it
         // is not a separate attachment store. Deduped by id against the already-collected set.
+        var attachments = resolution.attachments
         var seenAttachmentIDs = Set(attachments.map { $0.id })
         for attachment in resultItems.flatMap({ $0.attachments }) where seenAttachmentIDs.insert(attachment.id).inserted {
             attachments.append(attachment)
         }
+        // Ingest everything the worker placed in its evidence directory (text reports, logs,
+        // screenshots it copied in) so those artifacts become clickable result attachments. This is
+        // the ONE place the sweep runs — `setResult` replaces the attachment list each submission,
+        // so a resubmission re-sweeps without accumulating. Runs LAST and dedups by filename, so a
+        // file the worker already attached — explicitly or through a deliverable, which is how
+        // workers usually cite their evidence file — is not ingested a second time.
+        attachments += await Self.ingestEvidenceDirectory(context: context, existing: attachments)
 
         // Store result on the task (survives restarts) and hand it to acceptance
         // validation — the evaluator system, not Smith, judges submissions now. The
         // "Ready for Review" banner is preserved for the UI via the same task_complete
         // message kind, posted publicly (Smith's filter drops it; the user sees it).
         await context.taskStore.setResult(id: task.id, result: result, commentary: commentary, attachments: attachments, resultItems: resultItems)
-        await context.taskStore.updateStatus(id: task.id, status: .validating)
+        guard await context.taskStore.updateStatus(id: task.id, status: .validating, cause: .submittedForValidation) else {
+            let current = await context.taskStore.task(id: task.id)?.status.displayName ?? "unknown"
+            return .failure("The task is \(current), so it can't be submitted for validation right now. Your result is saved on the task.")
+        }
 
         var message = "Task '\(task.title)' submitted — acceptance validation is running."
         if let commentary {
@@ -150,7 +156,11 @@ public struct TaskCompleteTool: AgentTool {
     /// tagged with the entry's `ref`. Best-effort: an entry with no usable content is skipped, and
     /// a per-entry attachment-resolution failure yields no attachments for that entry rather than
     /// failing the whole submission. Returns `[]` when `deliverables` is absent.
-    static func buildDeliverables(arguments: [String: AnyCodable], context: ToolContext) async -> [ResultItem] {
+    static func buildDeliverables(
+        arguments: [String: AnyCodable],
+        context: ToolContext,
+        pathIngestions: AttachmentPathIngestions = AttachmentPathIngestions()
+    ) async -> [ResultItem] {
         guard case .array(let rawDeliverables) = arguments["deliverables"] else { return [] }
         var items: [ResultItem] = []
         for raw in rawDeliverables {
@@ -174,7 +184,7 @@ public struct TaskCompleteTool: AgentTool {
             if let ids = entry["attachment_ids"] { entryArgs["attachment_ids"] = ids }
             if let paths = entry["attachment_paths"] { entryArgs["attachment_paths"] = paths }
             if !entryArgs.isEmpty {
-                let resolved = await TaskUpdateTool.resolveAttachments(arguments: entryArgs, context: context).attachments
+                let resolved = await TaskUpdateTool.resolveAttachments(arguments: entryArgs, context: context, pathIngestions: pathIngestions).attachments
                 if resolved.count == 1, description == nil {
                     items.append(ResultItem(content: .attachment(resolved[0]), refs: refs))
                 } else if !resolved.isEmpty {
@@ -186,30 +196,40 @@ public struct TaskCompleteTool: AgentTool {
     }
 
     /// Ingests every regular file in the task's evidence directory as an attachment, skipping any
-    /// whose filename already appears in `existing` (the worker's explicitly-referenced attachments)
-    /// so nothing is doubled. Best-effort: a file that can't be read or ingested is skipped. Returns
-    /// the newly ingested attachments. No-op when the task has no evidence directory.
+    /// already in `existing` (the worker's explicit and deliverable attachments) — the same file,
+    /// judged by name and bytes — so nothing is doubled. Best-effort: a file that can't be read or
+    /// ingested is skipped. Returns the newly ingested attachments. No-op when the task has no
+    /// evidence directory.
     static func ingestEvidenceDirectory(context: ToolContext, existing: [Attachment]) async -> [Attachment] {
         guard let evidenceDir = context.taskEvidenceDirectory else { return [] }
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: evidenceDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
             return []
         }
-        var existingNames = Set(existing.map { $0.filename })
         var ingested: [Attachment] = []
         for fileURL in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             let isRegular = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
             guard isRegular else { continue }
             let filename = fileURL.lastPathComponent
-            guard !existingNames.contains(filename), let data = try? Data(contentsOf: fileURL) else { continue }
+            guard let data = try? Data(contentsOf: fileURL) else { continue }
+            // Skip only the SAME file already attached, not merely one sharing its name: a distinct
+            // file that happens to share a name with another attachment is still evidence.
+            guard !(existing + ingested).contains(where: { Self.isSameFile($0, filename: filename, data: data) }) else { continue }
             let mimeType = Self.mimeType(forExtension: fileURL.pathExtension)
             let (attachment, _) = await context.ingestAttachmentData(data, filename, mimeType)
             if let attachment {
                 ingested.append(attachment)
-                existingNames.insert(filename)
             }
         }
         return ingested
+    }
+
+    /// Whether `attachment` is this file: same name and same bytes. An attachment resolved by id may
+    /// not have its bytes loaded; its recorded size stands in for them then.
+    private static func isSameFile(_ attachment: Attachment, filename: String, data: Data) -> Bool {
+        guard attachment.filename == filename else { return false }
+        if let attachedData = attachment.data { return attachedData == data }
+        return attachment.byteCount == data.count
     }
 
     /// Minimal extension→MIME mapping for evidence ingest. Unknown types fall back to

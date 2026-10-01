@@ -96,6 +96,8 @@ final class AppViewModel {
     /// The resident transcript tail shown in the main pane — a forward to the primary provider (the
     /// store owns the array off-main). Still `[ChannelMessage]`, so every existing reader is unchanged.
     var messages: [ChannelMessage] { primaryTranscriptProvider.messages }
+    /// Changes whenever `messages` does; see `FilteredTranscriptProvider.revision`.
+    var messagesRevision: Int { primaryTranscriptProvider.revision }
 
     /// `requestID`s of every resident `tool_request`, maintained incrementally by the primary provider
     /// so `ChannelLogView` folds tool-output / security-review follow-ups into their parent row without
@@ -331,6 +333,8 @@ final class AppViewModel {
     /// Live model configuration per role as currently held by the runtime (agent/evaluator/summarizer),
     /// used by inspector model rows so they reflect what is actually running now.
     var inspectorLiveModelConfigs: [AgentRole: ModelConfiguration] = [:]
+    /// Derived inspector display state, retained alongside the live runtime model snapshots.
+    @ObservationIgnored private(set) lazy var inspectorLive = InspectorLiveState(viewModel: self)
 
     /// Per-session idle poll intervals for each agent role (seconds).
     var agentPollIntervals: [AgentRole: TimeInterval] = [
@@ -447,7 +451,6 @@ final class AppViewModel {
     /// `flush()` actually waits for in-flight writes to complete (the
     /// `flushPersistence()` path used to race them).
     private let channelLogAppendWriter: ChannelLogAppendWriter
-    private let tasksWriter: SerialPersistenceWriter<[AgentTask]>
     private let timerEventsWriter: SerialPersistenceWriter<[TimerEvent]>
     private let scheduledWakesWriter: SerialPersistenceWriter<[ScheduledWake]>
     private let sessionStateWriter: SerialPersistenceWriter<SessionState>
@@ -459,9 +462,6 @@ final class AppViewModel {
         self.persistenceManager = pm
         self.channelLogAppendWriter = ChannelLogAppendWriter { messages in
             try await pm.appendChannelMessages(messages)
-        }
-        self.tasksWriter = SerialPersistenceWriter(label: "tasks") { snapshot in
-            try await pm.saveTasks(snapshot)
         }
         self.timerEventsWriter = SerialPersistenceWriter(label: "timerEvents") { snapshot in
             try await pm.saveTimerEvents(snapshot)
@@ -715,16 +715,6 @@ final class AppViewModel {
                 }
             }
 
-            // Running tasks didn't survive the last quit — mark them interrupted.
-            var anyStatusChanged = false
-            for i in savedTasks.indices {
-                if savedTasks[i].status == .running {
-                    savedTasks[i].status = .interrupted
-                    savedTasks[i].updatedAt = Date()
-                    anyStatusChanged = true
-                }
-            }
-
             // Migration backstop: any archived/deleted tasks still in this session's file (a
             // session the one-time sweep didn't rewrite, or a crash mid-migration) move to the
             // global store. `merge` dedupes by id, so this is idempotent and never duplicates.
@@ -788,9 +778,6 @@ final class AppViewModel {
 
             // `tasks` now holds only this session's active tasks.
             tasks = savedTasks
-            if canStripSessionFile && (movedToGlobal || anyStatusChanged) {
-                persistTasks()
-            }
 
             // Back-fill the immutable origin sessionID on legacy per-session tasks that predate the
             // field (nil). New tasks get stamped by the store on creation; this stamps the already-
@@ -802,6 +789,18 @@ final class AppViewModel {
             taskStore = standaloneStore
             await wireDurablePersistHooks(on: standaloneStore)
             await standaloneStore.restore(savedTasks)
+            // No worker survives a quit: repair launch state now, through the store (typed
+            // transitions), so a session that is never started doesn't show dead work as running.
+            let reconciled = await standaloneStore.reconcileAfterLaunch()
+            tasks = await standaloneStore.allTasks()
+            // The store is the file's writer from here on. Write at once only when the load repaired
+            // something AND stripping this session's inactive copies is safe (the global file durably
+            // has them); otherwise the file is left as-is until the next real mutation.
+            let persistPM = persistenceManager
+            await standaloneStore.attachPersistence(
+                save: { snapshot in try await persistPM.saveTasks(snapshot) },
+                writeNow: canStripSessionFile && (movedToGlobal || reconciled)
+            )
             await standaloneStore.setOnChange { [weak self, weak standaloneStore] in
                 Task { @MainActor [weak self, weak standaloneStore] in
                     guard let self, let store = standaloneStore else { return }
@@ -811,7 +810,6 @@ final class AppViewModel {
                     guard myGen == self.taskApplyGeneration else { return }
                     self.tasks = allTasks
                     self.updateTaskOverlay()
-                    self.persistTasks()
                 }
             }
         } catch {
@@ -1058,10 +1056,29 @@ final class AppViewModel {
         runtime = newRuntime
         isRunning = true
 
-        if !tasks.isEmpty {
-            let tasksToRestore = tasks
-            await newRuntime.taskStore.restore(tasksToRestore)
+        // Hand the session's tasks to the runtime's store, which takes over `tasks.json`. The previous
+        // store (standalone, or the prior run's live store) is retired FIRST — after its in-flight
+        // write lands — so it can never write a stale snapshot over its successor's, and its own
+        // state (not the main-actor mirror, which can lag) is what the new store starts from.
+        let tasksToRestore: [AgentTask]
+        if let previousStore = taskStore {
+            await previousStore.retirePersistence()
+            tasksToRestore = await previousStore.allTasks()
+        } else {
+            tasksToRestore = tasks
         }
+        let liveStore = await newRuntime.taskStore
+        if !tasksToRestore.isEmpty {
+            await liveStore.restore(tasksToRestore)
+        }
+        let livePersistPM = persistenceManager
+        await liveStore.attachPersistence(save: { snapshot in try await livePersistPM.saveTasks(snapshot) }, writeNow: true)
+        // Adopt the live store at once: edits made while the rest of start() runs must land on the
+        // store that persists them, not on the retired one (whose writes are gone for good).
+        if let previousStore = taskStore, previousStore !== liveStore {
+            await previousStore.setOnChange { }
+        }
+        taskStore = liveStore
 
         await newRuntime.setOnAbort { [weak self] reason in
             Task { @MainActor [weak self] in
@@ -1192,9 +1209,13 @@ final class AppViewModel {
                 guard myGen == self.taskApplyGeneration else { return }
                 self.tasks = allTasks
                 self.updateTaskOverlay()
-                self.persistTasks()
             }
         }
+        // Edits that landed on the live store before this observer existed would otherwise not show
+        // until the next change.
+        taskApplyGeneration &+= 1
+        tasks = await liveTaskStore.allTasks()
+        updateTaskOverlay()
 
         // Auto-archive policy ("Auto-archive completed tasks" in Settings): push it into the store
         // BEFORE the launch sweep so the first sweep honors the user's choice, then run the gated
@@ -1295,21 +1316,14 @@ final class AppViewModel {
         // rather than cached, so it always reflects the latest persisted state.
         let persistence = persistenceManager
         let logger = self.logger
+        // Errors propagate: the runtime reports a failed save, and on a failed load keeps the queue in
+        // memory rather than overwriting the file it couldn't read.
         await newRuntime.setPendingScheduledRunQueuePersistence(
             load: {
-                do {
-                    return try await persistence.loadPendingScheduledRunQueue()
-                } catch {
-                    logger.error("Failed to load pending scheduled-run queue: \(error.localizedDescription)")
-                    return []
-                }
+                try await persistence.loadPendingScheduledRunQueue()
             },
             persist: { entries in
-                do {
-                    try await persistence.savePendingScheduledRunQueue(entries)
-                } catch {
-                    logger.error("Failed to persist pending scheduled-run queue: \(error.localizedDescription)")
-                }
+                try await persistence.savePendingScheduledRunQueue(entries)
             }
         )
 
@@ -1317,21 +1331,14 @@ final class AppViewModel {
         // that dedups a fired wake across an app restart (a fired-and-delivered wake whose id is on
         // disk is recognized as a duplicate, not re-fired). Wired before the runtime starts so the
         // broker seeds from disk and its per-settle flushes land next to the other per-session state.
+        // Errors propagate: the runtime surfaces a failed load (and then leaves the file untouched)
+        // and the broker surfaces a failed save.
         await newRuntime.setDeliveryLedgerPersistence(
             load: {
-                do {
-                    return try await persistence.loadDeliveryLedger()
-                } catch {
-                    logger.error("Failed to load notification delivery ledger: \(error.localizedDescription)")
-                    return [:]
-                }
+                try await persistence.loadDeliveryLedger()
             },
             persist: { ledger in
-                do {
-                    try await persistence.saveDeliveryLedger(ledger)
-                } catch {
-                    logger.error("Failed to persist notification delivery ledger: \(error.localizedDescription)")
-                }
+                try await persistence.saveDeliveryLedger(ledger)
             }
         )
 
@@ -1393,22 +1400,25 @@ final class AppViewModel {
             await wakesWriter.enqueue(wakes)
         }
 
+        // Task watches that post macOS notifications reach the app's notification service, which
+        // checks permission at delivery and tags each banner with this session so a click opens the
+        // right Task Detail window.
+        let taskNotifications = shared.taskNotifications
+        let notificationSessionID = session.id
+        await newRuntime.setExternalRecipientTarget(
+            TaskWatchDelivery.macOSNotificationTarget,
+            ClosureRecipientTarget { text, notification in
+                await taskNotifications.deliver(text, for: notification, sessionID: notificationSessionID)
+            }
+        )
+
         // Per-session durable outbox for notifications queued for Smith until he drains them.
         await newRuntime.setPendingDeliveryPersistence(
             load: {
-                do {
-                    return try await persistence.loadPendingDelivery()
-                } catch {
-                    logger.error("Failed to load pending notification deliveries: \(error.localizedDescription)")
-                    return []
-                }
+                try await persistence.loadPendingDelivery()
             },
             persist: { items in
-                do {
-                    try await persistence.savePendingDelivery(items)
-                } catch {
-                    logger.error("Failed to persist pending notification deliveries: \(error.localizedDescription)")
-                }
+                try await persistence.savePendingDelivery(items)
             }
         )
 
@@ -1462,6 +1472,7 @@ final class AppViewModel {
             switch event.cancellationCause {
             case .replaced:        label = "rescheduled"
             case .taskTerminated:  label = "cancelled (task ended)"
+            case .taskRemoved:     label = "cancelled (task archived or deleted)"
             case .agentTerminated: label = "cancelled (agent ended)"
             // Not a cancellation the user asked for: the repeat pattern simply has no further
             // occurrence, so the series retired itself. Saying "cancelled" would imply someone
@@ -1905,6 +1916,28 @@ final class AppViewModel {
         return true
     }
 
+    /// Adds a watch the user authored in Task Detail. Returns why it was refused, if it was. A
+    /// macOS-notification watch asks for notification permission now, while the user is here to
+    /// answer, rather than first when it fires.
+    func addTaskWatch(_ watch: TaskWatch, to taskID: UUID) async -> String? {
+        guard let taskStore else { return "The session's tasks haven't loaded yet." }
+        if let refusal = await taskStore.addWatch(watch, to: taskID) {
+            return refusal
+        }
+        if case .macOSNotification = watch.action {
+            await shared.taskNotifications.requestAuthorizationIfNeeded()
+        }
+        return nil
+    }
+
+    /// Cancels a watch from Task Detail or the Timers window; a refusal is shown as the task alert.
+    func cancelTaskWatch(_ watchID: UUID, on taskID: UUID) async {
+        guard let taskStore else { return }
+        if let refusal = await taskStore.cancelWatch(watchID, on: taskID) {
+            taskActionError = refusal
+        }
+    }
+
     /// Replaces a task's step list from the task-detail editor (same gating). The user
     /// holds full authority over the plan — unlike the worker, edits here may delete
     /// steps outright rather than tombstoning them.
@@ -1932,7 +1965,7 @@ final class AppViewModel {
         stopLogger.notice("VM.pauseTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
         // CAS: only pause a task that's actually working — if it finished (completed, escalated,
         // failed) in the click/iteration window, don't clobber that terminal status with .paused.
-        guard await taskStore?.updateStatus(id: id, to: .paused, ifCurrentlyIn: [.running, .validating]) == true else {
+        guard await taskStore?.updateStatus(id: id, to: .paused, ifCurrentlyIn: [.running, .validating], cause: .userPaused) == true else {
             stopLogger.notice("VM.pauseTask task=\(slug, privacy: .public) not in a pausable state — skipped")
             return
         }
@@ -1950,7 +1983,7 @@ final class AppViewModel {
         stopLogger.notice("VM.stopTask after terminateTaskAgents task=\(slug, privacy: .public) elapsedMs=\(Int(afterTerm.timeIntervalSince(entry) * 1000), privacy: .public)")
         // CAS: only interrupt a task that's actually working — don't clobber a terminal status
         // if it finished in the click window.
-        guard await taskStore?.updateStatus(id: id, to: .interrupted, ifCurrentlyIn: [.running, .validating]) == true else {
+        guard await taskStore?.updateStatus(id: id, to: .interrupted, ifCurrentlyIn: [.running, .validating], cause: .userStopped) == true else {
             stopLogger.notice("VM.stopTask task=\(slug, privacy: .public) not in a stoppable state — skipped")
             return
         }
@@ -1986,7 +2019,7 @@ final class AppViewModel {
             return .resume
         case .deleted:
             return shared.deletedTasks.contains { $0.id == taskID } ? .undelete : nil
-        case .retryRequested, .runAgainRequested, .undeleted:
+        case .retryRequested, .runAgainRequested, .undeleted, .deferredForCapacity:
             return nil
         }
     }
@@ -2275,7 +2308,7 @@ final class AppViewModel {
         }
         // No separate "resumed" notice: the runtime tells Smith "has been started" once the worker
         // is actually claimed and spawned, which is the only point it is true.
-        await runtime?.restartForNewTask(taskID: task.id, templateInputValues: templateInputValues)
+        await runtime?.restartForNewTask(taskID: task.id, templateInputValues: templateInputValues, origin: .explicitUser)
     }
 
     func updatePollInterval(for role: AgentRole, interval: TimeInterval) async {
@@ -2376,10 +2409,12 @@ final class AppViewModel {
         // and persisted before we tear down rather than dropped here.
         self.runtime = nil
 
+        // A running task whose result was already submitted is left `.running`: the next launch's
+        // reconciliation (`ColdBootRunningRecovery`) resumes its validation instead of re-running it.
         if let store = taskStore {
             let liveTasks = await store.allTasks()
-            for task in liveTasks where task.status == .running {
-                await store.updateStatus(id: task.id, status: .interrupted)
+            for task in liveTasks where task.status == .running && ColdBootRunningRecovery.recovery(for: task) == .interrupt {
+                await store.updateStatus(id: task.id, status: .interrupted, cause: .sessionShutdown)
             }
         }
 
@@ -2411,7 +2446,7 @@ final class AppViewModel {
         var allMoved = true
         for task in await taskStore.allTasks() where task.disposition == .active {
             if task.status.isInProgress {
-                await taskStore.updateStatus(id: task.id, status: .interrupted)
+                await taskStore.updateStatus(id: task.id, status: .interrupted, cause: .sessionDeletion)
             }
             let moved = archiving
                 ? await taskStore.archive(id: task.id)
@@ -2491,7 +2526,6 @@ final class AppViewModel {
         channelLogPersistTask?.cancel()
         channelLogPersistTask = nil
         await drainPendingChannelAppends()
-        await tasksWriter.enqueue(tasks)
         let finalState = SessionState(
             agentAssignments: agentAssignments,
             agentPollIntervals: agentPollIntervals,
@@ -2510,7 +2544,9 @@ final class AppViewModel {
         if await channelLogAppendWriter.flush() == false {
             logger.error("flushPersistence: channel-log flush did NOT reach disk (disk full / permissions) — the trailing transcript batch was retained in memory only and is lost on exit.")
         }
-        await tasksWriter.flush()
+        if let taskStore, await taskStore.persistDurablyNow() == false {
+            logger.error("flushPersistence: tasks.json did NOT reach disk — the latest task changes are in memory only and are lost on exit.")
+        }
         await sessionStateWriter.flush()
         await timerEventsWriter.flush()
         await scheduledWakesWriter.flush()
@@ -2833,31 +2869,11 @@ final class AppViewModel {
         await channelLogAppendWriter.enqueue(batch)
     }
 
-    private func persistTasks() {
-        let tasksToSave = tasks
-        let writer = tasksWriter
-        Task { await writer.enqueue(tasksToSave) }
-    }
-
-    /// Durably writes the given active-task snapshot to this session's `tasks.json` right now,
-    /// returning whether it succeeded. Injected into `TaskStore` as its durable-active hook so a
-    /// restore lands the task on disk before it's removed from the global inactive store.
-    private func persistActiveTasksNow(_ snapshot: [AgentTask]) async -> Bool {
-        do {
-            try await persistenceManager.saveTasks(snapshot)
-            return true
-        } catch {
-            logger.error("Failed to durably persist tasks.json: \(error.localizedDescription, privacy: .public)")
-            return false
-        }
-    }
-
     /// Wires the crash-safe durable-move hooks onto a session `TaskStore`. Kept in one place so the
     /// initial standalone store and the live runtime store are wired identically.
     private func wireDurablePersistHooks(on store: TaskStore) async {
         await store.setDurablePersistHooks(
             inactive: { [weak self] in await self?.shared.persistInactiveTasksNow() ?? false },
-            active: { [weak self] snapshot in await self?.persistActiveTasksNow(snapshot) ?? false },
             library: { [weak self] in await self?.shared.persistTemplateLibraryNow() ?? false }
         )
     }

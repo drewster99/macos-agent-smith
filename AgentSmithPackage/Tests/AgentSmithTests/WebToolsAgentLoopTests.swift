@@ -74,7 +74,7 @@ struct WebToolsAgentLoopTests {
         await agent.setOnContextChanged { messages in history.update(messages) }
 
         let task = await taskStore.addTask(title: "agent-loop test", description: "drive a web tool")
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
         await taskStore.assignAgent(taskID: task.id, agentID: agentID)
         await agent.start(initialInstruction: "go")
 

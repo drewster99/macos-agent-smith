@@ -93,6 +93,103 @@ struct EvidenceSweepTests {
         #expect(ingested.isEmpty, "the already-referenced file must not be ingested again")
     }
 
+    @Test("an evidence file cited by a deliverable is attached once, not again by the sweep")
+    func deliverableEvidenceNotDoubled() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("echo-output.log")
+        try "watch-test-B".write(to: file, atomically: true, encoding: .utf8)
+
+        let store = TaskStore()
+        let agentID = UUID()
+        let task = await store.addTask(title: "t", description: "d")
+        await store.updateStatus(id: task.id, status: .starting, cause: .startClaimed)
+        #expect(await store.updateStatus(id: task.id, status: .running, cause: .workerStarted))
+        await store.assignAgent(taskID: task.id, agentID: agentID)
+        let context = TestToolContext.make(
+            agentID: agentID,
+            taskStore: store,
+            attachmentIngestor: { path in
+                let url = URL(fileURLWithPath: path)
+                guard let data = try? Data(contentsOf: url) else { return (nil, "unreadable") }
+                return (Attachment(filename: url.lastPathComponent, mimeType: "text/plain", byteCount: data.count, data: data), nil)
+            },
+            taskEvidenceDirectory: dir
+        )
+        let result = try await TaskCompleteTool().execute(arguments: [
+            "result": .string("done"),
+            "deliverables": .array([.dictionary([
+                "ref": .string("echo"),
+                "attachment_paths": .array([.string(file.path)])
+            ])])
+        ], context: context)
+        #expect(result.succeeded)
+        let stored = try #require(await store.task(id: task.id))
+        #expect(stored.resultAttachments.map(\.filename) == ["echo-output.log"])
+        let deliverableIDs = Set(stored.resultItems.flatMap(\.attachments).map(\.id))
+        #expect(deliverableIDs == Set(stored.resultAttachments.map(\.id)), "the deliverable points at the one stored attachment")
+    }
+
+    @Test("a file named both top-level and in a deliverable is one attachment")
+    func samePathTopLevelAndDeliverable() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("paths-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("report.md")
+        try "report".write(to: file, atomically: true, encoding: .utf8)
+
+        let store = TaskStore()
+        let agentID = UUID()
+        let task = await store.addTask(title: "t", description: "d")
+        await store.updateStatus(id: task.id, status: .starting, cause: .startClaimed)
+        #expect(await store.updateStatus(id: task.id, status: .running, cause: .workerStarted))
+        await store.assignAgent(taskID: task.id, agentID: agentID)
+        let recorder = IngestRecorder()
+        let context = TestToolContext.make(
+            agentID: agentID,
+            taskStore: store,
+            attachmentIngestor: { path in
+                let url = URL(fileURLWithPath: path)
+                await recorder.record(url.lastPathComponent)
+                guard let data = try? Data(contentsOf: url) else { return (nil, "unreadable") }
+                return (Attachment(filename: url.lastPathComponent, mimeType: "text/plain", byteCount: data.count, data: data), nil)
+            }
+        )
+        // The same file, spelled two ways.
+        let dotted = dir.appendingPathComponent(".").appendingPathComponent("report.md").path
+        let result = try await TaskCompleteTool().execute(arguments: [
+            "result": .string("done"),
+            "attachment_paths": .array([.string(file.path)]),
+            "deliverables": .array([.dictionary([
+                "ref": .string("report"),
+                "attachment_paths": .array([.string(dotted)])
+            ])])
+        ], context: context)
+        #expect(result.succeeded)
+        let stored = try #require(await store.task(id: task.id))
+        #expect(stored.resultAttachments.count == 1)
+        #expect(Set(stored.resultItems.flatMap(\.attachments).map(\.id)) == Set(stored.resultAttachments.map(\.id)))
+        #expect(await recorder.count == 1, "ingested once")
+    }
+
+    @Test("a distinct evidence file sharing a name with another attachment is still ingested")
+    func sameNameDifferentContentIngested() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "evidence".write(to: dir.appendingPathComponent("report.md"), atomically: true, encoding: .utf8)
+
+        let recorder = IngestRecorder()
+        let context = makeContext(evidenceDir: dir, recorder: recorder)
+        let other = Attachment(filename: "report.md", mimeType: "text/plain", byteCount: 5, data: Data("other".utf8))
+        let ingested = await TaskCompleteTool.ingestEvidenceDirectory(context: context, existing: [other])
+        #expect(ingested.map(\.filename) == ["report.md"])
+    }
+
     @Test("no evidence directory → no-op")
     func noEvidenceDir() async {
         let recorder = IngestRecorder()
@@ -110,5 +207,6 @@ struct EvidenceSweepTests {
         private var names: [String] = []
         func record(_ name: String) { names.append(name) }
         func contains(_ name: String) -> Bool { names.contains(name) }
+        var count: Int { names.count }
     }
 }

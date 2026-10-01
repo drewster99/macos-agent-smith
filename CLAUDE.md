@@ -25,7 +25,8 @@ The full design history, rationale, and completed/planned features live in `ROAD
 - `SafetySystemTesting/` — isolated harness and scripts for exercising the safety/gatekeeper system. Self-contained; has its own README.
 - `scripts/` — one-off Python utilities (e.g. `backfill_tool_calls.py`).
 - `ROADMAP.md` — long-form plan + completed-work log. Authoritative source for "why is it this way."
-- `ROADMAP_implement_tabs.md` — historical sub-plan for the multi-session tab work.
+- `docs/plans/` — historical sub-plans (`ROADMAP_implement_tabs.md`, `InspectorImprovements.md`, …).
+- `docs/audits/` — past code-review and SwiftUI audit reports.
 
 ## Package dependencies (versioned git)
 
@@ -190,7 +191,17 @@ LLM provider/model state is owned by `SwiftLLMKit.LLMKitManager` (`@Observable`,
 
 **`restartForNewTask` does NOT rebuild Smith while Smith is alive** — it cycles only the worker and returns (Phase 2, long-lived Smith). Older comments and commit messages claiming Smith picks up a new model "on the next task" or "on the next runtime restart (`restartForNewTask`)" are wrong and have been corrected. Without a retune, a live Smith keeps its spawn-time model and parameters for the entire session.
 
-**Known limitation, tracked as [issue #9](https://github.com/drewster99/macos-agent-smith/issues/9):** the non-agent long-lived holders take NEITHER a retune nor a model change until the runtime restarts — `TaskSummarizer`, Smith's own `SecurityEvaluator`, and `validationSecurityEvaluator`. Only per-Brown evaluators refresh, at spawn. The validator needs nothing: `validatorModel()` reads the dictionaries fresh for every criterion judgment.
+**The non-agent holders take BOTH a retune and a model change live** (issue #9 gap 2, closed
+2026-09-25). Every `SecurityEvaluator` the runtime makes (Smith's, each Brown's, the validators'
+shared one) is registered weakly (`liveSecurityEvaluators`). When the Security Agent's resolved
+configuration changes, `setProviders` hands each one the new `SecurityEvaluatorModel` (`applyModel`),
+keeping its accumulated review state. A model change is safe here, unlike for an agent: an evaluation
+snapshots its model at its start and its conversation lives only for that evaluation. The
+`TaskSummarizer` is rebuilt (`makeTaskSummarizer`) when the summarizer's configuration changes. The
+validator needs nothing: `validatorModel()` reads the dictionaries fresh for every criterion
+judgment. The inspector's model line shows `AgentCardRunningModelNotice` whenever an agent's last call
+used a model other than its assignment. Issue #9 gap 1, switching a live AGENT's model mid-conversation,
+stays unsupported by the decision above.
 
 The pool (`LLMKitManager.configurations`) still LOADS — it seeds first launch and backs one-way migration of pre-retirement state (a session's legacy `[AgentRole: UUID]` decodes into `SessionState.legacyConfigAssignments`, mapped to `(provider, model)` via the pool at load; `AppDefaults` self-migrates its bundled UUID `agentAssignments` the same way at decode and re-encodes as `agentModelAssignments`) — but no longer drives assignment. Nothing edits it: the old **Configurations** settings tab is now a per-model **Models** tab (`SettingsView.modelsTab`) listing every cached `(provider, model)` with the per-model Flags/Capabilities/Pricing editors (keyed on `providerID+modelID`, never on a config) plus Refresh Models + Export Defaults. `ModelConfigurationEditorView`, the config CRUD, `SharedAppState.updateAgentConfig`/`deleteConfiguration`, and `SessionManager.deleteConfiguration` were all deleted.
 
@@ -402,6 +413,7 @@ A template task defines `templateInputDefinitions`; `instantiateTemplate` resolv
 - **Wholesale replace is gated in `TaskStore`, on status AND evidence** — atomically, because a tool-level check is TOCTOU. `AgentTask.canReplaceAcceptanceContract(with:)` asks the narrow question: does the replacement still contain every criterion currently on the task? Restating them all destroys no identity whatever else it edits (that is the task-detail editor, which carries every row's id). Dropping one, once evidence exists, must be said through `delete`. **`hasValidationEvidence` is `validation != nil`** — the ledger's existence, not its contents, because every finer-grained signal is erased by the action being guarded: a round increments *before* judging, and a contract edit resets `round` to 0, so two edits in a row would find the second unguarded. Not parity with `purge`, which requires the strictly stronger `startedAt == nil && validation == nil`. The **task-detail editor saves as a DIFF** (`applyCriterionActions`), so a user deliberately deleting a row says `delete` instead of tripping a guard aimed at accidental loss; it has no reorder and appends new rows, so order is preserved exactly.
 - **`SetAcceptanceCriteriaTool` carries `Status.isValidationContractEditable`**, the gate `ManageStepsTool` always had — enforced again in the store. There are **no mid-round criteria edits**: changing the rules while a validator judges against them is the race the gate exists to prevent. Smith can still fix criteria at both decision points, since `.failed` and `.awaitingReview` are both editable. The tool takes **exactly one of `criteria` (replace-all, first-time authoring) or `actions`**, and `get_task_details` prints criterion ids because the edit verbs have nothing to name otherwise.
 - **A completed acceptance contract is immutable; changed-contract follow-ups become successor tasks (decided 2026-09-22).** `run_task` remains the correct operation for a retry or continuation when the existing criteria still describe success completely. A follow-up that adds or changes a deliverable, criterion, or distinct work phase is a new contract: Smith creates a related successor task and carries the predecessor id/title plus relevant result context into its description. Smith must not reopen a completed task merely to make its criteria editable, and must never call `set_acceptance_criteria` on that completed predecessor. This keeps the accepted result and validation ledger historically honest while still making the relationship explicit.
+- **Optional per-task user-acceptance gate (decided + built 2026-10-01).** `AgentTask.requiresUserAcceptance` (opt-in, default false, set via `set_acceptance_criteria`'s `requires_user_acceptance`) makes a task park in `.awaitingReview` — reusing `escalateValidation`'s worker-teardown-and-park shape verbatim, non-modal — once every criterion settles, instead of auto-completing. `AgentTask.AwaitingReviewReason` (`.validatorError` | `.userAcceptanceRequested`) distinguishes WHY a task is parked (banner copy only; both resolve through the same four user row-actions). The new Smith tool `respond_to_user_acceptance` is the "just reply in chat" path: Smith relays the user's own accept/reject decision, and the runtime structurally refuses it on anything but a `.userAcceptanceRequested` park — it can never be used to self-resolve a validator-error escalation, which stays user-only. See ROADMAP.md for the full design note.
 - **`consecutiveValidationsWithoutNewApprovals` / `maxConsecutiveValidationsWithoutNewApprovals`** (default 8) share vocabulary; "stall" never said what stalled. It counts consecutive validation rounds in which nothing newly settled (no criterion reached ACCEPT or WAIVE — a waive counts as an approval), resets the instant anything settles, and fails the task at the limit. Persisted deliberately — the counter measures that worker and validator cannot converge on this contract, and a cold-boot reset would let a crash loop keep a runaway task alive forever; `resetValidationRound` is the intentional escape hatch. Read everywhere through the computed `validationsWithoutNewApprovals: Int`, so the persistence-shaped `Int?` never reaches the domain model.
 - **Persisted keys outlive property renames.** `TaskValidationState` maps `consecutiveValidationsWithoutNewApprovals` back to the on-disk `consecutiveStallRounds` with a `CodingKeys` case (the decoder stays synthesized — a key mapping, not a hand-written `init(from:)`), so no in-flight task restarts its convergence budget at zero on upgrade. **That mapping costs the type its synthesized key list**, and the resulting footgun is real: a stored property with a default value (every optional has one) that is missing a case is silently never persisted, and every field this work added is that shape. `ledgerCodingKeyCoverage` guards it **by reflection, not round trip** — an uncovered property decodes back to its default and compares equal to any fixture that also left it defaulted, so a round-trip test stays green (verified by deliberately adding one). `SwiftLLMKit.ModelProfile` carries the identical pattern and guard.
 
@@ -413,7 +425,7 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
 
 **Architecture decision (2026-07-26): the inspector becomes a live "Now" panel, telemetry re-keyed by instance.** The role-keyed inspector described above is the PRE-MIGRATION state. The agreed direction rebuilds the right inspector as a live "Now" panel (agent states, live task stages, a tool-call lifecycle tree with inline security), driven by **per-instance** telemetry (`AgentInstanceRef`) rather than the fixed four `AgentRole` buckets; per-agent config moves to Settings, per-task detail to a click-into-a-task view, durable money to the cost panel. This is the long-deferred "M2 inspector re-key." The full phased build plan + settled UI rules live in `ROADMAP.md` ("Inspector 'Now' panel + M2 telemetry re-key"). Until those phases land, the role-keyed surfaces (`turnsByRole`, `processingRoles`, `toolExecutingByRole`, role-keyed `terminatedAgentArchive`, `AgentInspectorTarget(sessionID, role)`) are still current — do not assume the instance-keyed model exists in code yet.
 
-### Inspector data sources (built 2026-09-23 — see InspectorImprovements.md)
+### Inspector data sources (built 2026-09-23 — see docs/plans/InspectorImprovements.md)
 
 - **Provider calls reach the inspector as `LLMCallEvent` (`completed` turn | `failed` attempt)**
   through `OrchestrationRuntime.setOnLLMCallRecorded`. Every caller that bills a role emits them:
@@ -434,6 +446,95 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
   stamping a sequence before delivery. Queries carry per-corpus `CorpusSearchOutcome` and hit
   snapshots; mutations are published only after commit, with typed `MemoryActivityOrigin`. Callers
   never synthesize memory events.
+
+### The inspector's display state is derived in the model (decided 2026-09-26)
+
+**User decision: "Model-side snapshots."** The agent cards and the Live section read finished,
+`Equatable` values from `AppViewModel.inspectorLive` (`InspectorLiveState`): per-role
+`RoleCardState.data` (`AgentRoleData`, including the processing / tools-running start dates),
+`summarizerCard`, and `liveRows`. `InspectorLiveState.rebuild()` reads every input inside
+`withObservationTracking`, schedules ONE rebuild on the next main-queue turn when any of them
+changes, re-arms, and assigns each output only when it changed. The views watch NOTHING.
+
+- **Why:** every SwiftUI "onChange(of:) action tried to update multiple times per frame" warning in
+  the app came from the `.onChange` watchers those views used to drive their own `@State` caches
+  (identified site by site with per-site wrapper types), a single input change was enough to
+  trigger one, and SwiftUI SKIPS the action it warns about, so a card sat stale until its 2 s
+  heartbeat. Measured on one small task: 11 warning sites before, 0 after. Frame-batching the
+  sources instead made it WORSE (17). Details: `docs/audits/2026-09-25-onchange-per-frame/`.
+- **Don't add `.onChange` watchers (or a `@State` cache rebuilt by them) back to these views.** A new
+  input to a card or the Live section is read inside `InspectorLiveState.computeOutputs()`; the
+  tracking picks it up automatically.
+- The transcript is re-bucketed by role only when `AppViewModel.messagesRevision` moves
+  (`FilteredTranscriptProvider.revision`, bumped on every `messages` write) — the one expensive step.
+- The 10 s aging rebuild stays: Live rows age out on a clock, which no observed value reports.
+
+### Task state events and task watches (decided 2026-09-24, revised 2026-09-25 — see TaskStateEventsPlan.md)
+
+**One event source, two kinds of subscriber.** Every live task status change goes through ONE
+`TaskStore` writer, `applyStatus`. It emits ONE typed `TaskStatusTransition`, carrying a per-task
+`statusRevision` and a required typed `TaskTransitionCause`, validated against a single
+`TaskTransitionMatrix`; an illegal combination is refused. Everything that reacts to a status
+change subscribes to it:
+
+- the runtime's own reactions. The store has ONE `setEventObserver`, which yields
+  `TaskStoreEvent`s (transitions AND `TaskLifecycleEvent`s, in write order) into a FIFO that one
+  serialized runtime consumer drains (`installTaskEventConsumerIfNeeded` / `react(to:)`). There
+  is no `onTaskTerminated` or `onTaskMovedToInactive` any more;
+- the built-in Smith briefing (defined in code, always on);
+- user-defined **task watches**: data on `AgentTask.watches` saying "when task X reaches state S,
+  do A", where A is start another task, a macOS notification, Smith summarizes to the user, or
+  instructions for Smith.
+
+Don't add a status write that bypasses the writer, and don't add a second notification path for
+task state. Add a subscriber.
+
+- **Crash consistency is structural.** A subscriber's effect is recorded on the task
+  (`pendingEffects`, id `taskID|statusRevision|subscriber`) in the same snapshot as the status.
+  - An effect is released only after the caller's ordered side effects (banner, teardown, briefing)
+    and only once its revision is DURABLE.
+  - One serialized per-session consumer submits effects to the broker. Store callbacks only
+    enqueue; nothing awaits the broker inside the writer.
+  - Persistence distinguishes "drained" from "durable". `TaskStore` is the SINGLE writer of its
+    session's `tasks.json`. Every mutation goes through `didMutate()`, which schedules an in-order,
+    coalesced write of the store's own state. The view model only mirrors tasks for display and
+    never writes them. When one store replaces another (the standalone store at runtime start, or
+    a prior run's store), the old one is `retirePersistence()`d first.
+- **Disposition is not status.** Archive, delete and restore emit a separate `TaskLifecycleEvent`.
+- **Cold-boot recovery** is one rule (`ColdBootRunningRecovery`) applied through the store at
+  session load, independent of Start.
+- **Holds live on the dependent task.** A chained task carries `startHolds` (a set), enforced at the
+  final claim gate against a typed `TaskStartOrigin` on EVERY start input. Only the user's explicit
+  Play overrides a hold.
+
+Decisions:
+- The Smith briefing (`SmithTaskBriefing`) keeps today's set of notified transitions. It is
+  recorded as a durable effect in the status write and delivered through the broker's Smith queue,
+  effectively once. Smith acknowledges a delivery (`acknowledgeDeliveries`, with the lease
+  generation) only when its run loop next goes idle, so the only duplicate window is a crash
+  mid-turn. Don't reintroduce `appendUserMessage` for a status note: it is dropped when no Smith
+  is live.
+- Watches fire for crash-recovery transitions but not for session shutdown or deletion.
+- Template watches are blueprints for the notifying actions only. `startTask` is same-session,
+  ordinary tasks only.
+- A watch never reopens a completed task or resets a failed one.
+- **An effect leaves its task only when the broker durably owns it.** `NotificationBroker.submit`
+  returns that ownership: settled in the ledger, or durably queued. Keep the record until it is
+  true; resubmitting is safe because ids dedup.
+- **Never block the task-event consumer on a person.** It is one serialized task: anything it awaits
+  delays every slot refill, briefing and chain start. `TaskNotificationService` therefore refuses
+  (and asks for permission in the background) instead of awaiting the permission prompt.
+- **Brown's first-turn acknowledgement never writes a status** (`TaskStore.acknowledgeTask`). Every
+  start path sets `.running` before the briefing.
+- **Cancelling a watch withdraws its handed-off deliveries before `cancelWatch` returns**
+  (`TaskStore.setWatchWithdrawal`, installed by the runtime → `NotificationBroker.withdraw`, settled
+  `.dropped(.withdrawn)`): anything still queued (even while its enqueue is being written) or
+  waiting on a push retry is taken back, one mid-attempt is withdrawn when the attempt ends, and an
+  id the broker has not seen yet is tombstoned so a submit still on its way dedups. A cancel before
+  Start (no runtime yet) is caught at start by `reconcileInFlightWatchFirings`. A note Smith has
+  already been handed, or a start already under way, cannot be recalled — that is the one residual.
+- **Archive and delete cancel ALL of a task's wakes**, including `survivesTaskTermination` ones
+  (`WakeScheduler.cancelAllWakes(forRemovedTask:)`). Only a terminal status spares those.
 
 ## Conventions specific to this repo
 

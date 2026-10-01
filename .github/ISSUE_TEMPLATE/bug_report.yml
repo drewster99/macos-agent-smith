@@ -1,0 +1,54 @@
+name: Bug report
+description: Something broke, crashed, or an agent did something strange.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Rough reports are fine. If this is a **security** issue, please
+        don't file it here. Use [private reporting](https://github.com/drewster99/macos-agent-smith/security/advisories/new) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The task you gave Smith, if one was involved, and anything else needed to see it again.
+      placeholder: |
+        1. Asked Smith to "..."
+        2. Brown ran ...
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: Agent Smith version
+      description: From the About window, or "built from source at <commit>".
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: textarea
+    id: models
+    attributes:
+      label: Models per role
+      description: Provider and model for each role you had set. Leave blank if it doesn't seem relevant.
+      placeholder: |
+        Smith: anthropic / claude-sonnet-5
+        Brown: ollama / qwen3.5
+        Security Agent:
+        Summarizer:
+        Validator:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Screenshots or transcript excerpt
+      description: Please check for API keys or personal data before pasting.

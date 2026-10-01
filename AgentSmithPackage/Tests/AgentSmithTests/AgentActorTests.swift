@@ -344,7 +344,7 @@ struct AgentActorTests {
     func listTasksFiltersByStatus() async throws {
         let taskStore = TaskStore()
         let task = await taskStore.addTask(title: "Done task", description: "Completed")
-        await taskStore.updateStatus(id: task.id, status: .completed)
+        await taskStore.driveStatus(id: task.id, to: .completed)
         await taskStore.addTask(title: "Pending task", description: "Waiting")
 
         let tool = ListTasksTool()

@@ -46,7 +46,7 @@ struct HelpRequestTests {
         let brownID = UUID(), smithID = UUID()
         let task = await taskStore.addTask(title: "Extract hooks", description: "...")
         await taskStore.assignAgent(taskID: task.id, agentID: brownID)
-        await taskStore.updateStatus(id: task.id, status: .running)
+        await taskStore.driveStatus(id: task.id, to: .running)
 
         let ctx = Self.brownContext(taskStore: taskStore, channel: channel, brownID: brownID, smithID: smithID)
         let result = try await RequestHelpTool().execute(
@@ -109,7 +109,7 @@ struct HelpRequestTests {
         let task = await taskStore.addTask(title: "Normal work", description: "...")
         await taskStore.assignAgent(taskID: task.id, agentID: brownID)
         await taskStore.setResult(id: task.id, result: "done", commentary: nil)
-        await taskStore.updateStatus(id: task.id, status: .awaitingReview)
+        await taskStore.driveStatus(id: task.id, to: .awaitingReview)
 
         let ctx = Self.smithContext(taskStore: taskStore, channel: channel, brownID: brownID, smithID: smithID)
         let result = try await ProvideHelpTool().execute(

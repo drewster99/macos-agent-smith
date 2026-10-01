@@ -25,6 +25,10 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
                 "type": .string("string"),
                 "description": .string("UUID of the task whose criteria to set.")
             ]),
+            "requires_user_acceptance": .dictionary([
+                "type": .string("boolean"),
+                "description": .string("Optional, independent of 'criteria'/'actions' and may be passed alone. When true, once every criterion has settled (ACCEPT/WAIVE) the task does NOT auto-complete — it parks awaiting the user's explicit sign-off (accept, or reject with feedback, including by just replying in chat). Use when the user said they want to review or approve the result themselves before it's considered done, or for any task where a human should have final say even though it technically passed. Omit (or false) for ordinary tasks — this is an opt-in gate, not the default.")
+            ]),
             "criteria": .dictionary([
                 "type": .string("array"),
                 "items": .dictionary([
@@ -171,13 +175,29 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         guard task.status.isValidationContractEditable else {
             return .failure("Task '\(task.title)' is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active. Criteria are editable when the task is pending, paused, interrupted, scheduled, failed, or awaiting review.")
         }
+        // Independent of the criteria/actions mode below and may be passed alone — it's a task-level
+        // gate, not a per-criterion property.
+        var acceptanceGateNote = ""
+        if let requiresUserAcceptance = ToolArguments.optionalBool(arguments, "requires_user_acceptance") {
+            if let problem = await context.taskStore.setRequiresUserAcceptance(id: taskID, value: requiresUserAcceptance) {
+                return .failure(problem)
+            }
+            acceptanceGateNote = requiresUserAcceptance
+                ? " This task now requires your explicit acceptance once all criteria settle."
+                : " This task no longer requires explicit acceptance — it will complete automatically once all criteria settle."
+        }
         // Empty reads as absent, so a caller that sends BOTH keys as `[]` gets the "pass one of
         // them" guidance rather than the "exactly one" refusal for two arguments it never meant.
         let rawCriteria = ToolArguments.optionalArray(arguments, "criteria")
         let rawActions = ToolArguments.optionalArray(arguments, "actions")
         switch (rawCriteria, rawActions) {
         case (nil, nil):
-            return .failure("Pass either 'criteria' (replace the whole list — first-time authoring) or 'actions' (per-criterion add/update/delete).")
+            // A flag-only call (requires_user_acceptance with no criteria/actions) is valid and
+            // already applied above — only refuse when NEITHER was given.
+            guard !acceptanceGateNote.isEmpty else {
+                return .failure("Pass either 'criteria' (replace the whole list — first-time authoring) or 'actions' (per-criterion add/update/delete), or 'requires_user_acceptance' alone to change just that gate.")
+            }
+            return .success("Updated '\(task.title)'.\(acceptanceGateNote)")
         case (.some, .some):
             return .failure("Pass 'criteria' OR 'actions', not both: one replaces the whole list, the other edits criteria individually.")
         case (nil, .some(let actions)):

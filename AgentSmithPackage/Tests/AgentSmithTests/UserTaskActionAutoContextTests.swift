@@ -52,7 +52,7 @@ struct UserTaskActionAutoContextTests {
         let expected: [UserTaskAction: String] = [
             .paused: "paused", .stopped: "stopped", .deleted: "deleted",
             .retryRequested: "retry_requested", .runAgainRequested: "run_again_requested",
-            .undeleted: "undeleted",
+            .undeleted: "undeleted", .deferredForCapacity: "deferred_for_capacity",
         ]
         #expect(Set(UserTaskAction.allCases) == Set(expected.keys), "a new case must be pinned here")
         for (action, raw) in expected {

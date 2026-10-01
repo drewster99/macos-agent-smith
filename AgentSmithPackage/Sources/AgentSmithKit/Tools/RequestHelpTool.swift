@@ -62,7 +62,9 @@ public struct RequestHelpTool: AgentTool {
         }
 
         let request = "Blocker: \(trimmedBlocker)\nNeeded: \(trimmedNeeded)"
-        await context.taskStore.requestHelp(id: task.id, request: request)
+        guard await context.taskStore.requestHelp(id: task.id, request: request) else {
+            return .failure("Help can't be requested for this task in its current state.")
+        }
 
         guard let smithID = await context.agentIDForRole(.smith) else {
             return .success("Help requested for task: \(task.title). Stop and wait for Smith's response.")

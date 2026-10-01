@@ -16,4 +16,10 @@ public enum KnownNotificationType: String, CaseIterable, Sendable {
     case reminder
     /// Inbound external message observed by a worker. Dispatch `.deliver`, recipient `.smith`.
     case userMessage = "user_message"
+    /// A task status change Smith is told about (`SmithTaskBriefing`). Dispatch `.deliver`,
+    /// recipient `.smith`.
+    case taskBriefing = "task_briefing"
+    /// One firing of a task watch. `.acted` for `startTask` (recipient `.runtime`), `.deliver` for
+    /// the notifying actions (recipient `.smith`, or `.external(macOSNotificationTarget)`).
+    case taskWatch = "task_watch"
 }

@@ -21,349 +21,39 @@ import AgentSmithKit
 /// duration, never that age — showing the age made a call that had long since returned read as
 /// one that never did. A task keeps its title and stage chip for as long as its status is live;
 /// only the activity beneath it expires.
+///
+/// The rows are derived in the model (`InspectorLiveState.liveRows`); this view only draws them.
 struct NowLiveSection: View {
-    let viewModel: AppViewModel
-
-    @State private var rows: [LiveTaskRow] = []
-    /// Every `.onChange` below funnels through this, so a frame in which four inputs change
-    /// rebuilds the rows once instead of four times. See `RecomputeCoalescer`.
-    @State private var coalescer = RecomputeCoalescer()
+    let live: InspectorLiveState
 
     var body: some View {
         // Rendered only when something is actually live, so an idle session shows no
-        // empty section. The `.onChange`/`.task` chain stays attached via the Group.
-        Group {
-            if !rows.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Live")
-                        .font(AppFonts.liveSectionHeader)
-                        .textCase(.uppercase)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 12)
-                        .padding(.bottom, 4)
+        // empty section.
+        if !live.liveRows.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Live")
+                    .font(AppFonts.liveSectionHeader)
+                    .textCase(.uppercase)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                    .padding(.bottom, 4)
 
-                    ForEach(rows) { row in
-                        LiveTaskRowView(row: row)
-                    }
-
-                    Divider()
-                        .padding(.top, 6)
+                ForEach(live.liveRows) { row in
+                    LiveTaskRowView(row: row)
                 }
+
+                Divider()
+                    .padding(.top, 6)
             }
-        }
-        // Activity rows age out on a clock, so they have to be re-evaluated on one. Every other
-        // trigger here is change-driven, and in a quiet session (a task parked, or a worker
-        // thinking for minutes) none of them fire — an aged-out row would sit on screen until
-        // some unrelated change happened to force a recompute.
-        .task {
-            scheduleRecompute()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.staleSweepIntervalSeconds))
-                guard !Task.isCancelled else { return }
-                scheduleRecompute()
-            }
-        }
-        .onChange(of: taskSignature) { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.messages) { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.processingInstances) { _, _ in scheduleRecompute() }
-        .onChange(of: viewModel.toolExecutingByInstance) { _, _ in scheduleRecompute() }
-        // The security registry drives both a worker's "waiting on security" line and the
-        // per-call "Security" marker, so it has to wake the recompute like any other live input.
-        // Without this the only thing refreshing them is the 10s stale sweep, and a review that
-        // starts and finishes between ticks never appears at all.
-        .onChange(of: viewModel.shared.liveActivitySnapshot) { _, _ in scheduleRecompute() }
-    }
-
-    /// A cheap Equatable digest of the active tasks' identity + stage, so a status change
-    /// (e.g. running → validating) triggers a recompute even when no new message arrived.
-    private var taskSignature: [String] {
-        viewModel.activeTaskList.map { "\($0.id.uuidString):\($0.status.rawValue)" }
-    }
-
-    /// Asks for a rebuild on the next main-queue turn. Callers never invoke `recompute()`
-    /// directly — that is what produced several `rows` assignments in a single frame.
-    private func scheduleRecompute() {
-        coalescer.schedule { recompute() }
-    }
-
-    private func recompute() {
-        let live = viewModel.activeTaskList.filter { Self.isLive($0.status) }
-        // The one registry `SecurityEvaluator` writes. Read ONCE per recompute so the tally, the
-        // per-worker blocked state, and every tool row describe the same instant.
-        let security = viewModel.shared.liveActivitySnapshot
-
-        // One ROW per call, built by joining the three messages a call produces on their shared
-        // `requestID`: the request, the Security Agent's verdict, and the output. Bucketing on the
-        // `tool` metadata key alone (which request AND output both carry) listed every call twice.
-        //
-        // Only the REQUESTS are age-bounded, and only they end the walk: `messages` is
-        // append-ordered, so once a request predates the window every earlier request does too.
-        // Verdicts and outputs are collected without a cutoff — a call issued just inside the
-        // window returns just outside it, and dropping its output would leave a finished call
-        // rendering forever as "under review".
-        //
-        // Walking newest-first also means the FIRST verdict/output seen for a requestID is the
-        // newest, which is the one that counts; a repeated id keeps its latest state.
-        let cutoff = Date().addingTimeInterval(-Self.activityWindowSeconds)
-        // Keyed by (agent, call id), NOT call id alone. A tool call id is whatever the provider
-        // sent — some OpenAI-compatible servers emit per-response index ids like `call_0` — so with
-        // two workers running, a bare id let one agent's row pick up another's verdict and output.
-        // The registry was hardened against exactly this; its consumer has to match.
-        var reviewByRequest: [CallKey: ChannelMessage] = [:]
-        var outputByRequest: [CallKey: ChannelMessage] = [:]
-        var requests: [(message: ChannelMessage, taskID: UUID, tool: String, key: CallKey)] = []
-        scan: for message in viewModel.messages.reversed() {
-            guard case .string(let requestID)? = message.metadata?["requestID"],
-                  let agentInstanceID = Self.agentInstanceID(of: message) else { continue }
-            let key = CallKey(agentInstanceID: agentInstanceID, callID: requestID)
-            // A security verdict carries NO `messageKind`; it is identified by its typed
-            // `securityDisposition`, exactly as the transcript's `isSuppressibleFollowUp` does.
-            // Still a typed discriminator — just a different one.
-            if message.metadata?["securityDisposition"] != nil {
-                if reviewByRequest[key] == nil { reviewByRequest[key] = message }
-                continue
-            }
-            switch message.kind {
-            case .toolOutput:
-                if outputByRequest[key] == nil { outputByRequest[key] = message }
-            case .toolRequest:
-                guard message.timestamp >= cutoff else { break scan }
-                guard let taskID = message.taskID,
-                      let tool = message.toolName else { continue }
-                requests.append((message, taskID, tool, key))
-            default:
-                continue
-            }
-        }
-
-        var toolsByTask: [UUID: [ToolActivity]] = [:]
-        for request in requests {
-            guard toolsByTask[request.taskID, default: []].count < Self.maxToolRowsPerTask else { continue }
-            toolsByTask[request.taskID, default: []].append(
-                Self.activity(
-                    request: request.message,
-                    name: request.tool,
-                    review: reviewByRequest[request.key],
-                    output: outputByRequest[request.key],
-                    key: request.key,
-                    security: security
-                )
-            )
-        }
-
-        // Per-instance live state (the M2 re-key payoff): each task reads ITS OWN Brown's
-        // thinking/tool state, matched by the Brown instance id in the task's assignees, so
-        // two concurrent Browns no longer clobber one shared role-level indicator.
-        let processing = viewModel.processingInstances
-        let toolsByInstance = viewModel.toolExecutingByInstance
-
-        let next = live.map { task in
-            LiveTaskRow(
-                id: task.id,
-                title: task.title,
-                status: task.status,
-                brownState: Self.brownState(for: task, processing: processing, tools: toolsByInstance, security: security),
-                // Already newest-first and already capped by the collecting loop above.
-                tools: toolsByTask[task.id] ?? []
-            )
-        }
-
-        // Already deferred off the .onChange / .task closure by the coalescer, so this assigns
-        // directly — wrapping it again would put the rebuild a further turn behind its inputs.
-        if rows != next { rows = next }
-    }
-
-    /// Assembles one call's state from its request, its Security Agent verdict, and its output.
-    /// Every branch is driven by which of those three messages EXIST and by the verdict's typed
-    /// `securityDisposition` — never by their prose.
-    private static func activity(
-        request: ChannelMessage,
-        name: String,
-        review: ChannelMessage?,
-        output: ChannelMessage?,
-        key: CallKey,
-        security: LiveActivityTracker.Snapshot
-    ) -> ToolActivity {
-        let disposition: String? = {
-            if case .string(let value)? = review?.metadata?["securityDisposition"] { return value }
-            return nil
-        }()
-        let phase: ToolActivity.SecurityPhase
-        switch disposition {
-        case "approved": phase = .approved
-        case "autoApproved": phase = .autoApproved
-        case "warning": phase = .warned
-        case "denied", "abort": phase = .denied
-        // Blocked, and NOT by a verdict. These must render as blocked — falling into the default
-        // below would paint a green check on a call that never ran, because that branch reads
-        // "a row exists" as "it got past the gate". It does not: `reviewDisabled` has been
-        // rendering that way since it shipped, and `unavailable`/`cancelled` would have joined it.
-        case "unavailable", "cancelled": phase = .denied
-        case "reviewDisabled": phase = .autoApproved
-        // No verdict on the wire yet. "Under review" is ASKED, not inferred: the registry
-        // `SecurityEvaluator` writes says whether this exact call is in front of the LLM right
-        // now. Inferring it from a missing verdict was also true before evaluation started and
-        // during any delivery gap, so a call could show "Security" while nothing was looking at
-        // it. An UNRECOGNISED disposition is deliberately NOT treated as allowed: a value this
-        // build has not heard of is most likely a newer build's block, and painting it green is
-        // the one wrong answer that hides a call which never ran. Blocked-looking is the safe
-        // reading, and `SecurityDisposition.channelTag` is the closed set it comes from.
-        default:
-            if review != nil {
-                phase = .denied
-            } else {
-                phase = security.isEvaluating(callID: key.callID, agentInstanceID: key.agentInstanceID)
-                    ? .evaluating
-                    : .notYetReviewed
-            }
-        }
-
-        let run: ToolActivity.RunPhase
-        if phase == .denied || phase == .evaluating || phase == .notYetReviewed {
-            run = .notStarted
-        } else if let output {
-            run = .finished(runMs: {
-                if case .int(let ms)? = output.metadata?["executionMs"] { return ms }
-                return nil
-            }())
-        } else {
-            // Executing. The verdict is posted immediately before the tool is invoked, so its
-            // timestamp is the closest start-of-execution marker the transcript carries.
-            run = .running(since: review?.timestamp ?? request.timestamp)
-        }
-
-        return ToolActivity(
-            id: request.id,
-            name: name,
-            requestedAt: request.timestamp,
-            security: phase,
-            run: run
-        )
-    }
-
-    /// The live micro-state of the Brown assigned to `task`, read from the per-instance
-    /// telemetry (thinking / running a tool). Nil when that Brown isn't currently active.
-    private static func brownState(
-        for task: AgentTask,
-        processing: Set<AgentInstanceRef>,
-        tools: [AgentInstanceRef: [String: Int]],
-        security: LiveActivityTracker.Snapshot
-    ) -> String? {
-        for id in task.assigneeIDs {
-            let brownRef = AgentInstanceRef(role: .brown, instanceID: id)
-            if let counts = tools[brownRef], !counts.isEmpty {
-                let names = counts.keys.sorted()
-                if names.count == 1, let only = names.first { return "running \(only)" }
-                return "running \(names.count) tools"
-            }
-            // Brown is blocked while the Security Agent reviews a call it issued. Derived from the
-            // one registry `SecurityEvaluator` writes, so this can never contradict the Agents
-            // tally or the tool row beneath it — all three read the same entries.
-            if security.isAwaitingSecurity(agentInstanceID: id) {
-                return "waiting on security"
-            }
-            if processing.contains(brownRef) { return "thinking" }
-        }
-        return nil
-    }
-
-    /// Most-recent tool calls shown per task before older ones fall off.
-    private static let maxToolRowsPerTask = 4
-
-    /// How far back a tool call still counts as "now". Comfortably longer than a typical call
-    /// (most return in seconds) and short enough that nothing on screen reads as stale. A call
-    /// that outlives this is still represented — by `brownState`'s live "running <tool>" line,
-    /// which comes from telemetry rather than a timestamp and therefore can't go stale.
-    private static let activityWindowSeconds: TimeInterval = 120
-
-    /// How often the rows are re-evaluated so aged-out activity actually disappears. Well under
-    /// `activityWindowSeconds`, so a row is never visibly overdue by more than this.
-    private static let staleSweepIntervalSeconds: TimeInterval = 10
-
-    /// Statuses that represent work happening — or needing attention — right now.
-    static func isLive(_ status: AgentTask.Status) -> Bool {
-        switch status {
-        case .starting, .running, .validating, .awaitingReview, .awaitingHelp, .interrupted:
-            return true
-        default:
-            return false
-        }
-    }
-
-    struct LiveTaskRow: Identifiable, Equatable {
-        let id: UUID
-        let title: String
-        let status: AgentTask.Status
-        /// This task's Brown's live micro-state, read from the per-instance telemetry (the
-        /// M2 re-key) and matched by the Brown instance id in the task's assignees — so two
-        /// concurrent Browns no longer overwrite one shared indicator. Nil when idle.
-        let brownState: String?
-        let tools: [ToolActivity]
-    }
-
-    /// Identifies one tool call. The agent is part of the key because a call id is provider data
-    /// and is not unique across agents — the same reason `LiveActivityTracker` keys its registry
-    /// this way, and the two must agree or a row reads another agent's verdict.
-    struct CallKey: Hashable {
-        let agentInstanceID: UUID
-        let callID: String
-    }
-
-    /// The agent a tool-lifecycle message belongs to. Every producer stamps it: `AgentActor` on
-    /// requests, verdicts and outputs; `TaskValidationCoordinator` on the validator's requests.
-    /// A message without one cannot be placed and is skipped rather than guessed at.
-    static func agentInstanceID(of message: ChannelMessage) -> UUID? {
-        guard case .string(let raw)? = message.metadata?["agentID"] else { return nil }
-        return UUID(uuidString: raw)
-    }
-
-    /// One tool call's live story: who is looking at it, and how long it actually RAN.
-    struct ToolActivity: Identifiable, Equatable {
-        let id: UUID
-        let name: String
-        /// When the request was posted. NOT displayed — it is the row's AGE, which is what this
-        /// used to show and what made a finished call read as a tool that never returned. Kept
-        /// only to age the row out of the "now" window.
-        let requestedAt: Date
-        let security: SecurityPhase
-        let run: RunPhase
-
-        /// What the Security Agent has decided about this call, so far.
-        enum SecurityPhase: Equatable {
-            /// The Security Agent's LLM is looking at this call right now.
-            case evaluating
-            /// No verdict yet, and nothing is evaluating it — the moment between a call being
-            /// issued and review starting, or an auto-approval whose verdict hasn't landed. Shown
-            /// as nothing rather than as a security wait that isn't happening.
-            case notYetReviewed
-            /// Reviewed by the Security Agent's LLM and allowed.
-            case approved
-            /// Pre-cleared without an LLM round-trip (the auto-approve table, or a WARN retry).
-            case autoApproved
-            /// Allowed, with a caveat.
-            case warned
-            /// Refused. The tool never ran, so there is no duration to show.
-            case denied
-        }
-
-        /// How far the tool itself has got. `.notStarted` covers both "still in review" and
-        /// "denied" — in neither case has the tool run, and a denied call never will.
-        enum RunPhase: Equatable {
-            case notStarted
-            /// Approved and executing, counting from the verdict's timestamp.
-            case running(since: Date)
-            /// Finished, with the duration `runToolWithTimeout` actually measured. Nil when the
-            /// producing path published none — rendered as no duration, never a fabricated one.
-            case finished(runMs: Int?)
         }
     }
 }
 
 /// One live task: its title + stage chip, with its recent tool activity indented beneath.
 private struct LiveTaskRowView: View {
-    let row: NowLiveSection.LiveTaskRow
+    let row: LiveTaskRow
 
     private var stageColor: Color { TaskStatusBadge.color(for: row.status) }
 
@@ -410,7 +100,7 @@ private struct LiveTaskRowView: View {
 /// One tool call: its name, then whatever is true of it right now — under review, running, or
 /// finished with the time it actually took and how Security ruled on it.
 private struct LiveToolRowView: View {
-    let tool: NowLiveSection.ToolActivity
+    let tool: LiveToolActivity
 
     var body: some View {
         HStack(spacing: 6) {
@@ -431,7 +121,7 @@ private struct LiveToolRowView: View {
 /// The trailing half of a live tool row: either the Security Agent holding the call, or the run
 /// duration plus the verdict it was let through on.
 private struct LiveToolStatusView: View {
-    let tool: NowLiveSection.ToolActivity
+    let tool: LiveToolActivity
 
     var body: some View {
         switch tool.security {
@@ -478,7 +168,7 @@ private struct LiveToolStatusView: View {
 /// Time the TOOL spent running — never the age of the row, never the review wait. A call still
 /// executing counts up from its verdict; a finished one shows what was measured.
 private struct LiveToolDurationView: View {
-    let run: NowLiveSection.ToolActivity.RunPhase
+    let run: LiveToolActivity.RunPhase
 
     var body: some View {
         switch run {

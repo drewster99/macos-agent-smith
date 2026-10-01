@@ -60,10 +60,11 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
                     .taskFailed, .taskUpdate, .taskUpdateGuidance, .taskSummarized, .taskActionScheduled,
                     .taskQueuedAtCapacity, .taskLifecycle, .scheduledRunDeferred, .scheduledRunRefused,
                     .orchestratorMessage,
-                    .taskAmendment, .userTaskAction, .helpRequested, .helpProvided, .taskInterrupted]
+                    .taskAmendment, .userTaskAction, .helpRequested, .helpProvided, .taskInterrupted,
+                    .taskWatchFired, .taskWatchRefused]
         case .validation:
             return [.changesRequested, .criteriaUpdated, .validationReport, .validationFailed,
-                    .validationEscalation, .submissionAutoRejected, .validationBlocked,
+                    .validationEscalation, .userAcceptanceRequested, .submissionAutoRejected, .validationBlocked,
                     .validationBlockedWorkerNotice, .validationWaitNotice, .validationOverride]
         case .memory:
             return [.memorySaved, .memorySearched]

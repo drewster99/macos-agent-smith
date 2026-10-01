@@ -50,6 +50,7 @@ struct AgentCardModelInfoLine: View {
                 ModelStatsPopover(turns: llmTurns, modelID: modelConfig.modelID, role: role,
                                   evictedCallCount: evictedCallCount)
             }
+            AgentCardRunningModelNotice(assignedModelID: modelConfig.modelID, lastCalledModelID: llmTurns.last?.modelID, role: role)
             if let resolution, resolution != .resolved {
                 Button(action: { showingMetadataWarning = true }, label: {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -142,5 +143,25 @@ struct AgentCardModelInfoLine: View {
             return "\(count / 1_000)K"
         }
         return "\(count)"
+    }
+}
+
+
+/// Shown when the model this agent last called is not the one assigned to its role. A model change
+/// never touches a live agent's conversation (its history is shaped by the model that wrote it):
+/// Brown picks it up at its next start, Smith when the agents are next started. The Security Agent
+/// and the Summarizer switch live on their next call, so they never show it.
+struct AgentCardRunningModelNotice: View {
+    let assignedModelID: String
+    let lastCalledModelID: String?
+    let role: AgentRole
+
+    var body: some View {
+        if role != .securityAgent, role != .summarizer,
+           let running = lastCalledModelID, !running.isEmpty, running != assignedModelID {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .foregroundStyle(AppColors.runningModelMismatch)
+                .help("\(role.displayName) is still calling \(running). The assigned model takes effect when it next starts\(role == .smith ? " (the next time the agents are started)" : "").")
+        }
     }
 }

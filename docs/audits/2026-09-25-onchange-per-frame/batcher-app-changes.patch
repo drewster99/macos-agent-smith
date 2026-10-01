@@ -1,0 +1,318 @@
+diff --git a/AgentSmith/AgentSmith/ViewModels/AppViewModel.swift b/AgentSmith/AgentSmith/ViewModels/AppViewModel.swift
+index c3bf897..9e1c30e 100644
+--- a/AgentSmith/AgentSmith/ViewModels/AppViewModel.swift
++++ b/AgentSmith/AgentSmith/ViewModels/AppViewModel.swift
+@@ -478,9 +478,9 @@ final class AppViewModel {
+         // The main pane subscribes now so it paints the moment the initial tail loads (readers are
+         // wired and the tail loaded in `loadPersistedState`). The store owns display; appends stay on
+         // this view model via the JSONL writer above.
+-        primaryTranscriptProvider.attach(to: transcriptStore)
+-        topTranscriptProvider.attach(to: transcriptStore)
+-        bottomTranscriptProvider.attach(to: transcriptStore)
++        primaryTranscriptProvider.attach(to: transcriptStore, batcher: shared.uiUpdateBatcher)
++        topTranscriptProvider.attach(to: transcriptStore, batcher: shared.uiUpdateBatcher)
++        bottomTranscriptProvider.attach(to: transcriptStore, batcher: shared.uiUpdateBatcher)
+     }
+ 
+     // MARK: - Lifecycle
+@@ -1073,8 +1073,13 @@ final class AppViewModel {
+         }
+         taskStore = liveStore
+ 
++        // The runtime's UI feeds below apply through the shared batcher rather than each hopping
++        // to the main actor on its own: one tool call fires several of them within milliseconds,
++        // and the inspector watches all of them (see `FrameBatchedMainActorQueue`). The batcher
++        // also keeps them in the order the runtime sent them, which separate hops did not.
++        let uiUpdateBatcher = shared.uiUpdateBatcher
+         await newRuntime.setOnAbort { [weak self] reason in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self else { return }
+                 self.isAborted = true
+                 self.abortReason = reason
+@@ -1094,7 +1099,7 @@ final class AppViewModel {
+         // Like the inspector feeds below, these drop events from a runtime that is no longer the
+         // live one — a late "processing" from a stopped agent must not relight a cleared card.
+         await newRuntime.setOnProcessingStateChange { [weak self, weak newRuntime] ref, isProcessing in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                 if isProcessing {
+                     self.processingInstances.insert(ref)
+@@ -1113,7 +1118,7 @@ final class AppViewModel {
+         }
+ 
+         await newRuntime.setOnToolExecutionStateChange { [weak self, weak newRuntime] ref, toolName, started in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                 // Role-collapsed view (legacy cards).
+                 var counts = self.toolExecutingByRole[ref.role] ?? [:]
+@@ -1143,7 +1148,7 @@ final class AppViewModel {
+         }
+ 
+         await newRuntime.setOnAgentStarted { [weak self, weak newRuntime] ref, toolNames in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                 self.agentToolNames[ref.role] = toolNames
+                 self.agentToolNamesByInstance[ref] = toolNames
+@@ -1199,8 +1204,13 @@ final class AppViewModel {
+                 let myGen = self.taskApplyGeneration
+                 let allTasks = await store.allTasks()
+                 guard myGen == self.taskApplyGeneration else { return }
+-                self.tasks = allTasks
+-                self.updateTaskOverlay()
++                // Applied with the other runtime-driven UI state (see `uiUpdateBatcher`). The
++                // generation is checked again there: a newer fetch may land before this batch runs.
++                uiUpdateBatcher.enqueue { [weak self] in
++                    guard let self, myGen == self.taskApplyGeneration else { return }
++                    self.tasks = allTasks
++                    self.updateTaskOverlay()
++                }
+             }
+         }
+         // Edits that landed on the live store before this observer existed would otherwise not show
+@@ -1222,7 +1232,7 @@ final class AppViewModel {
+         // evaluators hold these closures past a stop (an in-flight review can finish afterwards);
+         // without the check a late event would repopulate an inspector that stop just cleared.
+         await newRuntime.setOnRunSessionChanged { [weak self, weak newRuntime] sessionID in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime,
+                       let sessionID, !self.inspectedRunIDs.contains(sessionID) else { return }
+                 self.inspectedRunIDs.append(sessionID)
+@@ -1230,28 +1240,28 @@ final class AppViewModel {
+         }
+ 
+         await newRuntime.setOnLLMCallRecorded { [weak self, weak newRuntime] ref, event in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                 self.inspectorStore.appendCall(event, for: ref)
+             }
+         }
+ 
+         await newRuntime.setOnContextChanged { [weak self, weak newRuntime] ref, messages in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                 self.inspectorStore.updateLiveContext(messages, for: ref)
+             }
+         }
+ 
+         await newRuntime.setOnEvaluationRecorded { [weak self, weak newRuntime] record in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                 self.inspectorStore.appendEvaluation(record)
+             }
+         }
+ 
+         await newRuntime.setOnCompactionCaptured { [weak self, weak newRuntime] capture in
+-            Task { @MainActor [weak self] in
++            uiUpdateBatcher.enqueue { [weak self] in
+                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                 self.appendCompactionCapture(capture)
+             }
+diff --git a/AgentSmith/AgentSmith/ViewModels/FilteredTranscriptProvider.swift b/AgentSmith/AgentSmith/ViewModels/FilteredTranscriptProvider.swift
+index 5d559d0..1459ee6 100644
+--- a/AgentSmith/AgentSmith/ViewModels/FilteredTranscriptProvider.swift
++++ b/AgentSmith/AgentSmith/ViewModels/FilteredTranscriptProvider.swift
+@@ -63,7 +63,9 @@ final class FilteredTranscriptProvider {
+     /// Subscribes to `store` and starts consuming updates. Re-attachable (detaches any prior
+     /// subscription first). The first update is always a full snapshot, so `messages` paints correctly
+     /// as soon as the stream delivers.
+-    func attach(to store: TranscriptStore) {
++    /// Updates are applied through `batcher`, with the rest of the runtime-driven UI state, so this
++    /// pane's `messages` changes at most once per frame (see `FrameBatchedMainActorQueue`).
++    func attach(to store: TranscriptStore, batcher: FrameBatchedMainActorQueue) {
+         detach()
+         self.store = store
+         let initialFilter = filter
+@@ -75,8 +77,8 @@ final class FilteredTranscriptProvider {
+             let (id, stream) = await store.subscribe(filter: initialFilter)
+             self?.subscriberID = id
+             for await update in stream {
+-                guard let self else { break }
+-                self.apply(update)
++                guard self != nil else { break }
++                batcher.enqueue { [weak self] in self?.apply(update) }
+             }
+             await store.unsubscribe(id)
+         }
+diff --git a/AgentSmith/AgentSmith/ViewModels/SharedAppState.swift b/AgentSmith/AgentSmith/ViewModels/SharedAppState.swift
+index 74c5a5d..36f5967 100644
+--- a/AgentSmith/AgentSmith/ViewModels/SharedAppState.swift
++++ b/AgentSmith/AgentSmith/ViewModels/SharedAppState.swift
+@@ -334,6 +334,12 @@ final class SharedAppState {
+     /// shows TOTAL in-flight operations across all tabs, not per-session counts.
+     let liveActivityTracker = LiveActivityTracker()
+ 
++    /// The ONE path by which runtime-driven state reaches anything the views watch: every such write
++    /// is queued here and applied with the others in one main-queue turn per frame, so no watched
++    /// value changes more than once per frame. See `FrameBatchedMainActorQueue` for why. Shared by
++    /// every session, since one window shows several sessions' state at once.
++    let uiUpdateBatcher = FrameBatchedMainActorQueue()
++
+     /// Main-thread mirror of `liveActivityTracker`'s snapshot, republished via its `onChange` so the
+     /// inspector's concurrency strip observes it without touching the tracker's lock.
+     private(set) var liveActivitySnapshot = LiveActivityTracker.Snapshot()
+@@ -622,8 +628,9 @@ final class SharedAppState {
+         // Mirror the app-wide live-activity tracker onto the main thread for the inspector's
+         // concurrency strip. `setOnChange` delivers the current snapshot immediately, then on
+         // every begin/end/set, so the mirror is live from launch.
++        let batcher = uiUpdateBatcher
+         liveActivityTracker.setOnChange { [weak self] snapshot in
+-            Task { @MainActor [weak self] in
++            batcher.enqueue { [weak self] in
+                 guard let self else { return }
+                 // Drop an out-of-order delivery. The tracker publishes AFTER releasing its lock and
+                 // each delivery hops the main actor separately, so neither step preserves mutation
+diff --git a/AgentSmith/AgentSmith/Views/Inspector/NowLiveSection.swift b/AgentSmith/AgentSmith/Views/Inspector/NowLiveSection.swift
+index 7e69faf..9906734 100644
+--- a/AgentSmith/AgentSmith/Views/Inspector/NowLiveSection.swift
++++ b/AgentSmith/AgentSmith/Views/Inspector/NowLiveSection.swift
+@@ -82,10 +82,10 @@ struct NowLiveSection: View {
+         viewModel.activeTaskList.map { "\($0.id.uuidString):\($0.status.rawValue)" }
+     }
+ 
+-    /// Asks for a rebuild on the next main-queue turn. Callers never invoke `recompute()`
+-    /// directly — that is what produced several `rows` assignments in a single frame.
++    /// Asks for a rebuild in the next UI batch. Callers never invoke `recompute()` directly — that
++    /// is what produced several `rows` assignments in a single frame.
+     private func scheduleRecompute() {
+-        coalescer.schedule { recompute() }
++        coalescer.schedule(on: viewModel.shared.uiUpdateBatcher) { recompute() }
+     }
+ 
+     private func recompute() {
+diff --git a/AgentSmith/AgentSmith/Views/Inspector/RecomputeCoalescer.swift b/AgentSmith/AgentSmith/Views/Inspector/RecomputeCoalescer.swift
+index 805d035..270e408 100644
+--- a/AgentSmith/AgentSmith/Views/Inspector/RecomputeCoalescer.swift
++++ b/AgentSmith/AgentSmith/Views/Inspector/RecomputeCoalescer.swift
+@@ -1,30 +1,19 @@
+ import SwiftUI
++import AgentSmithKit
+ 
+-/// Collapses many change signals into ONE cache rebuild per main-queue turn.
++/// Collapses many change signals into ONE cache rebuild per UI batch.
+ ///
+ /// The inspector's views keep a `@State` cache rebuilt by a fan of `.onChange` handlers, and several
+ /// fire together as a matter of course: one completed tool call changes the message list, the
+ /// processing set, the executing-tools map and the security-evaluation registry at the same
+-/// instant. Each handler then rebuilt the cache and scheduled its own assignment.
++/// instant. Each handler asks for a rebuild; this runs ONE, with the newest request.
+ ///
+-/// What this buys is the REBUILDS, and ONLY the rebuilds — measured, not assumed. A standalone
+-/// harness (six signals, six watchers, 60s) put it at 30,989 rebuilds down to 14,729, and 15.8s of
+-/// CPU down to 7.5s. Over the same run, body evaluations were 34,474 in BOTH arms and `@State`
+-/// writes were 185,934 vs 88,374 — so twice the writes produced bit-identical render counts.
+-/// SwiftUI marks dependents dirty and renders once per pass regardless; this changes none of that.
+-/// Do not reach for it to reduce rendering, and do not expect it to silence SwiftUI's "tried to
+-/// update multiple times per frame" logging. A signal arriving in a LATER turn of the same frame
+-/// still gets its own rebuild; the coalescing unit is a queue drain, not a frame.
+-///
+-/// It therefore pays only where the REBUILD is expensive and the watchers fire TOGETHER. Where the
+-/// shared work is a lookup, or the watchers write unrelated state, it buys nothing.
+-///
+-/// And it is only safe where a ONE-TURN DELAY is safe. `ChannelLogView` has the ideal fan-out on
+-/// paper — two of its three cache watchers fire on every appended message — but its cache feeds a
+-/// `ForEach` that `proxy.scrollTo` targets in a sibling watcher on the same key, so deferring the
+-/// rebuild would scroll to a row that does not exist yet and break auto-scroll on every message.
+-/// It dedupes with a synchronous signature guard instead. Check what reads the cache in the SAME
+-/// pass before reaching for this.
++/// The rebuild runs in the shared `FrameBatchedMainActorQueue` batch, not merely on the next
++/// main-queue turn. That matters: SwiftUI logs "onChange(of:) action tried to update multiple times
++/// per frame" whenever a watched value changes in more than one main-queue turn of a frame, and the
++/// cache this writes feeds watchers of its own (a card's processing and executing-tools timers).
++/// Deferring to "the next turn" let two rebuilds — the appear-time `.task` and a watcher, say — land
++/// in two turns of one frame. Batched, they are at least one batch interval apart.
+ ///
+ /// LAST writer wins, deliberately. Most of these rebuilds read live view-model state, but not all:
+ /// `InspectorView`'s cards take `roleMessages` as a `let` on the view struct, so a closure captures
+@@ -43,13 +32,13 @@ final class RecomputeCoalescer {
+ 
+     init() {}
+ 
+-    /// Runs the most recently supplied `work` on the next main-queue turn, absorbing any signals
+-    /// that arrive before it drains.
+-    func schedule(_ work: @escaping @MainActor () -> Void) {
++    /// Runs the most recently supplied `work` in `batcher`'s next batch, absorbing any requests that
++    /// arrive before it runs.
++    func schedule(on batcher: FrameBatchedMainActorQueue, _ work: @escaping @MainActor () -> Void) {
+         let alreadyScheduled = pending != nil
+         pending = work
+         guard !alreadyScheduled else { return }
+-        DispatchQueue.main.async { [self] in
++        batcher.enqueue { [self] in
+             let work = pending
+             pending = nil
+             work?()
+diff --git a/AgentSmith/AgentSmith/Views/InspectorView.swift b/AgentSmith/AgentSmith/Views/InspectorView.swift
+index 4cc1130..fb18bae 100644
+--- a/AgentSmith/AgentSmith/Views/InspectorView.swift
++++ b/AgentSmith/AgentSmith/Views/InspectorView.swift
+@@ -33,6 +33,7 @@ struct InspectorView: View {
+     @State private var brownMessages: [ChannelMessage] = []
+     @State private var securityAgentMessages: [ChannelMessage] = []
+     @State private var summarizerMessages: [ChannelMessage] = []
++    @State private var rebucketCoalescer = RecomputeCoalescer()
+ 
+     /// Buckets channel messages by the agent role they belong to, in one pass.
+     /// One deliberate deviation from "sender == role": role-attributed SYSTEM diagnostics are
+@@ -97,15 +98,18 @@ struct InspectorView: View {
+     }
+ 
+     /// Re-buckets `viewModel.messages` and assigns each per-role @State only if its slice
+-    /// actually changed. Mutations are deferred via `DispatchQueue.main.async` per the
+-    /// project rule (no synchronous @State mutation inside .onChange / .task closures).
++    /// actually changed. Deferred (the project rule: no synchronous @State mutation inside
++    /// .onChange / .task closures) into the shared UI batch rather than the next main-queue turn:
++    /// the role cards watch these slices, and the appear-time `.task` plus the messages watcher used
++    /// to write them in two turns of one frame. Buckets are computed when the batch runs, from the
++    /// messages as they are then, so the newest request is the one that lands.
+     private func rebucket() {
+-        let buckets = Self.bucketMessagesByRole(viewModel.messages)
+-        let nextSmith = buckets[.smith] ?? []
+-        let nextBrown = buckets[.brown] ?? []
+-        let nextSecurityAgent = buckets[.securityAgent] ?? []
+-        let nextSummarizer = buckets[.summarizer] ?? []
+-        DispatchQueue.main.async {
++        rebucketCoalescer.schedule(on: viewModel.shared.uiUpdateBatcher) {
++            let buckets = Self.bucketMessagesByRole(viewModel.messages)
++            let nextSmith = buckets[.smith] ?? []
++            let nextBrown = buckets[.brown] ?? []
++            let nextSecurityAgent = buckets[.securityAgent] ?? []
++            let nextSummarizer = buckets[.summarizer] ?? []
+             if smithMessages != nextSmith { smithMessages = nextSmith }
+             if brownMessages != nextBrown { brownMessages = nextBrown }
+             if securityAgentMessages != nextSecurityAgent { securityAgentMessages = nextSecurityAgent }
+@@ -237,10 +241,10 @@ private struct RoleAgentCard: View {
+         }
+     }
+ 
+-    /// Asks for a rebuild on the next main-queue turn. Nothing calls `recompute()` directly —
+-    /// that is what produced several `cached` assignments inside one frame.
++    /// Asks for a rebuild in the next UI batch. Nothing calls `recompute()` directly — that is what
++    /// produced several `cached` assignments inside one frame.
+     private func scheduleRecompute() {
+-        coalescer.schedule { recompute() }
++        coalescer.schedule(on: viewModel.shared.uiUpdateBatcher) { recompute() }
+     }
+ 
+     private func recompute() {
+@@ -341,10 +345,10 @@ private struct SummarizerAgentCard: View {
+         )
+     }
+ 
+-    /// Asks for a rebuild on the next main-queue turn. Nothing calls `recompute()` directly —
+-    /// that is what produced several `cached` assignments inside one frame.
++    /// Asks for a rebuild in the next UI batch. Nothing calls `recompute()` directly — that is what
++    /// produced several `cached` assignments inside one frame.
+     private func scheduleRecompute() {
+-        coalescer.schedule { recompute() }
++        coalescer.schedule(on: viewModel.shared.uiUpdateBatcher) { recompute() }
+     }
+ 
+     private func recompute() {

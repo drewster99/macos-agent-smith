@@ -242,22 +242,26 @@ public actor OrchestrationRuntime {
     /// Loads the persisted pending-scheduled-run queue from disk. Set by the app layer
     /// at runtime construction; consulted inside `start()` so a fresh runtime inherits
     /// any deferred scheduled tasks from the previous session lifetime.
-    private var loadPendingScheduledRunQueue: (@Sendable () async -> [PendingScheduledRun])?
+    private var loadPendingScheduledRunQueue: (@Sendable () async throws -> [PendingScheduledRun])?
 
     /// Persists the pending-scheduled-run queue on every mutation. Wired by the app
-    /// layer to `PersistenceManager.savePendingScheduledRunQueue`. Fire-and-forget;
-    /// failures log to the app's logger but do not block the runtime.
-    private var persistPendingScheduledRunQueue: (@Sendable ([PendingScheduledRun]) async -> Void)?
+    /// layer to `PersistenceManager.savePendingScheduledRunQueue`. Nil when this launch could not
+    /// read the file (it is then kept in memory only, so the unreadable file is never
+    /// overwritten). Every save goes through `savePendingScheduledRunQueue`, which reports a failure.
+    private var persistPendingScheduledRunQueue: (@Sendable ([PendingScheduledRun]) async throws -> Void)?
+    /// Whether the last save of the queue failed — so a failing disk is reported once, not per save.
+    private var pendingScheduledRunQueueSaveFailing = false
 
     /// Loads the persisted notification delivery ledger from disk. Set by the app layer before
     /// `start()`; consulted once inside `ensureNotificationBroker` to seed the broker so a wake that
     /// already fired-and-delivered before a restart is recognized as a duplicate rather than re-fired.
-    private var loadDeliveryLedger: (@Sendable () async -> [NotificationID: DeliveryStatus])?
+    private var loadDeliveryLedger: (@Sendable () async throws -> [NotificationID: DeliveryStatus])?
 
     /// Persists the notification delivery ledger after every settle. Wired by the app layer to
     /// `PersistenceManager.saveDeliveryLedger` and handed to the broker as its `persistLedger` hook
-    /// (single-flight coalesced there). Fire-and-forget; failures log but never block delivery.
-    private var persistDeliveryLedger: (@Sendable ([NotificationID: DeliveryStatus]) async -> Void)?
+    /// (single-flight coalesced there). A failure never blocks delivery, but the broker reports it
+    /// and the runtime surfaces it to the user (`reportNotificationPersistenceFailure`).
+    private var persistDeliveryLedger: (@Sendable ([NotificationID: DeliveryStatus]) async throws -> Void)?
 
     /// Inbound user messages captured while Smith could not accept them (agents stopped, or
     /// mid-startup during the "Preparing task — starting MCP servers…" window), in FIFO order.
@@ -426,9 +430,74 @@ public actor OrchestrationRuntime {
     /// The user-configurable ceiling for `setWorkerCapacity`.
     public static let maxWorkerCapacity = 10
 
-    /// Sets the worker-pool capacity (clamped to 1...maxWorkerCapacity).
-    public func setWorkerCapacity(_ capacity: Int) {
-        maxConcurrentWorkers = min(max(1, capacity), Self.maxWorkerCapacity)
+    /// Sets the worker-pool capacity (clamped to 1...maxWorkerCapacity), taking effect on the live
+    /// run at once:
+    ///
+    /// - **Raised** — queued work fills the new slots immediately (the same drain a freed slot
+    ///   runs), instead of waiting for some worker to finish.
+    /// - **Lowered** — the newest workers above the new capacity are stopped (least work lost) and
+    ///   their tasks go `.interrupted` onto `capacityDeferredQueue`, which resumes them ahead of all
+    ///   other queued work as slots free. The user lowered a limit; they did not ask for that work
+    ///   to halt, so resuming does not depend on the auto-run settings.
+    ///
+    /// Before a run starts (the app pushes the saved setting ahead of `start()`), only the number
+    /// changes: nothing is shed or started without a live generation.
+    public func setWorkerCapacity(_ capacity: Int) async {
+        let newCapacity = min(max(1, capacity), Self.maxWorkerCapacity)
+        let raised = await lifecycleQueue.run { [weak self] () -> Bool in
+            guard let self else { return false }
+            return await self.performSetWorkerCapacity(newCapacity)
+        }
+        // Outside the lifecycle queue: the drain schedules starts onto it.
+        if raised, supervisor.currentGeneration != nil {
+            await advanceAfterFreedWorkerSlot()
+        }
+    }
+
+    /// Applies the new capacity and sheds workers above it. Returns whether capacity was raised.
+    /// Runs on the lifecycle queue, so it serializes with every start: the capacity is lowered
+    /// BEFORE any worker is torn down, so the slot a teardown frees can't be refilled from the queue.
+    private func performSetWorkerCapacity(_ newCapacity: Int) async -> Bool {
+        let previous = maxConcurrentWorkers
+        maxConcurrentWorkers = newCapacity
+        if newCapacity < previous, supervisor.currentGeneration != nil {
+            await shedWorkersAboveCapacity()
+        }
+        return newCapacity > previous
+    }
+
+    /// Stops the newest workers until the live count fits `maxConcurrentWorkers`, deferring their
+    /// tasks for automatic resume. Newest first: they have done the least work, and a resumed task
+    /// is re-briefed from its progress log, so what they did is not lost.
+    private func shedWorkersAboveCapacity() async {
+        let workers = supervisor.handles(role: .brown)   // oldest first
+        let excess = workers.count - maxConcurrentWorkers
+        guard excess > 0 else { return }
+        var deferred: [(task: AgentTask, sequence: UInt64)] = []
+        for handle in workers.suffix(excess).reversed() {
+            guard let task = await taskStore.taskForAgent(agentID: handle.id) else {
+                // A worker bound to no task holds a slot for nothing; stop it all the same.
+                _ = await performTerminateAgent(id: handle.id)
+                continue
+            }
+            await performTerminateTaskAgents(taskID: task.id)
+            // CAS: a task that reached a terminal status in the meantime keeps it.
+            guard await taskStore.updateStatus(
+                id: task.id, to: .interrupted,
+                ifCurrentlyIn: [.starting, .running, .validating, .awaitingHelp, .awaitingReview],
+                cause: .capacityShed
+            ) else { continue }
+            deferred.append((task, handle.sequence))
+        }
+        // Resume in the order they originally started.
+        for entry in deferred.sorted(by: { $0.sequence < $1.sequence }) {
+            capacityDeferredQueue.append(entry.task.id)
+            await notifySmithOfUserTaskAction(
+                .deferredForCapacity,
+                taskID: entry.task.id,
+                text: "User action in the app: the user lowered the maximum number of simultaneous tasks to \(maxConcurrentWorkers). This task's worker was stopped to free a slot; the task is interrupted and will resume automatically (re-briefed from its progress log) as soon as a slot frees. Do not restart it yourself. Task: \"\(entry.task.title)\" (ID: \(entry.task.id.uuidString))."
+            )
+        }
     }
 
     /// Live worker count vs. capacity — the slot arithmetic tools and UI gate on.
@@ -459,6 +528,13 @@ public actor OrchestrationRuntime {
     /// user Stops MID-session (which also lands `.interrupted`) is never on this queue and
     /// stays stopped until the next launch. Governed by `autoRunInterruptedTasks`.
     private var launchResumeQueue: [UUID] = []
+
+    /// Tasks whose workers were stopped because the user LOWERED the worker capacity, oldest-started
+    /// first. Resumed ahead of every other queued task as slots free, regardless of the auto-run
+    /// settings — the user shrank a limit, they did not ask for the work to stop. An ID leaves the
+    /// queue when its resume starts, or when the task is no longer `.interrupted` (the user paused,
+    /// resumed, or deleted it).
+    private var capacityDeferredQueue: [UUID] = []
 
     private func armBreakerRedrainIfNeeded() {
         // `lastScopingFailureAt` is always set when the breaker is open (the only callers
@@ -508,11 +584,11 @@ public actor OrchestrationRuntime {
     /// Per-session persistence for the broker's pending-delivery queue (the durable outbox of
     /// notifications queued for Smith until he drains them). Load seeds the broker at boot; persist
     /// is handed to the broker as its flush hook. Wired before `start()`.
-    private var loadPendingDelivery: (@Sendable () async -> [QueuedDelivery])?
-    private var persistPendingDelivery: (@Sendable ([QueuedDelivery]) async -> Void)?
+    private var loadPendingDelivery: (@Sendable () async throws -> [QueuedDelivery])?
+    private var persistPendingDelivery: (@Sendable ([QueuedDelivery]) async throws -> Void)?
     public func setPendingDeliveryPersistence(
-        load: @escaping @Sendable () async -> [QueuedDelivery],
-        persist: @escaping @Sendable ([QueuedDelivery]) async -> Void
+        load: @escaping @Sendable () async throws -> [QueuedDelivery],
+        persist: @escaping @Sendable ([QueuedDelivery]) async throws -> Void
     ) {
         loadPendingDelivery = load
         persistPendingDelivery = persist
@@ -525,8 +601,8 @@ public actor OrchestrationRuntime {
     /// `PersistenceManager(sessionID:)` so the queue lives next to the channel log,
     /// scheduled wakes, and other per-session state.
     public func setPendingScheduledRunQueuePersistence(
-        load: @escaping @Sendable () async -> [PendingScheduledRun],
-        persist: @escaping @Sendable ([PendingScheduledRun]) async -> Void
+        load: @escaping @Sendable () async throws -> [PendingScheduledRun],
+        persist: @escaping @Sendable ([PendingScheduledRun]) async throws -> Void
     ) {
         loadPendingScheduledRunQueue = load
         persistPendingScheduledRunQueue = persist
@@ -537,8 +613,8 @@ public actor OrchestrationRuntime {
     /// `PersistenceManager(sessionID:)`. Must be wired before `start()` so the broker (built lazily
     /// in the Smith-setup path) is seeded from disk and its per-settle flushes land on disk.
     public func setDeliveryLedgerPersistence(
-        load: @escaping @Sendable () async -> [NotificationID: DeliveryStatus],
-        persist: @escaping @Sendable ([NotificationID: DeliveryStatus]) async -> Void
+        load: @escaping @Sendable () async throws -> [NotificationID: DeliveryStatus],
+        persist: @escaping @Sendable ([NotificationID: DeliveryStatus]) async throws -> Void
     ) {
         loadDeliveryLedger = load
         persistDeliveryLedger = persist
@@ -857,13 +933,20 @@ public actor OrchestrationRuntime {
         // Templates are exempt at the CALL SITE (as in `RunTaskTool`): starting one clones a fresh
         // instance downstream, and `prepareForRun` is a per-session method that cannot see a
         // library-resident template at all.
+        // A held task is refused BEFORE `prepareForRun`, which would otherwise reset or reopen it
+        // only for the start gate to turn it away.
+        if !scheduledTask.startHolds.isEmpty {
+            let reason = "it is waiting on \(await describeHolds(scheduledTask.startHolds)) — a watch starts it when that happens"
+            await reportScheduledRunRefused(taskID: taskID, title: scheduledTask.title, reason: reason)
+            return .refused(reason)
+        }
         if !scheduledTask.isTemplate,
            case .refused(let reason) = await taskStore.prepareForRun(id: taskID) {
             await reportScheduledRunRefused(taskID: taskID, title: scheduledTask.title, reason: reason)
             return .refused(reason)
         }
 
-        let entry = PendingScheduledRun(taskID: taskID, amendment: amendment)
+        let entry = PendingScheduledRun(taskID: taskID, amendment: amendment, origin: .scheduled)
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let inFlight = activeTasks.first {
             $0.id != taskID
@@ -881,7 +964,7 @@ public actor OrchestrationRuntime {
         // runs independently of `autoAdvanceEnabled`), so an autoAdvance-off run isn't lost.
         guard supervisor.handles(role: .brown).count >= maxConcurrentWorkers, let blocker = inFlight else {
             pendingScheduledRunQueue.append(entry)
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+            await savePendingScheduledRunQueue()
             await drainPendingScheduledRunQueue()
             return .placed
         }
@@ -890,7 +973,7 @@ public actor OrchestrationRuntime {
         // task to run the scheduled one, resume it after) is gone by design: a scheduled run waits
         // its turn like any other queued work rather than interrupting live work.
         pendingScheduledRunQueue.append(entry)
-        await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+        await savePendingScheduledRunQueue()
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Scheduled task '\(scheduledTask.title)' fired while '\(blocker.title)' is \(blocker.status.rawValue). Queued — will run after the current task finishes.",
@@ -951,6 +1034,25 @@ public actor OrchestrationRuntime {
     /// the broker. Runtime-level (NOT per-spawn) so it outlives Smith restarts; the tool context and
     /// the boot restore both reach it through `ensureWakeScheduler`.
     private var wakeScheduler: WakeScheduler?
+    /// Outward delivery bridges the app supplies (e.g. macOS notifications), registered on the
+    /// broker when it is built — before anything it holds can be delivered.
+    private var externalRecipientTargets: [String: any RecipientTarget] = [:]
+
+    /// Supplies an outward delivery bridge for `.external(key)` recipients. Set before `start()`;
+    /// a later call also registers it on a broker that already exists.
+    public func setExternalRecipientTarget(_ key: String, _ target: any RecipientTarget) async {
+        externalRecipientTargets[key] = target
+        await notificationBroker?.registerRecipientTarget(.external(key), target)
+    }
+
+    /// The single serialized consumer of `taskStore`'s events (`installTaskEventConsumerIfNeeded`).
+    private var taskEventConsumer: Task<Void, Never>?
+    /// Every `SecurityEvaluator` this runtime made that is still alive — Smith's, each Brown's, and
+    /// the validators' shared one — so a Security Agent model change reaches all of them at once.
+    private var liveSecurityEvaluators: [WeakSecurityEvaluator] = []
+    /// Feeds `taskEventConsumer`; held so a delayed effect retry can re-drive delivery.
+    private var taskEventContinuation: AsyncStream<TaskStoreEvent>.Continuation?
+    private var taskEffectRetryScheduled = false
 
     /// Returns the broker, constructing and fully registering it on first call. Called only from
     /// the serialized Smith-setup path, so there is no concurrent construction. Smith is a PULL
@@ -965,18 +1067,64 @@ public actor OrchestrationRuntime {
             },
             setTaskStatus: { [weak self] taskID, status in await self?.applyNotificationTaskStatus(taskID, status) ?? false },
             taskTitle: { [weak self] taskID in await self?.notificationTaskTitle(taskID) },
-            postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) }
+            postSystemNotice: { [weak self] text, taskID in await self?.postNotificationSystemNotice(text, taskID: taskID) },
+            startTaskForWatch: { [weak self] targetID, watchedTaskID, watchID, occurrence in
+                guard let self else { return .refused("the session is shutting down") }
+                return await self.startTaskForWatch(targetID, watchedTaskID: watchedTaskID, watchID: watchID, occurrence: occurrence)
+            }
         )
+        // Load BEFORE constructing the broker: a file that exists but can't be read must never be
+        // overwritten by the broker's first flush (an empty snapshot would erase the dedup record
+        // or the undelivered outbox). On a failed load that store runs in memory only this launch,
+        // leaving the file intact for the next one, and the user is told.
+        var seededLedger: [NotificationID: DeliveryStatus] = [:]
+        var ledgerPersistence = persistDeliveryLedger
+        if let loadDeliveryLedger {
+            do {
+                seededLedger = try await loadDeliveryLedger()
+            } catch {
+                ledgerPersistence = nil
+                await reportNotificationPersistenceFailure(.init(store: .deliveryLedger, operation: .load, reason: error.localizedDescription))
+            }
+        }
+        var seededPending: [QueuedDelivery] = []
+        var pendingPersistence = persistPendingDelivery
+        if let loadPendingDelivery {
+            do {
+                seededPending = try await loadPendingDelivery()
+            } catch {
+                pendingPersistence = nil
+                await reportNotificationPersistenceFailure(.init(store: .pendingDelivery, operation: .load, reason: error.localizedDescription))
+            }
+        }
         let broker = NotificationBroker(
             runtime: adapter,
-            persistLedger: persistDeliveryLedger,
-            persistPendingDelivery: persistPendingDelivery
+            persistLedger: ledgerPersistence,
+            persistPendingDelivery: pendingPersistence
         )
+        await broker.setOnPersistenceFailure { [weak self] failure in
+            Task { await self?.reportNotificationPersistenceFailure(failure) }
+        }
         await broker.registerHandler(type: KnownNotificationType.taskAction.rawValue, TaskActionNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.taskSummary.rawValue, TaskSummaryNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.reminder.rawValue, ReminderNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.userMessage.rawValue, UserMessageNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.taskBriefing.rawValue, TaskBriefingNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.taskWatch.rawValue, TaskWatchNotificationHandler())
+        // Every first-party type must have a handler before anything can fire: an unhandled type is
+        // dropped on arrival, which would silently lose every notification of that type.
+        let unhandled = await broker.typesMissingHandlers(KnownNotificationType.allCases.map(\.rawValue))
+        if !unhandled.isEmpty {
+            stopLogger.fault("Notification types with no handler: \(unhandled.joined(separator: ", "), privacy: .public)")
+            assertionFailure("Notification types with no handler: \(unhandled)")
+        }
+        await broker.setOnSettled { [weak self] notification, settlement in
+            Task { await self?.handleNotificationSettled(notification, settlement) }
+        }
         await broker.registerPullRecipient(.smith)
+        for (key, target) in externalRecipientTargets {
+            await broker.registerRecipientTarget(.external(key), target)
+        }
         await broker.setOnPendingEnqueued { [weak self] kind in
             guard kind == .smith else { return }
             Task { await self?.wakeSmithFromIdle() }
@@ -984,12 +1132,8 @@ public actor OrchestrationRuntime {
         // Seed the delivered-set AND the pending-delivery outbox from disk BEFORE anything can fire,
         // so a re-fire after restart is deduped and an undrained reminder is handed out on the next
         // drain instead of lost.
-        if let seeded = await loadDeliveryLedger?() {
-            await broker.seedLedger(seeded)
-        }
-        if let pending = await loadPendingDelivery?() {
-            await broker.seedPendingDeliveries(pending)
-        }
+        await broker.seedLedger(seededLedger)
+        await broker.seedPendingDeliveries(seededPending)
         notificationBroker = broker
         return broker
     }
@@ -1033,14 +1177,413 @@ public actor OrchestrationRuntime {
         // slot), then the CAS would fail (`.awaitingReview` isn't in the set) and the handler would
         // report "skipped": worker silently destroyed, user told nothing happened. The CAS below is
         // still the atomic authority; this guard just prevents the terminate outside its window.
+        let action: TaskActionKind
+        switch status {
+        case .paused: action = .pause
+        case .interrupted: action = .interrupt
+        default:
+            stopLogger.fault("Scheduled task action asked for status \(status.rawValue, privacy: .public), which no scheduled action sets — refused")
+            return false
+        }
         guard let task = await taskStore.task(id: taskID),
               task.status == .running || task.status == .validating else { return false }
         await terminateTaskAgents(taskID: taskID)
-        return await taskStore.updateStatus(id: taskID, to: status, ifCurrentlyIn: [.running, .validating])
+        return await taskStore.updateStatus(id: taskID, to: status, ifCurrentlyIn: [.running, .validating], cause: .scheduledAction(action))
     }
 
     private func notificationTaskTitle(_ taskID: UUID) async -> String? {
         await taskStore.task(id: taskID)?.title
+    }
+
+    /// Installs the ONE consumer of the task store's events (status transitions and lifecycle
+    /// changes). The store's observer only yields into a FIFO; this single task drains it, so the
+    /// runtime's reactions run one at a time in the order the store produced them — never
+    /// reordered by racing unstructured tasks. Installed once per runtime: the store and the wake
+    /// scheduler both outlive `restartForNewTask`, and replacing a live consumer could drop events
+    /// it had not reached yet.
+    private func installTaskEventConsumerIfNeeded(scheduler: WakeScheduler) async {
+        guard taskEventConsumer == nil else { return }
+        let (stream, continuation) = AsyncStream<TaskStoreEvent>.makeStream()
+        taskEventContinuation = continuation
+        // Claimed before the await below, so a concurrent caller can't install a second consumer.
+        taskEventConsumer = Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                await self.react(to: event, scheduler: scheduler)
+            }
+        }
+        await taskStore.setEventObserver { event in continuation.yield(event) }
+        // A cancelled watch takes back its handed-off firings before `cancelWatch` returns: whatever
+        // has not reached its recipient. One Smith has already been handed, or a start already under
+        // way, cannot be recalled.
+        await taskStore.setWatchWithdrawal { [weak self] watchID, occurrences in
+            guard let self else { return }
+            let broker = await self.ensureNotificationBroker()
+            await broker.withdraw(
+                occurrences.map { TaskWatchDelivery.notificationID(watchID: watchID, occurrence: $0) },
+                reason: "the watch was cancelled"
+            )
+        }
+        await reconcileInFlightWatchFirings()
+        // Effects restored from disk (a crash before delivery) are due now.
+        continuation.yield(.effectsReady)
+    }
+
+    /// A firing handed to the broker before a crash may have settled without its outcome reaching
+    /// the task: adopt what the broker's ledger recorded. A firing the broker is still holding (a
+    /// Smith delivery not yet acknowledged) stays in flight and settles when it is. An in-flight
+    /// firing the broker has neither settled nor queued was lost in the crash (e.g. mid push
+    /// retry): hand it to the broker again.
+    private func reconcileInFlightWatchFirings() async {
+        let broker = await ensureNotificationBroker()
+        for (task, watch) in await taskStore.allWatches() {
+            // A watch cancelled before this runtime existed had no one to withdraw its handed-off
+            // firings, and the persisted Smith queue this start just reloaded may still hold one.
+            var cancelledButHeld: [NotificationID] = []
+            for firing in watch.recentFirings where firing.state == .cancelled {
+                let id = TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)
+                if await broker.isHoldingForDelivery(id) { cancelledButHeld.append(id) }
+            }
+            if !cancelledButHeld.isEmpty {
+                await broker.withdraw(cancelledButHeld, reason: "the watch was cancelled")
+            }
+            for firing in watch.recentFirings where !firing.state.isSettled {
+                let id = TaskWatchDelivery.notificationID(watchID: watch.id, occurrence: firing.occurrence)
+                if let settled = Self.firingState(adopting: await broker.deliveryStatus(id)) {
+                    await taskStore.setWatchFiringState(taskID: task.id, watchID: watch.id, occurrence: firing.occurrence, to: settled)
+                } else if firing.state == .inFlight, await !broker.isHoldingForDelivery(id),
+                          // Re-read: a cancel that landed since the snapshot above wins.
+                          await taskStore.task(id: task.id)?.watch(id: watch.id)?.firing(occurrence: firing.occurrence)?.state == .inFlight {
+                    await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
+                }
+            }
+        }
+    }
+
+    /// The firing state a settled ledger entry implies, or nil while it is unsettled.
+    private static func firingState(adopting status: DeliveryStatus) -> TaskWatchFiring.State? {
+        switch status {
+        case .delivered(let at): return .delivered(at: at)
+        case .dropped(let code): return .refused(reason: code.rawValue)
+        case .pending: return nil
+        }
+    }
+
+    /// Records how a watch firing ended and tells the user (and Smith, on a refusal). Other
+    /// notifications' settlements need nothing here.
+    private func handleNotificationSettled(_ notification: AgentNotification, _ settlement: NotificationSettlement) async {
+        guard case .taskWatch(let watchID, let occurrence) = notification.triggerSource,
+              case .string(let rawTaskID)? = notification.payload.data[TaskWatchDelivery.Key.taskID],
+              let taskID = UUID(uuidString: rawTaskID) else { return }
+        let title = await taskStore.task(id: taskID)?.title ?? rawTaskID
+        switch settlement {
+        case .delivered(let at):
+            guard await taskStore.setWatchFiringState(taskID: taskID, watchID: watchID, occurrence: occurrence, to: .delivered(at: at)) else { return }
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Watch on \"\(title)\" fired: \(notification.title).",
+                metadata: ["messageKind": .kind(.taskWatchFired), "taskID": .string(taskID.uuidString)],
+                taskID: taskID
+            ))
+        case .refused(let reason):
+            let bounded = String(reason.prefix(Self.watchRefusalReasonLimit))
+            guard await taskStore.setWatchFiringState(taskID: taskID, watchID: watchID, occurrence: occurrence, to: .refused(reason: bounded)) else { return }
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Watch on \"\(title)\" fired but could not be carried out: \(bounded)",
+                metadata: ["messageKind": .kind(.taskWatchRefused), "taskID": .string(taskID.uuidString), "severity": .severity(.error)],
+                taskID: taskID
+            ))
+            let note = """
+                [System: A task watch on "\(title)" (ID: \(taskID.uuidString)) fired but its action could not be \
+                carried out: \(bounded) The user was shown this in the transcript. Tell them briefly if it \
+                affects something they are waiting on.]
+                """
+            let broker = await ensureNotificationBroker()
+            await broker.post(
+                triggerSource: .taskWatch(watchID: watchID, occurrence: occurrence),
+                recipient: .smith,
+                payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)]),
+                title: "Watch refused",
+                idempotencyKey: "refused|\(watchID.uuidString)|\(occurrence)"
+            )
+        }
+    }
+
+    private static let watchRefusalReasonLimit = 500
+
+    /// The start gate for holds. A held task (`AgentTask.startHolds`) starts only for the user's
+    /// explicit Play — which cancels the chain links it supersedes and says so — or once every
+    /// watch holding it has fired. Every other origin is turned away here, before anything is
+    /// cloned or claimed, and the ones a person or Smith is waiting on are told why.
+    private func passesStartGate(taskID: UUID, origin: TaskStartOrigin) async -> Bool {
+        guard let task = await taskStore.task(id: taskID), !task.startHolds.isEmpty else { return true }
+        let waitingOn = await describeHolds(task.startHolds)
+        if origin.overridesStartHolds {
+            _ = await taskStore.overrideStartHolds(of: taskID)
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Started \"\(task.title)\" now instead of waiting on \(waitingOn); the watch that would have started it is cancelled.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(taskID.uuidString)],
+                taskID: taskID
+            ))
+            return true
+        }
+        let reason = "it is waiting on \(waitingOn) — a watch starts it when that happens"
+        switch origin {
+        case .scheduled:
+            await reportScheduledRunRefused(taskID: taskID, title: task.title, reason: reason)
+        case .smithTool, .watchSatisfied:
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Did not start \"\(task.title)\": \(reason).",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(taskID.uuidString), "severity": .severity(.warning)],
+                taskID: taskID
+            ))
+        case .autoAdvance, .launchResume, .capacityResume:
+            // These paths skip held tasks when choosing; reaching here means a hold landed in between.
+            stopLogger.notice("start of held task \(taskID.uuidString, privacy: .public) from \(String(describing: origin), privacy: .public) skipped")
+        case .explicitUser:
+            break
+        }
+        return false
+    }
+
+    /// "“A”" or "“A” and “B”" — the tasks a hold set waits on, for messages.
+    private func describeHolds(_ holds: [TaskStartHold]) async -> String {
+        var names: [String] = []
+        for hold in holds {
+            names.append(await taskStore.task(id: hold.watchedTaskID).map { "\"\($0.title)\"" } ?? "task \(hold.watchedTaskID.uuidString)")
+        }
+        return names.joined(separator: " and ")
+    }
+
+    /// Tells the user when a task that another task is waiting on can no longer start it on its own:
+    /// it finished without firing its startTask watch, or it left the active list.
+    private func reportStrandedHolds(watchedTaskID: UUID, because situation: String) async {
+        for held in await taskStore.tasksHeld(by: watchedTaskID) {
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(held.title)\" is still waiting on a task that \(situation), so it won't start on its own. Press Play to start it now, or remove the watch.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(held.id.uuidString), "severity": .severity(.warning)],
+                taskID: held.id
+            ))
+        }
+    }
+
+    /// Starts a task because a watch fired (a `startTask` chain link). Never reopens or resets: a
+    /// target that is not an ordinary runnable task in THIS session is refused with the reason.
+    /// Otherwise it goes through the durable scheduled-run queue, so it starts at once when a worker
+    /// slot is free, waits its turn at capacity, and survives a crash in between.
+    func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID, occurrence: Int) async -> AutoRunDispatchOutcome {
+        // The handler re-checks at the moment of acting: a firing cancelled after it was handed to
+        // the broker must not start anything.
+        if case .cancelled = await taskStore.task(id: watchedTaskID)?.watch(id: watchID)?.firing(occurrence: occurrence)?.state {
+            return .refused("the watch was cancelled before it could start \"\(await taskStore.task(id: targetID)?.title ?? targetID.uuidString)\"")
+        }
+        let outcome = await placeWatchStart(targetID, watchedTaskID: watchedTaskID, watchID: watchID)
+        if case .refused = outcome, await taskStore.watchState(watchID)?.isActive != true {
+            // A refused chain link whose watch can never fire again must not leave its target
+            // waiting on it forever.
+            await taskStore.releaseStartHolds(placedBy: watchID)
+        }
+        return outcome
+    }
+
+    private func placeWatchStart(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID) async -> AutoRunDispatchOutcome {
+        guard let target = await taskStore.task(id: targetID), target.disposition == .active else {
+            return .refused("the task to start (\(targetID.uuidString)) is no longer an active task in this session")
+        }
+        guard !target.isTemplate else {
+            return .refused("\"\(target.title)\" is a template, which a watch doesn't start")
+        }
+        guard target.status.isRunnable else {
+            return .refused("\"\(target.title)\" is \(target.status.displayName.lowercased()); a watch only starts a pending, paused or interrupted task, and never reopens or resets one")
+        }
+        // This watch's hold is satisfied. A target waiting on more than one task starts only when
+        // the last of them fires.
+        let stillWaitingOn = await taskStore.releaseStartHolds(placedBy: watchID)
+        guard stillWaitingOn.isEmpty else {
+            let waitingOn = await describeHolds(stillWaitingOn)
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(target.title)\" is no longer waiting on this task, but still waits on \(waitingOn) before it starts.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(targetID.uuidString)],
+                taskID: targetID
+            ))
+            return .placed
+        }
+        pendingScheduledRunQueue.append(PendingScheduledRun(taskID: targetID, amendment: nil, origin: .watchSatisfied(watchID: watchID)))
+        await savePendingScheduledRunQueue()
+        if supervisor.handles(role: .brown).count >= maxConcurrentWorkers {
+            let watchedTitle = await taskStore.task(id: watchedTaskID)?.title ?? watchedTaskID.uuidString
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(target.title)\" was started by a watch on \"\(watchedTitle)\", but every worker slot is busy — queued; it starts when a slot frees.",
+                metadata: ["messageKind": .kind(.taskQueuedAtCapacity), "taskID": .string(targetID.uuidString)],
+                taskID: targetID
+            ))
+        } else {
+            await drainPendingScheduledRunQueue()
+        }
+        return .placed
+    }
+
+    /// A watched task that reached completed/failed without firing the startTask watch that holds
+    /// another task (its triggers didn't include this state) leaves that task waiting — say so.
+    private func reportHoldsStrandedByTerminal(_ transition: TaskStatusTransition) async {
+        guard let task = await taskStore.task(id: transition.taskID) else { return }
+        let firedNow = Set(task.watches.filter { watch in
+            watch.recentFirings.contains { $0.transition.statusRevision == transition.statusRevision }
+        }.map(\.id))
+        let stillHolding = task.watches.contains { watch in
+            guard case .startTask = watch.action, watch.isActive else { return false }
+            return !firedNow.contains(watch.id)
+        }
+        guard stillHolding else { return }
+        await reportStrandedHolds(watchedTaskID: task.id, because: "\(transition.to.displayName.lowercased()) without starting it")
+    }
+
+    /// The runtime's own reactions to task events.
+    private func react(to event: TaskStoreEvent, scheduler: WakeScheduler) async {
+        switch event {
+        case .transition(let transition):
+            // First entry into completed/failed: cancel the task's wakes, then fill the freed slot —
+            // a deferred scheduled run first (a commitment, independent of auto-advance), else the
+            // oldest pending task (gated on auto-advance). Task boundaries are also the long-lived
+            // Smith's compaction points: the finished task's play-by-play just became history.
+            guard transition.entersTerminal else { return }
+            await reportHoldsStrandedByTerminal(transition)
+            await scheduler.cancelWakesForTask(transition.taskID)
+            if await !drainPendingScheduledRunQueue() {
+                await drainPendingTaskQueue()
+            }
+            await autoCompactSmithIfNeeded()
+        case .effectsReady:
+            await deliverReadyTaskEffects()
+
+        case .lifecycle(let lifecycle):
+            switch lifecycle {
+            case .leftActive, .permanentlyDeleted:
+                // A task that leaves the active store (archive, soft or permanent delete) relinquishes
+                // its schedule: an orphaned wake would fire later and be skipped. No queue drain —
+                // an inactive task never held a worker slot.
+                await scheduler.cancelAllWakes(forRemovedTask: lifecycle.taskID)
+                await reportStrandedHolds(watchedTaskID: lifecycle.taskID, because: "is no longer in the active list")
+            case .restoredToActive:
+                break
+            }
+        }
+    }
+
+    /// Delivers every released transition effect whose write is on disk, oldest first, then removes
+    /// it from its task. A write that has not reached disk yet (or failed to) stops the pass — its
+    /// effect must not outrun the status it describes — and a retry is scheduled. Delivery is
+    /// idempotent: the broker id is the effect's deterministic id, so a crash between submitting
+    /// and removing re-submits a duplicate the broker recognizes.
+    private func deliverReadyTaskEffects() async {
+        let broker = await ensureNotificationBroker()
+        for ready in await taskStore.readyEffects() {
+            guard await taskStore.awaitDurable(through: ready.durableThrough) else {
+                scheduleTaskEffectRetry()
+                return
+            }
+            // An effect leaves its task only once the broker durably owns what it produced; until
+            // then it stays (and is resubmitted — the id dedups) so a crash can't lose it.
+            if await deliver(ready, via: broker) {
+                await taskStore.completeEffect(taskID: ready.taskID, recordID: ready.record.id)
+            } else {
+                scheduleTaskEffectRetry()
+            }
+        }
+    }
+
+    /// Hands one effect to the broker. Returns whether nothing more is owed on it: the broker owns
+    /// it durably, or it has become moot (its firing was cancelled or already settled).
+    private func deliver(_ ready: ReadyTaskEffect, via broker: NotificationBroker) async -> Bool {
+        switch ready.record.effect {
+        case .smithBriefing(let note):
+            let trigger = TriggerSource.taskTransition(taskID: ready.taskID, statusRevision: ready.record.transition.statusRevision)
+            return await broker.submit(AgentNotification(
+                id: NotificationID(namespace: trigger.namespace, key: ready.record.id),
+                triggerSource: trigger,
+                recipient: .smith,
+                title: "Task \(ready.record.transition.to.displayName)",
+                createdAt: Date(),
+                payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)])
+            ))
+        case .watchFiring(let watchID, let occurrence):
+            guard let task = await taskStore.task(id: ready.taskID),
+                  let watch = task.watch(id: watchID),
+                  let firing = watch.firing(occurrence: occurrence),
+                  !firing.state.isSettled else { return true }
+            // Already settled by the broker (a crash after submitting, before the task recorded
+            // it): the broker would dedup silently, so adopt its outcome instead.
+            let id = TaskWatchDelivery.notificationID(watchID: watchID, occurrence: occurrence)
+            if let settled = Self.firingState(adopting: await broker.deliveryStatus(id)) {
+                await taskStore.setWatchFiringState(taskID: task.id, watchID: watchID, occurrence: occurrence, to: settled)
+                return true
+            }
+            // Claim it, then re-read: a cancel that landed in between wins, and nothing is sent.
+            await taskStore.setWatchFiringState(taskID: task.id, watchID: watchID, occurrence: occurrence, to: .inFlight)
+            guard await taskStore.task(id: task.id)?.watch(id: watchID)?.firing(occurrence: occurrence)?.state == .inFlight else {
+                return true
+            }
+            return await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
+        }
+    }
+
+    /// Re-drives effect delivery after a failed or pending task write. A later mutation's successful
+    /// write covers every earlier one, so retrying is enough; the delay keeps a failing disk from
+    /// spinning the consumer.
+    private func scheduleTaskEffectRetry() {
+        guard !taskEffectRetryScheduled, let continuation = taskEventContinuation else { return }
+        taskEffectRetryScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.taskEffectRetryDelay)
+            await self?.clearTaskEffectRetry()
+            continuation.yield(.effectsReady)
+        }
+    }
+
+    private func clearTaskEffectRetry() {
+        taskEffectRetryScheduled = false
+    }
+
+    private static let taskEffectRetryDelay: Duration = .seconds(5)
+
+    /// Saves the queue of runs waiting for a worker slot, reporting (once per failure streak) a save
+    /// that failed: those runs — scheduled wakes and chained starts — would be lost if the app
+    /// restarted before a later save succeeds.
+    @discardableResult
+    private func savePendingScheduledRunQueue() async -> Bool {
+        guard let persistPendingScheduledRunQueue else { return true }
+        do {
+            try await persistPendingScheduledRunQueue(pendingScheduledRunQueue)
+            pendingScheduledRunQueueSaveFailing = false
+            return true
+        } catch {
+            if !pendingScheduledRunQueueSaveFailing {
+                pendingScheduledRunQueueSaveFailing = true
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Couldn't save the queue of runs waiting for a free worker (\(error.localizedDescription)). If the app restarts before a later save succeeds, a queued scheduled or chained run may not start.",
+                    metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
+                ))
+            }
+            return false
+        }
+    }
+
+    /// Surfaces a notification-store persistence failure to the user. A failed save means a restart
+    /// could re-fire an already-delivered notification (ledger) or lose one Smith hasn't read yet
+    /// (outbox); a failed load means this launch runs that store in memory only.
+    private func reportNotificationPersistenceFailure(_ failure: NotificationPersistenceFailure) async {
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: failure.userFacingDescription,
+            metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
+        ))
     }
 
     private func postNotificationSystemNotice(_ text: String, taskID: UUID?) async {
@@ -1094,7 +1637,7 @@ public actor OrchestrationRuntime {
 
         while let next = pendingScheduledRunQueue.first {
             pendingScheduledRunQueue.removeFirst()
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+            await savePendingScheduledRunQueue()
             // Library-aware, for the same reason as `dispatchAutoRunWake`: a recurring run's target
             // is a template, and templates live in the GLOBAL library. The bare `task(id:)` this
             // replaced returned nil for every one of them and `continue`d without a word.
@@ -1106,16 +1649,36 @@ public actor OrchestrationRuntime {
                 )
                 continue
             }
-            // Re-prepare rather than re-check: an entry queued while a slot was busy may have been
-            // failed or completed in the meantime, and this is the same acceptance a manual
-            // `run_task` would apply. The old bare `task.status.isRunnable` check here refused
-            // exactly those cases — and refused them SILENTLY, with a bare `continue`.
-            if !task.isTemplate,
-               case .refused(let reason) = await taskStore.prepareForRun(id: next.taskID) {
-                await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
-                continue
+            if case .watchSatisfied(let watchID) = next.origin {
+                // A watch never reopens or resets its target, and a cancelled watch starts nothing.
+                if case .cancelled = await taskStore.watchState(watchID) { continue }
+                guard task.status.isRunnable else {
+                    await channel.post(ChannelMessage(
+                        sender: .system,
+                        content: "\"\(task.title)\" was queued to start by a watch, but it is now \(task.status.displayName.lowercased()); a watch never reopens or resets a task, so it was not started.",
+                        metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(task.id.uuidString), "severity": .severity(.warning)],
+                        taskID: task.id
+                    ))
+                    continue
+                }
+            } else {
+                // A held task is refused BEFORE `prepareForRun` could reset or reopen it.
+                if !task.startHolds.isEmpty, !next.origin.overridesStartHolds {
+                    let reason = "it is waiting on \(await describeHolds(task.startHolds)) — a watch starts it when that happens"
+                    await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
+                    continue
+                }
+                // Re-prepare rather than re-check: an entry queued while a slot was busy may have
+                // been failed or completed in the meantime, and this is the same acceptance a manual
+                // `run_task` would apply. The old bare `task.status.isRunnable` check here refused
+                // exactly those cases — and refused them SILENTLY, with a bare `continue`.
+                if !task.isTemplate,
+                   case .refused(let reason) = await taskStore.prepareForRun(id: next.taskID) {
+                    await reportScheduledRunRefused(taskID: next.taskID, title: task.title, reason: reason)
+                    continue
+                }
             }
-            restartForNewTask(taskID: next.taskID, amendment: next.amendment)
+            restartForNewTask(taskID: next.taskID, amendment: next.amendment, origin: next.origin)
             return true
         }
         return false
@@ -1142,7 +1705,9 @@ public actor OrchestrationRuntime {
         // Two queues share the pool: the launch-scoped interrupted-resume queue
         // (autoRunInterruptedTasks) and pending auto-advance (autoAdvanceEnabled). Run if
         // either could place work.
-        guard autoAdvanceEnabled || (autoRunInterruptedTasks && !launchResumeQueue.isEmpty) else { return }
+        guard autoAdvanceEnabled
+                || (autoRunInterruptedTasks && !launchResumeQueue.isEmpty)
+                || !capacityDeferredQueue.isEmpty else { return }
         guard !isDrainingTaskQueues else { drainRequestedWhileBusy = true; return }
         isDrainingTaskQueues = true
         defer { isDrainingTaskQueues = false }
@@ -1167,13 +1732,15 @@ public actor OrchestrationRuntime {
         // Prune the resume queue to IDs still present AND still interrupted (a task that
         // completed, was manually run, or was archived drops off).
         launchResumeQueue = launchResumeQueue.filter { byID[$0]?.status == .interrupted }
+        capacityDeferredQueue = capacityDeferredQueue.filter { byID[$0]?.status == .interrupted }
 
         // Launch-interrupted work (in-flight when the session came up) resumes before pending
         // (never-started) work; each oldest-first. `restartForNewTask` resumes an interrupted
         // task WITH its prior context (the briefing draws on task.updates), so nothing is lost.
-        var runnable: [AgentTask] = []
+        // Capacity-deferred work first: it was already running before the user shrank the pool.
+        var runnable: [(task: AgentTask, origin: TaskStartOrigin)] = capacityDeferredQueue.compactMap { byID[$0] }.map { ($0, .capacityResume) }
         if autoRunInterruptedTasks {
-            runnable += launchResumeQueue.compactMap { byID[$0] }
+            runnable += launchResumeQueue.compactMap { byID[$0] }.map { ($0, .launchResume) }
         }
         if autoAdvanceEnabled {
             // Templates are `.pending` launchers, not queued work — they start only on an
@@ -1183,14 +1750,20 @@ public actor OrchestrationRuntime {
             runnable += activeTasks
                 .filter { $0.status == .pending && !$0.isTemplate }
                 .sorted { $0.createdAt < $1.createdAt }
+                .map { ($0, .autoAdvance) }
         }
+        // One start per task even if it sits on more than one queue; a task a watch is waiting to
+        // start is never picked up automatically (only its watch, or the user's Play, starts it).
+        var queued: Set<UUID> = []
+        runnable = runnable.filter { $0.task.startHolds.isEmpty && queued.insert($0.task.id).inserted }
         let toStart = Array(runnable.prefix(freeSlots))
         // Drop resumed IDs from the queue immediately, so a later mid-session Stop of the same
         // task can't put it back on the auto-resume path.
-        let startedIDs = Set(toStart.map(\.id))
+        let startedIDs = Set(toStart.map(\.task.id))
         launchResumeQueue.removeAll { startedIDs.contains($0) }
-        for task in toStart {
-            restartForNewTask(taskID: task.id)
+        capacityDeferredQueue.removeAll { startedIDs.contains($0) }
+        for entry in toStart {
+            restartForNewTask(taskID: entry.task.id, origin: entry.origin)
         }
     }
 
@@ -1464,6 +2037,13 @@ public actor OrchestrationRuntime {
                 kept.append(candidate)
             } else {
                 guard seenIDs.insert(wake.id).inserted else { droppedCount += 1; continue }
+                // A task archived or deleted while no runtime was listening (the session stopped)
+                // took its wakes with it: nothing scheduled for a task that is gone may fire.
+                if let taskID = wake.taskID, tasksByID[taskID]?.disposition != .active,
+                   await taskStore.taskOrLibraryTemplate(id: taskID) == nil {
+                    droppedCount += 1
+                    continue
+                }
                 kept.append(wake)
             }
         }
@@ -1671,8 +2251,10 @@ public actor OrchestrationRuntime {
     ///   reset at the same turn boundary (`AgentActor.scheduleModelSwap`): Smith gets the same
     ///   `/clear` orientation rebuild, Brown gets a fresh task briefing. This avoids replaying
     ///   provider-shaped history across backends.
-    /// - Non-agent holders refresh in place: `TaskSummarizer`, Smith's long-lived
-    ///   `SecurityEvaluator`, and `validationSecurityEvaluator`.
+    /// - Non-agent holders take BOTH, live: every live `SecurityEvaluator` gets the new Security
+    ///   Agent model (`applyModel`; each evaluation snapshots its model, and keeps no conversation),
+    ///   and the `TaskSummarizer` is rebuilt. Only when the role's provider was actually rebuilt, so a
+    ///   configuration is never paired with a stale provider.
     /// - The validator needs none of this: `validatorModel()` reads these dictionaries fresh for
     ///   every criterion judgment.
     ///
@@ -1685,14 +2267,6 @@ public actor OrchestrationRuntime {
         supportsVisionByRole: [AgentRole: Bool] = [:],
         supportsDocumentsByRole: [AgentRole: Bool] = [:]
     ) async {
-        let summarizerConfigOnlyRequestWithoutProvider =
-            configurations[.summarizer] != nil
-            && providers[.summarizer] == nil
-            && llmProviders[.summarizer] == nil
-        let securityConfigOnlyRequestWithoutProvider =
-            configurations[.securityAgent] != nil
-            && providers[.securityAgent] == nil
-            && llmProviders[.securityAgent] == nil
         // Decide what is a RETUNE before the merge overwrites the configs being compared against.
         // Three conditions, all required: the role already had a config (nothing live otherwise),
         // the model identity is unchanged,
@@ -1701,6 +2275,25 @@ public actor OrchestrationRuntime {
         // per-instance state (the ChatGPT-subscription provider's `prompt_cache_key`, which is its
         // prefix-cache routing hint), so retuning a role nobody touched would throw away a live
         // agent's cache locality to apply a change that isn't there.
+        // The non-agent holders (Security Agent evaluators, the task summarizer) take a MODEL change
+        // as well as a retune: neither keeps a conversation across calls, so nothing provider-shaped
+        // survives the switch (unlike an agent, whose history does). Same "only if the resolved
+        // configuration actually changed" rule as the retune, for the same cache-locality reason.
+        // Requires the rebuilt PROVIDER too (like the retune guard): a role whose provider build
+        // failed arrives with a new config and no provider, and pairing that config with the old
+        // provider would call one model while recording and sizing requests for another.
+        // A capability-only change (vision / PDF overrides) counts too: evaluators gate attachments on it.
+        // A provider arriving for a role that had none is a change even with an equal configuration:
+        // that configuration may have been merged earlier without a provider (see `accepts` below).
+        let securityModelChanged = providers[.securityAgent] != nil
+            && (llmProviders[.securityAgent] == nil
+                || (configurations[.securityAgent].map { $0 != llmConfigs[.securityAgent] } ?? false)
+                || (supportsVisionByRole[.securityAgent].map { $0 != self.supportsVisionByRole[.securityAgent] } ?? false)
+                || (supportsDocumentsByRole[.securityAgent].map { $0 != self.supportsDocumentsByRole[.securityAgent] } ?? false))
+        let summarizerModelChanged = providers[.summarizer] != nil
+            && (llmProviders[.summarizer] == nil
+                || (configurations[.summarizer].map { $0 != llmConfigs[.summarizer] } ?? false))
+
         var retunes: [AgentRole: AgentActor.ModelRetune] = [:]
         var identitySwaps: [AgentRole: AgentActor.ModelRetune] = [:]
         for (role, newConfig) in configurations {
@@ -1723,11 +2316,16 @@ public actor OrchestrationRuntime {
             }
         }
 
+        // A role's configuration and facts are merged only together with its provider (or when the
+        // runtime has no provider for it yet). A role whose provider failed to build keeps its
+        // previous, coherent pair — and because its configuration is then still the OLD one, the
+        // next successful rebuild compares as a change and reaches every live holder.
+        func accepts(_ role: AgentRole) -> Bool { providers[role] != nil || llmProviders[role] == nil }
         for (role, provider) in providers { llmProviders[role] = provider }
-        for (role, config) in configurations { llmConfigs[role] = config }
-        for (role, apiType) in apiTypes { providerAPITypes[role] = apiType }
-        for (role, vision) in supportsVisionByRole { self.supportsVisionByRole[role] = vision }
-        for (role, docs) in supportsDocumentsByRole { self.supportsDocumentsByRole[role] = docs }
+        for (role, config) in configurations where accepts(role) { llmConfigs[role] = config }
+        for (role, apiType) in apiTypes where accepts(role) { providerAPITypes[role] = apiType }
+        for (role, vision) in supportsVisionByRole where accepts(role) { self.supportsVisionByRole[role] = vision }
+        for (role, docs) in supportsDocumentsByRole where accepts(role) { self.supportsDocumentsByRole[role] = docs }
         // New configuration is grounds to retry: close a breaker opened by
         // missing-provider spawn failures (or by scoping failures against a backend the
         // user may just have fixed).
@@ -1739,9 +2337,6 @@ public actor OrchestrationRuntime {
         if llmProviders[.validator] != nil, llmConfigs[.validator] != nil {
             releaseTasksBlockedOnValidatorModel()
         }
-
-        await refreshTaskSummarizerHolder(keepExistingOnMissing: summarizerConfigOnlyRequestWithoutProvider)
-        await refreshLongLivedSecurityEvaluators(keepExistingOnMissing: securityConfigOnlyRequestWithoutProvider)
 
         // Push retunes AFTER the merge, so a spawn racing this call reads the same configuration
         // the live agents just received.
@@ -1761,8 +2356,18 @@ public actor OrchestrationRuntime {
                 // converge to the same updated identity. Each worker gets its own task briefing so
                 // the swap reset preserves that worker's task context independently.
                 for workerHandle in supervisor.handles(role: .brown) {
+                    // A just-spawned worker already has a supervisor task binding before the
+                    // caller records its assignment in TaskStore. Prefer that binding, retaining
+                    // the assignment lookup for legacy task-less spawns.
+                    var task: AgentTask?
+                    if let taskID = workerHandle.taskID {
+                        task = await taskStore.task(id: taskID)
+                    }
+                    if task == nil {
+                        task = await taskStore.taskForAgent(agentID: workerHandle.id)
+                    }
                     let orientation: String?
-                    if let task = await taskStore.taskForAgent(agentID: workerHandle.id) {
+                    if let task {
                         orientation = await composeBrownTaskBriefing(for: task)
                     } else {
                         orientation = nil
@@ -1773,17 +2378,19 @@ public actor OrchestrationRuntime {
                 continue
             }
         }
+        if securityModelChanged {
+            await ensureLongLivedSecurityEvaluators()
+            await pushSecurityModelToLiveEvaluators()
+        }
+        // Only a running runtime has a summarizer to replace; one not yet started builds it at start.
+        if summarizerModelChanged, currentSessionID != nil {
+            await rebuildTaskSummarizer()
+        }
     }
 
-    private func refreshLongLivedSecurityEvaluators(keepExistingOnMissing: Bool = false) async {
+    private func ensureLongLivedSecurityEvaluators() async {
         guard let provider = llmProviders[.securityAgent],
-              let config = llmConfigs[.securityAgent] else {
-            if !keepExistingOnMissing {
-                smithSecurityEvaluator = nil
-                validationSecurityEvaluator = nil
-            }
-            return
-        }
+              llmConfigs[.securityAgent] != nil else { return }
         if smithSecurityEvaluator == nil {
             let evaluator = makeSecurityEvaluator(provider: provider, executionTracker: ToolExecutionTracker())
             if let evalCallback = onEvaluationRecorded {
@@ -1811,54 +2418,6 @@ public actor OrchestrationRuntime {
             }
             validationSecurityEvaluator = evaluator
         }
-        let providerType = providerAPITypes[.securityAgent]?.rawValue ?? ""
-        let supportsVision = supportsVisionByRole[.securityAgent] ?? true
-        let supportsDocuments = supportsDocumentsByRole[.securityAgent] ?? false
-        await smithSecurityEvaluator?.setModel(
-            provider: provider,
-            configuration: config,
-            providerType: providerType,
-            supportsVision: supportsVision,
-            supportsDocuments: supportsDocuments
-        )
-        await validationSecurityEvaluator?.setModel(
-            provider: provider,
-            configuration: config,
-            providerType: providerType,
-            supportsVision: supportsVision,
-            supportsDocuments: supportsDocuments
-        )
-    }
-
-    private func refreshTaskSummarizerHolder(keepExistingOnMissing: Bool = false) async {
-        guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else {
-            if !keepExistingOnMissing {
-                taskSummarizer = nil
-            }
-            return
-        }
-        let providerType = providerAPITypes[.summarizer]?.rawValue ?? ""
-        if let summarizer = taskSummarizer {
-            await summarizer.setModel(provider: provider, configuration: config, providerType: providerType)
-            return
-        }
-        let summarizer = TaskSummarizer(
-            provider: provider,
-            memoryStore: memoryStore,
-            channel: channel,
-            contextWindowSize: config.contextWindowSize,
-            maxOutputTokens: config.maxTokens,
-            usageStore: usageStore,
-            configuration: config,
-            providerType: providerType,
-            sessionID: currentSessionID,
-            activityTracker: liveActivityTracker
-        )
-        if let callCallback = onLLMCallRecorded {
-            let summarizerRef = summarizerInspectorRef
-            await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
-        }
-        taskSummarizer = summarizer
     }
 
     /// Returns every task parked on a missing validator model to `.validating` and re-enqueues
@@ -2121,10 +2680,12 @@ public actor OrchestrationRuntime {
     public func restartForNewTask(
         taskID: UUID,
         amendment: String? = nil,
-        templateInputValues: [String: String] = [:]
+        templateInputValues: [String: String] = [:],
+        origin: TaskStartOrigin
     ) {
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
+            guard await self.passesStartGate(taskID: taskID, origin: origin) else { return }
             // Template interception: starting a template never runs the template — it
             // clones a fresh instance and runs THAT. The template stays put (gets a
             // "started instance" note) so it can spawn another instance next time. This
@@ -2151,7 +2712,7 @@ public actor OrchestrationRuntime {
             if let priorSessionID {
                 await self.usageStore.backfillTaskID(startID, forSession: priorSessionID)
             }
-            await self.performStart(resumingTaskID: startID, lastUserMessage: lastUserMessage)
+            await self.performStart(resumingTaskID: startID, resumingOrigin: origin, lastUserMessage: lastUserMessage)
         }
     }
 
@@ -2238,7 +2799,7 @@ public actor OrchestrationRuntime {
         // lifecycle queue, finds the task already `.starting` (or `.running`), the CAS returns false,
         // and it bails. Without this, the loser could flip a live `.running` task back to `.pending`
         // (orphaning its worker) or respawn Brown and discard its in-progress context.
-        guard await taskStore.updateStatus(id: taskID, to: .starting, ifCurrentlyIn: [.pending, .paused, .interrupted]) else {
+        guard await taskStore.updateStatus(id: taskID, to: .starting, ifCurrentlyIn: [.pending, .paused, .interrupted], cause: .startClaimed) else {
             stopLogger.notice("performStart: task \(taskID.uuidString, privacy: .public) not claimable (already starting/running) — duplicate start ignored")
             return
         }
@@ -2279,7 +2840,7 @@ public actor OrchestrationRuntime {
             // idle-worker cycling above, and an unconditional `.pending` would clobber that pause and
             // let the auto-advance drain run a task that was meant to stay paused. If the CAS loses,
             // honor the new status silently (no misleading "queued" message).
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.starting]) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.starting], cause: .startAbandoned) else { return }
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees.",
@@ -2297,15 +2858,9 @@ public actor OrchestrationRuntime {
             // Only fail the task if it's STILL our `.starting` claim. A wake may have paused it during
             // the spawn (same race as the `.running` finalize below); don't clobber that pause or tell
             // Smith it FAILED when it was actually paused — the paused task retries its spawn on resume.
-            guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.starting]) else { return }
-            if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-                await smithAgent.appendUserMessage("""
-                    [System: Task "\(task.title)" (ID: \(taskID.uuidString)) could not be started — the worker \
-                    failed to spawn (provider unreachable or tool-scoping failed; details were posted to the \
-                    channel). The task has been marked FAILED. Tell the user briefly what happened; saying \
-                    "retry" will re-run it via `run_task`, which auto-resets failed tasks.]
-                    """)
-            }
+            // Smith is told through the task's durable briefing (`SmithTaskBriefing`): the spawn
+            // failure's details were already posted, so it is released with the write.
+            await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.starting], cause: .spawnFailed)
             return
         }
 
@@ -2315,7 +2870,9 @@ public actor OrchestrationRuntime {
         // an unconditional set to `.running` would silently clobber that pause and run the task Smith
         // was told to interrupt. If the CAS loses, honor the new status and tear down the worker we
         // just spawned — the paused task resumes later via its queued wake.
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.starting]) else {
+        // Smith's "has been started" briefing is written with the status but HELD until Brown is
+        // assigned and briefed, then released below.
+        guard let startEffects = await taskStore.updateStatusHoldingEffects(id: taskID, to: .running, ifCurrentlyIn: [.starting], cause: .workerStarted) else {
             stopLogger.notice("performStart: task \(taskID.uuidString, privacy: .public) left .starting during spawn (e.g. paused by a wake) — tearing down the freshly spawned worker")
             _ = await performTerminateAgent(id: brownID)
             return
@@ -2329,18 +2886,7 @@ public actor OrchestrationRuntime {
             await brownAgent.setAcknowledgesTaskOnFirstTurn()
             await brownAgent.appendUserMessage(briefing, attachments: attachmentsForBrown)
         }
-
-        if let smithAgent = supervisor.firstHandle(role: .smith)?.agent {
-            await smithAgent.appendUserMessage("""
-                [System: Task "\(refreshed.title)" (ID: \(taskID.uuidString)) has been started. A fresh worker \
-                (Brown) was spawned and briefed automatically. Do NOT call `run_task`, `create_task`, or \
-                `notify_brown` FOR THIS task — Brown will signal progress via task_update / task_complete, \
-                and you'll get the periodic Brown-activity digest; do NOT poll. This start came from your own \
-                run_task call, a scheduled timer, auto-advance, or the user's Play/Resume control; if it \
-                resumes a task you were told was paused or stopped, it is in progress again. If the user \
-                doesn't already know it started, tell them in one short line. Handle any NEW user message normally.]
-                """)
-        }
+        await taskStore.releaseEffects(startEffects)
     }
 
     /// Awaits every previously-scheduled restart. Surfaced for tests / smoke
@@ -2415,13 +2961,18 @@ public actor OrchestrationRuntime {
     /// The actual start implementation. Runs ONLY as a lifecycle-queue item (or from
     /// another implementation already inside one) — never call directly from a public
     /// entry point.
-    private func performStart(resumingTaskID: UUID? = nil, lastUserMessage: String? = nil) async {
+    private func performStart(resumingTaskID: UUID? = nil, resumingOrigin: TaskStartOrigin? = nil, lastUserMessage: String? = nil) async {
         guard !startInProgress, smith == nil else {
             // Bailing — but if we were asked to resume a specific task, don't silently drop
             // it (the historical `guard smith == nil` drop bug). Re-route it through the
-            // restart queue so it runs once the in-flight start has finished.
+            // restart queue so it runs once the in-flight start has finished, under the origin
+            // that asked for it.
             if let resumingTaskID {
-                restartForNewTask(taskID: resumingTaskID)
+                if let resumingOrigin {
+                    restartForNewTask(taskID: resumingTaskID, origin: resumingOrigin)
+                } else {
+                    stopLogger.fault("performStart: resuming task \(resumingTaskID.uuidString, privacy: .public) arrived with no start origin — not re-routed")
+                }
             }
             return
         }
@@ -2448,32 +2999,9 @@ public actor OrchestrationRuntime {
         await powerMgr.start()
         powerManager = powerMgr
 
-        // Create the TaskSummarizer only if a summarizer model is explicitly configured.
-        // If not configured, task summarization is silently skipped.
-        if let summarizerProvider = llmProviders[.summarizer],
-           let summarizerConfig = llmConfigs[.summarizer] {
-            taskSummarizer = TaskSummarizer(
-                provider: summarizerProvider,
-                memoryStore: memoryStore,
-                channel: channel,
-                contextWindowSize: summarizerConfig.contextWindowSize,
-                maxOutputTokens: summarizerConfig.maxTokens,
-                usageStore: usageStore,
-                configuration: summarizerConfig,
-                providerType: providerAPITypes[.summarizer]?.rawValue ?? "",
-                sessionID: sessionID,
-                activityTracker: liveActivityTracker
-            )
-            // One inspector identity per summarizer instance, so its calls form one stable
-            // subject in the inspector for the life of this run.
-            summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
-            if let callCallback = onLLMCallRecorded, let summarizer = taskSummarizer {
-                let summarizerRef = summarizerInspectorRef
-                await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
-            }
-        } else {
-            taskSummarizer = nil
-        }
+        // Created only if a summarizer model is explicitly configured; otherwise task summarization
+        // is skipped. Rebuilt by `setProviders` whenever the summarizer's model or tuning changes.
+        taskSummarizer = await makeTaskSummarizer()
 
         guard let smithConfig = llmConfigs[.smith],
               let provider = llmProviders[.smith] else {
@@ -2578,13 +3106,19 @@ public actor OrchestrationRuntime {
         }
         // This is a NEW Smith (performStart re-spawns it; the live-Smith task-start path doesn't run
         // here). The broker is memoized and survives the re-spawn, so clear any lease the PREVIOUS
-        // Smith left outstanding — otherwise this Smith's first drain would ack away that undelivered
-        // batch and lose it. Cleared → the new Smith re-delivers the durable outbox (at-least-once).
-        await broker.resetLease(for: .smith)
-        await smithAgent.setDrainNotifications { [weak broker] in
-            guard let broker else { return [] }
-            return await broker.drainPendingDeliveries(for: .smith).map(\.text)
-        }
+        // Smith left outstanding: whatever it never acknowledged is re-delivered to this one. The new
+        // lease generation keeps a late acknowledgement from the old Smith from removing an item this
+        // one was re-handed.
+        let leaseGeneration = await broker.resetLease(for: .smith)
+        await smithAgent.setDrainNotifications(
+            { [weak broker] in
+                guard let broker else { return [] }
+                return await broker.drainPendingDeliveries(for: .smith)
+            },
+            onActedOn: { [weak broker] ids in
+                await broker?.acknowledgeDeliveries(ids, for: .smith, leaseGeneration: leaseGeneration)
+            }
+        )
         if let callCallback = onLLMCallRecorded {
             await smithAgent.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .smith, instanceID: id), event) }
         }
@@ -2601,38 +3135,19 @@ public actor OrchestrationRuntime {
             guard let self else { return nil }
             return await self.assembleDigestIfBrownAlive(since: since)
         }
-        // Cancel any task-scoped wakes when the task transitions to a terminal status the first time.
-        // Also drain `pendingScheduledRunQueue` so any deferred scheduled task — or a paused
-        // task awaiting resume after an interrupt — runs immediately when the in-flight slot
-        // frees up. The scheduled-run drain runs INDEPENDENTLY of `autoAdvanceEnabled`
-        // (scheduled wakes are a commitment, not a deferred suggestion). The pending-task
-        // drain that follows IS gated on `autoAdvanceEnabled` and only runs when the
-        // scheduled drain didn't claim the slot — that's the auto-advance step Smith's
-        // prompt promises after `review_work(accepted: true)`.
-        let scheduler = wakeScheduler
-        await taskStore.setOnTaskTerminated { [weak self] taskID in
-            // Fire-and-forget Task to stay synchronous from TaskStore's view.
-            // Both calls are non-throwing today; if either ever gains a `throws`
-            // signature, wrap them in `do { try await ... } catch { os_log(.error) }`
-            // so the failure surfaces rather than vanishing into the unstructured
-            // Task. (L3 from the 2026-04-27 concurrency review.)
-            Task {
-                await scheduler.cancelWakesForTask(taskID)
-                let kicked = await self?.drainPendingScheduledRunQueue() ?? false
-                if !kicked {
-                    await self?.drainPendingTaskQueue()
-                }
-                // Task boundaries are the long-lived Smith's compaction points: the
-                // terminated task's play-by-play just became history (Phase 2).
-                await self?.autoCompactSmithIfNeeded()
+        // The runtime reacts to task transitions and lifecycle changes through one serialized
+        // consumer (wake cancellation, slot refill, Smith compaction).
+        await installTaskEventConsumerIfNeeded(scheduler: wakeScheduler)
+        // A task deleted or archived while the session was stopped left no runtime to warn the tasks
+        // waiting on it.
+        var goneWatchedTaskIDs: Set<UUID> = []
+        for held in await taskStore.allTasks() {
+            for hold in held.startHolds where await taskStore.task(id: hold.watchedTaskID) == nil {
+                goneWatchedTaskIDs.insert(hold.watchedTaskID)
             }
         }
-
-        // Archive / soft-delete: cancel the task's scheduled wakes so an orphaned wake doesn't fire
-        // (and get skipped) later. Unlike the terminal-status path above, an inactivated task simply
-        // relinquishes its schedule — no queue drain, no compaction.
-        await taskStore.setOnTaskMovedToInactive { taskID in
-            Task { await scheduler.cancelWakesForTask(taskID) }
+        for watchedTaskID in goneWatchedTaskIDs {
+            await reportStrandedHolds(watchedTaskID: watchedTaskID, because: "is no longer in the active list")
         }
 
         // Wire timer lifecycle callbacks from the WakeScheduler into the runtime's event log so the
@@ -2691,9 +3206,20 @@ public actor OrchestrationRuntime {
         // the slot frees up. The queue is per-session, so each window's runtime restores
         // its own list — no cross-session bleed.
         if let loader = loadPendingScheduledRunQueue {
-            let queue = await loader()
-            if !queue.isEmpty {
-                pendingScheduledRunQueue = queue
+            do {
+                let queue = try await loader()
+                if !queue.isEmpty {
+                    pendingScheduledRunQueue = queue
+                }
+            } catch {
+                // Never overwrite a file this launch couldn't read: runs queued before the restart
+                // may be in it. Keep the queue in memory only, and say so.
+                persistPendingScheduledRunQueue = nil
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Couldn't read the queue of runs waiting for a free worker (\(error.localizedDescription)). It is left untouched on disk; this launch keeps the queue in memory only, so runs queued before the restart won't start on their own — check your scheduled and chained tasks.",
+                    metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
+                ))
             }
         }
 
@@ -2716,8 +3242,8 @@ public actor OrchestrationRuntime {
             // crash between the enqueue and the start still loses the run's refinements even though
             // it no longer loses the run. Carrying the amendment in the QUEUE (which IS persisted)
             // is what keeps that window down to a crash, rather than every deferred run.
-            pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map { PendingScheduledRun(taskID: $0.id) })
-            await persistPendingScheduledRunQueue?(pendingScheduledRunQueue)
+            pendingScheduledRunQueue.append(contentsOf: orphanedScheduledRuns.map { PendingScheduledRun(taskID: $0.id, origin: .scheduled) })
+            await savePendingScheduledRunQueue()
         }
 
         // Belt-and-suspenders: re-arm any `.scheduled` task that doesn't yet have a wake
@@ -2725,33 +3251,15 @@ public actor OrchestrationRuntime {
         // tasks get promoted to `.pending` so the cold-launch instruction surfaces them.
         await rearmScheduledTaskWakes(excluding: resumingTaskID)
 
+        // No worker survives a restart: a `.running` task gets `ColdBootRunningRecovery` (a durably
+        // submitted result resumes validation, anything else is interrupted) and a `.starting` one
+        // returns to `.pending` for a fresh start, re-picked by the cold-boot auto-advance below.
+        // The session loader already reconciled the restored tasks; this covers tasks that reached
+        // those states after that load (a runtime restart leaves its workers behind). Skip the
+        // resuming task — it will be set to running momentarily.
+        await taskStore.reconcileAfterLaunch(excluding: resumingTaskID)
+
         var activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-
-        // A crash during `task_complete` can leave the durable result written while the
-        // status is still `.running`. That is submitted work, not resumable Brown work.
-        for task in activeTasks where task.status == .running && task.id != resumingTaskID && task.hasSubmittedResult {
-            await taskStore.addUpdate(id: task.id, message: "Recovered submitted result after restart; resuming acceptance validation without re-running Brown.")
-            await taskStore.updateStatus(id: task.id, status: .validating)
-        }
-
-        activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-
-        // Mark any leftover running tasks as interrupted — no Brown is running them anymore.
-        // (Clean shutdowns mark these interrupted via AppViewModel; this catches crashes/force-quits.)
-        // Skip the resuming task if present — it will be set to running momentarily.
-        let leftoverRunningTasks = activeTasks.filter { $0.status == .running && $0.id != resumingTaskID }
-        for task in leftoverRunningTasks {
-            await taskStore.updateStatus(id: task.id, status: .interrupted)
-        }
-
-        // A task left `.starting` by a crash mid-spawn never got a live worker (no context was
-        // saved), so demote it to `.pending` — a fresh start, re-picked by the cold-boot
-        // auto-advance below rather than resumed as if it had in-progress work.
-        for task in activeTasks where task.status == .starting && task.id != resumingTaskID {
-            await taskStore.updateStatus(id: task.id, status: .pending)
-        }
-
-        activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
         // A validator model may already be configured at boot (the runtime is built with providers
         // BEFORE tasks are restored), so a task persisted-parked on a missing validator would
@@ -2768,8 +3276,8 @@ public actor OrchestrationRuntime {
         // (Brown needs an answer a restart can't give) or missing-validator parks (need config).
         for task in activeTasks where task.status == .awaitingReview
             && task.helpRequest == nil && task.validationBlockedReason == nil {
+            guard await taskStore.updateStatus(id: task.id, to: .validating, ifCurrentlyIn: [.awaitingReview], cause: .coldBootRevalidate) else { continue }
             await taskStore.addUpdate(id: task.id, message: "Re-running acceptance validation after restart instead of waiting on manual review.")
-            await taskStore.updateStatus(id: task.id, status: .validating)
         }
         activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
 
@@ -2813,7 +3321,7 @@ public actor OrchestrationRuntime {
                 // Auto-spawn Brown and deliver the task briefing
                 let brownSpawned: Bool
                 if let brownID = await performSpawnBrown(for: resumingTask) {
-                    await taskStore.updateStatus(id: resumingTaskID, status: .running)
+                    await taskStore.updateStatus(id: resumingTaskID, status: .running, cause: .workerStartedAtRuntimeStart)
                     await taskStore.assignAgent(taskID: resumingTaskID, agentID: brownID)
                     // Re-read to get the latest state (includes any amendments from run_task)
                     resumingTask = await taskStore.task(id: resumingTaskID) ?? resumingTask
@@ -2892,7 +3400,7 @@ public actor OrchestrationRuntime {
                     // mistaken for "the task the user means" after the 2026-07-08 outage.
                     // Mark it failed; `run_task` auto-resets failed tasks, so retrying is
                     // one call once the provider is reachable again.
-                    await taskStore.updateStatus(id: resumingTaskID, status: .failed)
+                    await taskStore.updateStatus(id: resumingTaskID, status: .failed, cause: .spawnFailedAtRuntimeStart)
                     smithParts.append("""
                         Failed to start task "\(resumingTask.title)" (ID: \(resumingTaskID.uuidString)) — Brown could not be spawned \
                         (LLM provider unreachable or the security agent could not scope tools; details were posted to the channel). \
@@ -2954,11 +3462,12 @@ public actor OrchestrationRuntime {
             // but it never enters this queue, so it stays stopped until the next launch.
             var autoResumedTasks: [AgentTask] = []
             if autoRunInterruptedTasks, awaitingReviewTasks.isEmpty {
-                var remaining = interruptedTasks.sorted { $0.createdAt < $1.createdAt }
+                // A held task waits for its watch (or the user's Play), not for launch.
+                var remaining = interruptedTasks.filter(\.startHolds.isEmpty).sorted { $0.createdAt < $1.createdAt }
                 while supervisor.handles(role: .brown).count < maxConcurrentWorkers, let task = remaining.first {
                     guard let brownID = await performSpawnBrown(for: task) else { break }
                     remaining.removeFirst()
-                    await taskStore.updateStatus(id: task.id, status: .running)
+                    await taskStore.updateStatus(id: task.id, status: .running, cause: .workerStartedAtRuntimeStart)
                     await taskStore.assignAgent(taskID: task.id, agentID: brownID)
 
                     let briefing = await composeBrownTaskBriefing(for: task)
@@ -3613,9 +4122,12 @@ public actor OrchestrationRuntime {
     /// per-evaluator breaker would fragment across concurrent workers and reset on every respawn.
     private let securityBackendHealth = SecurityBackendHealth()
 
-    private func makeSecurityEvaluator(provider: any LLMProvider, executionTracker: ToolExecutionTracker) -> SecurityEvaluator {
-        SecurityEvaluator(
-            provider: provider,
+    /// Builds an evaluator on the Security Agent model as configured NOW. `provider` is the one the
+    /// caller verified exists; it is used only if the configured provider disappeared since, so an
+    /// evaluator built after a suspension never pairs a fresh configuration with a stale provider.
+    private func makeSecurityEvaluator(provider verifiedProvider: any LLMProvider, executionTracker: ToolExecutionTracker) -> SecurityEvaluator {
+        let evaluator = SecurityEvaluator(
+            provider: llmProviders[.securityAgent] ?? verifiedProvider,
             systemPrompt: SecurityAgentBehavior.systemPrompt,
             channel: channel,
             abort: { [weak self] reason, callerRole in
@@ -3654,6 +4166,89 @@ public actor OrchestrationRuntime {
                     ?? SemanticSearchResults(memories: [], taskSummaries: [])
             }
         )
+        liveSecurityEvaluators.removeAll { $0.evaluator == nil }
+        liveSecurityEvaluators.append(WeakSecurityEvaluator(evaluator: evaluator))
+        return evaluator
+    }
+
+    /// The configurations every live Security Agent evaluator and the task summarizer are calling
+    /// with — what a model change must reach.
+    func nonAgentModelConfigurations() async -> (security: [ModelConfiguration?], summarizer: ModelConfiguration?) {
+        var security: [ModelConfiguration?] = []
+        for box in liveSecurityEvaluators {
+            if let evaluator = box.evaluator { security.append(await evaluator.currentModel.configuration) }
+        }
+        return (security, await taskSummarizer?.modelConfiguration)
+    }
+
+    /// Hands every live evaluator the Security Agent model as configured NOW. The pushes suspend, so
+    /// a later `setProviders` can land between them; after the loop the configuration is compared
+    /// with what was pushed and the push repeats until they agree — an older model never ends up
+    /// overwriting a newer one.
+    private func pushSecurityModelToLiveEvaluators() async {
+        while let model = currentSecurityEvaluatorModel() {
+            liveSecurityEvaluators.removeAll { $0.evaluator == nil }
+            for box in liveSecurityEvaluators {
+                await box.evaluator?.applyModel(model)
+            }
+            if llmConfigs[.securityAgent] == model.configuration,
+               (supportsVisionByRole[.securityAgent] ?? true) == model.supportsVision,
+               (supportsDocumentsByRole[.securityAgent] ?? false) == model.supportsDocuments { return }
+        }
+    }
+
+    /// Replaces the task summarizer with one built from the CURRENT summarizer configuration,
+    /// repeating if the configuration changed while it was being built (building suspends).
+    private func rebuildTaskSummarizer() async {
+        while true {
+            let builtFrom = llmConfigs[.summarizer]
+            let rebuilt = await makeTaskSummarizer()
+            if llmConfigs[.summarizer] == builtFrom {
+                taskSummarizer = rebuilt
+                return
+            }
+        }
+    }
+
+    /// The Security Agent model as currently configured, for handing to a live evaluator. Nil when
+    /// no Security Agent provider is configured (evaluators then keep what they have; `start()` and
+    /// `spawnBrown` refuse to run without one).
+    private func currentSecurityEvaluatorModel() -> SecurityEvaluatorModel? {
+        guard let provider = llmProviders[.securityAgent] else { return nil }
+        return SecurityEvaluatorModel(
+            provider: provider,
+            configuration: llmConfigs[.securityAgent],
+            providerType: providerAPITypes[.securityAgent]?.rawValue ?? "",
+            supportsVision: supportsVisionByRole[.securityAgent] ?? true,
+            supportsDocuments: supportsDocumentsByRole[.securityAgent] ?? false
+        )
+    }
+
+    /// Builds the task summarizer from the summarizer role's CURRENT configuration, or nil when no
+    /// summarizer model is assigned (summarization is then skipped). Called at start and again
+    /// whenever the summarizer's model or tuning changes, so it never runs on a stale snapshot.
+    private func makeTaskSummarizer() async -> TaskSummarizer? {
+        guard let summarizerProvider = llmProviders[.summarizer],
+              let summarizerConfig = llmConfigs[.summarizer] else { return nil }
+        let summarizer = TaskSummarizer(
+            provider: summarizerProvider,
+            memoryStore: memoryStore,
+            channel: channel,
+            contextWindowSize: summarizerConfig.contextWindowSize,
+            maxOutputTokens: summarizerConfig.maxTokens,
+            usageStore: usageStore,
+            configuration: summarizerConfig,
+            providerType: providerAPITypes[.summarizer]?.rawValue ?? "",
+            sessionID: currentSessionID,
+            activityTracker: liveActivityTracker
+        )
+        // One inspector identity per summarizer instance, so its calls form one stable subject.
+        summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
+        if let callCallback = onLLMCallRecorded {
+            let summarizerRef = summarizerInspectorRef
+            await summarizer.setOnLLMCallRecorded { event in callCallback(summarizerRef, event) }
+        }
+        return summarizer
     }
 
     /// Publishes THIS runtime's live Brown-worker count to the shared activity tracker, keyed by the
@@ -4209,11 +4804,11 @@ public actor OrchestrationRuntime {
             }
             return llmConfigs[.brown]
         case .securityAgent:
-            if let config = await smithSecurityEvaluator?.currentConfiguration() { return config }
-            if let config = await validationSecurityEvaluator?.currentConfiguration() { return config }
+            if let config = await smithSecurityEvaluator?.currentModel.configuration { return config }
+            if let config = await validationSecurityEvaluator?.currentModel.configuration { return config }
             return llmConfigs[.securityAgent]
         case .summarizer:
-            if let config = await taskSummarizer?.currentConfiguration() { return config }
+            if let config = await taskSummarizer?.modelConfiguration { return config }
             return llmConfigs[.summarizer]
         case .validator:
             return llmConfigs[.validator]
@@ -4222,14 +4817,14 @@ public actor OrchestrationRuntime {
 
     /// Test/diagnostic surface for the two long-lived Security evaluators.
     func longLivedSecurityEvaluatorConfigurations() async -> (smith: ModelConfiguration?, validation: ModelConfiguration?) {
-        let smith = await smithSecurityEvaluator?.currentConfiguration()
-        let validation = await validationSecurityEvaluator?.currentConfiguration()
+        let smith = await smithSecurityEvaluator?.currentModel.configuration
+        let validation = await validationSecurityEvaluator?.currentModel.configuration
         return (smith, validation)
     }
 
     /// Test/diagnostic surface for the live summarizer holder (if currently instantiated).
     func summarizerHolderConfiguration() async -> ModelConfiguration? {
-        await taskSummarizer?.currentConfiguration()
+        await taskSummarizer?.modelConfiguration
     }
 
     // MARK: - Agent Archive
@@ -4437,9 +5032,13 @@ public actor OrchestrationRuntime {
                 guard let self else { return .failure("Runtime is unavailable.") }
                 return await self.reportInboundUserMessage(report, reportingAgentID: agentID)
             },
+            respondToUserAcceptance: { [weak self] taskID, accept, feedback in
+                guard let self else { return .failure("Runtime is unavailable.") }
+                return await self.respondToUserAcceptance(taskID: taskID, accept: accept, feedback: feedback)
+            },
             restartForNewTask: { [weak self] taskID, amendment in
                 guard let self else { return }
-                await self.restartForNewTask(taskID: taskID, amendment: amendment)
+                await self.restartForNewTask(taskID: taskID, amendment: amendment, origin: .smithTool)
             },
             currentResumingTaskID: currentResumingTaskID,
             memoryStore: memoryStore,
@@ -4654,7 +5253,7 @@ Message:
             // `task_complete`) after this snapshot must not be force-failed. `task.status`
             // from the snapshot is not trustworthy here, so the decision is made atomically
             // inside the store.
-            let didFail = await taskStore.updateStatus(id: task.id, ifCurrentlyEquals: .running, to: .failed)
+            let didFail = await taskStore.updateStatus(id: task.id, ifCurrentlyEquals: .running, to: .failed, cause: .workerSelfTerminated)
             if didFail && !task.updates.isEmpty {
                 Task.detached { [weak self] in
                     guard let self else { return }
@@ -4822,4 +5421,11 @@ Message:
         }
         return lines.joined(separator: "\n")
     }
+}
+
+
+/// A weak reference to a `SecurityEvaluator`, so the runtime can reach every live evaluator without
+/// keeping a retired Brown's alive.
+private struct WeakSecurityEvaluator {
+    weak var evaluator: SecurityEvaluator?
 }

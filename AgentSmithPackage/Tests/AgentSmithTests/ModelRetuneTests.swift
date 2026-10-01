@@ -194,6 +194,46 @@ struct ModelRetuneTests {
         #expect(temperature == 0.2)
     }
 
+    @Test("A retune of a queued swap destination keeps the reset and latest parameters")
+    func pendingSwapCoalescesRetuneWithoutLosingReset() async {
+        let original = MockLLMProvider(responses: [LLMResponse(text: "old")])
+        let swapped = MockLLMProvider(responses: [LLMResponse(text: "swapped")])
+        let latest = MockLLMProvider(responses: [LLMResponse(text: "latest")])
+        let agent = Self.makeAgent(provider: original, llmConfig: Self.config(temperature: 0.2))
+        await agent.appendUserMessage("pre-swap marker")
+        await agent.scheduleModelSwap(AgentActor.ModelRetune(
+            provider: swapped,
+            llmConfig: Self.config(temperature: 0.4, modelID: "new-model", providerID: "new-provider"),
+            providerAPIType: .openAICompatible,
+            supportsVision: nil,
+            supportsDocuments: nil
+        ), orientation: "fresh task orientation")
+        let accepted = await agent.scheduleModelRetune(AgentActor.ModelRetune(
+            provider: latest,
+            llmConfig: Self.config(temperature: 0.9, modelID: "new-model", providerID: "new-provider"),
+            providerAPIType: .openAICompatible,
+            supportsVision: nil,
+            supportsDocuments: nil
+        ))
+        #expect(accepted)
+        #expect(await agent.currentModelConfiguration().modelID == "test-model")
+        await agent.start()
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, latest.callCount == 0 {
+            do { try await Task.sleep(for: .milliseconds(20)) }
+            catch { Issue.record("interrupted while waiting for swap: \(error)"); break }
+        }
+        await agent.stop()
+        #expect(await agent.currentModelConfiguration().modelID == "new-model")
+        #expect(await agent.currentModelConfiguration().temperature == 0.9)
+        #expect(latest.callCount > 0)
+        #expect(original.callCount == 0)
+        #expect(swapped.callCount == 0)
+        let text = await agent.contextSnapshot().compactMap { $0.content.textValue }.joined(separator: "\n")
+        #expect(!text.contains("pre-swap marker"))
+        #expect(text.contains("fresh task orientation"))
+    }
+
     // MARK: - OrchestrationRuntime dispatch
 
     private func makeRuntime() -> OrchestrationRuntime {
@@ -414,8 +454,7 @@ struct ModelRetuneTests {
         await runtime.start()
         defer { Task { await runtime.stopAll() } }
 
-        let task = AgentTask(title: "Brown swap task", description: "Perform work.")
-        await runtime.taskStore.addTask(task)
+        let task = await runtime.taskStore.addTask(title: "Brown swap task", description: "Perform work.")
         guard let brownID = await runtime.spawnBrown(for: task),
               let brown = await runtime.liveAgent(id: brownID) else {
             Issue.record("missing live Brown")
