@@ -40,15 +40,15 @@ struct GrepTool: AgentTool {
             ]),
             "max_file_count": .dictionary([
                 "type": .string("integer"),
-                "description": .string("Max number of matching files to return (default \(GrepTool.defaultMaxFileMatches)).")
+                "description": .string("Max number of matching files to return (default \(GrepTool.defaultMaxFileMatches), hard ceiling \(GrepTool.hardMaxFileMatches); larger values are clamped).")
             ]),
             "max_line_count": .dictionary([
                 "type": .string("integer"),
-                "description": .string("Max number of matching content lines to return in \"content\" mode (default \(GrepTool.defaultMaxContentLines)).")
+                "description": .string("Max number of matching content lines to return in \"content\" mode (default \(GrepTool.defaultMaxContentLines), hard ceiling \(GrepTool.hardMaxContentLines); larger values are clamped).")
             ]),
             "max_file_size_mb": .dictionary([
                 "type": .string("integer"),
-                "description": .string("Skip files larger than this many megabytes (default \(GrepTool.defaultMaxFileSizeMB)). Any skipped files are reported in the result, so matches are never silently missed — raise this to search larger files.")
+                "description": .string("Skip files larger than this many megabytes (default \(GrepTool.defaultMaxFileSizeMB), hard ceiling \(GrepTool.hardMaxFileSizeMB); larger values are clamped). Any skipped files are reported in the result, so matches are never silently missed — raise this to search larger files.")
             ])
         ]),
         "required": .array([.string("pattern"), .string("path")])
@@ -62,11 +62,20 @@ struct GrepTool: AgentTool {
     /// larger than this are skipped, and the skip COUNT is reported — never a silent miss.
     private static let defaultMaxFileSizeMB = 16
 
-    /// Parses an optional positive-integer argument, flooring at 1, falling back when absent/invalid.
-    private static func positiveInt(_ raw: AnyCodable?, or fallback: Int) -> Int {
+    // Bound model-supplied caps before conversion so malformed magnitudes cannot trap or
+    // permit unbounded result buffers. The MB ceiling also makes conversion to bytes safe.
+    static let hardMaxFileMatches = 10_000
+    static let hardMaxContentLines = 100_000
+    static let hardMaxFileSizeMB = 256
+
+    /// Preserve the existing floor/truncation and absent-value defaults, but reject non-finite numbers.
+    static func positiveInt(_ raw: AnyCodable?, or fallback: Int, ceiling: Int) -> Int? {
         switch raw {
-        case .int(let v): return max(1, v)
-        case .double(let v): return max(1, Int(v))
+        case .int(let value): return min(ceiling, max(1, value))
+        case .double(let value):
+            guard value.isFinite else { return nil }
+            // Clamp in floating point BEFORE converting; even finite doubles can exceed Int.max.
+            return Int(min(Double(ceiling), max(1, value)))
         default: return fallback
         }
     }
@@ -105,10 +114,12 @@ struct GrepTool: AgentTool {
             contentMode = false
         }
 
-        // Caller-configurable limits (all optional; defaults are generous).
-        let maxFileMatches = Self.positiveInt(arguments["max_file_count"], or: Self.defaultMaxFileMatches)
-        let maxContentLines = Self.positiveInt(arguments["max_line_count"], or: Self.defaultMaxContentLines)
-        let maxFileSizeMB = Self.positiveInt(arguments["max_file_size_mb"], or: Self.defaultMaxFileSizeMB)
+        // All limits are bounded before any integer conversion or byte-size arithmetic.
+        guard let maxFileMatches = Self.positiveInt(arguments["max_file_count"], or: Self.defaultMaxFileMatches, ceiling: Self.hardMaxFileMatches),
+              let maxContentLines = Self.positiveInt(arguments["max_line_count"], or: Self.defaultMaxContentLines, ceiling: Self.hardMaxContentLines),
+              let maxFileSizeMB = Self.positiveInt(arguments["max_file_size_mb"], or: Self.defaultMaxFileSizeMB, ceiling: Self.hardMaxFileSizeMB) else {
+            return .failure("Error: `max_file_count`, `max_line_count`, and `max_file_size_mb` must be finite numbers.")
+        }
         let maxFileSizeBytes = UInt64(maxFileSizeMB) * 1024 * 1024
 
         // Compile glob filter if provided.
