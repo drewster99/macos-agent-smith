@@ -64,7 +64,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
                     .taskWatchFired, .taskWatchRefused]
         case .validation:
             return [.changesRequested, .criteriaUpdated, .validationReport, .validationFailed,
-                    .validationEscalation, .submissionAutoRejected, .validationBlocked,
+                    .validationEscalation, .userAcceptanceRequested, .submissionAutoRejected, .validationBlocked,
                     .validationBlockedWorkerNotice, .validationWaitNotice, .validationOverride]
         case .memory:
             return [.memorySaved, .memorySearched]

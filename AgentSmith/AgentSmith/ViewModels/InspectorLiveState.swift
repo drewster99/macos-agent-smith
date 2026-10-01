@@ -66,7 +66,15 @@ final class InspectorLiveState {
     func activate() {
         guard !isActive else { return }
         isActive = true
-        rebuild()
+        // Deferred, not synchronous: this fires from `InspectorView`'s `.task`, which runs in the
+        // SAME runloop turn AppKit is animating the `.inspector()` column open. A synchronous
+        // `rebuild()` here populates three role cards + the summarizer card + every live task/tool
+        // row in one shot — a large subtree landing in the ScrollView mid-animation — and macOS
+        // 26's window layout has been observed to hard-hang on that burst with "The window has been
+        // marked as needing another Update Constraints in Window pass, but it has already had more
+        // Update Constraints in Window passes than there are views in the window." `scheduleRebuild`
+        // is the same one-tick deferral every later rebuild already goes through.
+        scheduleRebuild()
         // The Live rows age out on a clock, and nothing observable changes when a row simply
         // gets older, so they need a timed rebuild as well.
         agingTask = Task { [weak self] in
@@ -98,12 +106,12 @@ final class InspectorLiveState {
         // Inputs are read inside the tracking; the outputs are compared and assigned OUTSIDE it,
         // so the rebuild is never registered on its own writes (which would buy a redundant
         // second rebuild after every real one).
-        let next = withObservationTracking {
+        let next = withObservationTracking({
             computeOutputs()
-        } onChange: { [weak self] in
+        }, onChange: { [weak self] in
             // Called as an input is ABOUT to change: rebuilding now would read the old value.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.scheduleRebuild() } }
-        }
+        })
         guard let next else { return }
         for (role, data) in next.roleCards {
             let state = card(for: role)

@@ -131,7 +131,7 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         .taskManagement: [
             "create_task", "run_task", "update_task", "edit_task", "amend_task",
             "get_task_details", "list_tasks", "set_template_inputs", "manage_task_disposition",
-            "manage_steps", "set_acceptance_criteria", "task_update", "task_complete"
+            "manage_steps", "set_acceptance_criteria", "respond_to_user_acceptance", "task_update", "task_complete"
         ],
         .messaging: [
             "message_user", "notify_brown", "reply_to_user",

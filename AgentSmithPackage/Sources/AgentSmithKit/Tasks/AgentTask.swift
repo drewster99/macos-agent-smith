@@ -155,6 +155,25 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// see `occupiesWorkerSlot` and the escalation row actions.)
     public var validationBlockedReason: String?
 
+    /// Opt-in per-task gate, set via `set_acceptance_criteria`: when true, a task whose criteria
+    /// have ALL settled (ACCEPT/WAIVE) does not auto-complete — it parks in `.awaitingReview` with
+    /// `awaitingReviewReason == .userAcceptanceRequested` for the user's explicit sign-off, same as
+    /// a validator-error escalation. Default false preserves today's behavior for every task that
+    /// doesn't opt in.
+    public var requiresUserAcceptance: Bool
+
+    /// Distinguishes WHY a task sits in `.awaitingReview` — the machine couldn't render a verdict
+    /// (`.validatorError`), or the machine's verdict was fine but `requiresUserAcceptance` demands a
+    /// human sign-off before completion (`.userAcceptanceRequested`). Both are resolved through the
+    /// same four user actions (`isUserResolvableEscalation`); this only changes the banner copy and
+    /// which replies Smith may treat as a conversational resolution (only the latter — Smith must
+    /// never self-resolve a park the machine itself couldn't judge).
+    public enum AwaitingReviewReason: String, Codable, Sendable {
+        case validatorError
+        case userAcceptanceRequested
+    }
+    public var awaitingReviewReason: AwaitingReviewReason?
+
     /// Messages addressed to this task's worker that arrived while no worker was alive.
     ///
     /// Smith addresses a worker by task (`notify_brown`), but the worker's existence is a race
@@ -446,6 +465,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         helpRequest: String? = nil,
         pendingWorkerMessages: [QueuedWorkerMessage] = [],
         validationBlockedReason: String? = nil,
+        requiresUserAcceptance: Bool = false,
+        awaitingReviewReason: AwaitingReviewReason? = nil,
         acceptanceCriteria: [AcceptanceCriterion] = [],
         steps: [TaskStep] = [],
         validation: TaskValidationState? = nil,
@@ -484,6 +505,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.helpRequest = helpRequest
         self.pendingWorkerMessages = pendingWorkerMessages
         self.validationBlockedReason = validationBlockedReason
+        self.requiresUserAcceptance = requiresUserAcceptance
+        self.awaitingReviewReason = awaitingReviewReason
         self.acceptanceCriteria = acceptanceCriteria
         self.steps = steps
         self.validation = validation
@@ -501,7 +524,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
     }
 
     public init(from decoder: Decoder) throws {
@@ -538,6 +561,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         helpRequest = try c.decodeIfPresent(String.self, forKey: .helpRequest)
         pendingWorkerMessages = try c.decodeIfPresent([QueuedWorkerMessage].self, forKey: .pendingWorkerMessages) ?? []
         validationBlockedReason = try c.decodeIfPresent(String.self, forKey: .validationBlockedReason)
+        requiresUserAcceptance = try c.decodeIfPresent(Bool.self, forKey: .requiresUserAcceptance) ?? false
+        awaitingReviewReason = try c.decodeIfPresent(AwaitingReviewReason.self, forKey: .awaitingReviewReason)
         acceptanceCriteria = try c.decodeIfPresent([AcceptanceCriterion].self, forKey: .acceptanceCriteria) ?? []
         steps = try c.decodeIfPresent([TaskStep].self, forKey: .steps) ?? []
         validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
@@ -601,6 +626,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(helpRequest, forKey: .helpRequest)
         try c.encode(pendingWorkerMessages, forKey: .pendingWorkerMessages)
         try c.encodeIfPresent(validationBlockedReason, forKey: .validationBlockedReason)
+        if requiresUserAcceptance { try c.encode(true, forKey: .requiresUserAcceptance) }
+        try c.encodeIfPresent(awaitingReviewReason, forKey: .awaitingReviewReason)
         if !acceptanceCriteria.isEmpty {
             try c.encode(acceptanceCriteria, forKey: .acceptanceCriteria)
         }

@@ -334,6 +334,7 @@ actor SecurityEvaluator {
 
                 "notify_brown",
                 "provide_help",
+                "respond_to_user_acceptance",
                 "terminate_agent",
                 "abort",
 

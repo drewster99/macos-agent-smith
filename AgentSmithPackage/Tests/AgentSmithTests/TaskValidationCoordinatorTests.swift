@@ -56,12 +56,18 @@ struct TaskValidationCoordinatorTests {
     /// leaves it, ready for `startTaskValidation`.
     private func makeSubmittedTask(
         on runtime: OrchestrationRuntime,
-        criteria: [AcceptanceCriterion] = []
+        criteria: [AcceptanceCriterion] = [],
+        requiresUserAcceptance: Bool = false
     ) async -> AgentTask {
         let store = await runtime.taskStore
         let task = await store.addTask(title: "Validated task", description: "Do the thing properly.")
         if !criteria.isEmpty {
             await store.setAcceptanceCriteria(id: task.id, criteria: criteria)
+        }
+        // Must be set before the status drive below: the gate is only editable while the
+        // acceptance contract is (`.isValidationContractEditable`), which `.validating` is not.
+        if requiresUserAcceptance {
+            _ = await store.setRequiresUserAcceptance(id: task.id, value: true)
         }
         await store.setResult(id: task.id, result: "The thing was done.", commentary: nil, attachments: [])
         // A real task reaches `.validating` only after pre-flight scoping, so its scoped set
@@ -160,6 +166,87 @@ struct TaskValidationCoordinatorTests {
         #expect(t.occupiesWorkerSlot == true)
         t.status = .pending
         #expect(t.occupiesWorkerSlot == false)
+    }
+
+    // MARK: - requiresUserAcceptance (opt-in user sign-off gate)
+
+    @Test("requiresUserAcceptance: all criteria settle → parks for the user instead of auto-completing")
+    func requiresUserAcceptanceParksInsteadOfCompleting() async {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        let status = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(status == .awaitingReview, "settling everything does not auto-complete a gated task")
+
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.status == .awaitingReview)
+        #expect(final?.awaitingReviewReason == .userAcceptanceRequested)
+        #expect(final?.occupiesWorkerSlot == false, "same worker-teardown shape as a validator-error park")
+    }
+
+    @Test("respond_to_user_acceptance: accept completes a userAcceptanceRequested park")
+    func respondToUserAcceptanceAcceptCompletes() async {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+
+        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        #expect(result.succeeded)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .completed)
+    }
+
+    @Test("respond_to_user_acceptance: reject sends the task back with the given feedback")
+    func respondToUserAcceptanceRejectSendsBack() async {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+
+        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: false, feedback: "not ready, fix the thing")
+        #expect(result.succeeded)
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.status == .running || final?.status == .pending)
+        #expect(final?.updates.contains { $0.message.contains("not ready, fix the thing") } == true)
+    }
+
+    @Test("respond_to_user_acceptance: refuses a reject with no feedback")
+    func respondToUserAcceptanceRejectRequiresFeedback() async {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+
+        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: false, feedback: "   ")
+        #expect(!result.succeeded)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "an empty-feedback rejection must not move the task")
+    }
+
+    @Test("respond_to_user_acceptance: refuses a validator-error park — that one is user-only")
+    func respondToUserAcceptanceRefusesValidatorErrorPark() async {
+        let runtime = makeRuntime(verdictScript: [])
+        let (task, _) = await makeEscalatedTask(on: runtime)
+        #expect(task.awaitingReviewReason == nil, "the fixture simulates a validator-error park, not a user-acceptance one")
+
+        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        #expect(!result.succeeded)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "Smith must never self-resolve a machine-can't-judge park")
     }
 
     @Test("All criteria accepted → task completes; the implicit default criterion is materialized")

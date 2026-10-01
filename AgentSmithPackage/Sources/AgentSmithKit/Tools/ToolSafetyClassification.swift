@@ -27,7 +27,7 @@ enum ToolSafetyClassification {
         // Low-risk side-effecting (lifecycle / orchestration)
         "task_update", "task_complete", "request_help", "reply_to_user",
         "report_inbound_user_message",
-        "message_user", "notify_brown", "provide_help", "create_task", "run_task",
+        "message_user", "notify_brown", "provide_help", "respond_to_user_acceptance", "create_task", "run_task",
         "update_task", "edit_task", "amend_task", "set_template_inputs", "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
         "watch_task",
         // Destructive

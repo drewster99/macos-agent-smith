@@ -274,7 +274,16 @@ extension OrchestrationRuntime {
         let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
         let pending = task.acceptanceCriteria.filter { !settled.contains($0.id) }
         guard !pending.isEmpty else {
-            await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
+            if task.requiresUserAcceptance {
+                await escalateValidation(
+                    taskID: taskID,
+                    reason: "All acceptance criteria passed.",
+                    judgedInRound: token,
+                    awaitingReviewReason: .userAcceptanceRequested
+                )
+            } else {
+                await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
+            }
             return
         }
 
@@ -385,8 +394,23 @@ extension OrchestrationRuntime {
         }
 
         if unjudged == 0 && errored.isEmpty && rejected.isEmpty {
-            mirrorRoundOutcome("completed")
-            await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
+            // All criteria settled — the machine says the result is correct. A task marked
+            // `requiresUserAcceptance` still doesn't auto-complete: it parks for the user's
+            // explicit sign-off, exactly like a validator-error escalation, so Brown is torn
+            // down (the worker's job here is done either way) and the four resolution actions
+            // (plus, uniquely for this reason, a plain chat reply) apply identically.
+            if judged.requiresUserAcceptance {
+                mirrorRoundOutcome("escalated", detail: "all criteria settled; awaiting the user's acceptance")
+                await escalateValidation(
+                    taskID: taskID,
+                    reason: "All acceptance criteria passed.",
+                    judgedInRound: token,
+                    awaitingReviewReason: .userAcceptanceRequested
+                )
+            } else {
+                mirrorRoundOutcome("completed")
+                await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
+            }
         } else if !errored.isEmpty {
             let messages = errored.map { record -> String in
                 if case .error(let message) = record.verdict { return message }
@@ -1513,6 +1537,42 @@ extension OrchestrationRuntime {
         }
     }
 
+    /// Smith's conversational counterpart to the task row's Accept / Send back buttons — but ONLY
+    /// for a `requiresUserAcceptance` park. Deliberately refuses a `.validatorError` escalation:
+    /// that park means the MACHINE couldn't judge the work, and letting Smith wave it through on
+    /// its own authority is exactly the human-free pass the escalation exists to force. This tool
+    /// exists so the user can reply "looks good" or "not ready, fix X" in chat instead of clicking a
+    /// button — Smith relays the user's own decision, it does not make one.
+    public func respondToUserAcceptance(taskID: UUID, accept: Bool, feedback: String?) async -> ToolExecutionResult {
+        guard let task = await taskStore.task(id: taskID) else {
+            return .failure("No task with id \(taskID.uuidString).")
+        }
+        guard task.status == .awaitingReview, task.awaitingReviewReason == .userAcceptanceRequested else {
+            return .failure("""
+                Task '\(task.title)' is not parked for user-acceptance resolution (status: \
+                \(task.status.rawValue)). This tool only resolves a task that required the user's \
+                explicit acceptance after all criteria settled — it cannot be used to resolve a \
+                validator-error escalation; that one needs the user's own choice from the task row.
+                """)
+        }
+        if accept {
+            await acceptEscalatedTask(taskID: taskID)
+            guard let after = await taskStore.task(id: taskID), after.status == .completed else {
+                return .failure("Could not accept '\(task.title)' — another action may have resolved it first.")
+            }
+            return .success("Accepted '\(task.title)' on the user's behalf. The task is now completed.")
+        }
+        let trimmed = (feedback ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failure("A rejection needs 'feedback' — say what the user wants changed so Brown has something to act on.")
+        }
+        await sendEscalatedTaskBackToBrown(taskID: taskID, feedback: trimmed)
+        guard let after = await taskStore.task(id: taskID), after.status != .awaitingReview else {
+            return .failure("Could not send '\(task.title)' back to Brown — another action may have resolved it first.")
+        }
+        return .success("Sent '\(task.title)' back to Brown with the user's requested changes.")
+    }
+
     /// Renders the rejected criteria as a numbered punch list: one block per rejection,
     /// each carrying the criterion's stable number, its full text, and the validator's
     /// reason (which — per the validator prompt — states both what is missing and the
@@ -1595,7 +1655,12 @@ extension OrchestrationRuntime {
     /// to resolve (accept / send back / re-validate / fail), and its worker is torn down so it stops
     /// holding a slot: a park can sit indefinitely, and re-validation doesn't need Brown (it judges
     /// the persisted result). Brown's context is saved first so a user "send back" can respawn it.
-    private func escalateValidation(taskID: UUID, reason: String, judgedInRound token: ValidationRoundToken) async {
+    private func escalateValidation(
+        taskID: UUID,
+        reason: String,
+        judgedInRound token: ValidationRoundToken,
+        awaitingReviewReason: AgentTask.AwaitingReviewReason = .validatorError
+    ) async {
         // Tear the worker down FIRST, while the task is still `.validating` — a state with NO user
         // row-actions — so the user can't fire a resolution (e.g. Send Back reusing the still-live
         // Brown) during the teardown window and strand a running task with no worker. Save context
@@ -1614,20 +1679,35 @@ extension OrchestrationRuntime {
         // Publish the park only after the worker is gone. CAS: a pause/stop that landed during
         // teardown must not be overwritten (such a transition tears Brown down anyway).
         guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .validationEscalated) else { return }
+        await taskStore.setAwaitingReviewReason(id: taskID, reason: awaitingReviewReason)
         // The freed slot isn't a terminal event, so `onTaskTerminated` won't fire the usual
         // auto-advance — kick it here so a pending task can take the slot.
         // Redundant since `terminateAgent` kicks the drain itself, and kept deliberately: this
         // call is the one that was RIGHT while the completion path was wrong, and deleting it
         // would erase the example. Both drains are reentrancy-guarded, so the second is a no-op.
         await advanceAfterFreedWorkerSlot()
-        await channel.post(ChannelMessage(
-            sender: .system,
-            content: "\"\(task.title)\" needs your attention: acceptance validation could not reach a verdict — \(reason) Re-validate, accept, send it back, or fail it. It also re-validates automatically on the next restart.",
-            metadata: [
-                "messageKind": .kind(.validationEscalation),
-                "taskID": .string(taskID.uuidString),
-                "severity": .severity(.warning)
-            ]
-        ))
+        switch awaitingReviewReason {
+        case .validatorError:
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(task.title)\" needs your attention: acceptance validation could not reach a verdict — \(reason) Re-validate, accept, send it back, or fail it. It also re-validates automatically on the next restart.",
+                metadata: [
+                    "messageKind": .kind(.validationEscalation),
+                    "taskID": .string(taskID.uuidString),
+                    "severity": .severity(.warning)
+                ]
+            ))
+        case .userAcceptanceRequested:
+            // Not a problem — every criterion already settled. `.info` severity, same as any other
+            // routine milestone; a `.warning` here would wrongly paint the happy path as trouble.
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "\"\(task.title)\" is ready for your acceptance: \(reason) Accept it, send it back with changes, re-validate, or fail it. You can also just reply in chat — Smith will relay your decision.",
+                metadata: [
+                    "messageKind": .kind(.userAcceptanceRequested),
+                    "taskID": .string(taskID.uuidString)
+                ]
+            ))
+        }
     }
 }

@@ -3174,6 +3174,45 @@ implementation: `Agent/Services/CodexAuth.swift` (223 lines), `CodexService.swif
 Copy the auth verbatim and adapt; treat its identity-prompt requirement as superseded by Phase 0.
 
 
+### Optional per-task user-acceptance gate (decided + built 2026-10-01) ✅
+
+**User decision (2026-10-01):** the user wanted a middle ground between "every submission is
+judged purely by automated acceptance validation" and "a changed-contract follow-up always spins
+up a new task" (see the 2026-09-22 immutable-contract decision above). The proposal: a task can
+optionally require the user's own explicit sign-off before it's considered complete, even after
+every acceptance criterion settles — without blocking anything modally, and without tearing down
+the thread of work. Built the same day, piggybacking entirely on the existing validator-error
+escalation machinery rather than inventing a parallel state machine:
+
+- **`AgentTask.requiresUserAcceptance: Bool`** — opt-in, default false, set via
+  `set_acceptance_criteria`'s new `requires_user_acceptance` parameter (independent of
+  `criteria`/`actions`, may be passed alone).
+- When every criterion has settled (ACCEPT/WAIVE) on a gated task, `TaskValidationCoordinator`
+  parks it in `.awaitingReview` instead of completing it — reusing `escalateValidation`'s existing
+  worker-teardown-and-park shape verbatim (same reasoning as a validator-error park: waiting on a
+  human can take arbitrarily long, so the worker slot is freed, not held).
+- **`AgentTask.AwaitingReviewReason` (`.validatorError` | `.userAcceptanceRequested`)** distinguishes
+  WHY a task sits in `.awaitingReview` — cosmetic (banner copy, which replies Smith may act on)
+  only; both reasons resolve through the same four user actions
+  (`isUserResolvableEscalation` is unchanged).
+- **New kind `ChannelMessageKind.userAcceptanceRequested`**, `.info` severity (never `.warning` —
+  this is the happy path, not a problem), grouped under `.validation` in `TranscriptViewConfig`.
+- **`respond_to_user_acceptance` (new Smith tool)** is the "just reply in chat" path the user
+  asked for: Smith relays the user's own accept/reject decision via
+  `OrchestrationRuntime.respondToUserAcceptance(taskID:accept:feedback:)`, which structurally
+  refuses to touch anything but a `.userAcceptanceRequested` park — it cannot be used to
+  self-resolve a validator-error escalation, which stays user-only via the task row. Reject
+  requires non-empty feedback, which becomes the "send back to Brown" message
+  (`sendEscalatedTaskBackToBrown`, unchanged) — the still-tracked Brown is resumed with it, exactly
+  the "continue with the still-active Brown agent" the user asked for.
+- Pre-cleared in `SecurityEvaluator.autoApprovedToolsByRole[.smith]` (same class as the other
+  task-lifecycle tools) since it only mutates this app's own task store.
+- UI: the existing escalation context menu (`TaskListView.escalationMenu`) needed no new actions —
+  only the Accept button's label changes ("Accept" vs "Accept As-Is") depending on the reason.
+
+Tests: `TaskValidationCoordinatorTests` — gated settlement parks instead of completing; accept
+completes; reject (with/without feedback) sends back / refuses; refuses a validator-error park.
+
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved

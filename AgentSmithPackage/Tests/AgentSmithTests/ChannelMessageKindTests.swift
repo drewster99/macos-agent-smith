@@ -54,6 +54,7 @@ struct ChannelMessageKindTests {
         (.validationReport, "validation_report"),
         (.validationFailed, "validation_failed"),
         (.validationEscalation, "validation_escalation"),
+        (.userAcceptanceRequested, "user_acceptance_requested"),
         (.submissionAutoRejected, "submission_auto_rejected"),
         (.validationBlocked, "validation_blocked"),
         (.validationBlockedWorkerNotice, "validation_blocked_worker_notice"),

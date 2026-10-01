@@ -96,6 +96,11 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     case validationReport = "validation_report"
     case validationFailed = "validation_failed"
     case validationEscalation = "validation_escalation"
+    /// A `requiresUserAcceptance` park: every criterion already settled (ACCEPT/WAIVE) — this is
+    /// the happy path, not a problem — but the task waits in `.awaitingReview` for the user's
+    /// explicit sign-off before it completes. Distinct from `validationEscalation`, which means the
+    /// MACHINE couldn't judge; `.info` severity, never `.warning`, because nothing went wrong.
+    case userAcceptanceRequested = "user_acceptance_requested"
     case submissionAutoRejected = "submission_auto_rejected"
     /// The PUBLIC banner announcing that validation is blocked on a missing Validator model.
     case validationBlocked = "validation_blocked"

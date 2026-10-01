@@ -2366,6 +2366,31 @@ public actor TaskStore {
         return released
     }
 
+    /// Sets the task's opt-in user-acceptance gate (`set_acceptance_criteria`'s
+    /// `requires_user_acceptance`). Gated the same as any other edit to the acceptance contract —
+    /// the gate decides how that contract's "all settled" outcome is handled, so it is part of it.
+    public func setRequiresUserAcceptance(id: UUID, value: Bool) -> String? {
+        guard var task = tasks[id] else { return "No task with id \(id.uuidString)." }
+        guard task.status.isValidationContractEditable else {
+            return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance contract can't be edited while a worker or validator is active."
+        }
+        task.requiresUserAcceptance = value
+        task.updatedAt = Date()
+        tasks[id] = task
+        didMutate()
+        return nil
+    }
+
+    /// Records WHY a task sits in `.awaitingReview` (validator error vs. a `requiresUserAcceptance`
+    /// park) — cosmetic banner/routing information only, read by the UI and by Smith's conversational
+    /// resolution tool. It never gates the four user-resolution actions themselves.
+    public func setAwaitingReviewReason(id: UUID, reason: AgentTask.AwaitingReviewReason?) {
+        guard var task = tasks[id] else { return }
+        task.awaitingReviewReason = reason
+        tasks[id] = task
+        didMutate()
+    }
+
     /// Stores a result (and optional commentary) on a task.
     public func setResult(id: UUID, result: String, commentary: String?, attachments: [Attachment] = [], resultItems: [ResultItem] = []) {
         guard var task = tasks[id] else { return }

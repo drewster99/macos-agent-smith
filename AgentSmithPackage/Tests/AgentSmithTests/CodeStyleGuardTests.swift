@@ -279,7 +279,6 @@ struct CodeStyleGuardTests {
         "Views/DeliverablesView.swift": 3,
         "Views/MCPServerEditorSheet.swift": 3,
         "Views/SettingsView.swift": 3,
-        "Views/InspectorView.swift": 2,
         "Views/ModelStatsPopover.swift": 2,
         "Views/TaskToolOverrideEditor.swift": 2,
         "Views/ToolsSettingsView.swift": 2,
@@ -294,7 +293,11 @@ struct CodeStyleGuardTests {
 
     /// The sum of the ceilings. Pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number, and so unused headroom cannot quietly accumulate in the table.
-    private static let someViewFunctionTotal = 130
+    ///
+    /// Lowered from 130: `InspectorView.swift`'s `-> some View` functions were eliminated by the
+    /// 2026-09-26 "derive the inspector's display state in the model" work, which replaced them
+    /// with real `View` structs. The ratchet was not re-checked in that commit; paid down here.
+    private static let someViewFunctionTotal = 128
 
     /// Counts `func … -> some View` declarations in one file, excluding the two forms that have no
     /// `View`-struct spelling:
@@ -502,7 +505,7 @@ struct CodeStyleGuardTests {
         "Views/AttachmentViews.swift": 2,
         "Views/CapabilitiesEditorSheet.swift": 2,
         "Views/DiffView.swift": 2,
-        "Views/Inspector/NowLiveSection.swift": 2,
+        "Views/Inspector/NowLiveSection.swift": 1,
         "Views/Inspector/ValidatorAgentCard.swift": 2,
         "Views/LLMTurnViews.swift": 2,
         "Views/MCPServerEditorSheet.swift": 2,
@@ -556,7 +559,10 @@ struct CodeStyleGuardTests {
 
     /// The sum of the ceilings, pinned separately and checked in BOTH directions so a cleanup has
     /// to edit this number and unused headroom cannot quietly accumulate. See `someViewFunctionTotal`.
-    private static let oversizedBodyTotal = 130
+    /// Lowered from 130: `NowLiveSection.swift` dropped one oversized body in the 2026-09-26
+    /// "derive the inspector's display state in the model" work. The ratchet was not re-checked in
+    /// that commit; paid down here.
+    private static let oversizedBodyTotal = 129
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.

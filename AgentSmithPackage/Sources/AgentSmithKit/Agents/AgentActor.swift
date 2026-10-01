@@ -1386,11 +1386,19 @@ public actor AgentActor {
     /// `reply_to_user` is forced throughout but remains gated by its own `isAvailable(in:)`
     /// context check (user-has-messaged) at the definition/dispatch sites. Forcing is a
     /// deliberate security bypass applied ONLY to these trusted built-ins.
+    ///
+    /// `save_memory` is forced throughout for the same reason: the system prompt (Smith's and
+    /// Brown's alike) makes calling it *mandatory* whenever a memory trigger fires, so preflight
+    /// tool scoping — a judgment call about what a task's description makes "relevant" — must
+    /// never be able to leave an agent unable to comply with its own unconditional instructions.
+    /// It is still a real security-reviewed call per `SecurityEvaluator.autoApprovedToolsByRole`
+    /// (not auto-approved there); forcing only guarantees it is ON THE MENU.
     private func applyForcedLifecycleFlags() {
         toolRegistry.setForcedAvailable("task_update", taskAcknowledged)
         toolRegistry.setForcedAvailable("task_complete", taskAcknowledged)
         toolRegistry.setForcedAvailable("request_help", taskAcknowledged)
         toolRegistry.setForcedAvailable("reply_to_user", true)
+        toolRegistry.setForcedAvailable("save_memory", true)
     }
 
     /// Re-runs the security scoping pass against the current candidate set (stateless — no

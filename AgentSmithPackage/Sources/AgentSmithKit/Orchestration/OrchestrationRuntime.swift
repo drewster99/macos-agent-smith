@@ -4913,6 +4913,10 @@ public actor OrchestrationRuntime {
                 guard let self else { return .failure("Runtime is unavailable.") }
                 return await self.reportInboundUserMessage(report, reportingAgentID: agentID)
             },
+            respondToUserAcceptance: { [weak self] taskID, accept, feedback in
+                guard let self else { return .failure("Runtime is unavailable.") }
+                return await self.respondToUserAcceptance(taskID: taskID, accept: accept, feedback: feedback)
+            },
             restartForNewTask: { [weak self] taskID, amendment in
                 guard let self else { return }
                 await self.restartForNewTask(taskID: taskID, amendment: amendment, origin: .smithTool)
