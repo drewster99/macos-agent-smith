@@ -48,8 +48,19 @@ final class InspectorLiveState {
     /// standalone `AgentInspectorWindow` (opened for Summarizer and Validator too) reads these
     /// directly instead of keeping its own `@State` + `.onChange` pair, which was the last
     /// leftover copy of the bug this file exists to close (see the type doc above).
+    ///
+    /// These are OUTPUTS, assigned outside the tracking like every other output (see `rebuild`).
+    /// They used to be written inside `computeOutputs` — on every pass, since a dictionary
+    /// subscript assignment fires `willSet` even when the value is unchanged — while also being
+    /// read there as inputs. Any rebuild that ran with the previous rebuild's tracking still armed
+    /// (the aging sweep does exactly that) then tripped that tracking with its own write, which
+    /// scheduled the next rebuild, which tripped the next: a self-sustaining loop pinning the main
+    /// thread at 100% (measured 2026-10-01). The rebuild now carries the previous values in the
+    /// untracked `lastProcessingSince` / `lastToolsRunningSince` instead of reading these.
     private(set) var processingSince: [AgentRole: Date] = [:]
     private(set) var toolsRunningSince: [AgentRole: Date] = [:]
+    @ObservationIgnored private var lastProcessingSince: [AgentRole: Date] = [:]
+    @ObservationIgnored private var lastToolsRunningSince: [AgentRole: Date] = [:]
 
     init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -119,12 +130,18 @@ final class InspectorLiveState {
         }
         if summarizerCard != next.summarizerCard { summarizerCard = next.summarizerCard }
         if liveRows != next.liveRows { liveRows = next.liveRows }
+        lastProcessingSince = next.processingSince
+        lastToolsRunningSince = next.toolsRunningSince
+        if processingSince != next.processingSince { processingSince = next.processingSince }
+        if toolsRunningSince != next.toolsRunningSince { toolsRunningSince = next.toolsRunningSince }
     }
 
     private struct Outputs {
         let roleCards: [AgentRole: AgentRoleData]
         let summarizerCard: SummarizerCardData
         let liveRows: [LiveTaskRow]
+        let processingSince: [AgentRole: Date]
+        let toolsRunningSince: [AgentRole: Date]
     }
 
     /// Everything the views show, from the current inputs. Nil once the view model is gone.
@@ -135,37 +152,46 @@ final class InspectorLiveState {
             bucketed = Self.bucketMessagesByRole(viewModel.messages)
             bucketedRevision = viewModel.messagesRevision
         }
+        // Every role, not just the three with a card: Summarizer and Validator are still valid
+        // `AgentInspectorWindow` targets. A spell keeps its start date until it ends.
+        var processing: [AgentRole: Date] = [:]
+        var toolsRunning: [AgentRole: Date] = [:]
+        for role in AgentRole.allCases {
+            if Self.isProcessing(role, viewModel: viewModel) {
+                processing[role] = lastProcessingSince[role] ?? now
+            }
+            if !Self.executingToolNames(viewModel.toolExecutingByRole[role]).isEmpty {
+                toolsRunning[role] = lastToolsRunningSince[role] ?? now
+            }
+        }
         var cards: [AgentRole: AgentRoleData] = [:]
         for role in roleCards.keys {
-            cards[role] = roleCardData(for: role, viewModel: viewModel, now: now)
-        }
-        // The three card roles just updated their own timers above. Summarizer and Validator have
-        // no card but are still valid `AgentInspectorWindow` targets, so their timers need keeping
-        // too — neither is ever `.securityAgent`, so the plain `processingRoles` check applies.
-        for role in [AgentRole.summarizer, .validator] {
-            let processing = viewModel.processingRoles.contains(role)
-            let tools = Self.executingToolNames(viewModel.toolExecutingByRole[role])
-            processingSince[role] = processing ? (processingSince[role] ?? now) : nil
-            toolsRunningSince[role] = tools.isEmpty ? nil : (toolsRunningSince[role] ?? now)
+            cards[role] = roleCardData(for: role, viewModel: viewModel,
+                                       processingSince: processing[role], toolsRunningSince: toolsRunning[role])
         }
         return Outputs(
             roleCards: cards,
             summarizerCard: summarizerCardData(viewModel: viewModel),
-            liveRows: Self.liveRows(viewModel: viewModel, now: now)
+            liveRows: Self.liveRows(viewModel: viewModel, now: now),
+            processingSince: processing,
+            toolsRunningSince: toolsRunning
         )
+    }
+
+    /// The Security Agent's busy state comes from its own evaluator registry; every other role's
+    /// from the processing set.
+    private static func isProcessing(_ role: AgentRole, viewModel: AppViewModel) -> Bool {
+        role == .securityAgent ? viewModel.isSecurityAgentBusy : viewModel.processingRoles.contains(role)
     }
 
     // MARK: - Role cards
 
-    private func roleCardData(for role: AgentRole, viewModel: AppViewModel, now: Date) -> AgentRoleData {
+    private func roleCardData(for role: AgentRole, viewModel: AppViewModel,
+                              processingSince: Date?, toolsRunningSince: Date?) -> AgentRoleData {
         let store = viewModel.inspectorStore
         let roleMessages = bucketed[role] ?? []
-        let isProcessing = role == .securityAgent
-            ? viewModel.isSecurityAgentBusy
-            : viewModel.processingRoles.contains(role)
+        let isProcessing = Self.isProcessing(role, viewModel: viewModel)
         let executingTools = Self.executingToolNames(viewModel.toolExecutingByRole[role])
-        processingSince[role] = isProcessing ? (processingSince[role] ?? now) : nil
-        toolsRunningSince[role] = executingTools.isEmpty ? nil : (toolsRunningSince[role] ?? now)
         return AgentRoleData(
             role: role,
             roleMessages: roleMessages,
@@ -180,9 +206,9 @@ final class InspectorLiveState {
             evaluationLifetimeCount: role == .securityAgent ? store.evaluationLifetimeCount : 0,
             sessionCost: viewModel.sessionCost(for: role),
             isProcessing: isProcessing,
-            processingSince: processingSince[role],
+            processingSince: processingSince,
             executingTools: executingTools,
-            toolsRunningSince: toolsRunningSince[role],
+            toolsRunningSince: toolsRunningSince,
             modelConfig: viewModel.resolvedAgentConfigs[role]
         )
     }

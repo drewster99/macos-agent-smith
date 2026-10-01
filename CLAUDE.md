@@ -474,6 +474,14 @@ changes, re-arms, and assigns each output only when it changed. The views watch 
   trigger one, and SwiftUI SKIPS the action it warns about, so a card sat stale until its 2 s
   heartbeat. Measured on one small task: 11 warning sites before, 0 after. Frame-batching the
   sources instead made it WORSE (17). Details: `docs/audits/2026-09-25-onchange-per-frame/`.
+- **Every output is assigned OUTSIDE the tracking, only when it changed — never written inside
+  `computeOutputs()`.** A tracked property written inside the apply closure fires the PREVIOUS
+  rebuild's still-armed tracking (a dictionary subscript assignment fires `willSet` even when the
+  value is unchanged), and with the 10 s aging sweep supplying the first overlap that becomes a
+  self-sustaining loop: `processingSince` / `toolsRunningSince` did exactly this from `b388cf0`,
+  pinning the main thread at 100% (fixed 2026-10-01; measured thousands of rebuilds/s → 2 per 20 s).
+  State a rebuild must carry between passes lives in `@ObservationIgnored` storage
+  (`lastProcessingSince`), never in the tracked output it feeds.
 - **Don't add `.onChange` watchers (or a `@State` cache rebuilt by them) back to these views.** A new
   input to a card or the Live section is read inside `InspectorLiveState.computeOutputs()`; the
   tracking picks it up automatically.
