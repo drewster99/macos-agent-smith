@@ -46,12 +46,17 @@ public enum TranscriptPane: Sendable, Equatable {
         }
     }
 
+    /// Backed by stored constants: the filter's `ForEach` iterates this, and a collection rebuilt on
+    /// every body evaluation is what the project's SwiftUI rules forbid there.
     public var presets: [TranscriptViewPreset] {
         switch self {
-        case .session: return [.conversation, .everything]
-        case .task: return [.everything, .condensed]
+        case .session: return Self.sessionPresets
+        case .task: return Self.taskPresets
         }
     }
+
+    private static let sessionPresets: [TranscriptViewPreset] = [.conversation, .everything]
+    private static let taskPresets: [TranscriptViewPreset] = [.everything, .condensed]
 
     /// Whether the "hide per-task work" scope control applies. The task pane is always scoped to
     /// its task, so offering it there would be a control that does nothing.

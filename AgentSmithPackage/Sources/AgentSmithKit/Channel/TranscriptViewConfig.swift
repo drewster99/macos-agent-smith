@@ -390,7 +390,7 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
             selections: decodedSelections,
             hideTaskScoped: try c.decodeIfPresent(Bool.self, forKey: .hideTaskScoped) ?? false,
             // An unknown policy from a newer build falls back to the widest — fails toward visible.
-            problems: (try? c.decodeIfPresent(String.self, forKey: .problems))
+            problems: try c.decodeIfPresent(String.self, forKey: .problems)
                 .flatMap(TranscriptProblemPolicy.init(rawValue:)) ?? .alwaysShowWarningsAndErrors
         )
     }
@@ -522,8 +522,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         from container: KeyedDecodingContainer<CodingKeys>,
         forKey key: CodingKeys
     ) -> Set<Element>? {
-        guard (try? container.nestedUnkeyedContainer(forKey: key)) != nil else { return nil }
-        let rawCount = (try? container.nestedUnkeyedContainer(forKey: key))?.count ?? 0
+        guard let elements = try? container.nestedUnkeyedContainer(forKey: key) else { return nil }
+        let rawCount = elements.count ?? 0
         let decoded = Set(decodeLenientArray(type, from: container, forKey: key))
         return rawCount > 0 && decoded.isEmpty ? nil : decoded
     }

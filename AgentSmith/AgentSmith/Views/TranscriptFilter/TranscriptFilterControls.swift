@@ -126,9 +126,13 @@ private struct ParticipantChipLabel: View {
                 .frame(width: 8, height: 8)
             Text(participant.filterName)
                 .foregroundStyle(isShown ? .primary : .secondary)
-            Text(count.map { $0.formatted() } ?? "")
-                .font(AppFonts.filterCount)
-                .foregroundStyle(.secondary)
+            // Absent (not empty) without counts: an empty Text still takes the stack's spacing and
+            // leaves the pill lopsided.
+            if let count {
+                Text(count.formatted())
+                    .font(AppFonts.filterCount)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
