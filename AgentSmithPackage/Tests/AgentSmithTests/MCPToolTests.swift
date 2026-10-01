@@ -30,6 +30,24 @@ struct MCPToolNamingTests {
         #expect(name.count <= MCPToolNaming.maxNameLength)
         #expect(name.hasPrefix("mcp__srv__"))
     }
+
+    @Test("Disambiguation does not mask a server's real tool names")
+    func disambiguationReservesCurrentServerToolNames() {
+        var usedNames = Set<String>()
+        _ = MCPClientHost.assignPrefixedToolNames(
+            serverName: "My Server",
+            toolNames: ["foo"],
+            usedNames: &usedNames
+        )
+
+        let secondServer = MCPClientHost.assignPrefixedToolNames(
+            serverName: "My_Server",
+            toolNames: ["foo", "foo_2"],
+            usedNames: &usedNames
+        )
+
+        #expect(secondServer == ["mcp__My_Server__foo_3", "mcp__My_Server__foo_2"])
+    }
 }
 
 @Suite("MCP value conversion")
