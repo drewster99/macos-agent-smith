@@ -3229,6 +3229,12 @@ A /stupid sweep of the gate found it leaky and silent. Fixed:
   parks. "Sign-off" outcome chip; watch text by cause.
 - **Telemetry (#7).** Typed `ValidationRoundOutcome`; a passing gated round is
   `user_acceptance_requested` (was "escalated"); the early all-settled path now mirrors its row.
+- **Atomic contract edits (#4).** `TaskStore.editAcceptanceContract` is the single writer of
+  criteria + gate; `set_acceptance_criteria` used to write the gate first and could half-apply
+  when the criteria part was refused. Turning the gate off on a sign-off park is refused.
+- **Gate inheritance and visibility (#5).** Library templates can be gated (the old setter only
+  looked in the session store), instances inherit it, `create_task` and the task editor set it at
+  creation, Task Detail toggles it, `get_task_details` shows it, Retry / Run Again carry it over.
 
 ## Blockers
 

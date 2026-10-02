@@ -6,6 +6,7 @@ struct GetTaskDetailsTool: AgentTool {
     let toolDescription = """
         Fetch the full details of one or more tasks by their IDs, including title, description, \
         scheduling/template metadata, template input definitions/values, acceptance criteria, \
+        whether the user must sign off before it completes (and, while it awaits review, why), \
         steps, the worker's approved tool list (per-task tool scope) plus any user tool overrides, \
         commentary, progress updates, and result. Pass an array of task IDs (max 10) \
         to retrieve several tasks in a single call.
@@ -105,6 +106,15 @@ struct GetTaskDetailsTool: AgentTool {
         parts.append("Title: \(task.title)")
         parts.append("Status: \(task.status.rawValue)")
         parts.append("Disposition: \(task.disposition.rawValue)")
+        parts.append("requiresUserAcceptance: \(task.requiresUserAcceptance)"
+            + (task.requiresUserAcceptance ? " (once every criterion settles, it parks awaitingReview for the user's sign-off instead of completing)" : ""))
+        if task.status == .awaitingReview {
+            if let blocked = task.validationBlockedReason {
+                parts.append("validationBlockedReason: \(blocked)")
+            } else if let reason = task.awaitingReviewReason {
+                parts.append("awaitingReviewReason: \(reason.rawValue)")
+            }
+        }
         parts.append("isTemplate: \(task.isTemplate)")
         parts.append("isScheduled: \(task.scheduledRunAt != nil)")
         if let scheduledRunAt = task.scheduledRunAt {

@@ -546,7 +546,7 @@ struct AgentActorTests {
     func updateTaskRefusesGatedCompletion() async throws {
         let taskStore = TaskStore()
         let task = await taskStore.addTask(title: "T", description: "d")
-        #expect(await taskStore.setRequiresUserAcceptance(id: task.id, value: true) == nil)
+        #expect(await taskStore.setRequiresUserAcceptance(id: task.id, value: true, by: .smith) == nil)
         let result = try await UpdateTaskTool().execute(
             arguments: ["task_id": .string(task.id.uuidString), "status": .string("completed")],
             context: makeContext(taskStore: taskStore)

@@ -90,14 +90,11 @@ struct TaskValidationCoordinatorTests {
         requiresUserAcceptance: Bool = false
     ) async -> AgentTask {
         let store = await runtime.taskStore
-        let task = await store.addTask(title: "Validated task", description: "Do the thing properly.")
+        // The gate is set at creation, the way create_task and the editor set it.
+        let task = await store.addTask(title: "Validated task", description: "Do the thing properly.",
+                                       requiresUserAcceptance: requiresUserAcceptance)
         if !criteria.isEmpty {
             await store.setAcceptanceCriteria(id: task.id, criteria: criteria)
-        }
-        // Must be set before the status drive below: the gate is only editable while the
-        // acceptance contract is (`.isValidationContractEditable`), which `.validating` is not.
-        if requiresUserAcceptance {
-            _ = await store.setRequiresUserAcceptance(id: task.id, value: true)
         }
         await store.setResult(id: task.id, result: "The thing was done.", commentary: nil, attachments: [])
         // A real task reaches `.validating` only after pre-flight scoping, so its scoped set

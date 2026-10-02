@@ -1751,7 +1751,8 @@ final class AppViewModel {
         templateInputDefinitions: [TemplateInputDefinition],
         templateInstanceTitleTemplate: String?,
         acceptanceCriteria: [AcceptanceCriterion],
-        steps: [TaskStep]
+        steps: [TaskStep],
+        requiresUserAcceptance: Bool
     ) async -> Bool {
         guard let taskStore else { return false }
         if isTemplate, let problem = TemplateInputValidation.validateDefinitions(templateInputDefinitions) {
@@ -1783,7 +1784,8 @@ final class AppViewModel {
             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
             isTemplate: isTemplate,
-            templateInputDefinitions: isTemplate ? templateInputDefinitions : []
+            templateInputDefinitions: isTemplate ? templateInputDefinitions : [],
+            requiresUserAcceptance: requiresUserAcceptance
         )
         if isTemplate, let problem = await taskStore.setTemplateInstanceTitleTemplate(id: task.id, titleTemplate: templateInstanceTitleTemplate) {
             // The title template was validated above, so this is unreachable in practice — but a
@@ -1855,14 +1857,18 @@ final class AppViewModel {
         return true
     }
 
-    /// Replaces a task's acceptance criteria from the task-detail editor. Gated to
-    /// states where no worker or validator is actively consuming the contract; the
-    /// store drops sticky verdicts for criteria that actually changed.
+    /// Saves an editor's acceptance contract — its criteria and, when it changed, its user sign-off
+    /// gate — as ONE store write, so the two can never half-land. Gated to states where no worker or
+    /// validator is consuming the contract; the store re-checks atomically and drops sticky verdicts
+    /// for criteria that actually changed. `requiresUserAcceptance` nil leaves the gate as it is.
     @discardableResult
-    func setTaskAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async -> Bool {
-        guard let taskStore else { return false }
+    func editTaskAcceptanceContract(id: UUID, criteria: [AcceptanceCriterion], requiresUserAcceptance: Bool?) async -> Bool {
+        guard let taskStore else {
+            taskActionError = "The session's tasks haven't loaded yet."
+            return false
+        }
         guard let task = await taskStore.taskOrLibraryTemplate(id: id), task.status.isValidationContractEditable else {
-            taskActionError = "Acceptance criteria can't be edited while the task is running, validating, or completed."
+            taskActionError = "A task's acceptance criteria and sign-off gate can't be edited while it is running, validating, or completed."
             return false
         }
         // The editor carries each existing row's id through, so its save is a DIFF, not a
@@ -1901,12 +1907,36 @@ final class AppViewModel {
         // empty — so a user who opens the editor and closes it via Save would otherwise be told
         // "No criterion actions were given." The store is right to refuse an empty batch (a caller
         // asking for nothing is a caller with a bug); the editor is right to send one.
-        guard !actions.isEmpty else { return true }
-        if let problem = await taskStore.applyCriterionActions(taskID: id, actions: actions) {
+        let gateChange = requiresUserAcceptance.map { UserAcceptanceGateChange(requiresUserAcceptance: $0, author: .user) }
+        guard !actions.isEmpty || gateChange != nil else { return true }
+        let edit = AcceptanceContractEdit(criteria: actions.isEmpty ? nil : .apply(actions), userAcceptanceGate: gateChange)
+        if let problem = await taskStore.editAcceptanceContract(id: id, edit) {
             taskActionError = problem
             return false
         }
         return true
+    }
+
+    /// Turns a task's (or template's) user sign-off gate on or off from Task Detail — a live write,
+    /// not a draft. A refusal (the task started, or it is parked waiting on that very sign-off) is
+    /// shown as the task alert; the control re-reads the task, so it shows what was actually stored.
+    func setTaskRequiresUserAcceptance(id: UUID, requiresUserAcceptance: Bool) async {
+        guard let taskStore else {
+            taskActionError = "The session's tasks haven't loaded yet."
+            return
+        }
+        if let problem = await taskStore.setRequiresUserAcceptance(id: id, value: requiresUserAcceptance, by: .user) {
+            taskActionError = problem
+        }
+    }
+
+    /// The line a re-create request (Retry, Run Again) adds when the original carried the sign-off
+    /// gate: those paths rebuild the task through Smith's `create_task`, which can only set the gate
+    /// if it is told to.
+    private static func userAcceptanceGateCarryOverNote(for task: AgentTask) -> String {
+        task.requiresUserAcceptance
+            ? "\nThe original required the user's explicit sign-off before completing — pass `requires_user_acceptance: true` to `create_task` so the new task does too."
+            : ""
     }
 
     /// Adds a watch the user authored in Task Detail. Returns why it was refused, if it was. A
@@ -1990,7 +2020,7 @@ final class AppViewModel {
         let delivered = await runtime?.notifySmithOfUserTaskAction(
             .retryRequested,
             taskID: task.id,
-            text: "User action in the app: the user chose Retry on a failed task. Please retry it:\nTitle: \(task.title)\nDescription: \(task.description)\nID: \(task.id.uuidString)"
+            text: "User action in the app: the user chose Retry on a failed task. Please retry it:\nTitle: \(task.title)\nDescription: \(task.description)\nID: \(task.id.uuidString)\(Self.userAcceptanceGateCarryOverNote(for: task))"
         ) ?? false
         guard delivered else {
             taskActionError = "Agent Smith isn't running, so the retry can't be requested. Start the session and try again."
@@ -2174,7 +2204,7 @@ final class AppViewModel {
             text: """
             User action in the app: the user chose "Run Again" on a completed task and wants a fresh, separate copy run from scratch. Call `create_task` with the title and description below. Do NOT reopen, reuse, or call `run_task` on any existing task — this must be a brand-new task.
             Title: \(task.title)
-            Description: \(task.description)
+            Description: \(task.description)\(Self.userAcceptanceGateCarryOverNote(for: task))
             """
         ) ?? false
         if !delivered {

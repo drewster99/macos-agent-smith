@@ -1097,8 +1097,9 @@ public actor TaskStore {
 
     /// Clones a template into a fresh, runnable INSTANCE and adds it to the store.
     /// Carries over the "what to do" fields — title, description, description
-    /// attachments, the step plan (each reset to `.pending`, notes cleared), and the
-    /// acceptance criteria (fresh criterion IDs, no verdicts). Blanks every run-state
+    /// attachments, the step plan (each reset to `.pending`, notes cleared), the
+    /// acceptance criteria (fresh criterion IDs, no verdicts), and the user sign-off gate
+    /// (`requiresUserAcceptance`). Blanks every run-state
     /// field (result, commentary, updates, summary, validation, timestamps, scoped
     /// tools, relevant-context, help request) and the template/recurrence-carrying
     /// fields (`isTemplate = false`, `scheduledRunAt = nil`). Sets `parentTaskID` to the
@@ -1285,6 +1286,10 @@ public actor TaskStore {
             disposition: .active,
             descriptionAttachments: template.descriptionAttachments,
             userToolOverrides: template.userToolOverrides,
+            // The sign-off gate is part of the acceptance contract the instance is cloned from: a
+            // template whose author wanted every run signed off must not produce runs that complete
+            // on their own.
+            requiresUserAcceptance: template.requiresUserAcceptance,
             acceptanceCriteria: clonedCriteria,
             steps: clonedSteps,
             isTemplate: false,
@@ -1314,17 +1319,22 @@ public actor TaskStore {
         scheduledRunAt: Date? = nil,
         descriptionAttachments: [Attachment] = [],
         isTemplate: Bool = false,
-        templateInputDefinitions: [TemplateInputDefinition] = []
+        templateInputDefinitions: [TemplateInputDefinition] = [],
+        requiresUserAcceptance: Bool = false
     ) async -> AgentTask {
         await autoArchiveStaleCompletedIfEnabled()
         let definitions = isTemplate ? templateInputDefinitions : []
         let initialStatus: AgentTask.Status = (scheduledRunAt.map { $0 > Date() } ?? false) ? .scheduled : .pending
+        // The sign-off gate is set HERE, in the write that creates the task: a new task can be started
+        // (create_task's auto-start, auto-advance) before any follow-up edit lands, and a started task's
+        // acceptance contract — gate included — is no longer editable.
         let task = AgentTask(
             title: title,
             description: description,
             status: initialStatus,
             scheduledRunAt: scheduledRunAt,
             descriptionAttachments: descriptionAttachments,
+            requiresUserAcceptance: requiresUserAcceptance,
             isTemplate: isTemplate,
             sessionID: sessionID,
             templateInputDefinitions: definitions
@@ -1875,105 +1885,181 @@ public actor TaskStore {
     /// (that state's invariant requires a result).
     // MARK: - Acceptance criteria (requester-owned)
 
+    /// The SINGLE writer of an authoring edit to a task's acceptance contract: its criteria (a
+    /// wholesale replace or a batch of per-criterion actions), its user-acceptance gate, or both —
+    /// validated together on a working copy and written together, or not at all. A refusal leaves
+    /// the task exactly as it was: a half-applied contract edit is not a state anyone can reason about.
+    ///
+    /// Gated on status (and, for a replace, evidence) HERE rather than at the tool layer: a tool reads
+    /// the task and mutates later, so its check is TOCTOU. Reaches library-resident templates via
+    /// `mutateTaskOrTemplate`. Changing ONLY the gate leaves the validation ledger and
+    /// `contractVersion` untouched — it changes how an all-settled round ends, not what is judged,
+    /// and it can only be written while no round is in flight (`isValidationContractEditable`
+    /// excludes `.validating`). Returns a human-readable refusal, or nil on success.
+    public func editAcceptanceContract(id: UUID, _ edit: AcceptanceContractEdit) async -> String? {
+        guard !edit.isEmpty else { return "No acceptance-contract change was given." }
+        return await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
+            guard task.status.isValidationContractEditable else {
+                let subject = edit.criteria == nil ? "acceptance contract" : "acceptance criteria"
+                return "Task \"\(task.title)\" is \(task.status.rawValue) — its \(subject) can't be edited while a worker or validator is active."
+            }
+            let gateChange = edit.userAcceptanceGate.flatMap { $0.requiresUserAcceptance == task.requiresUserAcceptance ? nil : $0 }
+            if let gateChange {
+                // The worker being judged never holds the pen on its own acceptance contract.
+                guard gateChange.author != .worker else {
+                    return "The worker can't change its own task's user sign-off gate."
+                }
+                // Turning the gate off cannot resolve the park it created — nothing re-runs validation,
+                // so the task would sit parked under a gate that no longer exists. The park is the user's.
+                if !gateChange.requiresUserAcceptance, task.isParkedForUserAcceptance {
+                    return """
+                        Task "\(task.title)" is parked awaiting the user's explicit acceptance, so its sign-off gate \
+                        can't be turned off now — that would not complete it, and nothing would ask the user again. \
+                        The user resolves it from the task row; if they have told you their decision, relay it with \
+                        `respond_to_user_acceptance`. Nothing was changed.
+                        """
+                }
+            }
+            if let change = edit.criteria {
+                let criteria: [AcceptanceCriterion]
+                switch change {
+                case .replace(let replacement):
+                    if let problem = Self.replacementProblem(replacement, for: task) { return problem }
+                    criteria = replacement
+                case .apply(let actions):
+                    switch Self.criteriaApplying(actions, to: task) {
+                    case .failure(let refusal): return refusal.message
+                    case .success(let applied): criteria = applied
+                    }
+                }
+                writeAcceptanceContract(criteria, to: &task)
+            }
+            // Writes only after every refusal above: a refused edit returns before touching `task`.
+            if let gateChange {
+                task.requiresUserAcceptance = gateChange.requiresUserAcceptance
+                appendUpdate(to: &task, Self.userAcceptanceGateUpdate(gateChange))
+            }
+            task.updatedAt = Date()
+            return nil
+        }
+    }
+
     /// Replaces the task's acceptance criteria. Any criterion whose validation prompt,
     /// input enumerator, waivable flag, or legacy validator selection CHANGED — and any
     /// new criterion — loses its sticky verdict (its
     /// records stay in the audit ledger; only the "settled" reading resets, because the
     /// contract it was judged against no longer exists). Unchanged criteria keep their
-    /// verdicts.
-    ///
-    /// Gated on status AND evidence, HERE rather than at the tool layer: a tool reads the task and
-    /// mutates later, so its check is TOCTOU. Returns a human-readable refusal, or nil on success.
+    /// verdicts. Gated on status AND evidence (`editAcceptanceContract`, which it delegates to).
+    /// Returns a human-readable refusal, or nil on success.
     @discardableResult
     public func setAcceptanceCriteria(id: UUID, criteria: [AcceptanceCriterion]) async -> String? {
-        await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
-            guard task.status.isValidationContractEditable else {
-                return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
-            }
-            guard task.canReplaceAcceptanceContract(with: criteria) else {
-                let dropped = task.acceptanceCriteria.filter { existing in !criteria.contains { $0.id == existing.id } }
-                return """
-                    Task "\(task.title)" has already been validated, so its contract can't be replaced wholesale — \
-                    this list drops \(dropped.count) criterion(s) that carry a verdict or rejection history \
-                    (\(dropped.map { "\"\($0.name)\"" }.joined(separator: ", "))). \
-                    Use `actions` with `update` (which keeps a criterion's id, and its verdict when the contract text \
-                    is unchanged) and `delete` (which says so plainly) instead.
-                    """
-            }
-            if task.isTemplate {
-                let definedNames = Set(task.templateInputDefinitions.map(\.name))
-                for criterion in criteria {
-                    if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: definedNames) {
-                        return problem
-                    }
-                }
-            }
-            writeAcceptanceContract(criteria, to: &task)
-            task.updatedAt = Date()
-            return nil
-        }
+        await editAcceptanceContract(id: id, AcceptanceContractEdit(criteria: .replace(criteria)))
     }
 
     /// Applies a batch of per-criterion edits ATOMICALLY: every action is validated and applied to a
     /// working copy, and nothing is written unless all of them succeed. A half-applied contract edit
     /// is the specific failure this shape exists to prevent — the contract is what the work is judged
     /// against, so "three of your four edits landed" is not a state anyone can reason about.
-    ///
-    /// Returns a human-readable error, or nil on success.
+    /// Delegates to `editAcceptanceContract`. Returns a human-readable error, or nil on success.
     @discardableResult
     public func applyCriterionActions(taskID: UUID, actions: [CriterionAction]) async -> String? {
-        await mutateTaskOrTemplate(id: taskID) { task in     // see setSteps for the locking rationale
-            guard task.status.isValidationContractEditable else {
-                return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active."
-            }
-            guard !actions.isEmpty else { return "No criterion actions were given." }
-            var criteria = task.acceptanceCriteria
-            let templateInputNames = task.isTemplate ? Set(task.templateInputDefinitions.map(\.name)) : []
-            for action in actions {
-                switch action {
-                case .add(let name, let validationPrompt, let inputEnumeratorPrompt, let waivable, let origin):
-                    let criterion = AcceptanceCriterion(
-                        name: name,
-                        validationPrompt: validationPrompt,
-                        inputEnumeratorPrompt: inputEnumeratorPrompt,
-                        waivable: waivable,
-                        origin: origin
-                    )
-                    if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: templateInputNames) {
-                        return problem
-                    }
-                    criteria.append(criterion)
-                case .update(let criterionID, let name, let validationPrompt, let inputEnumeratorPrompt, let waivable):
-                    guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
-                        return "No acceptance criterion with id \(criterionID.uuidString)."
-                    }
-                    // id and origin are deliberately untouched: preserving identity across an edit is
-                    // the whole reason this verb exists.
-                    var edited = criteria[index]
-                    edited.name = name
-                    edited.validationPrompt = validationPrompt
-                    edited.inputEnumeratorPrompt = inputEnumeratorPrompt
-                    edited.waivable = waivable
-                    if let problem = TemplateInputValidation.placeholderProblem(inCriterion: edited, definedNames: templateInputNames) {
-                        return problem
-                    }
-                    criteria[index] = edited
-                case .delete(let criterionID):
-                    guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
-                        return "No acceptance criterion with id \(criterionID.uuidString)."
-                    }
-                    criteria.remove(at: index)
+        await editAcceptanceContract(id: taskID, AcceptanceContractEdit(criteria: .apply(actions)))
+    }
+
+    /// Sets the task's (or library template's) user sign-off gate alone. See `editAcceptanceContract`.
+    public func setRequiresUserAcceptance(id: UUID, value: Bool, by author: TaskAuthorship) async -> String? {
+        await editAcceptanceContract(id: id, AcceptanceContractEdit(
+            userAcceptanceGate: UserAcceptanceGateChange(requiresUserAcceptance: value, author: author)
+        ))
+    }
+
+    /// Why a wholesale replacement is refused, or nil. Evidence first: once a task has been validated,
+    /// a replacement that drops a criterion would throw away its verdicts and rejection history.
+    private static func replacementProblem(_ criteria: [AcceptanceCriterion], for task: AgentTask) -> String? {
+        guard task.canReplaceAcceptanceContract(with: criteria) else {
+            let dropped = task.acceptanceCriteria.filter { existing in !criteria.contains { $0.id == existing.id } }
+            return """
+                Task "\(task.title)" has already been validated, so its contract can't be replaced wholesale — \
+                this list drops \(dropped.count) criterion(s) that carry a verdict or rejection history \
+                (\(dropped.map { "\"\($0.name)\"" }.joined(separator: ", "))). \
+                Use `actions` with `update` (which keeps a criterion's id, and its verdict when the contract text \
+                is unchanged) and `delete` (which says so plainly) instead.
+                """
+        }
+        if task.isTemplate {
+            let definedNames = Set(task.templateInputDefinitions.map(\.name))
+            for criterion in criteria {
+                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: definedNames) {
+                    return problem
                 }
             }
-            // Names must stay distinct: the replace-all path matches criteria BY NAME to preserve
-            // identity, so a duplicate would silently collapse two criteria into one there.
-            guard Set(criteria.map(\.name)).count == criteria.count else {
-                return "Duplicate criterion names — each display name must be distinct."
-            }
-            writeAcceptanceContract(criteria, to: &task)
-            task.updatedAt = Date()
-            return nil
         }
+        return nil
+    }
+
+    struct CriterionEditRefusal: Error { let message: String }
+
+    /// The batch applied to a working copy of the task's criteria, or the first refusal.
+    private static func criteriaApplying(_ actions: [CriterionAction], to task: AgentTask) -> Result<[AcceptanceCriterion], CriterionEditRefusal> {
+        guard !actions.isEmpty else { return .failure(.init(message: "No criterion actions were given.")) }
+        var criteria = task.acceptanceCriteria
+        let templateInputNames = task.isTemplate ? Set(task.templateInputDefinitions.map(\.name)) : []
+        for action in actions {
+            switch action {
+            case .add(let name, let validationPrompt, let inputEnumeratorPrompt, let waivable, let origin):
+                let criterion = AcceptanceCriterion(
+                    name: name,
+                    validationPrompt: validationPrompt,
+                    inputEnumeratorPrompt: inputEnumeratorPrompt,
+                    waivable: waivable,
+                    origin: origin
+                )
+                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: criterion, definedNames: templateInputNames) {
+                    return .failure(.init(message: problem))
+                }
+                criteria.append(criterion)
+            case .update(let criterionID, let name, let validationPrompt, let inputEnumeratorPrompt, let waivable):
+                guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
+                    return .failure(.init(message: "No acceptance criterion with id \(criterionID.uuidString)."))
+                }
+                // id and origin are deliberately untouched: preserving identity across an edit is
+                // the whole reason this verb exists.
+                var edited = criteria[index]
+                edited.name = name
+                edited.validationPrompt = validationPrompt
+                edited.inputEnumeratorPrompt = inputEnumeratorPrompt
+                edited.waivable = waivable
+                if let problem = TemplateInputValidation.placeholderProblem(inCriterion: edited, definedNames: templateInputNames) {
+                    return .failure(.init(message: problem))
+                }
+                criteria[index] = edited
+            case .delete(let criterionID):
+                guard let index = criteria.firstIndex(where: { $0.id == criterionID }) else {
+                    return .failure(.init(message: "No acceptance criterion with id \(criterionID.uuidString)."))
+                }
+                criteria.remove(at: index)
+            }
+        }
+        // Names must stay distinct: the replace-all path matches criteria BY NAME to preserve
+        // identity, so a duplicate would silently collapse two criteria into one there.
+        guard Set(criteria.map(\.name)).count == criteria.count else {
+            return .failure(.init(message: "Duplicate criterion names — each display name must be distinct."))
+        }
+        return .success(criteria)
+    }
+
+    /// The update-history line for a sign-off gate change, naming who changed it.
+    private static func userAcceptanceGateUpdate(_ change: UserAcceptanceGateChange) -> String {
+        let author: String
+        switch change.author {
+        case .user: author = "the user"
+        case .smith: author = "Smith"
+        case .worker: author = "the worker"
+        case .system: author = "the system"
+        }
+        return change.requiresUserAcceptance
+            ? "User sign-off gate turned ON by \(author): once every acceptance criterion settles, this task waits for the user's explicit acceptance instead of completing on its own."
+            : "User sign-off gate turned OFF by \(author): this task completes on its own once every acceptance criterion settles."
     }
 
     /// The SINGLE writer of a task's acceptance contract. Both authoring paths — a wholesale replace
@@ -2430,21 +2516,6 @@ public actor TaskStore {
         if !released.isEmpty { didMutate() }
         for transition in transitions { publish(transition) }
         return released
-    }
-
-    /// Sets the task's opt-in user-acceptance gate (`set_acceptance_criteria`'s
-    /// `requires_user_acceptance`). Gated the same as any other edit to the acceptance contract —
-    /// the gate decides how that contract's "all settled" outcome is handled, so it is part of it.
-    public func setRequiresUserAcceptance(id: UUID, value: Bool) -> String? {
-        guard var task = tasks[id] else { return "No task with id \(id.uuidString)." }
-        guard task.status.isValidationContractEditable else {
-            return "Task \"\(task.title)\" is \(task.status.rawValue) — its acceptance contract can't be edited while a worker or validator is active."
-        }
-        task.requiresUserAcceptance = value
-        task.updatedAt = Date()
-        tasks[id] = task
-        didMutate()
-        return nil
     }
 
     /// Stores a result (and optional commentary) on a task.

@@ -2,7 +2,8 @@ import Foundation
 
 /// Lets Smith relay the ACTUAL user's own accept/reject decision on a task parked in
 /// `.awaitingReview` with `awaitingReviewReason == .userAcceptanceRequested` — the park a task
-/// enters when its author set `requires_user_acceptance` and every criterion has since settled.
+/// enters when it carries `requires_user_acceptance` and every criterion has settled (or acceptance
+/// validation is switched off).
 ///
 /// This is the conversational counterpart to the task row's Accept / Send back buttons: the user
 /// can reply "looks good" or "not ready — fix X" in chat instead of clicking one. Smith must call
@@ -36,16 +37,17 @@ public struct RespondToUserAcceptanceTool: AgentTool {
 
     public init() {
         self.toolDescription = """
-            Relay the user's own accept/reject decision on a task awaiting their acceptance (one \
-            where you set `requires_user_acceptance` via set_acceptance_criteria and every criterion \
-            has since settled). Call this ONLY in direct response to what the user actually said about \
+            Relay the user's own accept/reject decision on a task waiting for their sign-off (one \
+            carrying `requires_user_acceptance` whose criteria all passed — or acceptance validation \
+            is switched off; the system note you got when it parked says which). Call this ONLY in direct response to what the user actually said about \
             THIS task — you are relaying their decision, not forming your own judgment about whether the \
             work is good enough. If the user approves ("looks good", "ship it", "accept"), call with \
             decision=accept. If they want changes ("not ready", "this is broken", "fix X first"), call \
             with decision=reject and feedback=<what they said needs to change> — the task goes back to \
-            Brown, who is still tracked and will be resumed. This tool refuses to act on any task that \
+            Brown, respawned from its saved context. This tool refuses to act on any task that \
             isn't actually parked for user acceptance, including a validator-error escalation — that one \
-            can only be resolved by the user directly from the task row, never by you.
+            can only be resolved by the user directly from the task row, never by you — and a sign-off \
+            park whose criteria you changed after it parked.
             """
     }
 

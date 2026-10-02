@@ -41,6 +41,8 @@ struct TaskEditorSheet: View {
     @State private var inputs: [InputRow]
     @State private var criteria: [CriterionRow]
     @State private var steps: [StepRow]
+    /// Seeded like every other field here; see `TaskEditorPresentation` for why seeding is correct.
+    @State private var requiresUserAcceptance: Bool
     /// Tombstoned steps carried through untouched. They are not shown here — this sheet authors
     /// the active seed plan — but they MUST be written back on save, because `setTaskSteps`
     /// replaces the step array wholesale and an active-only array erases the append-only record
@@ -127,6 +129,7 @@ struct TaskEditorSheet: View {
             _inputs = State(initialValue: [])
             _criteria = State(initialValue: [])
             _steps = State(initialValue: [])
+            _requiresUserAcceptance = State(initialValue: false)
             _preservedTombstones = State(initialValue: [])
         case .edit(let task):
             _title = State(initialValue: task.title)
@@ -146,6 +149,7 @@ struct TaskEditorSheet: View {
                 )
             })
             _steps = State(initialValue: task.steps.filter(\.isActive).map(StepRow.init(step:)))
+            _requiresUserAcceptance = State(initialValue: task.requiresUserAcceptance)
             _preservedTombstones = State(initialValue: task.steps.filter { !$0.isActive })
         }
     }
@@ -268,6 +272,10 @@ struct TaskEditorSheet: View {
                 .buttonStyle(.plain)
                 .disabled(!canEditValidationContract)
             }
+            UserAcceptanceGateToggle(
+                requiresUserAcceptance: $requiresUserAcceptance,
+                lockedReason: userAcceptanceGateLockedReason
+            )
             if !canEditValidationContract {
                 Text("Acceptance criteria are locked for this task status.")
                     .font(.caption)
@@ -384,6 +392,15 @@ struct TaskEditorSheet: View {
         return false
     }
 
+    private var userAcceptanceGateLockedReason: String? {
+        switch mode {
+        case .create:
+            return nil
+        case .edit(let task):
+            return UserAcceptanceGateToggle.lockedReason(for: task)
+        }
+    }
+
     private var canEditValidationContract: Bool {
         switch mode {
         case .create:
@@ -487,7 +504,8 @@ struct TaskEditorSheet: View {
                     templateInputDefinitions: inputDefinitions,
                     templateInstanceTitleTemplate: instanceTitleTemplate,
                     acceptanceCriteria: criteriaToSave,
-                    steps: builtSteps
+                    steps: builtSteps,
+                    requiresUserAcceptance: requiresUserAcceptance
                 )
             case .edit(let task):
                 saved = await viewModel.updateTaskDefinition(
@@ -499,9 +517,14 @@ struct TaskEditorSheet: View {
                     templateInstanceTitleTemplate: instanceTitleTemplate
                 )
                 if saved && canEditValidationContract {
-                    let criteriaSaved = await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteriaToSave)
+                    // Only a gate the user actually changed is written: comparing against the value the
+                    // sheet opened with means a gate Smith changed while the sheet was open is not
+                    // silently reverted by a Save that never touched the checkbox.
+                    let gateChange: Bool? = requiresUserAcceptance == task.requiresUserAcceptance ? nil : requiresUserAcceptance
+                    let contractSaved = await viewModel.editTaskAcceptanceContract(
+                        id: task.id, criteria: criteriaToSave, requiresUserAcceptance: gateChange)
                     let stepsSaved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
-                    saved = criteriaSaved && stepsSaved
+                    saved = contractSaved && stepsSaved
                 }
             }
             if saved {

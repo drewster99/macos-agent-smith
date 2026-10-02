@@ -89,6 +89,13 @@ private func orderedSections(for status: AgentTask.Status) -> [TaskDetailSection
 
 /// Sections that actually have content to show (or are editable), in canonical order — the set
 /// the jump bar offers.
+/// Whether the Acceptance section has anything to show or offer: criteria, an editable empty
+/// contract, or a sign-off gate that is on. Shared by the jump bar and the section itself so the two
+/// can't disagree about whether the section exists.
+private func acceptanceSectionIsPresent(_ task: AgentTask) -> Bool {
+    !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable || task.requiresUserAcceptance
+}
+
 private func presentSections(_ task: AgentTask) -> [TaskDetailSectionKind] {
     orderedSections(for: task.status).filter { kind in
         switch kind {
@@ -98,7 +105,7 @@ private func presentSections(_ task: AgentTask) -> [TaskDetailSectionKind] {
         case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
         case .summary:        return !(task.summary ?? "").isEmpty
         case .result:         return !(task.result ?? "").isEmpty
-        case .acceptance:     return !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable
+        case .acceptance:     return acceptanceSectionIsPresent(task)
         case .steps:          return !task.steps.isEmpty || task.status.isValidationContractEditable
         case .updates:        return !task.updates.isEmpty
         case .relatedContext: return (task.relevantMemories?.isEmpty == false) || (task.relevantPriorTasks?.isEmpty == false)
@@ -358,6 +365,11 @@ private struct TaskDetailTaskSync: ViewModifier {
                 DispatchQueue.main.async { sync() }
             }
             .onChange(of: viewModel.recentlyDeletedTaskList) { _, _ in
+                DispatchQueue.main.async { sync() }
+            }
+            .onChange(of: viewModel.libraryTemplates) { _, _ in
+                // A template opened from the Library lives in none of the lists above; without this
+                // its window never re-reads an edit (criteria, steps, the sign-off gate).
                 DispatchQueue.main.async { sync() }
             }
     }
@@ -810,6 +822,26 @@ private struct EditableCriterion: Identifiable {
     }
 }
 
+/// The sign-off gate inside the Acceptance section. Unlike the criteria it is not a draft: a click
+/// writes straight to the store (as the per-task tool overrides do) and the control re-reads the
+/// task, so a refused write snaps back and its reason appears in the task alert.
+private struct TaskDetailUserAcceptanceGate: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        UserAcceptanceGateToggle(
+            requiresUserAcceptance: Binding(
+                get: { task.requiresUserAcceptance },
+                set: { requested in
+                    Task { await viewModel.setTaskRequiresUserAcceptance(id: task.id, requiresUserAcceptance: requested) }
+                }
+            ),
+            lockedReason: UserAcceptanceGateToggle.lockedReason(for: task)
+        )
+    }
+}
+
 /// The acceptance contract and its verdict history.
 ///
 /// Owns the editor's draft rows and the two expansion sets (`expandedValidatorPromptIDs`,
@@ -843,14 +875,14 @@ private struct TaskDetailAcceptanceSection: View {
     }
 
     private func save(_ criteria: [AcceptanceCriterion]) {
-        Task { await viewModel.setTaskAcceptanceCriteria(id: task.id, criteria: criteria) }
+        Task { await viewModel.editTaskAcceptanceContract(id: task.id, criteria: criteria, requiresUserAcceptance: nil) }
         isEditing = false
     }
 
     var body: some View {
-        // Shown when the task has criteria OR when the user could author some
-        // (an editable empty state offers the pencil).
-        if !task.acceptanceCriteria.isEmpty || task.status.isValidationContractEditable {
+        // Shown when the task has criteria, when the user could author some (an editable empty state
+        // offers the pencil), or when its sign-off gate is on.
+        if acceptanceSectionIsPresent(task) {
             VStack(alignment: .leading, spacing: 10) {
                 TaskDetailEditableSectionHeader(
                     title: "Acceptance", subtitle: settledSubtitle,
@@ -858,6 +890,7 @@ private struct TaskDetailAcceptanceSection: View {
                     canEdit: task.status.isValidationContractEditable && !isEditing,
                     editHelp: "Edit acceptance criteria", onEdit: beginEditing
                 )
+                TaskDetailUserAcceptanceGate(task: task, viewModel: viewModel)
                 if isEditing {
                     TaskDetailAcceptanceEditor(rows: $editedCriteria,
                                                onCancel: { isEditing = false }, onSave: save)

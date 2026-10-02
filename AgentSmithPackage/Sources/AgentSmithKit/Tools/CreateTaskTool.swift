@@ -174,6 +174,10 @@ public struct CreateTaskTool: AgentTool {
                         Initial to-do list of steps for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. Note that these steps are guidance to the worker agent, not requirements. Once the task starts, the worker owns this to-do list and may edit, delete, re-order items as it wishes. Validators see only the *final* list.
                         """)
                 ]),
+                "requires_user_acceptance": .dictionary([
+                    "type": .string("boolean"),
+                    "description": .string("Optional, default false. When true, once every acceptance criterion settles (ACCEPT/WAIVE) the task does NOT complete on its own — it parks awaiting the user's explicit sign-off (accept, or reject with feedback, including by just replying in chat). Set it whenever the user said they want to review or approve the result themselves. Set it HERE rather than afterwards: a new task usually starts immediately, and once it is running the gate can no longer be changed. On a template it carries to every instance the template starts. When creating a successor or re-run of a task that had it, carry it over unless the user said otherwise.")
+                ]),
                 "is_template": .dictionary([
                     "type": .string("boolean"),
                     "description": .string("Make this a TEMPLATE. A template never runs itself. Each time it's started, a fresh instance is cloned (title/description/steps/criteria copied with every {{input_name}} placeholder replaced by that run's value, all run-state blank) and that instance runs. Use for a task the user wants to trigger repeatedly (either manually or on a schedule) and get a clean run each time. Default `false`. When you schedule a RECURRING run on a task with `schedule_task_action`, it becomes a template automatically.")
@@ -322,6 +326,8 @@ public struct CreateTaskTool: AgentTool {
 
         var isTemplate = false
         if case .bool(let flag) = arguments["is_template"] { isTemplate = flag }
+        // Absent means the documented default (no sign-off gate).
+        let requiresUserAcceptance = ToolArguments.optionalBool(arguments, "requires_user_acceptance") ?? false
         let templateInputDefinitions: [TemplateInputDefinition]
         // An EMPTY array defines no inputs, which is what omitting the key means — so it must not
         // trip the is_template guard below. Matching on presence made this an inescapable dead
@@ -391,8 +397,17 @@ public struct CreateTaskTool: AgentTool {
             scheduledRunAt: scheduledRunAt,
             descriptionAttachments: resolvedAttachments,
             isTemplate: isTemplate,
-            templateInputDefinitions: templateInputDefinitions
+            templateInputDefinitions: templateInputDefinitions,
+            requiresUserAcceptance: requiresUserAcceptance
         )
+        let gateNote: String
+        if !requiresUserAcceptance {
+            gateNote = ""
+        } else if isTemplate {
+            gateNote = " Every instance it starts will wait for the user's explicit sign-off once its criteria settle."
+        } else {
+            gateNote = " It will wait for the user's explicit sign-off once its criteria settle, instead of completing on its own."
+        }
         if isTemplate, let templateInstanceTitleTemplate {
             if let problem = await context.taskStore.setTemplateInstanceTitleTemplate(id: task.id, titleTemplate: templateInstanceTitleTemplate) {
                 return .failure("Task created but instance title template could not be saved: \(problem)")
@@ -505,9 +520,9 @@ public struct CreateTaskTool: AgentTool {
             case .scheduled(let wake):
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-                return .success("Task created (ID: \(task.id), title: \"\(title)\") in scheduled status. Will fire at \(formatter.string(from: scheduledRunAt)) (timer id \(wake.id.uuidString)).\(contextNote)")
+                return .success("Task created (ID: \(task.id), title: \"\(title)\") in scheduled status. Will fire at \(formatter.string(from: scheduledRunAt)) (timer id \(wake.id.uuidString)).\(contextNote)\(gateNote)")
             case .error(let message):
-                return .success("Task created (ID: \(task.id), title: \"\(title)\") but timer registration failed: \(message). Re-schedule via schedule_task_action(task_id: \(task.id.uuidString), action: \"run\").")
+                return .success("Task created (ID: \(task.id), title: \"\(title)\")\(gateNote) but timer registration failed: \(message). Re-schedule via schedule_task_action(task_id: \(task.id.uuidString), action: \"run\").")
             }
         }
 
@@ -518,7 +533,7 @@ public struct CreateTaskTool: AgentTool {
             let inputNote = templateInputDefinitions.isEmpty
                 ? ""
                 : " Template inputs: \(templateInputDefinitions.map(\.name).joined(separator: ", "))."
-            return .success("Template task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(inputNote) It won't run on its own — starting it (run_task, the play button, or a scheduled run) clones a fresh instance each time.")
+            return .success("Template task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(inputNote)\(gateNote) It won't run on its own — starting it (run_task, the play button, or a scheduled run) clones a fresh instance each time.")
         }
 
         // Auto-start the new task when a worker slot is free. Prevents the failure mode
@@ -533,10 +548,10 @@ public struct CreateTaskTool: AgentTool {
         }
         if slotHolders.count < capacity {
             await context.restartForNewTask(task.id, nil)
-            return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote) A worker is being spawned to begin work on it now.")
+            return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) A worker is being spawned to begin work on it now.")
         }
 
-        return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote) All \(capacity) task slot(s) are busy — it is queued as pending and auto-run will start it when a slot frees. Do NOT call `run_task` on it.")
+        return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) All \(capacity) task slot(s) are busy — it is queued as pending and auto-run will start it when a slot frees. Do NOT call `run_task` on it.")
     }
 
     /// Build the "missing title" tool error. If there's exactly one pending task

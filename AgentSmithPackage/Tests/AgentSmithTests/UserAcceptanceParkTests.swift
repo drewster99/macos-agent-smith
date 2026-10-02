@@ -15,7 +15,7 @@ struct UserAcceptanceParkTests {
         let criterion = AcceptanceCriterion(name: "works", validationPrompt: "it works", origin: .user)
         await store.setAcceptanceCriteria(id: task.id, criteria: [criterion])
         if gated {
-            #expect(await store.setRequiresUserAcceptance(id: task.id, value: true) == nil)
+            #expect(await store.setRequiresUserAcceptance(id: task.id, value: true, by: .smith) == nil)
         }
         await store.setResult(id: task.id, result: "done", commentary: nil, attachments: [])
         #expect(await store.driveStatus(id: task.id, to: .validating))

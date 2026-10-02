@@ -284,6 +284,43 @@ public enum CriterionAction: Sendable {
     case delete(criterionID: UUID)
 }
 
+/// A requested change to a task's user sign-off gate (`AgentTask.requiresUserAcceptance`), carrying
+/// who asked for it so the task's update history can say so.
+public struct UserAcceptanceGateChange: Sendable, Equatable {
+    public let requiresUserAcceptance: Bool
+    public let author: TaskAuthorship
+
+    public init(requiresUserAcceptance: Bool, author: TaskAuthorship) {
+        self.requiresUserAcceptance = requiresUserAcceptance
+        self.author = author
+    }
+}
+
+/// One atomic edit to a task's acceptance contract — its criteria, its user sign-off gate, or both.
+/// `TaskStore.editAcceptanceContract` validates every part on a working copy and writes all of it or
+/// none of it.
+public struct AcceptanceContractEdit: Sendable {
+    /// How the criteria list changes.
+    public enum CriteriaChange: Sendable {
+        /// Wholesale replace — first-time authoring; refused once validated if it drops a criterion.
+        case replace([AcceptanceCriterion])
+        /// Per-criterion add/update/delete batch — preserves identity.
+        case apply([CriterionAction])
+    }
+
+    /// nil leaves the criteria as they are.
+    public var criteria: CriteriaChange?
+    /// nil leaves the gate as it is (not "off").
+    public var userAcceptanceGate: UserAcceptanceGateChange?
+
+    public init(criteria: CriteriaChange? = nil, userAcceptanceGate: UserAcceptanceGateChange? = nil) {
+        self.criteria = criteria
+        self.userAcceptanceGate = userAcceptanceGate
+    }
+
+    public var isEmpty: Bool { criteria == nil && userAcceptanceGate == nil }
+}
+
 /// Identifies ONE validation round: which attempt it is, and which version of the acceptance
 /// contract it judged. Captured atomically when the round begins and handed to every store mutation
 /// that round makes, so each mutation can refuse if the world moved while the round awaited an LLM.

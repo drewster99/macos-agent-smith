@@ -317,11 +317,11 @@ public struct ToolContext: Sendable {
     /// Reports an externally observed user message to the runtime, which wraps it with
     /// provenance and injects it into Smith's private queue.
     public let reportInboundUserMessage: @Sendable (InboundUserMessageReport) async -> ToolExecutionResult
-    /// Resolves a task parked in `.awaitingReview` with `awaitingReviewReason ==
-    /// .userAcceptanceRequested` — Smith relays the ACTUAL user's own accept/reject decision,
-    /// conveyed conversationally rather than through the task-row buttons. Refuses
-    /// (`ToolExecutionResult.failure`) for any other status or escalation reason, so this can never
-    /// be used to self-resolve a validator-error park, which stays user-only via the UI.
+    /// Resolves a task parked in `.awaitingReview` waiting ONLY on the user's sign-off
+    /// (`AgentTask.isAwaitingOnlyUserSignOff` — every criterion passed, or validation is switched off)
+    /// — Smith relays the ACTUAL user's own accept/reject decision, conveyed conversationally rather
+    /// than through the task-row buttons. Refuses (`ToolExecutionResult.failure`) anything else, and
+    /// the store re-checks that inside its CAS, so this can never self-resolve a validator-error park.
     /// `feedback` is required when `accept == false` and becomes the "send back" message to Brown.
     public let respondToUserAcceptance: @Sendable (_ taskID: UUID, _ accept: Bool, _ feedback: String?) async -> ToolExecutionResult
     /// Signals a full system restart for a new task. Called by create_task and run_task. The

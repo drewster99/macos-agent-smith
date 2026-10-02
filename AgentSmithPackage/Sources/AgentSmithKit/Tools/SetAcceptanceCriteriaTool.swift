@@ -10,6 +10,10 @@ import Foundation
 /// names a `criterion_id` and so preserves identity (and the sticky ACCEPT, when the contract text
 /// is unchanged).
 ///
+/// The optional `requires_user_acceptance` gate is part of the same contract: it lands in the SAME
+/// store write as the criteria edit it rides with (`TaskStore.editAcceptanceContract`), so a refused
+/// call changes nothing.
+///
 /// Criteria can only be edited in a state where no worker or validator is consuming them
 /// (`Status.isValidationContractEditable`) — the same gate `manage_steps` has always had. There are
 /// no mid-round edits: changing the rules while a validator is judging against them is the race the
@@ -27,7 +31,7 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             ]),
             "requires_user_acceptance": .dictionary([
                 "type": .string("boolean"),
-                "description": .string("Optional, independent of 'criteria'/'actions' and may be passed alone. When true, once every criterion has settled (ACCEPT/WAIVE) the task does NOT auto-complete — it parks awaiting the user's explicit sign-off (accept, or reject with feedback, including by just replying in chat). Use when the user said they want to review or approve the result themselves before it's considered done, or for any task where a human should have final say even though it technically passed. Omit (or false) for ordinary tasks — this is an opt-in gate, not the default.")
+                "description": .string("Optional, independent of 'criteria'/'actions' and may be passed alone. When true, once every criterion has settled (ACCEPT/WAIVE) the task does NOT auto-complete — it parks awaiting the user's explicit sign-off (accept, or reject with feedback, including by just replying in chat). Use when the user said they want to review or approve the result themselves before it's considered done, or for any task where a human should have final say even though it technically passed. Omit (or false) for ordinary tasks — this is an opt-in gate, not the default. Applied atomically with 'criteria'/'actions' — if any part is refused, nothing changes. Prefer passing it to `create_task` at creation: a new task usually starts immediately, and once it is running the gate can no longer be changed. Works on templates (every instance inherits it). Turning it off is refused while the task is parked awaiting the user's acceptance — that park is the user's to resolve; relay their decision with respond_to_user_acceptance.")
             ]),
             "criteria": .dictionary([
                 "type": .string("array"),
@@ -175,57 +179,84 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         guard task.status.isValidationContractEditable else {
             return .failure("Task '\(task.title)' is \(task.status.rawValue) — its acceptance criteria can't be edited while a worker or validator is active. Criteria are editable when the task is pending, paused, interrupted, scheduled, failed, or awaiting review.")
         }
-        // Independent of the criteria/actions mode below and may be passed alone — it's a task-level
-        // gate, not a per-criterion property.
-        var acceptanceGateNote = ""
-        if let requiresUserAcceptance = ToolArguments.optionalBool(arguments, "requires_user_acceptance") {
-            if let problem = await context.taskStore.setRequiresUserAcceptance(id: taskID, value: requiresUserAcceptance) {
-                return .failure(problem)
-            }
-            acceptanceGateNote = requiresUserAcceptance
-                ? " This task now requires your explicit acceptance once all criteria settle."
-                : " This task no longer requires explicit acceptance — it will complete automatically once all criteria settle."
-        }
+        // Everything is parsed BEFORE anything is written, and the whole edit — criteria and gate —
+        // lands in ONE store call, so a refusal anywhere leaves the task exactly as it was. The gate is
+        // independent of the criteria/actions mode and may be passed alone.
+        let gateChange = ToolArguments.optionalBool(arguments, "requires_user_acceptance")
+            .map { UserAcceptanceGateChange(requiresUserAcceptance: $0, author: .smith) }
         // Empty reads as absent, so a caller that sends BOTH keys as `[]` gets the "pass one of
         // them" guidance rather than the "exactly one" refusal for two arguments it never meant.
         let rawCriteria = ToolArguments.optionalArray(arguments, "criteria")
         let rawActions = ToolArguments.optionalArray(arguments, "actions")
+        let criteriaChange: AcceptanceContractEdit.CriteriaChange?
         switch (rawCriteria, rawActions) {
         case (nil, nil):
-            // A flag-only call (requires_user_acceptance with no criteria/actions) is valid and
-            // already applied above — only refuse when NEITHER was given.
-            guard !acceptanceGateNote.isEmpty else {
+            guard gateChange != nil else {
                 return .failure("Pass either 'criteria' (replace the whole list — first-time authoring) or 'actions' (per-criterion add/update/delete), or 'requires_user_acceptance' alone to change just that gate.")
             }
-            return .success("Updated '\(task.title)'.\(acceptanceGateNote)")
+            criteriaChange = nil
         case (.some, .some):
-            return .failure("Pass 'criteria' OR 'actions', not both: one replaces the whole list, the other edits criteria individually.")
-        case (nil, .some(let actions)):
-            return await applyActions(actions, to: task, context: context)
-        case (.some, nil):
-            break
+            return .failure("Pass 'criteria' OR 'actions', not both: one replaces the whole list, the other edits criteria individually. Nothing was changed.")
+        case (nil, .some(let actionArguments)):
+            switch CriterionArgumentParsing.parseActions(actionArguments, origin: .smith) {
+            case .success(let actions): criteriaChange = .apply(actions)
+            case .failure(let problem): return .failure(problem.message)
+            }
+        case (.some(let criterionArguments), nil):
+            let parsed: [CriterionArgumentParsing.ParsedCriterion]
+            switch CriterionArgumentParsing.parse(criterionArguments) {
+            case .success(let criteria): parsed = criteria
+            case .failure(let problem): return .failure(problem.message)
+            }
+            guard !parsed.isEmpty else {
+                return .failure("'criteria' must contain at least one non-empty criterion.")
+            }
+            criteriaChange = .replace(Self.replacementCriteria(parsed, existing: task.acceptanceCriteria))
         }
 
-        guard let rawCriteria, !rawCriteria.isEmpty else {
-            return .failure("'criteria' must be a non-empty array of {name, validation_prompt, input_enumerator_prompt?, waivable?} objects.")
+        if let problem = await context.taskStore.editAcceptanceContract(
+            id: taskID, AcceptanceContractEdit(criteria: criteriaChange, userAcceptanceGate: gateChange)
+        ) {
+            return .failure(problem)
         }
+        guard let updated = await context.taskStore.taskOrLibraryTemplate(id: taskID) else {
+            return .failure("Task \(taskID.uuidString) disappeared while its acceptance contract was being edited.")
+        }
+        let gateSentence = gateChange.map { Self.gateSentence(requested: $0.requiresUserAcceptance, wasRequired: task.requiresUserAcceptance, after: updated) }
+        let gateSuffix = gateSentence.map { " \($0)" } ?? ""
+        let gateChanged = gateChange.map { $0.requiresUserAcceptance != task.requiresUserAcceptance } ?? false
+        // The store already logged a gate change on the task (naming who made it); the transcript post
+        // carries it too, so the user sees it.
+        let gateBlock = gateChanged ? gateSentence.map { "\n\n\($0)" } ?? "" : ""
 
-        // Parse the complete task-scoped prompt contract before touching the task.
-        let parsed: [CriterionArgumentParsing.ParsedCriterion]
-        switch CriterionArgumentParsing.parse(rawCriteria) {
-        case .success(let criteria):
-            parsed = criteria
-        case .failure(let problem):
-            return .failure(problem.message)
+        switch criteriaChange {
+        case nil:
+            if gateChanged, let gateSentence {
+                await Self.post("Acceptance gate for \"\(updated.title)\": \(gateSentence)", taskID: taskID, taskTitle: updated.title, context: context)
+            }
+            return .success("Updated '\(updated.title)'.\(gateSuffix)")
+        case .replace(let criteria)?:
+            let rendered = Self.renderCriteriaList(criteria)
+            await context.taskStore.addUpdate(id: taskID, message: "Acceptance criteria set (\(criteria.count)):\n\(rendered)")
+            await Self.post("Acceptance criteria for \"\(task.title)\" (\(criteria.count)):\n\(rendered)\(gateBlock)", taskID: taskID, taskTitle: task.title, context: context)
+            return .success("Acceptance criteria set for '\(task.title)' (\(criteria.count) criterion(s)).\(gateSuffix)")
+        case .apply(let actions)?:
+            let summary = Self.describe(actions)
+            let rendered = Self.renderCriteriaList(updated.acceptanceCriteria)
+            await context.taskStore.addUpdate(id: taskID, message: "Acceptance criteria edited (\(summary)). Now \(updated.acceptanceCriteria.count):\n\(rendered)")
+            await Self.post("Acceptance criteria for \"\(updated.title)\" edited (\(summary)) — now \(updated.acceptanceCriteria.count):\n\(rendered)\(gateBlock)", taskID: taskID, taskTitle: updated.title, context: context)
+            return .success("Acceptance criteria for '\(updated.title)' edited (\(summary)); the task now has \(updated.acceptanceCriteria.count) criterion(s).\(gateSuffix)")
         }
-        guard !parsed.isEmpty else {
-            return .failure("'criteria' must contain at least one non-empty criterion.")
-        }
+    }
 
-        // Unchanged text keeps the criterion's identity so its sticky ACCEPT survives;
-        // the store drops verdicts for anything that actually changed.
-        let existingByName = Dictionary(task.acceptanceCriteria.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
-        let criteria = parsed.map { entry -> AcceptanceCriterion in
+    /// Unchanged text keeps the criterion's identity so its sticky ACCEPT survives; the store drops
+    /// verdicts for anything that actually changed.
+    private static func replacementCriteria(
+        _ parsed: [CriterionArgumentParsing.ParsedCriterion],
+        existing: [AcceptanceCriterion]
+    ) -> [AcceptanceCriterion] {
+        let existingByName = Dictionary(existing.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
+        return parsed.map { entry -> AcceptanceCriterion in
             if let existing = existingByName[entry.name] {
                 var updated = existing
                 updated.waivable = entry.waivable
@@ -235,58 +266,36 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             }
             return AcceptanceCriterion(name: entry.name, validationPrompt: entry.validationPrompt, inputEnumeratorPrompt: entry.inputEnumeratorPrompt, waivable: entry.waivable, origin: .smith)
         }
+    }
 
-        if let problem = await context.taskStore.setAcceptanceCriteria(id: taskID, criteria: criteria) {
-            return .failure(problem)
+    /// What the call did to the user sign-off gate, for Smith and the transcript.
+    private static func gateSentence(requested: Bool, wasRequired: Bool, after: AgentTask) -> String {
+        switch (wasRequired, requested) {
+        case (false, true):
+            return "This task now requires the USER's explicit acceptance once all criteria settle — it will park for their sign-off instead of completing."
+        case (true, true):
+            return "This task still requires the user's explicit acceptance once all criteria settle."
+        case (true, false):
+            if after.status == .awaitingReview {
+                // Only a validator-error park reaches here — the store refuses this on a sign-off park.
+                return "This task no longer requires the user's explicit acceptance. It is still parked for the user to resolve from the task row; if they re-validate and every criterion passes, it completes without a separate sign-off."
+            }
+            return "This task no longer requires the user's explicit acceptance — it will complete automatically once all criteria settle."
+        case (false, false):
+            return "This task does not require the user's explicit acceptance (unchanged)."
         }
+    }
 
-        let rendered = Self.renderCriteriaList(criteria)
-
-        await context.taskStore.addUpdate(id: taskID, message: "Acceptance criteria set (\(criteria.count)):\n\(rendered)")
+    private static func post(_ content: String, taskID: UUID, taskTitle: String, context: ToolContext) async {
         await context.post(ChannelMessage(
             sender: .agent(context.agentRole),
-            content: "Acceptance criteria for \"\(task.title)\" (\(criteria.count)):\n\(rendered)",
+            content: content,
             metadata: [
                 "messageKind": .kind(.criteriaUpdated),
                 "taskID": .string(taskID.uuidString),
-                "taskTitle": .string(task.title)
+                "taskTitle": .string(taskTitle)
             ]
         ))
-
-        return .success("Acceptance criteria set for '\(task.title)' (\(criteria.count) criterion(s)).")
-    }
-
-    /// The per-criterion path. The store applies the batch atomically, so a rejected action leaves
-    /// the contract exactly as it was — the caller never has to reason about a partial edit.
-    private func applyActions(_ rawActions: [AnyCodable], to task: AgentTask, context: ToolContext) async -> ToolExecutionResult {
-        guard !rawActions.isEmpty else {
-            return .failure("'actions' must be a non-empty array of {action, ...} objects.")
-        }
-        let actions: [CriterionAction]
-        switch CriterionArgumentParsing.parseActions(rawActions, origin: .smith) {
-        case .success(let parsed): actions = parsed
-        case .failure(let problem): return .failure(problem.message)
-        }
-        if let problem = await context.taskStore.applyCriterionActions(taskID: task.id, actions: actions) {
-            return .failure(problem)
-        }
-        guard let updated = await context.taskStore.taskOrLibraryTemplate(id: task.id) else {
-            return .failure("Task \(task.id.uuidString) disappeared while its criteria were being edited.")
-        }
-
-        let summary = Self.describe(actions)
-        let rendered = Self.renderCriteriaList(updated.acceptanceCriteria)
-        await context.taskStore.addUpdate(id: task.id, message: "Acceptance criteria edited (\(summary)). Now \(updated.acceptanceCriteria.count):\n\(rendered)")
-        await context.post(ChannelMessage(
-            sender: .agent(context.agentRole),
-            content: "Acceptance criteria for \"\(updated.title)\" edited (\(summary)) — now \(updated.acceptanceCriteria.count):\n\(rendered)",
-            metadata: [
-                "messageKind": .kind(.criteriaUpdated),
-                "taskID": .string(task.id.uuidString),
-                "taskTitle": .string(updated.title)
-            ]
-        ))
-        return .success("Acceptance criteria for '\(updated.title)' edited (\(summary)); the task now has \(updated.acceptanceCriteria.count) criterion(s).")
     }
 
     private static func describe(_ actions: [CriterionAction]) -> String {
