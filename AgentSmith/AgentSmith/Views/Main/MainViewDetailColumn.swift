@@ -523,8 +523,8 @@ private struct CrossSessionTranscriptView: View {
         case .failed:
             return .failed
         case .loaded(let messages, let toolRequestIDs):
-            let filter = config.makeFilter(taskScope: .any)
-            return .loaded(messages: messages.filter(filter.delivers), toolRequestIDs: toolRequestIDs)
+            var delivery = TranscriptDelivery(filter: config.makeFilter(taskScope: .any))
+            return .loaded(messages: delivery.admitted(from: messages), toolRequestIDs: toolRequestIDs)
         }
     }
 }

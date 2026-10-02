@@ -6,7 +6,8 @@ import Foundation
 ///
 /// Classified from the `securityDisposition` wire tag that `SecurityDisposition.channelTag` writes —
 /// the closed set every verdict carries, including legacy rows that predate `messageKind`.
-/// `SecurityVerdictClassTests` pins this mapping against `SecurityDisposition.approved` itself, so a
+/// `TranscriptViewConfigTests.verdictClassesAgreeWithWhetherTheCallRan` pins this mapping against
+/// `SecurityDisposition.approved` itself, so a
 /// new outcome cannot land in a class that disagrees with whether the call actually ran.
 public enum SecurityVerdictClass: String, CaseIterable, Sendable, Hashable {
     /// The call ran: approved, auto-approved, or approved with review switched off.

@@ -290,6 +290,29 @@ struct TranscriptStoreClearViewTests {
         await store.updateFilter(id, to: .all)
         #expect(await next(&it)?.messages.isEmpty == true)
     }
+
+    /// A hidden verdict reaches the pane when its call did — even in a LATER batch, which is why the
+    /// store carries each subscriber's delivery state across fan-outs — and in a snapshot.
+    @Test("A hidden verdict follows its delivered call across batches and into snapshots")
+    func hiddenVerdictFollowsItsCallAcrossBatches() async {
+        let request = ChannelMessage(sender: .agent(.brown), content: "bash",
+                                     metadata: ["messageKind": .kind(.toolRequest), "requestID": .string("call_1")])
+        let verdict = ChannelMessage(sender: .system, content: "Security Agent → Brown: SAFE",
+                                     metadata: ["messageKind": .kind(.securityReview), "requestID": .string("call_1"),
+                                                "securityDisposition": .string("approved")])
+        let hidingVerdicts = TranscriptFilter(kinds: .allExcept([.securityReview]), alwaysShowAtOrAbove: nil)
+        #expect(!hidingVerdicts.matches(verdict))
+        let store = TranscriptStore()
+        let (id, stream) = await store.subscribe(filter: hidingVerdicts)
+        var it = stream.makeAsyncIterator()
+        _ = await next(&it)
+        await store.ingest(request); await store.flush()
+        #expect(await next(&it)?.messages.map(\.id) == [request.id])
+        await store.ingest(verdict); await store.flush()
+        #expect(await next(&it)?.messages.map(\.id) == [verdict.id])
+        await store.updateFilter(id, to: hidingVerdicts)
+        #expect(await next(&it)?.messages.map(\.id) == [request.id, verdict.id])
+    }
 }
 
 

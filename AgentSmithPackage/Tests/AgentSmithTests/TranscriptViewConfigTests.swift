@@ -230,23 +230,65 @@ import Foundation
         #expect(config.visibility(of: TranscriptKindGroup.securityReviews.targets, for: Self.everyone) == .mixed)
     }
 
+    private static func toolRequest(_ requestID: String, taskID: UUID? = nil) -> ChannelMessage {
+        ChannelMessage(sender: .agent(.brown), content: "bash",
+                       metadata: ["messageKind": .kind(.toolRequest), "requestID": .string(requestID),
+                                  "tool": .string("bash")],
+                       taskID: taskID)
+    }
+
     /// The reported bug: hiding verdicts stripped every tool call's status icon. A hidden verdict
-    /// on a tool call is still DELIVERED (for its call's row) but not shown; nothing else changes.
-    @Test func hiddenVerdictsAreDeliveredForTheirToolCallButNotShown() {
+    /// on a DELIVERED tool call is still delivered (for its call's row) but not shown.
+    @Test func hiddenVerdictIsDeliveredWithItsToolCall() {
         var config = TranscriptViewConfig.everything
         config.problems = .filterNormally
         config.setVisible(false, targets: TranscriptKindGroup.securityReviews.targets, for: Self.everyone)
         let task = UUID()
-        let pane = config.makeFilter(taskScope: .task(task))
-        let onThisTask = Self.verdict(tag: "approved", taskID: task)
-        #expect(!pane.matches(onThisTask))
-        #expect(pane.delivers(onThisTask))
-        // Never across scope, and never a verdict that belongs to no tool call.
-        #expect(!pane.delivers(Self.verdict(tag: "approved", taskID: UUID())))
-        #expect(!pane.delivers(Self.verdict(tag: "approved", requestID: nil, taskID: task)))
+        var delivery = TranscriptDelivery(filter: config.makeFilter(taskScope: .task(task)))
+        let verdict = Self.verdict(tag: "approved", requestID: "call_1", taskID: task)
+        #expect(!delivery.filter.matches(verdict))
+        let delivered = delivery.admitted(from: [Self.toolRequest("call_1", taskID: task), verdict])
+        #expect(delivered.count == 2)
+        // One verdict per call: the call's entry is spent, so a stray repeat is withheld.
+        let repeatAdmitted = delivery.admits(verdict)
+        #expect(!repeatAdmitted)
+    }
+
+    /// A hidden verdict whose call the pane does NOT show is withheld: it would never draw, and the
+    /// default Conversation pane (tool calls hidden) would otherwise fill its render window with
+    /// such rows.
+    @Test func hiddenVerdictIsWithheldWhenItsCallIsNotShown() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setVisible(false, targets: TranscriptKindGroup.securityReviews.targets, for: Self.everyone)
+        config.setVisible(false, targets: TranscriptKindGroup.toolCalls.targets, for: Self.everyone)
+        var delivery = TranscriptDelivery(filter: config.makeFilter())
+        let withheld = delivery.admitted(from: [Self.toolRequest("call_1"), Self.verdict(tag: "approved")])
+        #expect(withheld.isEmpty)
+        // A verdict for some OTHER call, or for none, is withheld even with tool calls shown.
+        config.setVisible(true, targets: TranscriptKindGroup.toolCalls.targets, for: Self.everyone)
+        delivery = TranscriptDelivery(filter: config.makeFilter())
+        let requestAdmitted = delivery.admits(Self.toolRequest("call_1"))
+        let otherCallAdmitted = delivery.admits(Self.verdict(tag: "approved", requestID: "call_2"))
+        let noCallAdmitted = delivery.admits(Self.verdict(tag: "approved", requestID: nil))
+        #expect(requestAdmitted)
+        #expect(!otherCallAdmitted)
+        #expect(!noCallAdmitted)
         // Anything else hidden stays undelivered.
         config.setVisible(false, targets: [.chat], for: Self.everyone)
-        #expect(!config.makeFilter().delivers(Self.message(from: .user)))
+        delivery = TranscriptDelivery(filter: config.makeFilter())
+        let chatAdmitted = delivery.admits(Self.message(from: .user))
+        #expect(!chatAdmitted)
+    }
+
+    /// A SHOWN verdict is delivered whether or not its call is — it then renders as its own row.
+    @Test func shownVerdictIsDeliveredWithoutItsCall() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setVisible(false, targets: TranscriptKindGroup.toolCalls.targets, for: Self.everyone)
+        var delivery = TranscriptDelivery(filter: config.makeFilter())
+        let admitted = delivery.admits(Self.verdict(tag: "approved"))
+        #expect(admitted)
     }
 
     @Test func toolScopeIsTheSecurityAgentsAndHasItsOwnSwitch() {

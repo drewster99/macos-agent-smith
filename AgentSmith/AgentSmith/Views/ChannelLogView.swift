@@ -280,7 +280,7 @@ private struct UserTaskActionInlineControl: View {
 private struct ChannelGroupingIndex {
     var toolRequestIDs: Set<String> = []
     /// Every verdict delivered for a tool call — including ones the pane's settings hide, which
-    /// arrive only so the call's row keeps its status icon (`TranscriptFilter.delivers`).
+    /// arrive only so the call's row keeps its status icon (`TranscriptDelivery`).
     var securityReviewByRequestID: [String: ChannelMessage] = [:]
     /// The verdicts the pane's settings actually SHOW — the only ones whose text the row prints.
     var shownVerdictRequestIDs: Set<String> = []

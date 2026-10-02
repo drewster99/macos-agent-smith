@@ -132,8 +132,9 @@ public actor TranscriptStore {
         // nil when nothing is resident: there is nothing to clear past, and a nil watermark keeps
         // the pane in its ordinary un-cleared state rather than inventing a boundary.
         subscriber.clearedThroughID = resident.last?.id
+        let update = makeReset(for: &subscriber)
         subscribers[id] = subscriber
-        subscriber.continuation.yield(makeReset(for: subscriber))
+        subscriber.continuation.yield(update)
     }
 
     /// Wipes the resident tail and every subscriber's view. The on-disk log is UNTOUCHED — so
@@ -151,8 +152,10 @@ public actor TranscriptStore {
     }
 
     private func fanOut(appended batch: [ChannelMessage]) {
-        for subscriber in subscribers.values {
-            let matched = batch.filter(subscriber.filter.delivers)
+        for id in Array(subscribers.keys) {
+            guard var subscriber = subscribers[id] else { continue }
+            let matched = subscriber.delivery.admitted(from: batch)
+            subscribers[id] = subscriber
             guard !matched.isEmpty else { continue }
             subscriber.continuation.yield(makeAppend(matched, for: subscriber))
         }
@@ -161,7 +164,9 @@ public actor TranscriptStore {
     // MARK: Subscribers
 
     private struct Subscriber {
-        var filter: TranscriptFilter
+        /// The pane's filter plus what it has been delivered so far — carried across batches,
+        /// because a verdict's delivery depends on whether its call (an earlier batch) was.
+        var delivery: TranscriptDelivery
         /// The last resident message this subscriber has CLEARED past, if it has cleared.
         ///
         /// Per-subscriber because clearing is a property of one pane's view, not of the shared
@@ -179,9 +184,11 @@ public actor TranscriptStore {
     public func subscribe(filter: TranscriptFilter) -> (id: UUID, stream: AsyncStream<TranscriptUpdate>) {
         let id = UUID()
         let (stream, continuation) = AsyncStream<TranscriptUpdate>.makeStream(bufferingPolicy: .unbounded)
-        let subscriber = Subscriber(filter: filter, clearedThroughID: nil, continuation: continuation)
+        var subscriber = Subscriber(delivery: TranscriptDelivery(filter: filter), clearedThroughID: nil,
+                                    continuation: continuation)
+        let update = makeReset(for: &subscriber)
         subscribers[id] = subscriber
-        continuation.yield(makeReset(for: subscriber))
+        continuation.yield(update)
         continuation.onTermination = { [weak self] _ in
             Task { await self?.removeSubscriber(id) }
         }
@@ -193,10 +200,11 @@ public actor TranscriptStore {
     /// change, not per message.
     public func updateFilter(_ id: UUID, to filter: TranscriptFilter) {
         guard var subscriber = subscribers[id] else { return }
-        subscriber.filter = filter
-        subscribers[id] = subscriber
+        subscriber.delivery = TranscriptDelivery(filter: filter)
         // The watermark rides along: changing what a pane shows is not un-clearing it.
-        subscriber.continuation.yield(makeReset(for: subscriber))
+        let update = makeReset(for: &subscriber)
+        subscribers[id] = subscriber
+        subscriber.continuation.yield(update)
     }
 
     public func unsubscribe(_ id: UUID) {
@@ -214,10 +222,15 @@ public actor TranscriptStore {
                          hasRestoredHistory: restoredHistory(for: subscriber))
     }
 
-    private func makeReset(for subscriber: Subscriber) -> TranscriptUpdate {
-        TranscriptUpdate(messages: visibleResident(for: subscriber).filter(subscriber.filter.delivers),
-                         replaces: true, persistedHistoryCount: persistedHistoryCount,
-                         hasRestoredHistory: restoredHistory(for: subscriber))
+    /// A wholesale snapshot. Restarts the subscriber's delivery state, because the snapshot is a new
+    /// history: a call it remembered may have been trimmed away or cleared past. Callers store the
+    /// mutated subscriber back.
+    private func makeReset(for subscriber: inout Subscriber) -> TranscriptUpdate {
+        subscriber.delivery = TranscriptDelivery(filter: subscriber.delivery.filter)
+        let messages = subscriber.delivery.admitted(from: visibleResident(for: subscriber))
+        return TranscriptUpdate(messages: messages,
+                                replaces: true, persistedHistoryCount: persistedHistoryCount,
+                                hasRestoredHistory: restoredHistory(for: subscriber))
     }
 
     /// The resident tail as one subscriber sees it — everything after whatever it last cleared past.
@@ -238,8 +251,11 @@ public actor TranscriptStore {
     }
 
     private func resetAllSubscribers() {
-        for subscriber in subscribers.values {
-            subscriber.continuation.yield(makeReset(for: subscriber))
+        for id in Array(subscribers.keys) {
+            guard var subscriber = subscribers[id] else { continue }
+            let update = makeReset(for: &subscriber)
+            subscribers[id] = subscriber
+            subscriber.continuation.yield(update)
         }
     }
 

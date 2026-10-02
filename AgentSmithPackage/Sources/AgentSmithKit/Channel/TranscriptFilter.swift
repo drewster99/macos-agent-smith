@@ -176,18 +176,6 @@ public struct TranscriptFilter: Sendable, Equatable {
         return true
     }
 
-    /// Whether a pane should RECEIVE this message — a superset of `matches`.
-    ///
-    /// Adds one thing: a Security Agent verdict on a tool call, in scope, even when the user's
-    /// settings hide verdicts. That verdict is part of its call's row — the status icon and the
-    /// popover behind it — so withholding it stripped the icon from every tool call the moment
-    /// "Security reviews" was unchecked. The view still asks `matches` to decide whether the
-    /// verdict's TEXT shows (inline, or as its own row when its call isn't shown).
-    public func delivers(_ message: ChannelMessage) -> Bool {
-        if matches(message) { return true }
-        return message.kind == .securityReview && message.toolRequestID != nil && isInScope(message)
-    }
-
     /// The scope axis alone: does this message belong to this pane at all?
     private func isInScope(_ message: ChannelMessage) -> Bool {
         switch taskScope {
