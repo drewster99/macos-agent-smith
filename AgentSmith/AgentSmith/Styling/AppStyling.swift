@@ -224,9 +224,9 @@ enum AppColors {
         case .agent(.brown): return brownAgent
         case .agent(.securityAgent): return securityAgent
         case .agent(.summarizer): return summarizerAgent
-        // Both spellings land on the same tint: `.validator` is the sender used by the
-        // validation coordinator's own posts, `.agent(.validator)` by anything stamped with
-        // the role (e.g. an evidence tool's channel message).
+        // `.validator` is the validator's transcript identity (`Sender.participant(for:)`);
+        // `.agent(.validator)` comes only from role-keyed callers such as the inspector's meters.
+        // Both are the validator, so both take its tint.
         case .agent(.validator), .validator: return validatorAgent
         case .user: return userMessage
         case .system: return systemMessage

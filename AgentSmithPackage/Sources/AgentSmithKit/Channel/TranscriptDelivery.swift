@@ -17,7 +17,24 @@ public struct TranscriptDelivery: Sendable {
     public let filter: TranscriptFilter
     /// Delivered tool requests still waiting for their verdict. Each entry leaves when its verdict
     /// arrives, so this holds only calls under review rather than growing with the session.
-    private var callsAwaitingVerdict: Set<String> = []
+    private var callsAwaitingVerdict: Set<CallKey> = []
+
+    /// A call id is provider data that can repeat across agents, so a call is identified by the
+    /// pair — the request and its verdict both carry the calling instance's `agentID`.
+    private struct CallKey: Hashable {
+        let agentID: String?
+        let callID: String
+
+        init?(_ message: ChannelMessage) {
+            guard let callID = message.toolRequestID else { return nil }
+            self.callID = callID
+            if case .string(let agentID)? = message.metadata?["agentID"] {
+                self.agentID = agentID
+            } else {
+                self.agentID = nil
+            }
+        }
+    }
 
     public init(filter: TranscriptFilter) {
         self.filter = filter
@@ -25,16 +42,16 @@ public struct TranscriptDelivery: Sendable {
 
     /// Whether the pane receives `message`. Must see the pane's messages in transcript order.
     public mutating func admits(_ message: ChannelMessage) -> Bool {
-        let verdictCallID = message.kind == .securityReview ? message.toolRequestID : nil
+        let verdictCall = message.kind == .securityReview ? CallKey(message) : nil
         if filter.matches(message) {
-            if message.kind == .toolRequest, let callID = message.toolRequestID {
-                callsAwaitingVerdict.insert(callID)
+            if message.kind == .toolRequest, let call = CallKey(message) {
+                callsAwaitingVerdict.insert(call)
             }
-            if let verdictCallID { callsAwaitingVerdict.remove(verdictCallID) }
+            if let verdictCall { callsAwaitingVerdict.remove(verdictCall) }
             return true
         }
-        guard let verdictCallID else { return false }
-        return callsAwaitingVerdict.remove(verdictCallID) != nil
+        guard let verdictCall else { return false }
+        return callsAwaitingVerdict.remove(verdictCall) != nil
     }
 
     /// The subset of `messages` the pane receives, in order.

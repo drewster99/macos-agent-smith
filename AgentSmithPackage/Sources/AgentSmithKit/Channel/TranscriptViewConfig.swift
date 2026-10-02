@@ -262,12 +262,11 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         self.problems = problems
     }
 
-    /// The participants the filter offers, in display order. Validators post as the display-only
-    /// `.validator` sender (never `.agent(.validator)`), so that is the case listed here.
-    public static let participants: [ChannelMessage.Sender] = [
-        .user, .agent(.smith), .agent(.brown), .agent(.securityAgent), .agent(.summarizer),
-        .validator, .system
-    ]
+    /// The participants the filter offers, in display order: the user, every role as
+    /// `Sender.participant(for:)` spells it, then the system. Derived, so a new role can never be
+    /// missing from the filter while its messages key on it.
+    public static let participants: [ChannelMessage.Sender] =
+        [.user] + AgentRole.allCases.map(ChannelMessage.Sender.participant(for:)) + [.system]
 
     // MARK: Participant × activity
 

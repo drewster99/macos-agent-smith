@@ -2487,8 +2487,8 @@ public actor AgentActor {
 
                     await AgentActor.postSecurityReviewToChannel(
                         disposition: disposition, callID: entry.call.id,
-                        agentInstanceID: agentInstanceID, roleName: roleName,
-                        agentRoleValue: role.rawValue, post: { await ctx.post($0) }
+                        agentInstanceID: agentInstanceID, reviewedRole: role,
+                        post: { await ctx.post($0) }
                     )
 
                     let result: String
@@ -2821,8 +2821,7 @@ public actor AgentActor {
             // lifecycle-tool bypass was closed for.
             await Self.postSecurityReviewToChannel(
                 disposition: unconfigured, callID: call.id, agentInstanceID: id,
-                roleName: configuration.role.displayName,
-                agentRoleValue: configuration.role.rawValue, post: { await toolContext.post($0) }
+                reviewedRole: configuration.role, post: { await toolContext.post($0) }
             )
             // Feed the failure-streak breaker, as every other blocked path does. Without this the
             // one state in which EVERY call is blocked was also the one state in which no streak
@@ -2868,8 +2867,7 @@ public actor AgentActor {
         // Post approval/denial status.
         await Self.postSecurityReviewToChannel(
             disposition: disposition, callID: call.id, agentInstanceID: id,
-            roleName: configuration.role.displayName,
-            agentRoleValue: configuration.role.rawValue, post: { await toolContext.post($0) }
+            reviewedRole: configuration.role, post: { await toolContext.post($0) }
         )
 
         if disposition.approved {
@@ -3282,8 +3280,11 @@ public actor AgentActor {
     /// `withTaskGroup`. Takes a `post` closure rather than a `ToolContext` so the SAME poster
     /// serves every caller on the security path — per-agent tool calls (via the agent's context)
     /// and acceptance-validator evidence calls (via the validation channel) — so an auto-approval
-    /// is surfaced identically no matter who made the call. `agentRoleValue` stamps the reviewed
-    /// agent's role for callers that have one (nil for validators, which aren't an `AgentRole`).
+    /// is surfaced identically no matter who made the call. `reviewedRole` is stamped as
+    /// `agentRole` on every verdict, which is what addresses it to the reviewed participant
+    /// (`ChannelMessage.addressee`): an unstamped verdict escapes "hide <role>". `taskID` is for
+    /// callers whose `post` does not stamp one itself (a `ToolContext` does; the validation
+    /// channel does not).
     /// `agentInstanceID` identifies WHICH agent's call this verdict is about. `agentRole` is not
     /// enough: two workers share a role, and a tool call id is provider data that can repeat across
     /// them, so a reader joining a verdict to its request needs the pair to land on the right row.
@@ -3291,10 +3292,11 @@ public actor AgentActor {
         disposition: SecurityDisposition,
         callID: String,
         agentInstanceID: UUID,
-        roleName: String,
-        agentRoleValue: String?,
+        reviewedRole: AgentRole,
+        taskID: UUID? = nil,
         post: @Sendable (ChannelMessage) async -> Void
     ) async {
+        let roleName = reviewedRole.displayName
         // Exhaustive on purpose. The if-chain this replaced had no arm for `isCancelled`, so a
         // review torn down mid-flight fell through to the UNSAFE `else` and printed
         // "Security Agent → Brown: UNSAFE: Evaluation cancelled" — a verdict on a call nobody had
@@ -3323,6 +3325,7 @@ public actor AgentActor {
         var reviewMetadata: [String: AnyCodable] = [
             "requestID": .string(callID),
             "agentID": .string(agentInstanceID.uuidString),
+            "agentRole": .string(reviewedRole.rawValue),
             "securityDisposition": .string(securityDisposition),
             "messageKind": .kind(.securityReview)
         ]
@@ -3331,14 +3334,14 @@ public actor AgentActor {
         if disposition.severity > .info {
             reviewMetadata["severity"] = .severity(disposition.severity)
         }
-        if let agentRoleValue { reviewMetadata["agentRole"] = .string(agentRoleValue) }
         if let msg = disposition.message, !msg.isEmpty {
             reviewMetadata["dispositionMessage"] = .string(msg)
         }
         await post(ChannelMessage(
             sender: .system,
             content: statusContent,
-            metadata: reviewMetadata
+            metadata: reviewMetadata,
+            taskID: taskID
         ))
     }
 

@@ -868,8 +868,8 @@ extension OrchestrationRuntime {
         let taskTitle = task.title
         // Route each validator tool call through the shared Security Agent evaluator (auto-approved
         // for read-only evidence tools — no LLM). A central choke point, tightenable later, so these
-        // reads are never off the security path. Nil when no Security Agent provider is configured;
-        // then reads execute directly, exactly as before.
+        // reads are never off the security path. With no Security Agent configured the gate refuses
+        // every call (the `else` branch below) rather than letting reads run unreviewed.
         let securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)?
         if let evaluator = validationSecurityEvaluator {
             let gateTaskTitle = task.title
@@ -927,8 +927,11 @@ extension OrchestrationRuntime {
                     disposition: disposition,
                     callID: call.id,
                     agentInstanceID: validatorInstanceID,
-                    roleName: "Validator",
-                    agentRoleValue: nil,
+                    reviewedRole: .validator,
+                    // The validation channel is a raw `MessageChannel`, so nothing stamps the task
+                    // the way a worker's `ToolContext.post` does. Unstamped, the verdict fell into the
+                    // session pane's orchestration scope, away from the request it belongs to.
+                    taskID: task.id,
                     post: { await gateChannel.post($0) }
                 )
                 return disposition.approved

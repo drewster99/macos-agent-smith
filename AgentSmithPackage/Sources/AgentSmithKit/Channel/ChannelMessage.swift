@@ -149,8 +149,10 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// Derived from the typed `kind`, never from the content.
     public var author: Sender {
         switch kind {
-        case .securityReview, .toolScopeReview: return .agent(.securityAgent)
-        default: return sender
+        case .securityReview, .toolScopeReview: return Sender.participant(for: .securityAgent)
+        default:
+            if case .agent(let role) = sender { return Sender.participant(for: role) }
+            return sender
         }
     }
 
@@ -172,7 +174,7 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// (`attributedRole`) — which is what makes "Security Agent → Brown" a message to Brown.
     public var addressee: Sender? {
         if let recipient { return recipient.participant }
-        if case .system = sender, let role = attributedRole { return .agent(role) }
+        if case .system = sender, let role = attributedRole { return Sender.participant(for: role) }
         return nil
     }
 
@@ -269,10 +271,22 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
         case agent(AgentRole)
         case user
         case system
-        /// An acceptance validator's own activity (e.g. its evidence tool calls). A display-only
-        /// sender — validators are ephemeral evaluation functions, not configurable `AgentRole`s —
-        /// kept distinct from the Security Agent that merely gates those calls.
+        /// The acceptance validator's own activity (its evidence tool calls and their output), and
+        /// the transcript's ONE spelling of the validator as a participant: `AgentRole.validator`
+        /// maps here through `participant(for:)`, never to `.agent(.validator)`. Kept distinct
+        /// from the Security Agent that merely gates those calls.
         case validator
+
+        /// The participant `role` is, in the identity terms the transcript filter keys on. Every
+        /// role-to-participant conversion (`author`, `addressee`, `MessageRecipient.participant`)
+        /// goes through here, so one role can never surface under two spellings — `.agent(.validator)`
+        /// escaping "hide Validator" was exactly that. Exhaustive so a new role must choose.
+        public static func participant(for role: AgentRole) -> Sender {
+            switch role {
+            case .smith, .brown, .securityAgent, .summarizer: return .agent(role)
+            case .validator: return .validator
+            }
+        }
 
         /// Display name for the sender.
         public var displayName: String {

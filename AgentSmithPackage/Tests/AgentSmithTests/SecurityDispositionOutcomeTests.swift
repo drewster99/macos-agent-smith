@@ -68,7 +68,7 @@ struct SecurityDispositionOutcomeTests {
             let captured = CapturedContent()
             await AgentActor.postSecurityReviewToChannel(
                 disposition: SecurityDisposition(outcome: outcome, message: "Evaluation cancelled"),
-                callID: "c", agentInstanceID: UUID(), roleName: "Brown", agentRoleValue: "brown",
+                callID: "c", agentInstanceID: UUID(), reviewedRole: .brown,
                 post: { message in await captured.set(message.content) }
             )
             let content = await captured.value ?? ""

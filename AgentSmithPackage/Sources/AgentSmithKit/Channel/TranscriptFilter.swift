@@ -199,7 +199,7 @@ extension MessageRecipient {
     public var participant: ChannelMessage.Sender {
         switch self {
         case .user: return .user
-        case .agent(let role): return .agent(role)
+        case .agent(let role): return .participant(for: role)
         }
     }
 }

@@ -303,6 +303,90 @@ import Foundation
         #expect(config.makeFilter().matches(Self.verdict(tag: "approved")))
     }
 
+    /// A call id is provider data that repeats across agents: another agent's verdict on the same id
+    /// must not ride in on this pane's call.
+    @Test func hiddenVerdictJoinsItsCallByAgentAndCallID() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setVisible(false, targets: TranscriptKindGroup.securityReviews.targets, for: Self.everyone)
+        var delivery = TranscriptDelivery(filter: config.makeFilter())
+        func stamped(_ message: ChannelMessage, agent: String) -> ChannelMessage {
+            var copy = message
+            copy.metadata?["agentID"] = .string(agent)
+            return copy
+        }
+        let request = stamped(Self.toolRequest("call_1"), agent: "A")
+        let otherAgentsVerdict = stamped(Self.verdict(tag: "approved"), agent: "B")
+        let ownVerdict = stamped(Self.verdict(tag: "approved"), agent: "A")
+        let delivered = delivery.admitted(from: [request, otherAgentsVerdict, ownVerdict])
+        #expect(delivered.map(\.id) == [request.id, ownVerdict.id])
+    }
+
+    // MARK: - The validator as a participant
+
+    private actor CapturedMessage {
+        private(set) var value: ChannelMessage?
+        func set(_ message: ChannelMessage) { value = message }
+    }
+
+    /// COMPLETENESS GUARD. Every role is offered under the spelling messages key on, and the
+    /// validator is never offered as `.agent(.validator)`.
+    @Test func everyRoleIsAnOfferedParticipant() {
+        for role in AgentRole.allCases {
+            #expect(Self.everyone.contains(.participant(for: role)), "\(role) is not an offered participant")
+        }
+        #expect(!Self.everyone.contains(.agent(.validator)))
+        // Display order is a user-visible contract; deriving the list must not change it.
+        #expect(Self.everyone == [.user, .agent(.smith), .agent(.brown), .agent(.securityAgent),
+                                  .agent(.summarizer), .validator, .system])
+    }
+
+    /// Every role stamp — a recipient, an `agentRole` on a system notice, a sender — resolves to the
+    /// participant the filter offers.
+    @Test func validatorRoleStampsResolveToTheValidatorParticipant() {
+        #expect(ChannelMessage.Sender.participant(for: .validator) == .validator)
+        #expect(MessageRecipient.agent(.validator).participant == .validator)
+        #expect(Self.verdict(about: .validator).addressee == .validator)
+        #expect(Self.message(from: .agent(.validator)).author == .validator)
+        #expect(Self.message(from: .user, to: .agent(.validator)).addressee == .validator)
+        #expect(Self.verdict(about: .brown).addressee == .agent(.brown))
+    }
+
+    /// The reported bug: hiding Validator left the Security Agent's verdicts on its evidence calls
+    /// visible, while hiding Brown hid Brown's.
+    @Test func hidingTheValidatorHidesVerdictsOnItsCalls() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setParticipant(.validator, shown: false)
+        let filter = config.makeFilter()
+        #expect(!filter.matches(Self.verdict(about: .validator)))
+        #expect(!filter.matches(Self.message(.toolRequest, from: .validator)))
+        #expect(filter.matches(Self.verdict(about: .brown)))
+    }
+
+    /// The verdict exactly as the validator's security gate posts it: addressed to the validator,
+    /// and scoped to the task — so it lands in that task's pane with its request.
+    @Test func validatorVerdictIsAddressedToTheValidatorAndScopedToItsTask() async throws {
+        let captured = CapturedMessage()
+        let task = UUID()
+        await AgentActor.postSecurityReviewToChannel(
+            disposition: SecurityDisposition(outcome: .approved),
+            callID: "call_1", agentInstanceID: UUID(), reviewedRole: .validator, taskID: task,
+            post: { await captured.set($0) })
+        let posted = await captured.value
+        let verdict = try #require(posted)
+        #expect(verdict.author == .agent(.securityAgent))
+        #expect(verdict.addressee == .validator)
+        #expect(verdict.attributedRole == .validator)
+        #expect(verdict.taskID == task)
+        #expect(verdict.content.contains("Validator"))
+
+        var shown = TranscriptViewConfig.everything
+        shown.problems = .filterNormally
+        #expect(shown.makeFilter(taskScope: .task(task)).matches(verdict))
+        #expect(!shown.makeFilter(taskScope: .orchestration).matches(verdict))
+    }
+
     /// `.securityReview` among hidden kinds is the saved form of "every verdict hidden"; it never
     /// survives construction, so the class set is the single representation.
     @Test func hiddenSecurityReviewKindNormalizesToClasses() {
