@@ -232,8 +232,11 @@ public actor MCPClientHost {
     public func currentBridgedTools() -> [any AgentTool] {
         var result: [any AgentTool] = []
         var usedNames = Set<String>()
-        // Stable ordering by server name keeps the tool list deterministic across turns.
-        let ordered = connections.values.sorted { $0.config.name < $1.config.name }
+        // Stable ordering keeps the tool list (and disambiguation) deterministic across turns;
+        // the id tie-break covers a hand-edited config with duplicate names.
+        let ordered = connections.values.sorted {
+            ($0.config.name, $0.config.id.uuidString) < ($1.config.name, $1.config.id.uuidString)
+        }
         for conn in ordered {
             let enabledTools = conn.tools.filter { !conn.config.disabledTools.contains($0.name) }
             let prefixedNames = Self.assignPrefixedToolNames(
@@ -579,7 +582,7 @@ public actor MCPClientHost {
 
         var namesForServer: [String] = []
         var namesAssignedInServer = Set<String>()
-        for base in baseNames {
+        for (tool, base) in zip(toolNames, baseNames) {
             if let count = futureNameCounts[base] {
                 if count <= 1 {
                     futureNameCounts.removeValue(forKey: base)
@@ -588,7 +591,9 @@ public actor MCPClientHost {
                 }
             }
             let unavailableNames = usedNames.union(namesAssignedInServer).union(futureNameCounts.keys)
-            let resolved = unavailableNames.contains(base) ? disambiguate(base, unavailable: unavailableNames) : base
+            let resolved = unavailableNames.contains(base)
+                ? disambiguatedName(server: serverName, tool: tool, avoiding: unavailableNames)
+                : base
             namesForServer.append(resolved)
             namesAssignedInServer.insert(resolved)
             usedNames.insert(resolved)
@@ -596,11 +601,14 @@ public actor MCPClientHost {
         return namesForServer
     }
 
-    private static func disambiguate(_ name: String, unavailable: Set<String>) -> String {
-        var n = 2
-        var candidate = "\(name)_\(n)"
-        while unavailable.contains(candidate) { n += 1; candidate = "\(name)_\(n)" }
-        return candidate
+    private static func disambiguatedName(server: String, tool: String, avoiding unavailable: Set<String>) -> String {
+        // Distinct ordinals always give distinct names (the ordinal is exactly the digits after the
+        // name's last `_`), so of these `unavailable.count + 1` candidates at least one is free.
+        for ordinal in 2...(unavailable.count + 2) {
+            let candidate = MCPToolNaming.prefixedName(server: server, tool: tool, disambiguationOrdinal: ordinal)
+            if !unavailable.contains(candidate) { return candidate }
+        }
+        preconditionFailure("No free disambiguated name for \(server)/\(tool) among \(unavailable.count + 1) distinct candidates")
     }
 
     private func publishStatus() {

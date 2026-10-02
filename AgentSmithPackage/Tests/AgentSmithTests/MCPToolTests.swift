@@ -74,6 +74,107 @@ struct MCPToolNamingTests {
         #expect(MCPToolNaming.components(of: "mcp____tool") == nil)
         #expect(MCPToolNaming.components(of: "mcp__srv__") == nil)
     }
+
+    private static func isProviderValid(_ name: String) -> Bool {
+        name.count <= MCPToolNaming.maxNameLength
+            && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
+    }
+
+    @Test("A long server name keeps the separator and part of every tool name")
+    func longServerKeepsSeparator() {
+        let server = String(repeating: "s", count: 60)
+        let s49 = String(repeating: "s", count: 49)
+        let read = MCPToolNaming.prefixedName(server: server, tool: "read_file")
+        let write = MCPToolNaming.prefixedName(server: server, tool: "write_file")
+        #expect(read == "mcp__\(s49)__read_fil")
+        #expect(write == "mcp__\(s49)__write_fi")
+        #expect(MCPToolNaming.components(of: read)?.server == s49)
+        #expect(MCPToolNaming.components(of: read)?.tool == "read_fil")
+    }
+
+    @Test("A truncated server slug never ends in a separator character")
+    func truncatedSlugIsRetrimmed() {
+        let q48 = String(repeating: "q", count: 48)
+        let name = MCPToolNaming.prefixedName(server: q48 + "_x", tool: "read")
+        #expect(name == "mcp__\(q48)__read")
+        #expect(MCPToolNaming.components(of: name)?.server == q48)
+    }
+
+    @Test("Disambiguating a name already at the cap stays within the cap")
+    func disambiguatedCappedNameFits() {
+        var used = Set<String>()
+        let long = String(repeating: "a", count: 200)
+        let names = MCPClientHost.assignPrefixedToolNames(serverName: "srv", toolNames: [long, long], usedNames: &used)
+        #expect(names == [
+            "mcp__srv__" + String(repeating: "a", count: 52) + "_2",
+            "mcp__srv__" + String(repeating: "a", count: 54)
+        ])
+        #expect(names.allSatisfy(Self.isProviderValid))
+    }
+
+    @Test("A truncated tool part ending in _ still splits at the server separator")
+    func truncatedToolPartEndingInUnderscore() {
+        let q49 = String(repeating: "q", count: 49)
+        let name = MCPToolNaming.prefixedName(server: q49, tool: "ttttt_hij", disambiguationOrdinal: 2)
+        #expect(name == "mcp__\(q49)__ttttt__2")
+        #expect(MCPToolNaming.components(of: name)?.server == q49)
+        #expect(MCPToolNaming.components(of: name)?.tool == "ttttt__2")
+    }
+
+    @Test("Every composed name is provider-valid, invertible, and keeps its ordinal and server slug")
+    func composedNamesProperties() {
+        let servers = ["srv", "My Server", String(repeating: "s", count: 49), String(repeating: "s", count: 50),
+                       String(repeating: "s", count: 56), String(repeating: "s", count: 57),
+                       String(repeating: "s", count: 200), String(repeating: "q", count: 48) + "_x", "***", "日本語 server"]
+        let tools = ["read_file", "x", String(repeating: "t", count: 200), "ttttt_hij", "@@@", "foo_2"]
+        for server in servers {
+            for tool in tools {
+                let base = MCPToolNaming.prefixedName(server: server, tool: tool)
+                #expect(Self.isProviderValid(base))
+                let baseParts = MCPToolNaming.components(of: base)
+                #expect(baseParts != nil)
+                for ordinal in [2, 3, 10, 99, 999_999, 1_000_000, Int.max] {
+                    let name = MCPToolNaming.prefixedName(server: server, tool: tool, disambiguationOrdinal: ordinal)
+                    #expect(Self.isProviderValid(name))
+                    #expect(name.hasSuffix("_\(ordinal)"))
+                    let parts = MCPToolNaming.components(of: name)
+                    #expect(parts != nil)
+                    if ordinal < 1_000_000 { #expect(parts?.server == baseParts?.server) }
+                }
+            }
+        }
+    }
+
+    @Test("Heavy collisions on a long server name all resolve to unique valid names")
+    func heavyCollisionsResolve() {
+        var used = Set<String>()
+        let names = MCPClientHost.assignPrefixedToolNames(
+            serverName: String(repeating: "z", count: 100),
+            toolNames: Array(repeating: String(repeating: "t", count: 100), count: 500),
+            usedNames: &used
+        )
+        #expect(Set(names).count == names.count)
+        #expect(names.allSatisfy { Self.isProviderValid($0) && MCPToolNaming.components(of: $0) != nil })
+    }
+
+    /// Persisted tool policies and per-task overrides are keyed by these names; any server slug of
+    /// `maxServerSlugLength` or fewer characters must keep producing exactly what it always did.
+    @Test("Names for slugs within the cap are unchanged")
+    func unchangedNamesPinned() {
+        let q49 = String(repeating: "q", count: 49)
+        #expect(MCPToolNaming.prefixedName(server: q49, tool: "abcdefghijk") == "mcp__\(q49)__abcdefgh")
+        #expect(MCPToolNaming.prefixedName(server: "srv", tool: String(repeating: "a", count: 200))
+            == "mcp__srv__" + String(repeating: "a", count: 54))
+        #expect(MCPToolNaming.prefixedName(server: "filesystem", tool: "read_file", disambiguationOrdinal: 2)
+            == "mcp__filesystem__read_file_2")
+        #expect(MCPToolNaming.maxServerSlugLength == 49)
+    }
+
+    @Test("No built-in tool name can collide with an MCP name")
+    func builtInsNeverUseMCPPrefix() {
+        let builtIns = BrownBehavior.toolNames + SmithBehavior.toolNames + SecurityAgentBehavior.toolNames
+        #expect(!builtIns.contains { $0.hasPrefix(MCPToolNaming.prefix) })
+    }
 }
 
 @Suite("MCP value conversion")
