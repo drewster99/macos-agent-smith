@@ -134,8 +134,10 @@ struct TranscriptToolFilterTests {
         selection.setVisible(false, .tool("bash"))
         selection.setVisible(false, .securityVerdict(.warn))
 
+        // The Security Agent: the one participant for whom every switch (including a verdict class)
+        // applies, so nothing is stripped on the way in.
         var config = TranscriptViewConfig()
-        config.setSelection(selection, for: .agent(.brown))
+        config.setSelection(selection, for: .agent(.securityAgent))
 
         let decoded = try JSONDecoder().decode(TranscriptViewConfig.self, from: JSONEncoder().encode(config))
         let properties = Set(Mirror(reflecting: selection).children.compactMap(\.label))
@@ -143,7 +145,7 @@ struct TranscriptToolFilterTests {
             TranscriptKindSelection's stored properties changed (\(properties.sorted().joined(separator: ", "))). \
             Add the new one to ParticipantSelectionRow (encode and decode) in TranscriptViewConfig, then here.
             """)
-        #expect(decoded.selection(for: .agent(.brown)) == selection)
+        #expect(decoded.selection(for: .agent(.securityAgent)) == selection)
     }
 
     // MARK: - The roster the UI is built from

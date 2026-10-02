@@ -148,12 +148,9 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// this, the filter called a verdict "System" while its text read "Security Agent → Brown".
     /// Derived from the typed `kind`, never from the content.
     public var author: Sender {
-        switch kind {
-        case .securityReview, .toolScopeReview: return Sender.participant(for: .securityAgent)
-        default:
-            if case .agent(let role) = sender { return Sender.participant(for: role) }
-            return sender
-        }
+        if let fixedAuthor = kind?.fixedAuthor { return fixedAuthor }
+        if case .agent(let role) = sender { return Sender.participant(for: role) }
+        return sender
     }
 
     /// For a Security Agent verdict on a tool call, which class it falls in; nil for every other
@@ -381,5 +378,21 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(providerID, forKey: .providerID)
         try c.encodeIfPresent(modelID, forKey: .modelID)
         try c.encodeIfPresent(configuration, forKey: .configuration)
+    }
+}
+
+extension ChannelMessageKind {
+    /// The only participant who writes messages of this kind, or nil when any participant may.
+    ///
+    /// A Security Agent verdict and its tool-scope review are posted by the system on the
+    /// evaluator's behalf but always written by the Security Agent. `ChannelMessage.author` and the
+    /// transcript filter's applicability (`TranscriptFilterTarget.applies(to:)`) both read this, so
+    /// "who writes it" has one answer. A kind added later defaults to nil — any author — which keeps
+    /// every participant's switch for it rather than stripping one.
+    public var fixedAuthor: ChannelMessage.Sender? {
+        switch self {
+        case .securityReview, .toolScopeReview: return .participant(for: .securityAgent)
+        default: return nil
+        }
     }
 }

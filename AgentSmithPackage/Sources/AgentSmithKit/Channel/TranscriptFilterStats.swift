@@ -18,8 +18,11 @@ public struct TranscriptFilterStats: Sendable, Equatable {
     /// error whose participant or activity is hidden. Without this a hidden row that still showed
     /// its warnings looked like a filter that did nothing.
     public private(set) var shownOnlyAsProblems = 0
-    /// In-scope messages by author and target. A tool exchange counts under both its kind and its
-    /// tool, so a tool row and the "Tool calls" row each report their own messages.
+    /// In-scope messages by author and target, leaving out any the participant axis hides (from or
+    /// to a hidden participant), so a row's count is what that row can put on screen. A tool exchange
+    /// counts under both its kind and its tool. `problemCounts` and `involving` are NOT narrowed this
+    /// way: a chip must say what hiding someone costs, and a problem note must count a hidden
+    /// participant's warnings still on screen.
     public private(set) var counts: [ChannelMessage.Sender: [TranscriptFilterTarget: Int]] = [:]
     /// The `shownOnlyAsProblems` messages by author and target, shaped like `counts`.
     public private(set) var problemCounts: [ChannelMessage.Sender: [TranscriptFilterTarget: Int]] = [:]
@@ -33,7 +36,8 @@ public struct TranscriptFilterStats: Sendable, Equatable {
     /// Messages the scope removes.
     public var scopeExcluded: Int { total - inScope }
 
-    /// In-scope messages matching any of `targets` from any of `participants`.
+    /// In-scope messages matching any of `targets` from any of `participants`, excluding what the
+    /// participant axis hides.
     public func count(of targets: [TranscriptFilterTarget], for participants: [ChannelMessage.Sender]) -> Int {
         Self.sum(counts, targets: targets, participants: participants)
     }
@@ -73,12 +77,14 @@ public struct TranscriptFilterStats: Sendable, Equatable {
             stats.total += 1
             guard inScope.matches(message) else { continue }
             let isShown = rendered.matches(message)
-            stats.record(message, shown: isShown, onlyAsProblem: isShown && !unfloored.matches(message))
+            stats.record(message, shown: isShown, onlyAsProblem: isShown && !unfloored.matches(message),
+                         hiddenByParticipant: rendered.excludesByParticipant(message))
         }
         return stats
     }
 
-    private mutating func record(_ message: ChannelMessage, shown isShown: Bool, onlyAsProblem: Bool) {
+    private mutating func record(_ message: ChannelMessage, shown isShown: Bool, onlyAsProblem: Bool,
+                                 hiddenByParticipant: Bool) {
         inScope += 1
         if isShown { shown += 1 }
         if onlyAsProblem { shownOnlyAsProblems += 1 }
@@ -92,7 +98,7 @@ public struct TranscriptFilterStats: Sendable, Equatable {
             targets.append(.securityVerdict(verdictClass))
         }
         for target in targets {
-            counts[author, default: [:]][target, default: 0] += 1
+            if !hiddenByParticipant { counts[author, default: [:]][target, default: 0] += 1 }
             if onlyAsProblem { problemCounts[author, default: [:]][target, default: 0] += 1 }
         }
         involving[author, default: 0] += 1

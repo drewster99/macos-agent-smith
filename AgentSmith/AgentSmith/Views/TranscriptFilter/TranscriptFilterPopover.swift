@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import Observation
 import AgentSmithKit
 
 /// Where a filter popover gets the messages it counts.
@@ -7,6 +9,9 @@ import AgentSmithKit
 /// re-render on — every new message; the transcript is read only when the popover counts it.
 struct TranscriptFilterStatsSource {
     let messages: () -> [ChannelMessage]
+    /// Moves whenever `messages` does (`AppViewModel.messagesRevision`). Only an open popover watches
+    /// it, so its counts follow the transcript without the header that owns the button observing it.
+    let revision: @MainActor @Sendable () -> Int
     /// The pane's whole population: `.any` for the session, `.task(id)` for a task.
     let universe: TranscriptFilter.TaskScope
     /// The pane's scope when the pane fixes it (a task); nil when the config's own switch decides.
@@ -27,6 +32,34 @@ struct TranscriptFilterStatsSource {
     }
 }
 
+/// The popover's geometry in one place.
+enum TranscriptFilterPopoverMetrics {
+    static let listWidth: CGFloat = 420
+    static let gridWidth: CGFloat = 620
+    /// Tall enough that the session pane's four sections fit without scrolling while every
+    /// category is collapsed; expanding rows scrolls.
+    static let preferredHeight: CGFloat = 740
+    /// Room kept between the popover and the screen's edges (menu bar, Dock, the anchor itself).
+    static let screenMargin: CGFloat = 80
+
+    /// The preferred height, or less on a screen too short for it, so the lower sections stay
+    /// reachable by scrolling instead of running off the screen. With no screen to measure there is
+    /// nothing to clamp against.
+    static var height: CGFloat {
+        guard let screen = NSScreen.main else { return preferredHeight }
+        return min(preferredHeight, screen.visibleFrame.height - screenMargin)
+    }
+}
+
+/// What the counts depend on besides the transcript itself. A change restarts counting at once —
+/// including the task pane switching tasks under an open popover (a newly started task is
+/// auto-selected).
+private struct StatsRequest: Equatable {
+    let config: TranscriptViewConfig
+    let universe: TranscriptFilter.TaskScope?
+    let fixedScope: TranscriptFilter.TaskScope?
+}
+
 /// The transcript filter: one model — scope, who, what, and how problems are treated — presented in
 /// that order, with presets on top and live counts throughout. Every edit applies immediately.
 struct TranscriptFilterPopover: View {
@@ -42,6 +75,10 @@ struct TranscriptFilterPopover: View {
     @State private var tree: [ActivityRowNode] = ActivityRowTree.initial
     @State private var rows: [FlatActivityRow] = ActivityRowTree.flatten(ActivityRowTree.initial, expanded: [])
 
+    /// How often an open popover recounts while the transcript moves. Each recount is a full pass
+    /// over the resident transcript; once a second keeps a busy worker from running them back to back.
+    private static let recountInterval: Duration = .seconds(1)
+
     var body: some View {
         VStack(spacing: 0) {
             TranscriptFilterHeader(config: $config, pane: pane, stats: stats)
@@ -53,18 +90,25 @@ struct TranscriptFilterPopover: View {
                     .padding(16)
             }
         }
-        // Tall enough that the session pane's four sections fit without scrolling while every
-        // category is collapsed; expanding rows scrolls.
-        .frame(width: layoutBinding.wrappedValue == .byParticipant ? 620 : 420, height: 740)
-        .task(id: config) { await refreshStats() }
+        .frame(width: layoutBinding.wrappedValue == .byParticipant
+                   ? TranscriptFilterPopoverMetrics.gridWidth : TranscriptFilterPopoverMetrics.listWidth,
+               height: TranscriptFilterPopoverMetrics.height)
+        // Latched once. Following the config live flipped the grid to the list — and the popover's
+        // width — the moment an edit happened to make every participant agree.
+        .onAppear { layoutChoice = layoutChoice ?? initialLayout }
+        .task(id: StatsRequest(config: config, universe: statsSource?.universe, fixedScope: statsSource?.fixedScope)) {
+            await followStats()
+        }
     }
 
     /// A config whose participants disagree opens on the grid, where that disagreement is visible;
     /// a uniform one opens on the simpler list.
+    private var initialLayout: ActivityLayout {
+        config.isUniformAcrossParticipants ? .everyone : .byParticipant
+    }
+
     private var layoutBinding: Binding<ActivityLayout> {
-        Binding(
-            get: { layoutChoice ?? (config.isUniformAcrossParticipants ? .everyone : .byParticipant) },
-            set: { layoutChoice = $0 })
+        Binding(get: { layoutChoice ?? initialLayout }, set: { layoutChoice = $0 })
     }
 
     private func toggleExpanded(_ id: String) {
@@ -72,10 +116,31 @@ struct TranscriptFilterPopover: View {
         rows = ActivityRowTree.flatten(tree, expanded: expanded)
     }
 
-    private func refreshStats() async {
-        guard let statsSource else { return }
-        let computed = await statsSource.compute(for: config)
-        guard !Task.isCancelled else { return }
+    /// Counts now, then again whenever the transcript moves, for as long as the popover is open.
+    /// A config edit or a different source restarts this (the task's id), so an edit recounts at
+    /// once. With no source the pane's messages aren't resident here, and the last pane's counts
+    /// must not stand in for them.
+    private func followStats() async {
+        guard let statsSource else {
+            stats = nil
+            return
+        }
+        let revision = statsSource.revision
+        let transcriptChanges = Observations { revision() }
+        for await _ in transcriptChanges {
+            let computed = await statsSource.compute(for: config)
+            guard !Task.isCancelled else { return }
+            apply(computed)
+            do {
+                try await Task.sleep(for: Self.recountInterval)
+            } catch {
+                // Only cancellation throws here: the popover closed, or the request changed.
+                return
+            }
+        }
+    }
+
+    private func apply(_ computed: TranscriptFilterStats) {
         stats = computed
         // The tree only changes when a tool no family claims (an MCP tool) appears.
         let rebuilt = ActivityRowTree.make(observedToolNames: computed.observedToolNames)

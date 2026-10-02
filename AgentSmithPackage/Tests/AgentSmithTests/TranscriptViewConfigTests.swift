@@ -168,6 +168,8 @@ import Foundation
         config.problems = .filterNormally
         config.setVisible(false, targets: [.kind(.securityReview)], for: [.system])
         #expect(config.makeFilter().matches(Self.verdict()))
+        // A verdict switch for someone who never writes verdicts is never even stored.
+        #expect(config.selections.isEmpty)
         config.setVisible(false, targets: [.kind(.securityReview)], for: [.agent(.securityAgent)])
         #expect(!config.makeFilter().matches(Self.verdict()))
     }
@@ -183,9 +185,14 @@ import Foundation
         #expect(stats.shown == 1)
         #expect(stats.shownOnlyAsProblems == 1)
         #expect(stats.problemCount(of: TranscriptKindGroup.securityReviews.targets, for: Self.everyone) == 1)
-        #expect(stats.count(of: TranscriptKindGroup.securityReviews.targets, for: [.agent(.securityAgent)]) == 2)
-        #expect(stats.count(of: TranscriptKindGroup.securityReviews.targets, for: [.system]) == 0)
+        // Row counts leave out what the participant axis hides — here, everyone.
+        #expect(stats.count(of: TranscriptKindGroup.securityReviews.targets, for: Self.everyone) == 0)
+        // The chips still say what each participant's hiding costs.
         #expect(stats.involving[.agent(.brown)] == 2)
+
+        let open = TranscriptFilterStats.compute(messages: messages, config: .everything, universe: .any, scope: .any)
+        #expect(open.count(of: TranscriptKindGroup.securityReviews.targets, for: [.agent(.securityAgent)]) == 2)
+        #expect(open.count(of: TranscriptKindGroup.securityReviews.targets, for: [.system]) == 0)
 
         config.problems = .filterNormally
         let strict = TranscriptFilterStats.compute(messages: messages, config: config, universe: .any, scope: .any)
@@ -320,6 +327,143 @@ import Foundation
         let ownVerdict = stamped(Self.verdict(tag: "approved"), agent: "A")
         let delivered = delivery.admitted(from: [request, otherAgentsVerdict, ownVerdict])
         #expect(delivered.map(\.id) == [request.id, ownVerdict.id])
+    }
+
+    // MARK: - Counts follow the participant axis
+
+    @Test func countsLeaveOutMessagesToAHiddenParticipant() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setParticipant(.agent(.brown), shown: false)
+        let messages = [
+            Self.message(.taskUpdate, from: .agent(.smith), to: .agent(.brown)),
+            Self.message(.taskUpdate, from: .agent(.smith), to: .user),
+            Self.verdict()   // Security Agent → Brown
+        ]
+        let stats = TranscriptFilterStats.compute(messages: messages, config: config, universe: .any, scope: .any)
+        #expect(stats.shown == 1)
+        #expect(stats.count(of: [.kind(.taskUpdate)], for: [.agent(.smith)]) == 1)
+        #expect(stats.count(of: TranscriptKindGroup.securityReviews.targets, for: Self.everyone) == 0)
+        #expect(stats.involving[.agent(.brown)] == 2)
+
+        config.setParticipant(.agent(.brown), shown: true)
+        let unhidden = TranscriptFilterStats.compute(messages: messages, config: config, universe: .any, scope: .any)
+        #expect(unhidden.count(of: [.kind(.taskUpdate)], for: [.agent(.smith)]) == 2)
+        #expect(unhidden.count(of: TranscriptKindGroup.securityReviews.targets, for: [.agent(.securityAgent)]) == 1)
+    }
+
+    /// The participant axis has one definition: with nothing else filtering, `matches` is exactly
+    /// its negation — so counts that exclude by it agree with the pane.
+    @Test func participantExclusionIsWhatMatchesApplies() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setParticipant(.agent(.brown), shown: false)
+        config.setParticipant(.system, shown: false)
+        let filter = config.makeFilter()
+        let messages = [
+            Self.message(from: .agent(.brown)),
+            Self.message(from: .agent(.smith), to: .agent(.brown)),
+            Self.message(from: .system),
+            Self.verdict(),                 // to Brown
+            Self.verdict(about: .smith),    // posted by System, written by the Security Agent
+            Self.message(from: .user, to: .agent(.smith))
+        ]
+        for (index, message) in messages.enumerated() {
+            #expect(filter.matches(message) == !filter.excludesByParticipant(message), "message \(index)" as Comment)
+        }
+        #expect(messages.filter { filter.excludesByParticipant($0) }.count == 4)
+    }
+
+    // MARK: - Applicability
+
+    @Test func everyKindsAuthorIsItsFixedAuthorWhenItHasOne() {
+        for kind in ChannelMessageKind.allCases {
+            #expect(Self.message(kind, from: .agent(.smith)).author == (kind.fixedAuthor ?? .agent(.smith)),
+                    "\(kind.rawValue)" as Comment)
+        }
+        #expect(Set(ChannelMessageKind.allCases.filter { $0.fixedAuthor != nil }) == [.securityReview, .toolScopeReview])
+    }
+
+    @Test func securityTargetsApplyOnlyToTheSecurityAgent() {
+        let securityTargets = TranscriptKindGroup.securityReviews.targets + [.kind(.securityReview)]
+        for target in securityTargets {
+            #expect(target.applies(to: .agent(.securityAgent)))
+            for participant in Self.everyone where participant != .agent(.securityAgent) {
+                #expect(!target.applies(to: participant), "\(target) for \(participant)" as Comment)
+            }
+        }
+        let otherGroups = TranscriptKindGroup.allCases.filter { $0 != .securityReviews }
+        let openTargets = otherGroups.flatMap(\.targets) + [.tool("bash")]
+        for target in openTargets {
+            #expect(Self.everyone.allSatisfy { target.applies(to: $0) }, "\(target)" as Comment)
+        }
+    }
+
+    @Test func inertSecurityStateIsNeverStored() {
+        var config = TranscriptViewConfig.everything
+        config.setVisible(false, targets: TranscriptKindGroup.securityReviews.targets,
+                          for: [.agent(.smith), .system, .validator])
+        #expect(config == .everything)
+        config.setVisible(false, targets: TranscriptKindGroup.securityReviews.targets, for: Self.everyone)
+        #expect(Set(config.selections.keys) == [.agent(.securityAgent)])
+        #expect(config.visibility(of: TranscriptKindGroup.securityReviews.targets, for: Self.everyone) == .none)
+        #expect(config.isUniformAcrossParticipants)
+        // The memberwise init normalizes exactly like `setSelection`.
+        let direct = TranscriptViewConfig(selections: [.agent(.smith): TranscriptKindSelection(hiddenKinds: [.securityReview])])
+        #expect(direct == .everything)
+        #expect(TranscriptViewConfig(selections: [.validator: TranscriptKindSelection(hiddenKinds: [.toolScopeReview])]) == .everything)
+    }
+
+    /// Why stripping is safe: the filter keys verdicts on their AUTHOR, so another participant's
+    /// verdict switches were never consulted. A raw filter, bypassing the config, shows it.
+    @Test func theFilterNeverConsultsAnotherParticipantsVerdictState() {
+        let everyKindButToolScope = Set(ChannelMessageKind.allCases).subtracting([.toolScopeReview])
+        let allClasses = Set(SecurityVerdictClass.allCases)
+        let inert = TranscriptFilter(
+            kindsBySender: [.agent(.smith): .only(everyKindButToolScope, includingKindless: true),
+                            .system: .only(everyKindButToolScope, includingKindless: true)],
+            alwaysShowAtOrAbove: nil,
+            hiddenVerdictClassesBySender: [.agent(.smith): allClasses, .system: allClasses])
+        let scope = ChannelMessage(sender: .system, content: "tool scope",
+                                   metadata: ["messageKind": .kind(.toolScopeReview), "agentRole": .string("smith")])
+        let verdicts = [Self.verdict(about: .smith), Self.verdict(about: .smith, legacyKindless: true),
+                        Self.verdict(tag: "denied"), scope]
+        for message in verdicts {
+            #expect(inert.matches(message))
+        }
+    }
+
+    @Test func uniformityIgnoresSwitchesOnlyOneParticipantHas() {
+        #expect(TranscriptViewConfig.conversation.isUniformAcrossParticipants)
+        #expect(TranscriptViewConfig.condensed.isUniformAcrossParticipants)
+        var config = TranscriptViewConfig.everything
+        config.setVisible(false, targets: [.securityVerdict(.accept)], for: [.agent(.securityAgent)])
+        #expect(config.isUniformAcrossParticipants)
+        config.setVisible(false, targets: [.tool("bash")], for: [.agent(.brown)])
+        #expect(!config.isUniformAcrossParticipants)
+    }
+
+    /// This machine's session-pane config exactly as persisted (2026-10-02, written before verdict
+    /// classes existed). Stripping inert verdict state must leave it the Conversation preset, or
+    /// the pane turns "Custom" on upgrade.
+    @Test func thisMachinesSavedSessionConfigIsStillConversation() throws {
+        let config = try Self.decode("""
+        {"hiddenParticipants":[{"agent":{"_0":"brown"}}],"hideTaskScoped":true,"participantSelections":[
+         {"hiddenKinds":["security_review","tool_output","tool_request"],"participant":{"agent":{"_0":"brown"}},"showsChat":true},
+         {"hiddenKinds":["security_review","tool_output","tool_request"],"participant":{"agent":{"_0":"securityAgent"}},"showsChat":true},
+         {"hiddenKinds":["security_review","tool_output","tool_request"],"participant":{"agent":{"_0":"smith"}},"showsChat":true},
+         {"hiddenKinds":["security_review","tool_output","tool_request"],"participant":{"agent":{"_0":"summarizer"}},"showsChat":true},
+         {"hiddenKinds":["security_review","tool_output","tool_request"],"participant":{"system":{}},"showsChat":true},
+         {"hiddenKinds":["security_review","tool_output","tool_request"],"participant":{"user":{}},"showsChat":true},
+         {"hiddenKinds":["security_review","tool_output","tool_request"],"participant":{"validator":{}},"showsChat":true}],
+         "problems":"alwaysShowWarningsAndErrors"}
+        """)
+        #expect(config == .conversation)
+        #expect(TranscriptPane.session.preset(matching: config)?.id == "conversation")
+        #expect(!TranscriptPane.session.isCustomized(config))
+        #expect(config.isUniformAcrossParticipants)
+        #expect(config.selection(for: .agent(.smith)) == TranscriptKindSelection(hiddenKinds: [.toolRequest, .toolOutput]))
+        #expect(config.selection(for: .agent(.securityAgent)).hiddenVerdictClasses == Set(SecurityVerdictClass.allCases))
     }
 
     // MARK: - The validator as a participant
@@ -549,15 +693,21 @@ import Foundation
     /// is diff-stable across saves.
     @Test func persistedFormIsCurrentGenerationAndDiffStable() throws {
         var config = TranscriptViewConfig.everything
-        config.setVisible(false, targets: [.kind(.securityReview), .kind(.memorySaved)], for: [.system, .agent(.brown)])
+        config.setVisible(false, targets: [.kind(.securityReview), .kind(.memorySaved)],
+                          for: [.system, .agent(.brown), .agent(.securityAgent)])
         let data = try JSONEncoder().encode(config)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(Set(json.keys) == ["hiddenParticipants", "participantSelections", "hideTaskScoped", "problems"])
         let rows = try #require(json["participantSelections"] as? [[String: Any]])
-        #expect(rows.count == 2)
-        // The verdict kind is stored as its classes, never as a hidden kind.
+        #expect(rows.count == 3)
+        // The verdict kind is stored as its classes, never as a hidden kind — and only on the
+        // Security Agent's row, the one participant who writes verdicts.
         #expect(rows.allSatisfy { ($0["hiddenKinds"] as? [String]) == ["memory_saved"] })
-        #expect(rows.allSatisfy { ($0["hiddenVerdictClasses"] as? [String]) == ["accept", "block", "warn"] })
+        let verdictRows = rows.filter { $0["hiddenVerdictClasses"] != nil }
+        try #require(verdictRows.count == 1)
+        #expect((verdictRows[0]["hiddenVerdictClasses"] as? [String]) == ["accept", "block", "warn"])
+        let participant = try #require(verdictRows[0]["participant"] as? [String: Any])
+        #expect((participant["agent"] as? [String: String]) == ["_0": "securityAgent"])
         let stable = JSONEncoder()
         stable.outputFormatting = .sortedKeys
         let back = try JSONDecoder().decode(TranscriptViewConfig.self, from: data)
@@ -618,15 +768,15 @@ import Foundation
          "alwaysShowAtOrAbove": "warning"}
         """)
         // "security_review" hidden is the old spelling of every Security Agent verdict hidden: all
-        // three classes, plus tool scope (a verdict that did not exist when the choice was made).
-        let allClasses = Set(SecurityVerdictClass.allCases)
-        #expect(config.selection(for: .agent(.brown)).hiddenKinds == [.toolScopeReview, .toolOutput])
-        for participant in Self.everyone {
-            #expect(config.selection(for: participant).hiddenVerdictClasses == allClasses)
-            if participant != .agent(.brown) {
-                #expect(config.selection(for: participant).hiddenKinds == [.toolScopeReview])
-            }
+        // three classes, plus tool scope — held by the Security Agent, the only one who writes them.
+        let securityAgent = config.selection(for: .agent(.securityAgent))
+        #expect(securityAgent.hiddenVerdictClasses == Set(SecurityVerdictClass.allCases))
+        #expect(securityAgent.hiddenKinds == [.toolScopeReview])
+        #expect(config.selection(for: .agent(.brown)) == TranscriptKindSelection(hiddenKinds: [.toolOutput]))
+        for participant in Self.everyone where participant != .agent(.securityAgent) && participant != .agent(.brown) {
+            #expect(config.selection(for: participant) == .allVisible)
         }
+        #expect(config.selections.count == 2)
         #expect(config.hiddenParticipants.isEmpty)
         #expect(config.problems == .alwaysShowWarningsAndErrors)
         #expect(!config.isUniformAcrossParticipants)
@@ -636,6 +786,7 @@ import Foundation
         #expect(filter.matches(Self.message(.toolRequest, from: .agent(.brown))))
         #expect(!filter.matches(Self.message(.toolOutput, from: .agent(.brown))))
         #expect(filter.matches(Self.message(.toolOutput, from: .validator)))
+        #expect(!filter.matches(Self.verdict()))
     }
 
     /// The VISIBLE-group generation predates `securityReviews`; those rows were kindless, so they

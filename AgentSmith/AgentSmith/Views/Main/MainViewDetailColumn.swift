@@ -284,6 +284,7 @@ private struct BottomTranscriptPane: View {
     /// Counts the whole resident session; the config's own scope switch decides what's in scope.
     private var statsSource: TranscriptFilterStatsSource {
         TranscriptFilterStatsSource(messages: { [viewModel] in viewModel.messages },
+                                    revision: { [viewModel] in viewModel.messagesRevision },
                                     universe: .any, fixedScope: nil)
     }
 }
@@ -376,6 +377,7 @@ private struct TaskTranscriptContent: View {
         guard let effectiveTask, logBackedTask == nil else { return nil }
         let scope = TranscriptFilter.TaskScope.task(effectiveTask.id)
         return TranscriptFilterStatsSource(messages: { [viewModel] in viewModel.messages },
+                                           revision: { [viewModel] in viewModel.messagesRevision },
                                            universe: scope, fixedScope: scope)
     }
 

@@ -143,10 +143,7 @@ public struct TranscriptFilter: Sendable, Equatable {
         // Identity is the AUTHOR, not the poster: a Security Agent verdict is posted by the system
         // but belongs to the Security Agent — and is addressed to the agent whose call it judged.
         let author = message.author
-        if !hiddenParticipants.isEmpty {
-            if hiddenParticipants.contains(author) { return false }
-            if let addressee = message.addressee, hiddenParticipants.contains(addressee) { return false }
-        }
+        if excludesByParticipant(message, author: author) { return false }
         // Covers BOTH the request and the output row: each carries the same `tool` name, so hiding
         // a tool hides the whole exchange rather than leaving an orphaned output under a request
         // that is no longer shown.
@@ -174,6 +171,20 @@ public struct TranscriptFilter: Sendable, Equatable {
         }
 
         return true
+    }
+
+    /// Whether the participant axis alone hides `message`: it is from, or addressed to, a hidden
+    /// participant. The one definition — `matches` applies it, and the filter's counts leave out
+    /// what it hides, so a row's count and the pane cannot disagree about who is hidden.
+    public func excludesByParticipant(_ message: ChannelMessage) -> Bool {
+        excludesByParticipant(message, author: message.author)
+    }
+
+    private func excludesByParticipant(_ message: ChannelMessage, author: ChannelMessage.Sender) -> Bool {
+        guard !hiddenParticipants.isEmpty else { return false }
+        if hiddenParticipants.contains(author) { return true }
+        guard let addressee = message.addressee else { return false }
+        return hiddenParticipants.contains(addressee)
     }
 
     /// The scope axis alone: does this message belong to this pane at all?

@@ -79,10 +79,10 @@ private struct ActivityListRow: View {
         .help(isMoot ? "Takes effect when tool calls are shown" : "")
     }
 
-    /// Messages these targets account for among the participants currently shown.
+    /// Messages these targets account for. The counts already leave out anything a hidden
+    /// participant sends or receives, so every participant's share is summed.
     private var countText: String {
-        let shown = TranscriptViewConfig.participants.filter(config.isParticipantShown)
-        return stats.map { $0.count(of: row.node.targets, for: shown).formatted() } ?? ""
+        stats.map { $0.count(of: row.node.targets, for: TranscriptViewConfig.participants).formatted() } ?? ""
     }
 
     /// Says so when hidden messages of this row are still on screen because they are warnings or
@@ -242,7 +242,10 @@ private struct MatrixCell: View {
     let participant: ChannelMessage.Sender
     let stats: TranscriptFilterStats?
 
-    private var count: Int? { stats?.count(of: row.node.targets, for: [participant]) }
+    /// Whether this participant can write anything this row covers. A verdict row for anyone but
+    /// the Security Agent can't — the filter judges verdicts by their author — so that cell would
+    /// be a checkbox that does nothing.
+    private var isApplicable: Bool { row.node.targets.contains { $0.applies(to: participant) } }
 
     /// The participant is hidden outright, or this is a tool row and they show no tool calls.
     private var isMoot: Bool {
@@ -261,13 +264,25 @@ private struct MatrixCell: View {
         .frame(width: MatrixMetrics.columnWidth, height: MatrixMetrics.rowHeight)
         // Dimmed ONLY where the cell can't take effect. Dimming empty cells too made the grid read
         // as mostly disabled; the count is in the tooltip instead.
-        .opacity(isMoot ? 0.3 : 1)
+        .opacity(cellOpacity)
+        .disabled(!isApplicable)
+        .accessibilityHidden(!isApplicable)
         .help(helpText)
+    }
+
+    /// Blank where the cell cannot apply; dimmed where it cannot take effect.
+    private var cellOpacity: Double {
+        guard isApplicable else { return 0 }
+        return isMoot ? 0.3 : 1
     }
 
     private var helpText: String {
         let base = "\(participant.filterName) · \(row.node.title)"
-        guard let count, let stats else { return base }
+        guard config.isParticipantShown(participant) else {
+            return "\(base): hidden — show \(participant.filterName) under Who"
+        }
+        guard let stats else { return base }
+        let count = stats.count(of: row.node.targets, for: [participant])
         let problems = stats.problemCount(of: row.node.targets, for: [participant])
         let note = problems > 0 ? " (\(problems.formatted()) still shown as warnings or errors)" : ""
         return "\(base): \(count.formatted()) message\(count == 1 ? "" : "s")\(note)"

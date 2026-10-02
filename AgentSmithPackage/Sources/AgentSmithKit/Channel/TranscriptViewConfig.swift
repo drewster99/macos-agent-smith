@@ -104,6 +104,23 @@ public enum TranscriptFilterTarget: Hashable, Sendable {
     case securityVerdict(SecurityVerdictClass)
 }
 
+extension TranscriptFilterTarget {
+    /// The only participant whose messages this target can match, or nil when anyone's can.
+    public var fixedAuthor: ChannelMessage.Sender? {
+        switch self {
+        case .chat, .tool: return nil
+        case .kind(let kind): return kind.fixedAuthor
+        case .securityVerdict: return ChannelMessageKind.securityReview.fixedAuthor
+        }
+    }
+
+    /// Whether `participant` can write anything this target matches. The filter keys activity on
+    /// the AUTHOR, so a switch for a target another participant always writes does nothing.
+    public func applies(to participant: ChannelMessage.Sender) -> Bool {
+        fixedAuthor.map { $0 == participant } ?? true
+    }
+}
+
 /// One participant's answer to "which activity shows?" — hidden kinds, the kindless (chat) switch,
 /// and hidden tools.
 public struct TranscriptKindSelection: Sendable, Equatable {
@@ -185,6 +202,19 @@ public struct TranscriptKindSelection: Sendable, Equatable {
         return .only(Set(ChannelMessageKind.allCases).subtracting(hiddenKinds),
                      includingKindless: showsChat)
     }
+
+    /// This selection without the state that cannot affect `participant` — switches for kinds only
+    /// another participant writes (Security Agent verdict classes, tool scope). The filter never
+    /// consults them, so keeping them only made configs that show the same thing compare unequal
+    /// and left inert cells in the grid.
+    func applicable(to participant: ChannelMessage.Sender) -> TranscriptKindSelection {
+        var applicable = self
+        applicable.hiddenKinds = hiddenKinds.filter { TranscriptFilterTarget.kind($0).applies(to: participant) }
+        applicable.hiddenVerdictClasses = hiddenVerdictClasses.filter {
+            TranscriptFilterTarget.securityVerdict($0).applies(to: participant)
+        }
+        return applicable
+    }
 }
 
 /// How problems (warnings and errors) relate to every other filter in a pane. One choice rather than
@@ -242,8 +272,9 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
     /// Participants hidden outright — messages from them and private messages to them.
     public var hiddenParticipants: Set<ChannelMessage.Sender>
     /// Per-participant activity selections. Sparse: a participant without an entry shows
-    /// everything, and `setSelection` drops an entry that returns to `.allVisible`, so two configs
-    /// that show the same thing are `==` (which is what preset matching relies on).
+    /// everything, and `setSelection` drops an entry that returns to `.allVisible` and strips state
+    /// that cannot affect its participant, so two configs that show the same thing are `==` (which
+    /// is what preset matching relies on).
     public private(set) var selections: [ChannelMessage.Sender: TranscriptKindSelection]
     /// When true, only messages with NO associated task (the Smith↔user orchestration layer) show.
     /// Meaningful only in the session pane — the task pane is always scoped to its task.
@@ -257,9 +288,11 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         problems: TranscriptProblemPolicy = .alwaysShowWarningsAndErrors
     ) {
         self.hiddenParticipants = hiddenParticipants
-        self.selections = selections.filter { $0.value != .allVisible }
+        self.selections = [:]
         self.hideTaskScoped = hideTaskScoped
         self.problems = problems
+        // Through `setSelection`, so normalization has one home.
+        for (participant, selection) in selections { setSelection(selection, for: participant) }
     }
 
     /// The participants the filter offers, in display order: the user, every role as
@@ -274,8 +307,11 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         selections[participant] ?? .allVisible
     }
 
+    /// The one write path for a selection: it holds only state that can affect `participant`, and is
+    /// dropped when nothing is hidden — so two configs that show the same thing are `==`.
     public mutating func setSelection(_ selection: TranscriptKindSelection, for participant: ChannelMessage.Sender) {
-        selections[participant] = selection == .allVisible ? nil : selection
+        let applicable = selection.applicable(to: participant)
+        selections[participant] = applicable == .allVisible ? nil : applicable
     }
 
     public func isParticipantShown(_ participant: ChannelMessage.Sender) -> Bool {
@@ -286,15 +322,16 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         if shown { hiddenParticipants.remove(participant) } else { hiddenParticipants.insert(participant) }
     }
 
-    /// How `targets` stand across `participants`: shown for all, none, or a mix. An empty product
-    /// (no targets) reads as `.all` — there is nothing hidden.
+    /// How `targets` stand across `participants`: shown for all, none, or a mix — counting only the
+    /// pairs where the target applies to the participant (a verdict class is the Security Agent's
+    /// alone). An empty product reads as `.all`: there is nothing hidden.
     public func visibility(of targets: [TranscriptFilterTarget],
                            for participants: [ChannelMessage.Sender]) -> TranscriptKindSelection.GroupVisibility {
         var shown = 0
         var total = 0
         for participant in participants {
             let selection = selection(for: participant)
-            for target in targets {
+            for target in targets where target.applies(to: participant) {
                 total += 1
                 if selection.isVisible(target) { shown += 1 }
             }
@@ -314,11 +351,14 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         }
     }
 
-    /// Whether every participant follows the same activity selection — the "Everyone" layout can
-    /// represent this config without a single mixed row caused by participants disagreeing.
+    /// Whether every activity reads the same for every participant it applies to — so the
+    /// "Everyone" layout shows this config without a mixed row caused by participants disagreeing.
+    /// Judged through the same aggregate the rows use; the target set covers every stored switch
+    /// (every grouped kind, chat, each verdict class, and each tool anyone hides).
     public var isUniformAcrossParticipants: Bool {
-        let first = selection(for: Self.participants[0])
-        return Self.participants.allSatisfy { selection(for: $0) == first }
+        let hiddenTools = selections.values.reduce(into: Set<String>()) { $0.formUnion($1.hiddenToolNames) }
+        let targets = TranscriptKindGroup.allCases.flatMap(\.targets) + hiddenTools.map(TranscriptFilterTarget.tool)
+        return targets.allSatisfy { visibility(of: [$0], for: Self.participants) != .mixed }
     }
 
     // MARK: Filter
