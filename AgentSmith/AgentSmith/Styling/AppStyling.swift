@@ -213,6 +213,10 @@ enum AppColors {
     /// A hidden participant chip's outline.
     static let participantChipOffStroke = Color(.separatorColor)
 
+    /// "Still shown as warnings or errors" — the note under a filter row whose messages the
+    /// problem policy keeps visible. The same orange as a security WARN.
+    static let filterProblemNote = Color.orange
+
     /// Returns the color for a given channel message sender.
     static func color(for sender: ChannelMessage.Sender) -> Color {
         switch sender {

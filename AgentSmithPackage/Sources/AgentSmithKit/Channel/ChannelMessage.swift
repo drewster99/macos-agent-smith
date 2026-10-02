@@ -131,6 +131,34 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
         return name
     }
 
+    /// The agent a SYSTEM-posted notice is about — its `agentRole` stamp: a worker's watchdog
+    /// error, an evaluator's own diagnostic, or the agent whose tool call a Security Agent verdict
+    /// reviewed. The single accessor for that slot, for the same reason as `toolName`.
+    public var attributedRole: AgentRole? {
+        guard case .string(let raw)? = metadata?["agentRole"] else { return nil }
+        return AgentRole(rawValue: raw)
+    }
+
+    /// Who WROTE this message, which is not always who posted it.
+    ///
+    /// A Security Agent verdict is posted by the system on the evaluator's behalf (`sender:
+    /// .system`), but its author is the Security Agent. Every reader that shows or filters by
+    /// identity — the row header, the transcript filter's participant and per-participant axes,
+    /// its counts — goes through this, so they cannot disagree about whose message it is. Before
+    /// this, the filter called a verdict "System" while its text read "Security Agent → Brown".
+    /// Derived from the typed `kind`, never from the content.
+    public var author: Sender {
+        kind == .securityReview ? .agent(.securityAgent) : sender
+    }
+
+    /// Who the message is TO: its recipient, or for a system-posted notice, the agent it is about
+    /// (`attributedRole`) — which is what makes "Security Agent → Brown" a message to Brown.
+    public var addressee: Sender? {
+        if let recipient { return recipient.participant }
+        if case .system = sender, let role = attributedRole { return .agent(role) }
+        return nil
+    }
+
     /// How bad this message is. See `MessageSeverity` — an axis orthogonal to `kind`.
     ///
     /// Never nil: a message with no severity metadata is `.info`, which is what the

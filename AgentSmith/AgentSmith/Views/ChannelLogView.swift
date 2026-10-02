@@ -904,7 +904,7 @@ private struct MessageRow: View, Equatable {
         // Compute all derived values INLINE at body start - no computed property accessors
         // Expensive ops use @State caches (cacheValid), simple ops compute directly
         
-        let _senderColor = AppColors.color(for: message.sender)
+        let _senderColor = AppColors.color(for: message.author)
         let _recipientColor: Color = {
             guard let recipient = message.recipient else { return .secondary }
             switch recipient {

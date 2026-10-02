@@ -64,7 +64,7 @@ private struct ActivityListRow: View {
             Button(action: {
                 config.setVisible(state != .all, targets: row.node.targets, for: TranscriptViewConfig.participants)
             }, label: {
-                ActivityRowLabel(node: row.node, state: state)
+                ActivityRowLabel(node: row.node, state: state, problemNote: problemNote)
             })
             .buttonStyle(.plain)
             .accessibilityValue(state.accessibilityDescription)
@@ -85,6 +85,15 @@ private struct ActivityListRow: View {
         return stats.map { $0.count(of: row.node.targets, for: shown).formatted() } ?? ""
     }
 
+    /// Says so when hidden messages of this row are still on screen because they are warnings or
+    /// errors — otherwise unchecking a row whose warnings stay visible looks like a broken filter.
+    private var problemNote: String? {
+        guard let stats, state != .all else { return nil }
+        let count = stats.problemCount(of: row.node.targets, for: TranscriptViewConfig.participants)
+        guard count > 0 else { return nil }
+        return "\(count.formatted()) still shown as warnings or errors"
+    }
+
     /// A tool row while no participant shows tool calls at all.
     private var isMoot: Bool {
         row.node.dependsOnToolCalls
@@ -96,6 +105,7 @@ private struct ActivityListRow: View {
 private struct ActivityRowLabel: View {
     let node: ActivityRowNode
     let state: TranscriptKindSelection.GroupVisibility
+    let problemNote: String?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -109,6 +119,11 @@ private struct ActivityRowLabel: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                }
+                if let problemNote {
+                    Text(problemNote)
+                        .font(.caption)
+                        .foregroundStyle(AppColors.filterProblemNote)
                 }
             }
         }
@@ -127,7 +142,7 @@ private struct ActivityRowTitle: View {
             // A tool name's distinguishing part is often its end (`mcp__server__verb`); a
             // category's is its start.
             .truncationMode(node.style == .tool ? .middle : .tail)
-            .help(node.title)
+            .help(node.tooltip ?? node.title)
     }
 }
 
@@ -164,7 +179,7 @@ struct TranscriptActivityMatrix: View {
 
 /// Fixed geometry for the grid, in one place so the header, labels, and cells agree.
 enum MatrixMetrics {
-    static let labelWidth: CGFloat = 200
+    static let labelWidth: CGFloat = 220
     static let columnWidth: CGFloat = 52
     static let rowHeight: CGFloat = 24
 }
@@ -252,7 +267,9 @@ private struct MatrixCell: View {
 
     private var helpText: String {
         let base = "\(participant.filterName) · \(row.node.title)"
-        guard let count else { return base }
-        return "\(base): \(count.formatted()) message\(count == 1 ? "" : "s")"
+        guard let count, let stats else { return base }
+        let problems = stats.problemCount(of: row.node.targets, for: [participant])
+        let note = problems > 0 ? " (\(problems.formatted()) still shown as warnings or errors)" : ""
+        return "\(base): \(count.formatted()) message\(count == 1 ? "" : "s")\(note)"
     }
 }

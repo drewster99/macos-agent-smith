@@ -40,8 +40,8 @@ public struct TranscriptFilter: Sendable, Equatable {
         case matchNone
     }
 
-    /// Participants whose messages are hidden — every message FROM one, and every private message
-    /// addressed TO one. Empty = everyone shows.
+    /// Participants whose messages are hidden — every message FROM one (`ChannelMessage.author`),
+    /// and every message addressed TO one (`ChannelMessage.addressee`). Empty = everyone shows.
     ///
     /// One axis for both directions because that is what "hide Brown" means to a reader: a
     /// Security-Agent verdict addressed to Brown is Brown's business even though Brown didn't send
@@ -147,21 +147,22 @@ public struct TranscriptFilter: Sendable, Equatable {
         // read — so returning true here is the only way a message those axes hide still lands.
         if let alwaysShowAtOrAbove, severity >= alwaysShowAtOrAbove { return true }
 
+        // Identity is the AUTHOR, not the poster: a Security Agent verdict is posted by the system
+        // but belongs to the Security Agent — and is addressed to the agent whose call it judged.
+        let author = message.author
         if !hiddenParticipants.isEmpty {
-            if hiddenParticipants.contains(message.sender) { return false }
-            if let recipient = message.recipient, hiddenParticipants.contains(recipient.participant) {
-                return false
-            }
+            if hiddenParticipants.contains(author) { return false }
+            if let addressee = message.addressee, hiddenParticipants.contains(addressee) { return false }
         }
         // Covers BOTH the request and the output row: each carries the same `tool` name, so hiding
         // a tool hides the whole exchange rather than leaving an orphaned output under a request
         // that is no longer shown.
-        let hiddenTools = hiddenToolNamesBySender[message.sender] ?? hiddenToolNames
+        let hiddenTools = hiddenToolNamesBySender[author] ?? hiddenToolNames
         if !hiddenTools.isEmpty, let toolName = message.toolName, hiddenTools.contains(toolName) {
             return false
         }
 
-        switch kindsBySender[message.sender] ?? kinds {
+        switch kindsBySender[author] ?? kinds {
         case .all:
             break
         case .only(let set, let includingKindless):

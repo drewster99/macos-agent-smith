@@ -48,4 +48,21 @@ public enum MCPToolNaming {
         }
         return name
     }
+
+    /// The inverse of `prefixedName`: the server slug and the tool part of a name this type built,
+    /// or nil for anything else (a built-in, or a name too truncated to keep its separator).
+    ///
+    /// Exact rather than heuristic because the format is ours: `sanitizeComponent` collapses every
+    /// run of `_`, so a server slug can never contain `__`, and the FIRST `__` after the prefix is
+    /// always the separator. The tool part keeps any disambiguation suffix (`_2`) — it is part of
+    /// that tool's name.
+    public static func components(of name: String) -> (server: String, tool: String)? {
+        guard name.hasPrefix(prefix) else { return nil }
+        let rest = name.dropFirst(prefix.count)
+        guard let separator = rest.range(of: "__") else { return nil }
+        let server = String(rest[..<separator.lowerBound])
+        let tool = String(rest[separator.upperBound...])
+        guard !server.isEmpty, !tool.isEmpty else { return nil }
+        return (server, tool)
+    }
 }

@@ -234,9 +234,7 @@ final class InspectorLiveState {
         for message in messages {
             if case .agent(let role) = message.sender {
                 buckets[role, default: []].append(message)
-            } else if case .system = message.sender,
-                      case .string(let attributed) = message.metadata?["agentRole"],
-                      let role = AgentRole(rawValue: attributed) {
+            } else if case .system = message.sender, let role = message.attributedRole {
                 buckets[role, default: []].append(message)
             }
         }

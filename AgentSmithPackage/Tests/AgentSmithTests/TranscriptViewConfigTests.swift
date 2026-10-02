@@ -122,6 +122,77 @@ import Foundation
         #expect(!config.makeFilter().matches(Self.message(from: .agent(.brown), severity: .error)))
     }
 
+    // MARK: - Authorship of system-posted verdicts
+
+    /// A Security Agent verdict exactly as `AgentActor` persists it (2026-10-02 channel log): posted
+    /// by the SYSTEM, kind `security_review`, stamped with the reviewed agent's role, public.
+    private static func verdict(about role: AgentRole = .brown, severity: MessageSeverity = .info,
+                                legacyKindless: Bool = false) -> ChannelMessage {
+        var metadata: [String: AnyCodable] = [
+            "securityDisposition": .string(severity == .warning ? "warning" : "approved"),
+            "agentRole": .string(role.rawValue),
+            "severity": .severity(severity)
+        ]
+        if !legacyKindless { metadata["messageKind"] = .kind(.securityReview) }
+        return ChannelMessage(sender: .system, content: "Security Agent → Brown: SAFE", metadata: metadata)
+    }
+
+    @Test func aVerdictIsAuthoredByTheSecurityAgentAndAddressedToTheReviewedAgent() {
+        #expect(Self.verdict().author == .agent(.securityAgent))
+        #expect(Self.verdict().addressee == .agent(.brown))
+        #expect(Self.verdict(legacyKindless: true).author == .agent(.securityAgent))
+        // An ordinary system notice is still the system's, and an unstamped one is to nobody.
+        #expect(Self.message(from: .system).author == .system)
+        #expect(Self.message(from: .system).addressee == nil)
+        #expect(Self.message(from: .agent(.smith), to: .user).addressee == .user)
+    }
+
+    /// The user-visible bug: verdicts filtered as "System". Hiding System must not touch them;
+    /// hiding the Security Agent, or the agent they are addressed to, must.
+    @Test func participantFilteringFollowsTheAuthorNotThePoster() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setParticipant(.system, shown: false)
+        #expect(config.makeFilter().matches(Self.verdict()))
+        config.setParticipant(.system, shown: true)
+        config.setParticipant(.agent(.securityAgent), shown: false)
+        #expect(!config.makeFilter().matches(Self.verdict()))
+        config.setParticipant(.agent(.securityAgent), shown: true)
+        config.setParticipant(.agent(.brown), shown: false)
+        #expect(!config.makeFilter().matches(Self.verdict()))
+    }
+
+    /// The per-participant activity selection that governs a verdict is the Security Agent's.
+    @Test func perParticipantActivityFollowsTheAuthor() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setVisible(false, targets: [.kind(.securityReview)], for: [.system])
+        #expect(config.makeFilter().matches(Self.verdict()))
+        config.setVisible(false, targets: [.kind(.securityReview)], for: [.agent(.securityAgent)])
+        #expect(!config.makeFilter().matches(Self.verdict()))
+    }
+
+    /// A WARN verdict with everything hidden still shows under the default policy — by design —
+    /// and the counts now say that it is shown ONLY for that reason, per row and in total.
+    @Test func statsReportWhatIsShownOnlyAsAProblem() {
+        var config = TranscriptViewConfig.everything
+        for participant in Self.everyone { config.setParticipant(participant, shown: false) }
+        let messages = [Self.verdict(severity: .warning), Self.verdict(), Self.message(from: .user)]
+        #expect(config.makeFilter().matches(Self.verdict(severity: .warning)))
+        let stats = TranscriptFilterStats.compute(messages: messages, config: config, universe: .any, scope: .any)
+        #expect(stats.shown == 1)
+        #expect(stats.shownOnlyAsProblems == 1)
+        #expect(stats.problemCount(of: TranscriptKindGroup.securityReviews.targets, for: Self.everyone) == 1)
+        #expect(stats.count(of: TranscriptKindGroup.securityReviews.targets, for: [.agent(.securityAgent)]) == 2)
+        #expect(stats.count(of: TranscriptKindGroup.securityReviews.targets, for: [.system]) == 0)
+        #expect(stats.involving[.agent(.brown)] == 2)
+
+        config.problems = .filterNormally
+        let strict = TranscriptFilterStats.compute(messages: messages, config: config, universe: .any, scope: .any)
+        #expect(strict.shown == 0)
+        #expect(strict.shownOnlyAsProblems == 0)
+    }
+
     // MARK: - Participant × activity
 
     @Test func hidingOneKindForEveryoneHidesJustThatKind() {

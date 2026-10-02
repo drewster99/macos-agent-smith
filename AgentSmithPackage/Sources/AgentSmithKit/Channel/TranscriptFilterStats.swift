@@ -14,10 +14,16 @@ public struct TranscriptFilterStats: Sendable, Equatable {
     public private(set) var inScope = 0
     /// Of those, the ones the full filter shows.
     public private(set) var shown = 0
-    /// In-scope messages by sender and target. A tool exchange counts under both its kind and its
+    /// Of `shown`, the ones visible ONLY because the problem policy re-admitted them — a warning or
+    /// error whose participant or activity is hidden. Without this a hidden row that still showed
+    /// its warnings looked like a filter that did nothing.
+    public private(set) var shownOnlyAsProblems = 0
+    /// In-scope messages by author and target. A tool exchange counts under both its kind and its
     /// tool, so a tool row and the "Tool calls" row each report their own messages.
     public private(set) var counts: [ChannelMessage.Sender: [TranscriptFilterTarget: Int]] = [:]
-    /// In-scope messages each participant sent or was privately addressed.
+    /// The `shownOnlyAsProblems` messages by author and target, shaped like `counts`.
+    public private(set) var problemCounts: [ChannelMessage.Sender: [TranscriptFilterTarget: Int]] = [:]
+    /// In-scope messages each participant wrote or was addressed by.
     public private(set) var involving: [ChannelMessage.Sender: Int] = [:]
     /// Every tool name seen in scope — including MCP tools, which no static list can enumerate.
     public private(set) var observedToolNames: Set<String> = []
@@ -29,8 +35,18 @@ public struct TranscriptFilterStats: Sendable, Equatable {
 
     /// In-scope messages matching any of `targets` from any of `participants`.
     public func count(of targets: [TranscriptFilterTarget], for participants: [ChannelMessage.Sender]) -> Int {
+        Self.sum(counts, targets: targets, participants: participants)
+    }
+
+    /// Of those, the ones shown only because the problem policy re-admitted them.
+    public func problemCount(of targets: [TranscriptFilterTarget], for participants: [ChannelMessage.Sender]) -> Int {
+        Self.sum(problemCounts, targets: targets, participants: participants)
+    }
+
+    private static func sum(_ table: [ChannelMessage.Sender: [TranscriptFilterTarget: Int]],
+                            targets: [TranscriptFilterTarget], participants: [ChannelMessage.Sender]) -> Int {
         participants.reduce(0) { sum, participant in
-            guard let byTarget = counts[participant] else { return sum }
+            guard let byTarget = table[participant] else { return sum }
             return targets.reduce(sum) { $0 + (byTarget[$1] ?? 0) }
         }
     }
@@ -48,27 +64,37 @@ public struct TranscriptFilterStats: Sendable, Equatable {
         let inUniverse = TranscriptFilter(taskScope: universe, alwaysShowAtOrAbove: nil)
         let inScope = TranscriptFilter(taskScope: scope, alwaysShowAtOrAbove: nil)
         let rendered = config.makeFilter(taskScope: scope)
+        // The same filter with the floor removed: a message the pane shows but this one doesn't is
+        // shown only because it's a problem.
+        var unfloored = rendered
+        unfloored.alwaysShowAtOrAbove = nil
         var stats = TranscriptFilterStats()
         for message in messages where inUniverse.matches(message) {
             stats.total += 1
             guard inScope.matches(message) else { continue }
-            stats.record(message, shown: rendered.matches(message))
+            let isShown = rendered.matches(message)
+            stats.record(message, shown: isShown, onlyAsProblem: isShown && !unfloored.matches(message))
         }
         return stats
     }
 
-    private mutating func record(_ message: ChannelMessage, shown isShown: Bool) {
+    private mutating func record(_ message: ChannelMessage, shown isShown: Bool, onlyAsProblem: Bool) {
         inScope += 1
         if isShown { shown += 1 }
-        let target = message.kind.map(TranscriptFilterTarget.kind) ?? .chat
-        counts[message.sender, default: [:]][target, default: 0] += 1
+        if onlyAsProblem { shownOnlyAsProblems += 1 }
+        let author = message.author
+        var targets: [TranscriptFilterTarget] = [message.kind.map(TranscriptFilterTarget.kind) ?? .chat]
         if let tool = message.toolName {
-            counts[message.sender, default: [:]][.tool(tool), default: 0] += 1
+            targets.append(.tool(tool))
             observedToolNames.insert(tool)
         }
-        involving[message.sender, default: 0] += 1
-        if let recipient = message.recipient?.participant, recipient != message.sender {
-            involving[recipient, default: 0] += 1
+        for target in targets {
+            counts[author, default: [:]][target, default: 0] += 1
+            if onlyAsProblem { problemCounts[author, default: [:]][target, default: 0] += 1 }
+        }
+        involving[author, default: 0] += 1
+        if let addressee = message.addressee, addressee != author {
+            involving[addressee, default: 0] += 1
         }
     }
 }

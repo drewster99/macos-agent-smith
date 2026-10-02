@@ -48,6 +48,32 @@ struct MCPToolNamingTests {
 
         #expect(secondServer == ["mcp__My_Server__foo_3", "mcp__My_Server__foo_2"])
     }
+
+    /// `components(of:)` is the exact inverse of `prefixedName` — the transcript filter groups MCP
+    /// tools by server with it — including sanitized names, single underscores and dashes in
+    /// either part, and the disambiguation suffix `assignPrefixedToolNames` appends.
+    @Test func componentsInvertPrefixedName() {
+        let cases: [(server: String, tool: String)] = [
+            ("mac-control", "menu_pick"), ("My Server", "do.it!"), ("filesystem", "read_file"),
+            ("a_b", "c_d_e"), ("***", "@@@")
+        ]
+        for (server, tool) in cases {
+            let parts = MCPToolNaming.components(of: MCPToolNaming.prefixedName(server: server, tool: tool))
+            #expect(parts?.server == MCPToolNaming.sanitizeComponent(server))
+            #expect(parts?.tool == MCPToolNaming.sanitizeComponent(tool))
+        }
+        #expect(MCPToolNaming.components(of: "mcp__My_Server__foo_3")?.tool == "foo_3")
+        #expect(MCPToolNaming.components(of: "mcp__My_Server__foo_3")?.server == "My_Server")
+        let long = MCPToolNaming.prefixedName(server: "srv", tool: String(repeating: "t", count: 200))
+        #expect(MCPToolNaming.components(of: long)?.server == "srv")
+    }
+
+    @Test func componentsRejectNamesThatAreNotOurs() {
+        #expect(MCPToolNaming.components(of: "file_read") == nil)
+        #expect(MCPToolNaming.components(of: "mcp__noseparator") == nil)
+        #expect(MCPToolNaming.components(of: "mcp____tool") == nil)
+        #expect(MCPToolNaming.components(of: "mcp__srv__") == nil)
+    }
 }
 
 @Suite("MCP value conversion")

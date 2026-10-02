@@ -16,6 +16,9 @@ struct ActivityRowNode: Identifiable, Equatable {
     let style: Style
     let targets: [TranscriptFilterTarget]
     let children: [ActivityRowNode]
+    /// Hover text: the full name where `title` is shortened (an MCP tool shown without its
+    /// `mcp__<server>__` prefix), otherwise the title itself, for when it truncates.
+    var tooltip: String? = nil
 
     var isExpandable: Bool { !children.isEmpty }
 
@@ -75,29 +78,46 @@ enum ActivityRowTree {
                                detail: nil, style: .kind, targets: [target], children: [])
     }
 
-    /// One row per built-in tool family, plus every observed tool no family claims — MCP tools,
-    /// whose names come from whichever servers are configured and so exist only in the transcript.
+    /// One row per built-in tool family, one per MCP server seen in the transcript, and "Other
+    /// tools" for any remaining name. MCP tools exist only in the transcript (their names come
+    /// from whichever servers are configured), and grouping them by server lets each row show the
+    /// tool's own name — the shared `mcp__<server>__` prefix otherwise ate the visible width.
     private static func toolFamilyRows(observedToolNames: Set<String>) -> [ActivityRowNode] {
         var families = BuiltInToolGroup.allCases.map { group in
-            toolFamily(id: group.rawValue, title: group.displayName, tools: BuiltInToolGroup.orderedToolNames(in: group))
+            toolFamily(id: group.rawValue, title: group.displayName, detailPrefix: nil,
+                       tools: BuiltInToolGroup.orderedToolNames(in: group).map { ($0, $0) })
         }
-        let other = observedToolNames.subtracting(BuiltInToolGroup.allToolNames).sorted()
+        var byServer: [String: [(name: String, title: String)]] = [:]
+        var other: [String] = []
+        for name in observedToolNames.subtracting(BuiltInToolGroup.allToolNames).sorted() {
+            if let parts = MCPToolNaming.components(of: name) {
+                byServer[parts.server, default: []].append((name, parts.tool))
+            } else {
+                other.append(name)
+            }
+        }
+        for server in byServer.keys.sorted() {
+            families.append(toolFamily(id: "mcp.\(server)", title: server, detailPrefix: "MCP server",
+                                       tools: byServer[server] ?? []))
+        }
         if !other.isEmpty {
-            families.append(toolFamily(id: "other", title: "Other tools", tools: other))
+            families.append(toolFamily(id: "other", title: "Other tools", detailPrefix: nil, tools: other.map { ($0, $0) }))
         }
         return families.filter { !$0.children.isEmpty }
     }
 
-    private static func toolFamily(id: String, title: String, tools: [String]) -> ActivityRowNode {
-        ActivityRowNode(
+    private static func toolFamily(id: String, title: String, detailPrefix: String?,
+                                   tools: [(name: String, title: String)]) -> ActivityRowNode {
+        let count = tools.count == 1 ? "1 tool" : "\(tools.count) tools"
+        return ActivityRowNode(
             id: "family.\(id)",
             title: title,
-            detail: tools.count == 1 ? "1 tool" : "\(tools.count) tools",
+            detail: detailPrefix.map { "\($0) · \(count)" } ?? count,
             style: .toolFamily,
-            targets: tools.map(TranscriptFilterTarget.tool),
-            children: tools.map { name in
-                ActivityRowNode(id: "tool.\(name)", title: name, detail: nil, style: .tool,
-                                targets: [.tool(name)], children: [])
+            targets: tools.map { TranscriptFilterTarget.tool($0.name) },
+            children: tools.map { tool in
+                ActivityRowNode(id: "tool.\(tool.name)", title: tool.title, detail: nil, style: .tool,
+                                targets: [.tool(tool.name)], children: [], tooltip: tool.name)
             })
     }
 }

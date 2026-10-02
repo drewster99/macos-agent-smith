@@ -55,7 +55,7 @@ struct TranscriptFilterPopover: View {
         }
         // Tall enough that the session pane's four sections fit without scrolling while every
         // category is collapsed; expanding rows scrolls.
-        .frame(width: layoutBinding.wrappedValue == .byParticipant ? 600 : 420, height: 740)
+        .frame(width: layoutBinding.wrappedValue == .byParticipant ? 620 : 420, height: 740)
         .task(id: config) { await refreshStats() }
     }
 
@@ -148,13 +148,21 @@ private struct TranscriptFilterSummary: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if let stats {
-                Text("Showing \(stats.shown.formatted()) of \(stats.total.formatted()) messages")
+                Text(Self.countLine(stats))
                     .font(AppFonts.filterCount)
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
                     .animation(.default, value: stats.shown)
             }
         }
+    }
+}
+
+extension TranscriptFilterSummary {
+    static func countLine(_ stats: TranscriptFilterStats) -> String {
+        let base = "Showing \(stats.shown.formatted()) of \(stats.total.formatted()) messages"
+        guard stats.shownOnlyAsProblems > 0 else { return base }
+        return "\(base), \(stats.shownOnlyAsProblems.formatted()) only as warnings or errors"
     }
 }
 
@@ -175,7 +183,7 @@ private struct TranscriptFilterSections: View {
             TranscriptParticipantsSection(config: $config, stats: stats)
             TranscriptActivitySection(
                 config: $config, layout: $layout, rows: rows, stats: stats, onToggleExpanded: onToggleExpanded)
-            TranscriptProblemsSection(config: $config)
+            TranscriptProblemsSection(config: $config, stats: stats)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -255,6 +263,15 @@ private struct TranscriptActivitySection: View {
 /// One choice for how warnings and errors relate to everything above.
 private struct TranscriptProblemsSection: View {
     @Binding var config: TranscriptViewConfig
+    let stats: TranscriptFilterStats?
+
+    /// The policy's meaning, plus — when it is actually keeping hidden messages on screen — how
+    /// many, so "I hid that, why is it still here?" has its answer right here.
+    private var caption: String {
+        guard let stats, stats.shownOnlyAsProblems > 0 else { return config.problems.explanation }
+        let count = stats.shownOnlyAsProblems
+        return "\(config.problems.explanation) Right now that keeps \(count.formatted()) hidden message\(count == 1 ? "" : "s") on screen."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -267,7 +284,7 @@ private struct TranscriptProblemsSection: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
-            FilterCaption(text: config.problems.explanation)
+            FilterCaption(text: caption)
         }
     }
 }

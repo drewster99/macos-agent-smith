@@ -23,7 +23,9 @@ struct MessageRowSenderHeader: View {
                case .string(let title)? = message.metadata?["senderTaskTitle"] {
                 return title.count <= 48 ? title : String(title.prefix(48)) + "…"
             }
-            return message.sender.displayName
+            // The AUTHOR, not the poster: a Security Agent verdict is posted by the system, and
+            // labeling it "System" disagreed both with its own text and with the filter.
+            return message.author.displayName
         }()
         let _recipientLabel: String = {
             if case .agent(.brown)? = message.recipient {
