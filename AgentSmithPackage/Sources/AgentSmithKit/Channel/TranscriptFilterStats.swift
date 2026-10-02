@@ -88,6 +88,9 @@ public struct TranscriptFilterStats: Sendable, Equatable {
             targets.append(.tool(tool))
             observedToolNames.insert(tool)
         }
+        if let verdictClass = message.securityVerdictClass {
+            targets.append(.securityVerdict(verdictClass))
+        }
         for target in targets {
             counts[author, default: [:]][target, default: 0] += 1
             if onlyAsProblem { problemCounts[author, default: [:]][target, default: 0] += 1 }

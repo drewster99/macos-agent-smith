@@ -54,6 +54,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// `ChannelMessage.kind` derives this case for them from the `securityDisposition` metadata
     /// the same producers have always stamped, so historical rows filter like current ones.
     case securityReview = "security_review"
+    /// The Security Agent's per-task tool-scoping result: which of the worker's candidate tools it
+    /// approved. Posted once per successful scoping pass (task start, and re-scope on a changed
+    /// tool set). Authored by the Security Agent, like `securityReview`.
+    case toolScopeReview = "tool_scope_review"
 
     // MARK: Task lifecycle
     case taskCreated = "task_created"

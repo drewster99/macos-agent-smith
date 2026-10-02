@@ -193,6 +193,86 @@ import Foundation
         #expect(strict.shownOnlyAsProblems == 0)
     }
 
+    // MARK: - Verdict classes, delivery, tool scope
+
+    /// The class mapping must agree with what actually gated the call: a class that says "accepted"
+    /// for a call that never ran would hide exactly the verdict a reader needs.
+    @Test func verdictClassesAgreeWithWhetherTheCallRan() {
+        let outcomes: [SecurityDisposition.Outcome] = [
+            .approved, .autoApproved, .approvedWithoutReview, .warned, .refused(.unsafe), .refused(.abort),
+            .reviewerUnavailable(.noEvaluatorConfigured), .reviewCancelled
+        ]
+        for outcome in outcomes {
+            let disposition = SecurityDisposition(outcome: outcome)
+            let verdictClass = SecurityVerdictClass.forDispositionTag(disposition.channelTag)
+            let expected: SecurityVerdictClass = disposition.approved ? .accept : (outcome == .warned ? .warn : .block)
+            #expect(verdictClass == expected, "\(disposition.channelTag)" as Comment)
+        }
+        #expect(SecurityVerdictClass.forDispositionTag("someFutureTag") == .block)
+    }
+
+    private static func verdict(tag: String, requestID: String? = "call_1", taskID: UUID? = nil) -> ChannelMessage {
+        var metadata: [String: AnyCodable] = [
+            "messageKind": .kind(.securityReview), "securityDisposition": .string(tag), "agentRole": .string("brown")
+        ]
+        if let requestID { metadata["requestID"] = .string(requestID) }
+        return ChannelMessage(sender: .system, content: "Security Agent → Brown", metadata: metadata, taskID: taskID)
+    }
+
+    @Test func eachVerdictClassFiltersIndependently() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setVisible(false, targets: [.securityVerdict(.warn)], for: Self.everyone)
+        let filter = config.makeFilter()
+        #expect(filter.matches(Self.verdict(tag: "approved")))
+        #expect(!filter.matches(Self.verdict(tag: "warning")))
+        #expect(filter.matches(Self.verdict(tag: "denied")))
+        #expect(config.visibility(of: TranscriptKindGroup.securityReviews.targets, for: Self.everyone) == .mixed)
+    }
+
+    /// The reported bug: hiding verdicts stripped every tool call's status icon. A hidden verdict
+    /// on a tool call is still DELIVERED (for its call's row) but not shown; nothing else changes.
+    @Test func hiddenVerdictsAreDeliveredForTheirToolCallButNotShown() {
+        var config = TranscriptViewConfig.everything
+        config.problems = .filterNormally
+        config.setVisible(false, targets: TranscriptKindGroup.securityReviews.targets, for: Self.everyone)
+        let task = UUID()
+        let pane = config.makeFilter(taskScope: .task(task))
+        let onThisTask = Self.verdict(tag: "approved", taskID: task)
+        #expect(!pane.matches(onThisTask))
+        #expect(pane.delivers(onThisTask))
+        // Never across scope, and never a verdict that belongs to no tool call.
+        #expect(!pane.delivers(Self.verdict(tag: "approved", taskID: UUID())))
+        #expect(!pane.delivers(Self.verdict(tag: "approved", requestID: nil, taskID: task)))
+        // Anything else hidden stays undelivered.
+        config.setVisible(false, targets: [.chat], for: Self.everyone)
+        #expect(!config.makeFilter().delivers(Self.message(from: .user)))
+    }
+
+    @Test func toolScopeIsTheSecurityAgentsAndHasItsOwnSwitch() {
+        let scope = ChannelMessage(sender: .system, content: "Security Agent → Brown: tool scope",
+                                   metadata: ["messageKind": .kind(.toolScopeReview), "agentRole": .string("brown")])
+        #expect(scope.author == .agent(.securityAgent))
+        #expect(scope.addressee == .agent(.brown))
+        #expect(scope.securityVerdictClass == nil)
+        var config = TranscriptViewConfig.everything
+        config.setVisible(false, targets: [.kind(.toolScopeReview)], for: [.agent(.securityAgent)])
+        #expect(!config.makeFilter().matches(scope))
+        #expect(config.makeFilter().matches(Self.verdict(tag: "approved")))
+    }
+
+    /// `.securityReview` among hidden kinds is the saved form of "every verdict hidden"; it never
+    /// survives construction, so the class set is the single representation.
+    @Test func hiddenSecurityReviewKindNormalizesToClasses() {
+        let selection = TranscriptKindSelection(hiddenKinds: [.securityReview, .memorySaved])
+        #expect(selection.hiddenKinds == [.memorySaved, .toolScopeReview])
+        #expect(selection.hiddenVerdictClasses == Set(SecurityVerdictClass.allCases))
+        #expect(!selection.isVisible(.kind(.securityReview)))
+        var partial = TranscriptKindSelection()
+        partial.setVisible(false, .securityVerdict(.accept))
+        #expect(partial.isVisible(.kind(.securityReview)))
+    }
+
     // MARK: - Participant × activity
 
     @Test func hidingOneKindForEveryoneHidesJustThatKind() {
@@ -349,7 +429,9 @@ import Foundation
         #expect(Set(json.keys) == ["hiddenParticipants", "participantSelections", "hideTaskScoped", "problems"])
         let rows = try #require(json["participantSelections"] as? [[String: Any]])
         #expect(rows.count == 2)
-        #expect(rows.allSatisfy { ($0["hiddenKinds"] as? [String]) == ["memory_saved", "security_review"] })
+        // The verdict kind is stored as its classes, never as a hidden kind.
+        #expect(rows.allSatisfy { ($0["hiddenKinds"] as? [String]) == ["memory_saved"] })
+        #expect(rows.allSatisfy { ($0["hiddenVerdictClasses"] as? [String]) == ["accept", "block", "warn"] })
         let stable = JSONEncoder()
         stable.outputFormatting = .sortedKeys
         let back = try JSONDecoder().decode(TranscriptViewConfig.self, from: data)
@@ -409,9 +491,15 @@ import Foundation
          "hideTaskScoped": false, "showsChat": true, "hiddenKinds": ["security_review"],
          "alwaysShowAtOrAbove": "warning"}
         """)
-        #expect(config.selection(for: .agent(.brown)).hiddenKinds == [.securityReview, .toolOutput])
-        for participant in Self.everyone where participant != .agent(.brown) {
-            #expect(config.selection(for: participant).hiddenKinds == [.securityReview])
+        // "security_review" hidden is the old spelling of every Security Agent verdict hidden: all
+        // three classes, plus tool scope (a verdict that did not exist when the choice was made).
+        let allClasses = Set(SecurityVerdictClass.allCases)
+        #expect(config.selection(for: .agent(.brown)).hiddenKinds == [.toolScopeReview, .toolOutput])
+        for participant in Self.everyone {
+            #expect(config.selection(for: participant).hiddenVerdictClasses == allClasses)
+            if participant != .agent(.brown) {
+                #expect(config.selection(for: participant).hiddenKinds == [.toolScopeReview])
+            }
         }
         #expect(config.hiddenParticipants.isEmpty)
         #expect(config.problems == .alwaysShowWarningsAndErrors)

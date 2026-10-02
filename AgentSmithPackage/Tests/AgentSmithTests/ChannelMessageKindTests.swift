@@ -31,6 +31,7 @@ struct ChannelMessageKindTests {
         (.toolRequest, "tool_request"),
         (.toolOutput, "tool_output"),
         (.securityReview, "security_review"),
+        (.toolScopeReview, "tool_scope_review"),
         (.taskCreated, "task_created"),
         (.taskAcknowledged, "task_acknowledged"),
         (.taskContinuing, "task_continuing"),

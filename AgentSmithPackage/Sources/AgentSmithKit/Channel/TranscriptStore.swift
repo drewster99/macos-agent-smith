@@ -152,7 +152,7 @@ public actor TranscriptStore {
 
     private func fanOut(appended batch: [ChannelMessage]) {
         for subscriber in subscribers.values {
-            let matched = batch.filter(subscriber.filter.matches)
+            let matched = batch.filter(subscriber.filter.delivers)
             guard !matched.isEmpty else { continue }
             subscriber.continuation.yield(makeAppend(matched, for: subscriber))
         }
@@ -215,7 +215,7 @@ public actor TranscriptStore {
     }
 
     private func makeReset(for subscriber: Subscriber) -> TranscriptUpdate {
-        TranscriptUpdate(messages: visibleResident(for: subscriber).filter(subscriber.filter.matches),
+        TranscriptUpdate(messages: visibleResident(for: subscriber).filter(subscriber.filter.delivers),
                          replaces: true, persistedHistoryCount: persistedHistoryCount,
                          hasRestoredHistory: restoredHistory(for: subscriber))
     }

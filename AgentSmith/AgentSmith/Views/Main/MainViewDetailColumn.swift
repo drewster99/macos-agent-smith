@@ -273,6 +273,7 @@ private struct BottomTranscriptPane: View {
                 onExportTaskPDF: onExportTaskPDF,
                 onOpenMCPSettings: onOpenMCPSettings,
                 displayPrefs: displayPrefs,
+                verdictFilter: viewModel.transcriptViewConfig.makeFilter(),
                 selectedImageAttachment: $selectedImageAttachment
             )
             .equatable()
@@ -431,6 +432,7 @@ private struct LiveTaskTranscript: View {
             onExportTaskPDF: onExportTaskPDF,
             onOpenMCPSettings: onOpenMCPSettings,
             displayPrefs: displayPrefs,
+            verdictFilter: viewModel.taskTranscriptViewConfig.makeFilter(taskScope: .any),
             selectedImageAttachment: $selectedImageAttachment
         )
         .equatable()
@@ -470,6 +472,7 @@ private struct CrossSessionTranscriptView: View {
                 CrossSessionTranscriptOutcomeView(
                     outcome: visible.outcome,
                     displayPrefs: displayPrefs,
+                    verdictFilter: filterConfig.makeFilter(taskScope: .any),
                     onExportTaskPDF: onExportTaskPDF,
                     onOpenMCPSettings: onOpenMCPSettings,
                     selectedImageAttachment: $selectedImageAttachment
@@ -521,7 +524,7 @@ private struct CrossSessionTranscriptView: View {
             return .failed
         case .loaded(let messages, let toolRequestIDs):
             let filter = config.makeFilter(taskScope: .any)
-            return .loaded(messages: messages.filter(filter.matches), toolRequestIDs: toolRequestIDs)
+            return .loaded(messages: messages.filter(filter.delivers), toolRequestIDs: toolRequestIDs)
         }
     }
 }
@@ -543,6 +546,7 @@ private struct LoadedCrossSessionTranscript {
 private struct CrossSessionTranscriptOutcomeView: View {
     let outcome: LoadedCrossSessionTranscript.Outcome
     let displayPrefs: TimestampPreferences
+    let verdictFilter: TranscriptFilter
     let onExportTaskPDF: (UUID, String, String?, Date) -> Void
     let onOpenMCPSettings: () -> Void
     @Binding var selectedImageAttachment: Attachment?
@@ -559,6 +563,7 @@ private struct CrossSessionTranscriptOutcomeView: View {
                 onExportTaskPDF: onExportTaskPDF,
                 onOpenMCPSettings: onOpenMCPSettings,
                 displayPrefs: displayPrefs,
+                verdictFilter: verdictFilter,
                 selectedImageAttachment: $selectedImageAttachment
             )
             .equatable()

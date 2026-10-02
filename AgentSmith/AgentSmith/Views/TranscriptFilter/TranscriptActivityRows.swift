@@ -67,15 +67,24 @@ enum ActivityRowTree {
     private static func children(of group: TranscriptKindGroup, observedToolNames: Set<String>) -> [ActivityRowNode] {
         // A one-type category has nothing to break down.
         guard group.targets.count > 1 else { return [] }
-        let kindRows = group.targets.compactMap(kindRow)
-        guard group == .toolCalls else { return kindRows }
-        return kindRows + toolFamilyRows(observedToolNames: observedToolNames)
+        let rows = group.targets.compactMap(targetRow)
+        guard group == .toolCalls else { return rows }
+        return rows + toolFamilyRows(observedToolNames: observedToolNames)
     }
 
-    private static func kindRow(_ target: TranscriptFilterTarget) -> ActivityRowNode? {
-        guard case .kind(let kind) = target else { return nil }
-        return ActivityRowNode(id: "kind.\(kind.rawValue)", title: kind.transcriptFilterLabel,
-                               detail: nil, style: .kind, targets: [target], children: [])
+    /// A row for one of a category's own targets: a message type, or a class of verdict.
+    private static func targetRow(_ target: TranscriptFilterTarget) -> ActivityRowNode? {
+        switch target {
+        case .kind(let kind):
+            return ActivityRowNode(id: "kind.\(kind.rawValue)", title: kind.transcriptFilterLabel,
+                                   detail: nil, style: .kind, targets: [target], children: [])
+        case .securityVerdict(let verdictClass):
+            return ActivityRowNode(id: "verdict.\(verdictClass.rawValue)", title: verdictClass.displayName,
+                                   detail: nil, style: .kind, targets: [target], children: [],
+                                   tooltip: verdictClass.filterExplanation)
+        case .chat, .tool:
+            return nil
+        }
     }
 
     /// One row per built-in tool family, one per MCP server seen in the transcript, and "Other
@@ -134,6 +143,7 @@ extension ChannelMessageKind {
         case .taskCompleted: return "Task completed (final state)"
         case .taskLifecycle: return "Task lifecycle (informational)"
         case .mcpStatus: return "MCP status"
+        case .toolScopeReview: return "Tool scope"
         default:
             let words = rawValue.split(separator: "_").joined(separator: " ")
             return words.prefix(1).uppercased() + words.dropFirst()
@@ -158,5 +168,16 @@ extension ChannelMessage.Sender {
     /// The grid's column-header form; only names too wide for a column are shortened.
     var filterShortName: String {
         self == .agent(.summarizer) ? "Summ." : filterName
+    }
+}
+
+extension SecurityVerdictClass {
+    /// Hover text for the verdict-class rows: which outcomes the class covers.
+    var filterExplanation: String {
+        switch self {
+        case .accept: return "Calls that ran: approved, auto-approved, or approved with review off"
+        case .warn: return "Calls held with a warning — an identical retry runs"
+        case .block: return "Calls refused, or blocked without a verdict (reviewer unavailable, review cancelled)"
+        }
     }
 }

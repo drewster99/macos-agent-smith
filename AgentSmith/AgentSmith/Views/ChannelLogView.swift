@@ -279,17 +279,22 @@ private struct UserTaskActionInlineControl: View {
 /// begins the window inside a follow-up group, so every visible follow-up's parent is present.
 private struct ChannelGroupingIndex {
     var toolRequestIDs: Set<String> = []
+    /// Every verdict delivered for a tool call — including ones the pane's settings hide, which
+    /// arrive only so the call's row keeps its status icon (`TranscriptFilter.delivers`).
     var securityReviewByRequestID: [String: ChannelMessage] = [:]
+    /// The verdicts the pane's settings actually SHOW — the only ones whose text the row prints.
+    var shownVerdictRequestIDs: Set<String> = []
     var toolOutputByRequestID: [String: ChannelMessage] = [:]
     var taskIDsWithSchedulingBanner: Set<String> = []
 
-    init(_ messages: some Sequence<ChannelMessage>) {
+    init(_ messages: some Sequence<ChannelMessage>, verdictFilter: TranscriptFilter = .all) {
         for message in messages {
             let kind = message.kind
             let requestID = message.stringMetadata("requestID")
             if kind == .toolRequest, let requestID { toolRequestIDs.insert(requestID) }
             if message.metadata?["securityDisposition"] != nil, let requestID {
                 securityReviewByRequestID[requestID] = message
+                if verdictFilter.matches(message) { shownVerdictRequestIDs.insert(requestID) }
             }
             if kind == .toolOutput, let requestID { toolOutputByRequestID[requestID] = message }
             if kind == .taskCreated || kind == .taskActionScheduled,
@@ -320,6 +325,10 @@ struct ChannelLogView: View, Equatable {
     /// Display toggles forwarded into the environment so each banner / row reads them
     /// without having to thread parameters through every initializer.
     var displayPrefs: TimestampPreferences
+    /// The pane's own filter. The pane is DELIVERED some verdicts its settings hide (so a tool call
+    /// keeps its status icon); this says which ones it actually shows — their inline text, and
+    /// whether one whose call isn't shown gets a row of its own.
+    var verdictFilter: TranscriptFilter = .all
 
     @State private var isAtBottom = true
     @State private var autoScrollEnabled = true
@@ -387,6 +396,7 @@ struct ChannelLogView: View, Equatable {
         && lhs.persistedHistoryCount == rhs.persistedHistoryCount
         && lhs.hasRestoredHistory == rhs.hasRestoredHistory
         && lhs.displayPrefs == rhs.displayPrefs
+        && lhs.verdictFilter == rhs.verdictFilter
     }
 
 
@@ -510,6 +520,10 @@ struct ChannelLogView: View, Equatable {
         /// Read by `windowStartIndex()` to pin the window while the user is scrolled back. It had
         /// no watcher at all before, so the freeze engaged one appended message late.
         let frozenAnchor: UUID?
+        /// Read by the grouping index. Toggling a verdict class can leave the DELIVERED messages
+        /// identical (hidden verdicts still arrive for their calls), so without this the inline
+        /// text would not update until the next message.
+        let verdictFilter: TranscriptFilter
     }
 
     private var cacheSignature: CacheSignature {
@@ -517,7 +531,8 @@ struct ChannelLogView: View, Equatable {
             count: messages.count,
             lastID: messages.last?.id,
             maxVisible: maxVisibleCount,
-            frozenAnchor: frozenAnchorID
+            frozenAnchor: frozenAnchorID,
+            verdictFilter: verdictFilter
         )
     }
 
@@ -532,7 +547,7 @@ struct ChannelLogView: View, Equatable {
         let windowStart = windowStartIndex()
         cachedWindowStart = windowStart
         cachedVisibleMessages = windowStart == 0 ? messages : Array(messages[windowStart...])
-        cachedGroupingIndex = ChannelGroupingIndex(cachedVisibleMessages)
+        cachedGroupingIndex = ChannelGroupingIndex(cachedVisibleMessages, verdictFilter: verdictFilter)
     }
 
     /// True for security-review and tool-output rows, which are grouped into (and rendered
@@ -562,6 +577,8 @@ struct ChannelLogView: View, Equatable {
     /// Suppresses security reviews and tool outputs that are grouped into a parent tool_request row.
     private func shouldSuppress(_ message: ChannelMessage, toolRequestIDs: Set<String>) -> Bool {
         guard isSuppressibleFollowUp(message) else { return false }
+        // Delivered only for its call's status icon: never a row of its own, parent or not.
+        if message.metadata?["securityDisposition"] != nil, !verdictFilter.matches(message) { return true }
         guard let reqID = message.stringMetadata("requestID") else { return false }
         // Only suppress if the parent tool_request exists in the messages array
         return toolRequestIDs.contains(reqID)
@@ -607,6 +624,7 @@ struct ChannelLogView: View, Equatable {
 private struct ChannelMessageBanner: View {
     let message: ChannelMessage
     let reviewLookup: [String: ChannelMessage]
+    let shownVerdictRequestIDs: Set<String>
     let outputLookup: [String: ChannelMessage]
     let scheduledTaskBannerIDs: Set<String>
     let displayPrefs: TimestampPreferences
@@ -641,6 +659,7 @@ private struct ChannelMessageBanner: View {
                     message: message,
                     securityReviewMessage: message.stringMetadata("requestID").flatMap { reviewLookup[$0] },
                     toolOutputMessage: message.stringMetadata("requestID").flatMap { outputLookup[$0] },
+                    showsSecurityReviewText: message.stringMetadata("requestID").map(shownVerdictRequestIDs.contains) ?? false,
                     displayPrefs: displayPrefs,
                     selectedImageAttachment: $selectedImageAttachment
                 )
@@ -763,6 +782,7 @@ private struct ChannelMessageBanner: View {
                 message: message,
                 securityReviewMessage: message.stringMetadata("requestID").flatMap { reviewLookup[$0] },
                 toolOutputMessage: message.stringMetadata("requestID").flatMap { outputLookup[$0] },
+                showsSecurityReviewText: message.stringMetadata("requestID").map(shownVerdictRequestIDs.contains) ?? false,
                 displayPrefs: displayPrefs,
                 selectedImageAttachment: $selectedImageAttachment
             )
@@ -821,6 +841,9 @@ private struct MessageRow: View, Equatable {
     let securityReviewMessage: ChannelMessage?
     /// Pre-looked-up tool output for this message's requestID (nil if none).
     let toolOutputMessage: ChannelMessage?
+    /// Whether the pane's settings show `securityReviewMessage` — gates only the verdict's inline
+    /// TEXT. The status icon and its popover always render: they are part of the tool call.
+    var showsSecurityReviewText = true
     /// Display preferences. Passed in as a `let` rather than read via `@Environment` so
     /// that it participates in `==` below — `EquatableView`'s cache shortcut would
     /// otherwise prevent body re-evaluation when only the env-injected prefs change,
@@ -857,6 +880,7 @@ private struct MessageRow: View, Equatable {
         lhs.message == rhs.message
         && lhs.securityReviewMessage == rhs.securityReviewMessage
         && lhs.toolOutputMessage == rhs.toolOutputMessage
+        && lhs.showsSecurityReviewText == rhs.showsSecurityReviewText
         && lhs.displayPrefs == rhs.displayPrefs
     }
 
@@ -935,7 +959,7 @@ private struct MessageRow: View, Equatable {
             return "\(index + 1)/\(count)"
         }()
         let _dispositionComment: String? = {
-            guard let review = securityReviewMessage,
+            guard showsSecurityReviewText, let review = securityReviewMessage,
                   case .string(let d) = review.metadata?["securityDisposition"] else { return nil }
             switch d {
             case "autoApproved": return nil
@@ -1400,9 +1424,9 @@ private struct MessageRow: View, Equatable {
         let dispositionTooltipText: String?
         let dispositionCommentColor: Color
         let securityReviewPopoverText: String?
-        
+
         @State private var showSecurityPopover = false
-        
+
         var body: some View {
             if let indicator = dispositionIndicator {
                 Button(action: { showSecurityPopover.toggle() }, label: {
@@ -1411,25 +1435,34 @@ private struct MessageRow: View, Equatable {
                 .buttonStyle(.plain)
                 .help(dispositionTooltipText ?? "Security review")
                 .popover(isPresented: $showSecurityPopover, arrowEdge: .bottom) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(dispositionTooltipText ?? "Security review")
-                            .font(.caption.bold())
-                            .foregroundStyle(dispositionCommentColor)
-                        if let text = securityReviewPopoverText {
-                            Text(text)
-                                .font(AppFonts.channelBody)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                        } else {
-                            Text("No details provided.")
-                                .font(AppFonts.channelBody)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(12)
-                    .frame(maxWidth: 420)
+                    SecurityVerdictPopoverContent(
+                        title: dispositionTooltipText ?? "Security review",
+                        titleColor: dispositionCommentColor,
+                        text: securityReviewPopoverText)
                 }
             }
+        }
+    }
+
+    /// The reviewer's verdict text, in the indicator's popover.
+    struct SecurityVerdictPopoverContent: View {
+        let title: String
+        let titleColor: Color
+        let text: String?
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.caption.bold())
+                    .foregroundStyle(titleColor)
+                Text(text ?? "No details provided.")
+                    .font(AppFonts.channelBody)
+                    .foregroundStyle(text == nil ? Color.secondary : Color.primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: 420)
         }
     }
     
@@ -1876,6 +1909,7 @@ private struct ChannelLogMessageList: View {
                     ChannelMessageBanner(
                         message: message,
                         reviewLookup: index.securityReviewByRequestID,
+                        shownVerdictRequestIDs: index.shownVerdictRequestIDs,
                         outputLookup: index.toolOutputByRequestID,
                         scheduledTaskBannerIDs: index.taskIDsWithSchedulingBanner,
                         displayPrefs: displayPrefs,

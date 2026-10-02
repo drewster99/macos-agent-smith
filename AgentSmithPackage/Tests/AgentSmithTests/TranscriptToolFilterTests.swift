@@ -132,13 +132,14 @@ struct TranscriptToolFilterTests {
         selection.setVisible(false, .kind(.toolOutput))
         selection.setVisible(false, .chat)
         selection.setVisible(false, .tool("bash"))
+        selection.setVisible(false, .securityVerdict(.warn))
 
         var config = TranscriptViewConfig()
         config.setSelection(selection, for: .agent(.brown))
 
         let decoded = try JSONDecoder().decode(TranscriptViewConfig.self, from: JSONEncoder().encode(config))
         let properties = Set(Mirror(reflecting: selection).children.compactMap(\.label))
-        #expect(properties == ["hiddenKinds", "showsChat", "hiddenToolNames"], """
+        #expect(properties == ["hiddenKinds", "showsChat", "hiddenToolNames", "hiddenVerdictClasses"], """
             TranscriptKindSelection's stored properties changed (\(properties.sorted().joined(separator: ", "))). \
             Add the new one to ParticipantSelectionRow (encode and decode) in TranscriptViewConfig, then here.
             """)

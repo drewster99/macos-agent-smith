@@ -492,7 +492,7 @@ struct CodeStyleGuardTests {
     /// modifier that does too much is the same defect as a view that does too much.
     private static let oversizedBodyBudget: [String: Int] = [
         "Views/TaskListView.swift": 13,
-        "Views/ChannelLogView.swift": 10,
+        "Views/ChannelLogView.swift": 9,
         "Views/InspectorView.swift": 6,
         "Views/Main/MainViewDetailColumn.swift": 7,
         "Views/TaskCostDetailSheet.swift": 6,
@@ -561,8 +561,9 @@ struct CodeStyleGuardTests {
     /// Lowered from 130: `NowLiveSection.swift` dropped one oversized body in the 2026-09-26
     /// "derive the inspector's display state in the model" work. Lowered from 129: the transcript
     /// filter redesign replaced `Views/Main/TranscriptFilterPopover.swift` (two oversized bodies)
-    /// with views that fit the limit.
-    private static let oversizedBodyTotal = 127
+    /// with views that fit the limit. Lowered from 127: the security-verdict popover's content in
+    /// `ChannelLogView.swift` became its own view.
+    private static let oversizedBodyTotal = 126
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.

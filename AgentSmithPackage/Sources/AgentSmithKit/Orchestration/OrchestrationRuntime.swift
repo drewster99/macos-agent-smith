@@ -4273,8 +4273,11 @@ public actor OrchestrationRuntime {
             // Drop tool_request and tool_output echo messages (posted for UI visibility
             // only), and context-management notices (Smith's compaction is none of the
             // worker's business).
+            // `.toolScopeReview` is the transcript's record of Brown's own scoping; Brown already
+            // has the result as its tool list, and the post must not wake or bloat the worker.
             let workerIrrelevantKinds: Set<ChannelMessageKind> = [
-                .toolRequest, .toolOutput, .contextManagement, .validationReport, .validationEscalation
+                .toolRequest, .toolOutput, .contextManagement, .validationReport, .validationEscalation,
+                .toolScopeReview
             ]
             if let kind = message.kind, workerIrrelevantKinds.contains(kind) { return false }
             return true

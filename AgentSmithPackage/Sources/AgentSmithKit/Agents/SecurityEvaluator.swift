@@ -580,6 +580,27 @@ actor SecurityEvaluator {
         await channel.post(stamped)
     }
 
+    /// Records a successful scoping pass in the transcript: how many of the worker's candidate tools
+    /// were approved, and which were not. Before this the result reached only the inspector, so the
+    /// transcript had no trace of why a worker lacked a tool. Scoping is the WORKER's task-start
+    /// pass, so it is addressed to Brown; Brown's own channel filter drops it (`.toolScopeReview`).
+    private func postToolScopeResult(approved: Set<String>, candidates: Set<String>, taskTitle: String,
+                                     taskID: UUID?, model stampModel: SecurityEvaluatorModel) async {
+        let notApproved = candidates.subtracting(approved).sorted()
+        var content = "Security Agent → Brown: tool scope for \"\(taskTitle)\" — approved \(approved.count) of \(candidates.count) tools."
+        if !notApproved.isEmpty {
+            content += "\nNot approved: \(notApproved.joined(separator: ", "))"
+        }
+        await postToChannel(ChannelMessage(
+            sender: .system,
+            content: content,
+            metadata: [
+                "messageKind": .kind(.toolScopeReview),
+                "agentRole": .string(AgentRole.brown.rawValue)
+            ]
+        ), taskID: taskID, model: stampModel)
+    }
+
     /// Registers a callback fired after each security evaluation is recorded.
     public func setOnEvaluationRecorded(_ handler: @escaping @Sendable (EvaluationRecord) -> Void) {
         onEvaluationRecorded = handler
@@ -1265,6 +1286,8 @@ actor SecurityEvaluator {
                 candidateCount: candidateNames.count,
                 startTime: startTime
             )
+            await postToolScopeResult(approved: approved, candidates: candidateNames, taskTitle: taskTitle,
+                                      taskID: UUID(uuidString: taskID), model: model)
             return ToolScopingResult(approvedNames: approved, rawResponse: responseText, succeeded: true)
         }
 

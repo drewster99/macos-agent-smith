@@ -148,7 +148,24 @@ public struct ChannelMessage: Identifiable, Codable, Sendable, Equatable {
     /// this, the filter called a verdict "System" while its text read "Security Agent → Brown".
     /// Derived from the typed `kind`, never from the content.
     public var author: Sender {
-        kind == .securityReview ? .agent(.securityAgent) : sender
+        switch kind {
+        case .securityReview, .toolScopeReview: return .agent(.securityAgent)
+        default: return sender
+        }
+    }
+
+    /// For a Security Agent verdict on a tool call, which class it falls in; nil for every other
+    /// message. Read from the typed disposition tag, never the verdict's prose.
+    public var securityVerdictClass: SecurityVerdictClass? {
+        guard kind == .securityReview else { return nil }
+        guard case .string(let tag)? = metadata?["securityDisposition"] else { return .block }
+        return SecurityVerdictClass.forDispositionTag(tag)
+    }
+
+    /// The tool call this message belongs to — a request, its output, or its verdict — or nil.
+    public var toolRequestID: String? {
+        guard case .string(let id)? = metadata?["requestID"] else { return nil }
+        return id
     }
 
     /// Who the message is TO: its recipient, or for a system-posted notice, the agent it is about

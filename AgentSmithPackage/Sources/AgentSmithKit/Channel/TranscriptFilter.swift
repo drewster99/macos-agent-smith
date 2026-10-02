@@ -92,6 +92,9 @@ public struct TranscriptFilter: Sendable, Equatable {
     /// instead of the default, so "hide bash from Brown but not from Smith" is expressible — which
     /// is the same shape the kind axis already has, and the reason this is not a single global set.
     public var hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>]
+    /// Per-author hidden classes of Security Agent verdict (accept / warn / block) — a sub-axis of
+    /// the `.securityReview` kind, the way `hiddenToolNamesBySender` is of the tool kinds.
+    public var hiddenVerdictClassesBySender: [ChannelMessage.Sender: Set<SecurityVerdictClass>]
 
     public init(
         hiddenParticipants: Set<ChannelMessage.Sender> = [],
@@ -101,7 +104,8 @@ public struct TranscriptFilter: Sendable, Equatable {
         hideErrors: Bool = false,
         alwaysShowAtOrAbove: MessageSeverity? = .warning,
         hiddenToolNames: Set<String> = [],
-        hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>] = [:]
+        hiddenToolNamesBySender: [ChannelMessage.Sender: Set<String>] = [:],
+        hiddenVerdictClassesBySender: [ChannelMessage.Sender: Set<SecurityVerdictClass>] = [:]
     ) {
         self.hiddenParticipants = hiddenParticipants
         self.kinds = kinds
@@ -111,6 +115,7 @@ public struct TranscriptFilter: Sendable, Equatable {
         self.alwaysShowAtOrAbove = alwaysShowAtOrAbove
         self.hiddenToolNames = hiddenToolNames
         self.hiddenToolNamesBySender = hiddenToolNamesBySender
+        self.hiddenVerdictClassesBySender = hiddenVerdictClassesBySender
     }
 
     /// The pass-everything filter — the single-pane / firehose default.
@@ -125,23 +130,11 @@ public struct TranscriptFilter: Sendable, Equatable {
         // filters that hide errors INCIDENTALLY. Checked first so the two cannot disagree.
         if hideErrors, severity >= .error { return false }
 
-        // SCOPE axes, checked BEFORE the floor — these decide whether the message belongs to this
-        // pane at all, and the floor must never override them. A pane showing one task would
-        // otherwise display another task's errors; `.matchNone`, which exists to show NOTHING
-        // until a task is picked, would show them too. "Surface anything bad" means surfacing it
-        // where it belongs, not everywhere.
-        switch taskScope {
-        case .any:
-            break
-        case .task(let id):
-            if message.taskID != id { return false }
-        case .orchestration:
-            // A user's task action is a notice TO Smith, so it belongs to the orchestration layer
-            // even though it names its task (the task id is what its inline Resume/Undelete acts on).
-            if message.taskID != nil, message.kind != .userTaskAction { return false }
-        case .matchNone:
-            return false
-        }
+        // SCOPE, checked BEFORE the floor — it decides whether the message belongs to this pane at
+        // all, and the floor must never override it. A pane showing one task would otherwise
+        // display another task's errors; `.matchNone`, which exists to show NOTHING until a task
+        // is picked, would show them too. "Surface anything bad" means where it belongs.
+        guard isInScope(message) else { return false }
 
         // The floor. Everything below is a NOISE exclusion — a category the user chose not to
         // read — so returning true here is the only way a message those axes hide still lands.
@@ -162,6 +155,11 @@ public struct TranscriptFilter: Sendable, Equatable {
             return false
         }
 
+        if let verdictClass = message.securityVerdictClass,
+           hiddenVerdictClassesBySender[author]?.contains(verdictClass) == true {
+            return false
+        }
+
         switch kindsBySender[author] ?? kinds {
         case .all:
             break
@@ -176,6 +174,34 @@ public struct TranscriptFilter: Sendable, Equatable {
         }
 
         return true
+    }
+
+    /// Whether a pane should RECEIVE this message — a superset of `matches`.
+    ///
+    /// Adds one thing: a Security Agent verdict on a tool call, in scope, even when the user's
+    /// settings hide verdicts. That verdict is part of its call's row — the status icon and the
+    /// popover behind it — so withholding it stripped the icon from every tool call the moment
+    /// "Security reviews" was unchecked. The view still asks `matches` to decide whether the
+    /// verdict's TEXT shows (inline, or as its own row when its call isn't shown).
+    public func delivers(_ message: ChannelMessage) -> Bool {
+        if matches(message) { return true }
+        return message.kind == .securityReview && message.toolRequestID != nil && isInScope(message)
+    }
+
+    /// The scope axis alone: does this message belong to this pane at all?
+    private func isInScope(_ message: ChannelMessage) -> Bool {
+        switch taskScope {
+        case .any:
+            return true
+        case .task(let id):
+            return message.taskID == id
+        case .orchestration:
+            // A user's task action is a notice TO Smith, so it belongs to the orchestration layer
+            // even though it names its task (the task id is what its inline Resume/Undelete acts on).
+            return message.taskID == nil || message.kind == .userTaskAction
+        case .matchNone:
+            return false
+        }
     }
 }
 

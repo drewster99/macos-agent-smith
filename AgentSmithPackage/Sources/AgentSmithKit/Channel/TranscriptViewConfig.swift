@@ -35,7 +35,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
         switch self {
         case .chat: return "Conversation and notes"
         case .toolCalls: return "Tool requests and their output"
-        case .securityReviews: return "Security Agent verdicts"
+        case .securityReviews: return "Security Agent verdicts and tool scope"
         case .taskLifecycle: return "Created, updated, completed, help"
         case .validation: return "Acceptance verdicts and escalations"
         case .memory: return "Memory saves and searches"
@@ -53,7 +53,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
         case .toolCalls:
             return [.toolRequest, .toolOutput]
         case .securityReviews:
-            return [.securityReview]
+            return [.securityReview, .toolScopeReview]
         case .taskLifecycle:
             return [.taskCreated, .taskAcknowledged, .taskContinuing, .taskComplete, .taskCompleted,
                     .taskFailed, .taskUpdate, .taskUpdateGuidance, .taskSummarized, .taskActionScheduled,
@@ -78,11 +78,14 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
     public var governsKindless: Bool { self == .chat }
 
     /// The group's filter targets, in a stable order (wire order clusters families like `task_*`) —
-    /// except tool calls, where a request reads before the output it produced.
+    /// except tool calls, where a request reads before the output it produced, and security
+    /// reviews, whose verdicts are filtered by CLASS (accept / warn / block) rather than as one kind.
     public var targets: [TranscriptFilterTarget] {
         switch self {
         case .chat: return [.chat]
         case .toolCalls: return [.kind(.toolRequest), .kind(.toolOutput)]
+        case .securityReviews:
+            return SecurityVerdictClass.allCases.map(TranscriptFilterTarget.securityVerdict) + [.kind(.toolScopeReview)]
         default: return kinds.sorted { $0.rawValue < $1.rawValue }.map(TranscriptFilterTarget.kind)
         }
     }
@@ -96,6 +99,9 @@ public enum TranscriptFilterTarget: Hashable, Sendable {
     case chat
     case kind(ChannelMessageKind)
     case tool(String)
+    /// One class of Security Agent verdict on a tool call. The `.securityReview` kind is filtered
+    /// only through these — see `TranscriptKindSelection.hiddenVerdictClasses`.
+    case securityVerdict(SecurityVerdictClass)
 }
 
 /// One participant's answer to "which activity shows?" — hidden kinds, the kindless (chat) switch,
@@ -110,12 +116,27 @@ public struct TranscriptKindSelection: Sendable, Equatable {
     /// Tool names hidden. Empty = every tool shows. Hidden rather than shown so a tool this build has
     /// never seen — including any MCP tool — is VISIBLE in a config saved before it existed.
     public var hiddenToolNames: Set<String>
+    /// Verdict classes hidden. The ONE representation of which security verdicts show: the
+    /// `.securityReview` kind itself never sits in `hiddenKinds` (see `init`), so the class set and
+    /// the kind can never disagree.
+    public var hiddenVerdictClasses: Set<SecurityVerdictClass>
 
+    /// `.securityReview` in `hiddenKinds` is the saved spelling — from every config written before
+    /// verdict classes existed — of "hide every Security Agent verdict". It is normalized here, at
+    /// the one construction point, into all classes hidden plus tool scope hidden (a Security
+    /// Agent verdict that didn't exist yet when that choice was made).
     public init(hiddenKinds: Set<ChannelMessageKind> = [], showsChat: Bool = true,
-                hiddenToolNames: Set<String> = []) {
-        self.hiddenKinds = hiddenKinds
+                hiddenToolNames: Set<String> = [], hiddenVerdictClasses: Set<SecurityVerdictClass> = []) {
+        var kinds = hiddenKinds
+        var classes = hiddenVerdictClasses
+        if kinds.remove(.securityReview) != nil {
+            classes = Set(SecurityVerdictClass.allCases)
+            kinds.insert(.toolScopeReview)
+        }
+        self.hiddenKinds = kinds
         self.showsChat = showsChat
         self.hiddenToolNames = hiddenToolNames
+        self.hiddenVerdictClasses = classes
     }
 
     /// The everything-shows selection — what a participant without an entry follows.
@@ -129,8 +150,11 @@ public struct TranscriptKindSelection: Sendable, Equatable {
     public func isVisible(_ target: TranscriptFilterTarget) -> Bool {
         switch target {
         case .chat: return showsChat
+        // The verdict kind is shown while any of its classes is.
+        case .kind(.securityReview): return hiddenVerdictClasses.count < SecurityVerdictClass.allCases.count
         case .kind(let kind): return !hiddenKinds.contains(kind)
         case .tool(let name): return !hiddenToolNames.contains(name)
+        case .securityVerdict(let verdictClass): return !hiddenVerdictClasses.contains(verdictClass)
         }
     }
 
@@ -138,6 +162,10 @@ public struct TranscriptKindSelection: Sendable, Equatable {
         switch target {
         case .chat:
             showsChat = visible
+        case .kind(.securityReview):
+            for verdictClass in SecurityVerdictClass.allCases { setVisible(visible, .securityVerdict(verdictClass)) }
+        case .securityVerdict(let verdictClass):
+            if visible { hiddenVerdictClasses.remove(verdictClass) } else { hiddenVerdictClasses.insert(verdictClass) }
         case .kind(let kind):
             if visible { hiddenKinds.remove(kind) } else { hiddenKinds.insert(kind) }
         case .tool(let name):
@@ -305,7 +333,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
             taskScope: taskScope ?? (hideTaskScoped ? .orchestration : .any),
             hideErrors: problems.hidesErrors,
             alwaysShowAtOrAbove: problems.floor,
-            hiddenToolNamesBySender: selections.mapValues(\.effectiveHiddenToolNames)
+            hiddenToolNamesBySender: selections.mapValues(\.effectiveHiddenToolNames),
+            hiddenVerdictClassesBySender: selections.mapValues(\.hiddenVerdictClasses)
         )
     }
 
@@ -360,6 +389,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         let hiddenKinds: [String]
         let showsChat: Bool
         var hiddenToolNames: [String]?
+        /// Optional: rows written before verdict classes have no such key.
+        var hiddenVerdictClasses: [String]?
     }
 
     /// A per-sender override row as the previous generation wrote it.
@@ -382,7 +413,8 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
         var decodedSelections: [ChannelMessage.Sender: TranscriptKindSelection] = [:]
         for row in Self.decodeLenientArray(ParticipantSelectionRow.self, from: c, forKey: .participantSelections) {
             decodedSelections[row.participant] = Self.selection(
-                hiddenKinds: row.hiddenKinds, showsChat: row.showsChat, hiddenTools: row.hiddenToolNames)
+                hiddenKinds: row.hiddenKinds, showsChat: row.showsChat, hiddenTools: row.hiddenToolNames,
+                hiddenVerdictClasses: row.hiddenVerdictClasses)
         }
         // Through the memberwise init so the sparse-map normalization has one home.
         self.init(
@@ -404,7 +436,9 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
                     participant: participant,
                     hiddenKinds: selection.hiddenKinds.map(\.rawValue).sorted(),
                     showsChat: selection.showsChat,
-                    hiddenToolNames: selection.hiddenToolNames.isEmpty ? nil : selection.hiddenToolNames.sorted())
+                    hiddenToolNames: selection.hiddenToolNames.isEmpty ? nil : selection.hiddenToolNames.sorted(),
+                    hiddenVerdictClasses: selection.hiddenVerdictClasses.isEmpty
+                        ? nil : selection.hiddenVerdictClasses.map(\.rawValue).sorted())
             }
             .sorted { Self.sortKey($0.participant) < Self.sortKey($1.participant) }
         try c.encode(rows, forKey: .participantSelections)
@@ -484,11 +518,13 @@ public struct TranscriptViewConfig: Codable, Sendable, Equatable {
 
     /// A selection from persisted raw names. Raw strings, so a kind written by a newer build is
     /// ignored (that kind shows) instead of throwing.
-    private static func selection(hiddenKinds: [String], showsChat: Bool, hiddenTools: [String]?) -> TranscriptKindSelection {
+    private static func selection(hiddenKinds: [String], showsChat: Bool, hiddenTools: [String]?,
+                                  hiddenVerdictClasses: [String]? = nil) -> TranscriptKindSelection {
         TranscriptKindSelection(
             hiddenKinds: Set(hiddenKinds.compactMap(ChannelMessageKind.init(rawValue:))),
             showsChat: showsChat,
-            hiddenToolNames: Set(hiddenTools ?? []))
+            hiddenToolNames: Set(hiddenTools ?? []),
+            hiddenVerdictClasses: Set((hiddenVerdictClasses ?? []).compactMap(SecurityVerdictClass.init(rawValue:))))
     }
 
     private static func sortKey(_ sender: ChannelMessage.Sender) -> String {
