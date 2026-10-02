@@ -15,7 +15,8 @@ struct TaskValidationCoordinatorTests {
     /// present so worker respawn paths work. The validator slot must be populated: it has no
     /// fallback to another role's model, and an empty slot parks the task instead of judging it
     /// (`validationBlocksWithoutAValidatorModel` covers that path deliberately).
-    private func makeRuntime(verdictScript: [String], includeValidator: Bool = true) -> OrchestrationRuntime {
+    private func makeRuntime(verdictScript: [String], includeValidator: Bool = true,
+                             metricsLedger: ValidationMetricsLedger? = nil) -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-validation-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -47,9 +48,38 @@ struct TaskValidationCoordinatorTests {
             usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
             autoAdvanceEnabled: false,
             autoRunInterruptedTasks: false,
-            memoryStore: nil
+            memoryStore: nil,
+            validationMetricsLedger: metricsLedger
         )
         return runtime
+    }
+
+    /// A temp-file ledger: tests never touch `ValidationMetricsLedger.shared`.
+    private func makeTempLedger() -> (ValidationMetricsLedger, URL) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("validation-metrics-\(UUID().uuidString).jsonl")
+        return (ValidationMetricsLedger(fileURL: url), url)
+    }
+
+    private func roundOutcomes(_ ledger: ValidationMetricsLedger, at url: URL) throws -> [ValidationRoundOutcomeRow] {
+        ledger.flush()
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        struct KindProbe: Decodable { let rowKind: String }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var rows: [ValidationRoundOutcomeRow] = []
+        for line in try String(contentsOf: url, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: true) {
+            let data = Data(line.utf8)
+            guard try JSONDecoder().decode(KindProbe.self, from: data).rowKind == "roundOutcome" else { continue }
+            rows.append(try decoder.decode(ValidationRoundOutcomeRow.self, from: data))
+        }
+        return rows
+    }
+
+    private func disableValidators(_ runtime: OrchestrationRuntime) async {
+        await runtime.setOrchestrationSettings(
+            OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(enableTaskCompletionValidators: false))
+        )
     }
 
     /// Creates a task in `.validating` with a submitted result, as `task_complete`
@@ -242,11 +272,154 @@ struct TaskValidationCoordinatorTests {
     func respondToUserAcceptanceRefusesValidatorErrorPark() async {
         let runtime = makeRuntime(verdictScript: [])
         let (task, _) = await makeEscalatedTask(on: runtime)
-        #expect(task.awaitingReviewReason == nil, "the fixture simulates a validator-error park, not a user-acceptance one")
+        #expect(task.awaitingReviewReason == .validatorError, "the fixture parks the way a validator error does")
 
         let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
         #expect(!result.succeeded)
         #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "Smith must never self-resolve a machine-can't-judge park")
+    }
+
+    // MARK: - The gate holds when validation is off; grants vs overrides
+
+    @Test("Validators off + gated: parks for the user's sign-off, flagged unjudged — never completes")
+    func validatorsOffGatedParks() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        #expect(await waitForStatusChange(on: runtime, taskID: task.id, away: .validating) == .awaitingReview)
+        let parked = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(parked.awaitingReviewReason == .userAcceptanceRequestedValidationSkipped)
+        #expect(parked.validation == nil, "no round was invented for a submission nothing judged")
+        #expect(parked.occupiesWorkerSlot == false)
+        #expect(parked.outcome == .awaitingSignOff(settled: nil, total: 1))
+    }
+
+    @Test("Validators off + not gated: still completes, flagged unjudged")
+    func validatorsOffUngatedCompletes() async {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(on: runtime)
+        await runtime.startTaskValidation(taskID: task.id)
+        #expect(await waitForStatusChange(on: runtime, taskID: task.id, away: .validating) == .completed)
+    }
+
+    @Test("Accepting an unjudged sign-off park is a grant: no override verdicts, honest update")
+    func validatorsOffGatedAcceptGrants() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        await runtime.acceptEscalatedTask(taskID: task.id)
+        let final = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(final.status == .completed)
+        #expect(final.validation?.verdictRecords.contains { $0.validatorName == "user override" } != true)
+        #expect(final.updates.contains { $0.message.contains("switched off") })
+    }
+
+    @Test("Smith can relay the user's decision on an unjudged sign-off park")
+    func relayAcceptsUnjudgedSignOffPark() async {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(on: runtime, requiresUserAcceptance: true)
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        #expect(result.succeeded)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .completed)
+    }
+
+    @Test("Accepting a passed sign-off park is a grant, not an override")
+    func gatedAcceptIsAGrant() async throws {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        await runtime.acceptEscalatedTask(taskID: task.id)
+        let final = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(final.status == .completed)
+        #expect(final.validation?.verdictRecords.contains { $0.validatorName == "user override" } != true)
+        #expect(final.updates.contains { $0.message.contains("had passed validation") })
+    }
+
+    @Test("A criterion added after a sign-off park: Smith's relay is refused; the user's Accept overrides it")
+    func criteriaChangedAfterParkRefusesRelay() async throws {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(await runtime.taskStore.applyCriterionActions(taskID: task.id, actions: [
+            .add(name: "and this", validationPrompt: "check", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
+        ]) == nil)
+        let relay = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        #expect(!relay.succeeded)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview)
+        await runtime.acceptEscalatedTask(taskID: task.id)
+        let final = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(final.status == .completed)
+        #expect(final.validation?.verdictRecords.contains { $0.validatorName == "user override" } == true)
+    }
+
+    // MARK: - Round-outcome telemetry
+
+    @Test("A passing round on a gated task mirrors user_acceptance_requested, never 'escalated'")
+    func userAcceptanceParkMirrorsDistinctOutcome() async throws {
+        let (ledger, url) = makeTempLedger()
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"], metricsLedger: ledger)
+        let task = await makeSubmittedTask(
+            on: runtime,
+            criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
+            requiresUserAcceptance: true
+        )
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let rows = try roundOutcomes(ledger, at: url)
+        #expect(rows.map(\.outcome) == [.userAcceptanceRequested])
+        #expect(rows.first?.settledCriteria == 1 && rows.first?.totalCriteria == 1)
+        #expect(rows.first?.erroredCriteria == 0 && rows.first?.detail == nil)
+
+        // Re-validating the park judges nothing (the ACCEPT is sticky) but still decides a round.
+        await runtime.revalidateEscalatedTask(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        #expect(await runtime.taskStore.task(id: task.id)?.awaitingReviewReason == .userAcceptanceRequested)
+        #expect(try roundOutcomes(ledger, at: url).map(\.outcome) == [.userAcceptanceRequested, .userAcceptanceRequested])
+    }
+
+    @Test("A validator error mirrors 'escalated'; an ungated pass mirrors 'completed'")
+    func otherOutcomesMirror() async throws {
+        let (errorLedger, errorURL) = makeTempLedger()
+        let erroring = makeRuntime(verdictScript: ["I cannot decide, sorry!"], metricsLedger: errorLedger)
+        let erroringTask = await makeSubmittedTask(on: erroring)
+        await erroring.startTaskValidation(taskID: erroringTask.id)
+        _ = await waitForStatusChange(on: erroring, taskID: erroringTask.id, away: .validating)
+        let errorRows = try roundOutcomes(errorLedger, at: errorURL)
+        #expect(errorRows.map(\.outcome) == [.escalatedOnValidatorError])
+        #expect((errorRows.first?.erroredCriteria ?? 0) >= 1)
+        #expect(errorRows.first?.detail != nil)
+
+        let (passLedger, passURL) = makeTempLedger()
+        let passing = makeRuntime(verdictScript: ["ACCEPT"], metricsLedger: passLedger)
+        let passingTask = await makeSubmittedTask(on: passing)
+        await passing.startTaskValidation(taskID: passingTask.id)
+        _ = await waitForStatusChange(on: passing, taskID: passingTask.id, away: .validating)
+        #expect(try roundOutcomes(passLedger, at: passURL).map(\.outcome) == [.completed])
     }
 
     @Test("All criteria accepted → task completes; the implicit default criterion is materialized")

@@ -3190,13 +3190,13 @@ public actor OrchestrationRuntime {
             releaseTasksBlockedOnValidatorModel()
         }
 
-        // A task that escalated to `.awaitingReview` PURELY because the validator errored (no
-        // pending help request, not parked on a missing validator model) re-validates on restart
-        // rather than waiting on a human — validation is idempotent, so the machine gets another
-        // pass before anyone is asked to intervene. This is deliberately NOT done for help requests
-        // (Brown needs an answer a restart can't give) or missing-validator parks (need config).
-        for task in activeTasks where task.status == .awaitingReview
-            && task.helpRequest == nil && task.validationBlockedReason == nil {
+        // A task that escalated to `.awaitingReview` PURELY because the validator errored re-validates
+        // on restart rather than waiting on a human — validation is idempotent, so the machine gets
+        // another pass before anyone is asked to intervene. Deliberately NOT done for help requests
+        // (Brown needs an answer a restart can't give), missing-validator parks (need config), or a
+        // sign-off park (the user's: re-judging would re-park and re-announce it on every launch, or
+        // with the gate since turned off complete it without the sign-off). `revalidatesAtLaunch`.
+        for task in activeTasks where task.revalidatesAtLaunch {
             guard await taskStore.updateStatus(id: task.id, to: .validating, ifCurrentlyIn: [.awaitingReview], cause: .coldBootRevalidate) else { continue }
             await taskStore.addUpdate(id: task.id, message: "Re-running acceptance validation after restart instead of waiting on manual review.")
         }
@@ -3353,7 +3353,10 @@ public actor OrchestrationRuntime {
             }
         } else {
             // Cold launch — gather all active tasks by status and surface everything to Smith.
-            let awaitingReviewTasks = activeTasks.filter { $0.status == .awaitingReview }
+            // A sign-off park waits on a person, possibly for days: it must not hold back the launch
+            // resume of interrupted work. It is listed for Smith separately below.
+            let awaitingReviewTasks = activeTasks.filter { $0.status == .awaitingReview && !$0.isParkedForUserAcceptance }
+            let signOffTasks = activeTasks.filter(\.isParkedForUserAcceptance)
             let awaitingHelpTasks = activeTasks.filter { $0.status == .awaitingHelp }
             let validatingTasks = activeTasks.filter { $0.status == .validating }
             let interruptedTasks = activeTasks.filter { $0.status == .interrupted }
@@ -3424,13 +3427,18 @@ public actor OrchestrationRuntime {
             // Help requests are their own `.awaitingHelp` state — a blocker Smith answers via
             // `provide_help`. Validator-error parks (`.awaitingReview`) are deliberately NOT surfaced
             // to Smith: they're the USER's to resolve from the task row, and they re-validate on cold
-            // boot anyway. Smith no longer reviews validation.
+            // boot anyway. Smith no longer reviews validation. Sign-off parks ARE surfaced (below):
+            // a fresh Smith has none of the conversation in which it told the user one was waiting,
+            // and could not otherwise recognize the user's "looks good" as the decision to relay.
             let helpRequestTasks = awaitingHelpTasks
             if !helpRequestTasks.isEmpty {
                 let taskList = helpRequestTasks.map { task in
                     "- \(task.title) (id: \(task.id.uuidString))\n  \(task.helpRequest ?? "")"
                 }.joined(separator: "\n")
                 parts.append("\(helpRequestTasks.count) task(s) have a BLOCKER from Brown awaiting your help:\n\(taskList)\nResolve each with `provide_help`, or `message_user` first if you need something from the user.")
+            }
+            if !signOffTasks.isEmpty {
+                parts.append(Self.userAcceptanceParkInstruction(for: signOffTasks))
             }
 
             if !validatingTasks.isEmpty {
@@ -4752,6 +4760,26 @@ public actor OrchestrationRuntime {
     /// tool_request/tool execution messages, and security review notices are filtered out — they
     /// generate too much noise and don't need Smith's attention. Static and pure so it can be
     /// tested directly.
+    /// The cold-launch note listing tasks parked for the user's sign-off. Pure, so it is testable.
+    static func userAcceptanceParkInstruction(for tasks: [AgentTask]) -> String {
+        let list = tasks.map { task -> String in
+            let judgment: String
+            switch task.awaitingReviewReason {
+            case .userAcceptanceRequestedValidationSkipped?:
+                judgment = "acceptance validation was switched off, so its criteria were NOT judged"
+            case .userAcceptanceRequested?, .validatorError?, nil:
+                judgment = "its acceptance criteria passed validation"
+            }
+            return "- \(task.title) (id: \(task.id.uuidString)) — \(judgment)"
+        }.joined(separator: "\n")
+        return """
+            The following task(s) are WAITING FOR THE USER'S SIGN-OFF (they require the user's own acceptance):
+            \(list)
+            Remind the user they are ready for review. Relay a decision with `respond_to_user_acceptance` only \
+            after the user tells you their decision on that task — never decide yourself.
+            """
+    }
+
     static func smithAcceptsMessage(_ message: ChannelMessage) -> Bool {
         // Drop Smith's own outgoing messages — they are published to the channel and would
         // immediately re-wake Smith, producing an infinite loop of repeated messages.

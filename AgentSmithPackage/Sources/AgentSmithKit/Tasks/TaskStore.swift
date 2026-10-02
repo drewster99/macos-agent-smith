@@ -445,10 +445,37 @@ public actor TaskStore {
         to newStatus: AgentTask.Status,
         ifCurrentlyIn allowed: Set<AgentTask.Status>,
         ifValidationRoundIs token: ValidationRoundToken? = nil,
+        ifResolvableBy resolver: AgentTask.EscalationResolver? = nil,
         cause: TaskTransitionCause
     ) -> TransitionEffectTicket? {
-        guard var task = tasks[id], allowed.contains(task.status) else { return nil }
+        guard let task = tasks[id], allowed.contains(task.status) else { return nil }
         guard validationRoundIsCurrent(token, on: task) else { return nil }
+        if let resolver, !task.admitsEscalationResolution(by: resolver) { return nil }
+        return commitStatusHoldingEffects(id: id, to: newStatus, cause: cause)
+    }
+
+    /// What `acceptAwaitingReviewHoldingEffects` claimed.
+    public struct AwaitingReviewAcceptance: Sendable {
+        public let ticket: TransitionEffectTicket
+        public let cause: TaskTransitionCause
+        /// The task the instant before completion — the snapshot override verdicts are computed from.
+        public let parkedTask: AgentTask
+    }
+
+    /// Completes an `.awaitingReview` park on the user's acceptance (directly, or relayed by Smith).
+    /// Admission, the choice of cause, and the write happen in ONE actor turn, so none is decided
+    /// against a park that has since changed (a re-park for another reason, a criteria edit).
+    /// Effects are HELD, as `updateStatusHoldingEffects`.
+    public func acceptAwaitingReviewHoldingEffects(id: UUID, resolvedBy resolver: AgentTask.EscalationResolver) -> AwaitingReviewAcceptance? {
+        guard let parked = tasks[id], parked.admitsEscalationResolution(by: resolver) else { return nil }
+        let cause = parked.acceptanceResolutionCause
+        guard let ticket = commitStatusHoldingEffects(id: id, to: .completed, cause: cause) else { return nil }
+        return AwaitingReviewAcceptance(ticket: ticket, cause: cause, parkedTask: parked)
+    }
+
+    /// The write behind every held-effects transition: change, store, publish, arm the watchdog.
+    private func commitStatusHoldingEffects(id: UUID, to newStatus: AgentTask.Status, cause: TaskTransitionCause) -> TransitionEffectTicket? {
+        guard var task = tasks[id] else { return nil }
         guard case .applied(let transition) = changeStatus(of: &task, to: newStatus, cause: cause, effectRelease: .held) else { return nil }
         tasks[id] = task
         didMutate()
@@ -1451,8 +1478,47 @@ public actor TaskStore {
             Self.statusLogger.fault("Refused .awaitingReview for task \(taskID.uuidString, privacy: .public): no stored result")
             return .refused
         }
+        // An Accept records exactly the cause the park implies — sign-off granted, or an override —
+        // decided from the park as it stands in THIS write, never from a caller's earlier snapshot.
+        let impliedAcceptanceCause = task.acceptanceResolutionCause
+        if cause.isUsersAcceptanceOfResult, cause != impliedAcceptanceCause {
+            Self.statusLogger.fault("Refused \(String(describing: cause), privacy: .public) for task \(taskID.uuidString, privacy: .public): the park implies \(String(describing: impliedAcceptanceCause), privacy: .public)")
+            return .refused
+        }
+        // A task gated on the user's acceptance completes ONLY on the user's acceptance — whatever
+        // the writer (validation passing or switched off, `update_task`, anything added later).
+        if newStatus == .completed, task.requiresUserAcceptance, !cause.isUsersAcceptanceOfResult {
+            Self.statusLogger.fault("Refused .completed for gated task \(taskID.uuidString, privacy: .public): cause \(String(describing: cause), privacy: .public) is not the user's acceptance")
+            return .refused
+        }
+        // WHY the task is parked is derived from the cause and written in this same write; a cause
+        // that names no park cannot enter `.awaitingReview`, and a config park must carry its marker.
+        var enteringReviewReason: AgentTask.AwaitingReviewReason?
+        if newStatus == .awaitingReview {
+            switch cause.awaitingReviewPark {
+            case .review(let reason)?:
+                enteringReviewReason = reason
+            case .validationBlocked?:
+                guard task.validationBlockedReason != nil else {
+                    Self.statusLogger.fault("Refused validation-blocked park for task \(taskID.uuidString, privacy: .public): no validationBlockedReason")
+                    return .refused
+                }
+            case nil:
+                Self.statusLogger.fault("Refused .awaitingReview for task \(taskID.uuidString, privacy: .public): cause \(String(describing: cause), privacy: .public) names no park")
+                return .refused
+            }
+        }
         task.status = newStatus
         task.updatedAt = now
+        if newStatus == .awaitingReview {
+            task.awaitingReviewReason = enteringReviewReason
+            // A review park is never a config park: heal a marker a previous park left behind.
+            if enteringReviewReason != nil { task.validationBlockedReason = nil }
+        } else if from == .awaitingReview {
+            // Leaving a park ends it: its reason and its config marker describe nothing any more.
+            task.awaitingReviewReason = nil
+            task.validationBlockedReason = nil
+        }
         if newStatus == .running && task.startedAt == nil {
             task.startedAt = now
         }
@@ -2355,8 +2421,8 @@ public actor TaskStore {
         var transitions: [TaskStatusTransition] = []
         for (id, task) in tasks where task.validationBlockedReason != nil && task.status == .awaitingReview {
             var updated = task
+            // `changeStatus` clears the config marker on the way out of the park.
             guard case .applied(let transition) = changeStatus(of: &updated, to: .validating, cause: .validationReleased) else { continue }
-            updated.validationBlockedReason = nil
             tasks[id] = updated
             released.append(id)
             transitions.append(transition)
@@ -2379,16 +2445,6 @@ public actor TaskStore {
         tasks[id] = task
         didMutate()
         return nil
-    }
-
-    /// Records WHY a task sits in `.awaitingReview` (validator error vs. a `requiresUserAcceptance`
-    /// park) — cosmetic banner/routing information only, read by the UI and by Smith's conversational
-    /// resolution tool. It never gates the four user-resolution actions themselves.
-    public func setAwaitingReviewReason(id: UUID, reason: AgentTask.AwaitingReviewReason?) {
-        guard var task = tasks[id] else { return }
-        task.awaitingReviewReason = reason
-        tasks[id] = task
-        didMutate()
     }
 
     /// Stores a result (and optional commentary) on a task.
@@ -2778,10 +2834,14 @@ public actor TaskStore {
         to newStatus: AgentTask.Status,
         ifCurrentlyIn allowed: Set<AgentTask.Status>,
         ifValidationRoundIs token: ValidationRoundToken? = nil,
+        ifResolvableBy resolver: AgentTask.EscalationResolver? = nil,
         cause: TaskTransitionCause
     ) -> Bool {
         guard let task = tasks[id], allowed.contains(task.status) else { return false }
         guard validationRoundIsCurrent(token, on: task) else { return false }
+        // A resolution of a review park re-checks WHO may resolve it in this same actor turn: the
+        // park may have changed (a re-park for another reason, a criteria edit) since the caller looked.
+        if let resolver, !task.admitsEscalationResolution(by: resolver) { return false }
         return applyStatus(id: id, to: newStatus, cause: cause)
     }
 
@@ -2802,6 +2862,12 @@ public actor TaskStore {
             // move it to the correct state so it isn't treated as a reviewable submission.
             if task.status == .awaitingReview && task.helpRequest != nil {
                 task.status = .awaitingHelp
+            }
+            // Park markers describe only the CURRENT park. Builds before the status writer owned
+            // them could leave one behind on a task that had already moved on.
+            if task.status != .awaitingReview {
+                task.awaitingReviewReason = nil
+                task.validationBlockedReason = nil
             }
             tasks[task.id] = task
         }

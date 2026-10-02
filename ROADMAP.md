@@ -3213,6 +3213,23 @@ escalation machinery rather than inventing a parallel state machine:
 Tests: `TaskValidationCoordinatorTests` — gated settlement parks instead of completing; accept
 completes; reject (with/without feedback) sends back / refuses; refuses a validator-error park.
 
+### User-acceptance gate hardening (2026-10-02) ✅
+
+A /stupid sweep of the gate found it leaky and silent. Fixed:
+
+- **Park design (issues #1–#3).** The park's reason is derived from the cause and written by
+  `TaskStore.changeStatus` in the same write as the status (was: a second write, never cleared —
+  a stale `.userAcceptanceRequested` could ride into a validator-error or config park). Distinct
+  causes `.userAcceptanceRequested(validationWasRun:)` / `.userAcceptanceGranted(validationWasRun:)`;
+  Smith is briefed on both (SmithTaskBriefing set widened). Who may resolve a park is re-checked
+  inside the store's CAS. `concludeSubmission` is the only automatic exit, and the store refuses a
+  gated completion by any other cause — validators switched off no longer bypass the gate (they
+  park it, flagged unjudged). `update_task` can no longer move a review park; `.validationPassed`
+  completes only from `.validating`. Cold boot no longer re-validates (and re-announces) sign-off
+  parks. "Sign-off" outcome chip; watch text by cause.
+- **Telemetry (#7).** Typed `ValidationRoundOutcome`; a passing gated round is
+  `user_acceptance_requested` (was "escalated"); the early all-settled path now mirrors its row.
+
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved

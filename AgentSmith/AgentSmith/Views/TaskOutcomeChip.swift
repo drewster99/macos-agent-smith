@@ -57,6 +57,8 @@ struct TaskStatusChip: View {
         TaskOutcomeChip(outcome: .pass(accepted: 6, waived: 2, total: 8))
         TaskOutcomeChip(outcome: .incomplete(accepted: 2, total: 8))
         TaskOutcomeChip(outcome: .needsReview(accepted: 3, total: 8))
+        TaskOutcomeChip(outcome: .awaitingSignOff(settled: 3, total: 3))
+        TaskOutcomeChip(outcome: .awaitingSignOff(settled: nil, total: 2))
     }
     .padding()
 }

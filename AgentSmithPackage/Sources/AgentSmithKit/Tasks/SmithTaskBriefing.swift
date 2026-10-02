@@ -4,8 +4,10 @@ import Foundation
 /// note Smith receives, or to nothing. The ONE place those notes are composed; the store records
 /// the note as a durable effect in the same write as the status (see `TaskEffectRecord`).
 ///
-/// Covers exactly the transitions Smith was told about before this existed (decision 2026-09-24:
-/// same set, same text). Widening the set is a separate decision. Notes about things that are NOT
+/// Covers the transitions Smith was told about before this existed (decision 2026-09-24: same set,
+/// same text), WIDENED 2026-10-02 to the user-acceptance park and its sign-off: without a note Smith
+/// could not tell the user a gated task is waiting on them, nor recognize their reply as the decision
+/// to relay. Notes about things that are NOT
 /// status changes (a refused scheduled run, delete / undelete / retry / run again) and the user
 /// actions posted as `.userTaskAction` rows stay where they are.
 public enum SmithTaskBriefing {
@@ -35,6 +37,22 @@ public enum SmithTaskBriefing {
                 ? "passed acceptance validation and is COMPLETE"
                 : "is COMPLETE — acceptance validation is disabled, so its criteria were NOT judged"
             return completionBriefing(subject: subject, completionNote: completionNote)
+        case .userAcceptanceRequested(let validationWasRun):
+            let judgment = validationWasRun
+                ? "every acceptance criterion passed validation"
+                : "acceptance validation is switched off, so its criteria were NOT judged"
+            return """
+                [System: \(subject) is WAITING FOR THE USER'S SIGN-OFF — \(judgment), and the task \
+                requires the user's own acceptance before it completes. Its worker has stopped. Tell the \
+                user in one short message that it is ready for their review and that they can accept it or \
+                ask for changes, from the task row or by replying to you; point them to the task's result \
+                rather than pasting it. Do NOT accept or reject it yourself: call \
+                `respond_to_user_acceptance` for this task only after the user tells you their decision about it.]
+                """
+        case .userAcceptanceGranted(let validationWasRun):
+            return completionBriefing(subject: subject, completionNote: validationWasRun
+                ? "is COMPLETE — the user signed off on it after every acceptance criterion passed validation"
+                : "is COMPLETE — the user signed off on it; acceptance validation is switched off, so its criteria were NOT judged")
         case .userAccepted:
             return completionBriefing(
                 subject: subject,

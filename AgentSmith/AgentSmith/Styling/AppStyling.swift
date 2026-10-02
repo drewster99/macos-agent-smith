@@ -71,6 +71,8 @@ enum AppColors {
     static let outcomeIncomplete = Color(red: 0.90, green: 0.35, blue: 0.35)
     /// Escalated — the machine couldn't judge; needs the user.
     static let outcomeReview = Color.orange
+    /// Parked for the user's own sign-off — nothing wrong, waiting on a person.
+    static let outcomeAwaitingSignOff = Color.blue
 
     // MARK: - Worker step statuses
 
@@ -421,6 +423,7 @@ enum TaskOutcomeBadge {
         case .pass: return AppColors.outcomePass
         case .incomplete: return AppColors.outcomeIncomplete
         case .needsReview: return AppColors.outcomeReview
+        case .awaitingSignOff: return AppColors.outcomeAwaitingSignOff
         }
     }
 
@@ -430,6 +433,7 @@ enum TaskOutcomeBadge {
         case .pass: return "checkmark.circle.fill"
         case .incomplete: return "xmark.circle.fill"
         case .needsReview: return "exclamationmark.triangle.fill"
+        case .awaitingSignOff: return "hand.thumbsup.fill"
         }
     }
 }

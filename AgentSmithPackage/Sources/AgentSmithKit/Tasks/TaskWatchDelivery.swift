@@ -34,11 +34,11 @@ public enum TaskWatchDelivery {
             recipient = .external(macOSNotificationTarget)
             data[Key.action] = .string(TaskWatchPayloadAction.deliverText.rawValue)
             data[Key.bannerTitle] = .string(bannerTitle(task: task, trigger: firing.trigger))
-            data[Key.text] = .string(bannerBody(task: task, trigger: firing.trigger))
+            data[Key.text] = .string(bannerBody(task: task, firing: firing))
         case .summarizeToUser:
             recipient = .smith
             data[Key.action] = .string(TaskWatchPayloadAction.deliverText.rawValue)
-            data[Key.text] = .string(summaryRequest(task: task, trigger: firing.trigger))
+            data[Key.text] = .string(summaryRequest(task: task, firing: firing))
         case .instructSmith(let instructions):
             recipient = .smith
             data[Key.action] = .string(TaskWatchPayloadAction.deliverText.rawValue)
@@ -60,13 +60,14 @@ public enum TaskWatchDelivery {
         "Task \"\(task.title)\" (ID: \(task.id.uuidString))"
     }
 
-    static func summaryRequest(task: AgentTask, trigger: TaskWatchTrigger) -> String {
+    static func summaryRequest(task: AgentTask, firing: TaskWatchFiring) -> String {
+        let trigger = firing.trigger
         var text = """
             [System: A task watch fired — \(subject(task)) \(trigger.displayName). The user asked to be told when \
             this happens. Send the user a short summary with `message_user` NOW: what happened and, if it \
             finished, the outcome. This overrides any "no action is needed" in a status note about this task.]
             """
-        if let detail = outcomeDetail(task: task, trigger: trigger) {
+        if let detail = outcomeDetail(task: task, firing: firing) {
             text += "\n\n\(detail)"
         }
         return text
@@ -84,8 +85,8 @@ public enum TaskWatchDelivery {
         "\"\(task.title)\" \(trigger.displayName)"
     }
 
-    static func bannerBody(task: AgentTask, trigger: TaskWatchTrigger) -> String {
-        switch trigger {
+    static func bannerBody(task: AgentTask, firing: TaskWatchFiring) -> String {
+        switch firing.trigger {
         case .started:
             return "Work has started."
         case .completed:
@@ -95,7 +96,18 @@ public enum TaskWatchDelivery {
         case .needsHelp:
             return excerpt(task.helpRequest) ?? "The worker is blocked and needs help."
         case .needsReview:
-            return excerpt(task.validationBlockedReason) ?? "Acceptance validation needs your review."
+            // Read from the PERSISTED firing's cause, not the task's current state, which may have
+            // moved on by the time this is delivered.
+            switch firing.transition.cause.awaitingReviewPark {
+            case .review(.validatorError)?:
+                return "Acceptance validation could not reach a verdict — it needs your review."
+            case .review(.userAcceptanceRequested)?:
+                return "Every acceptance criterion passed — ready for your sign-off."
+            case .review(.userAcceptanceRequestedValidationSkipped)?:
+                return "Ready for your sign-off. Acceptance validation is switched off, so its criteria were not judged."
+            case .validationBlocked?, nil:
+                return "Acceptance validation needs your review."
+            }
         case .interrupted:
             return "The task was interrupted."
         }
@@ -103,8 +115,8 @@ public enum TaskWatchDelivery {
 
     /// The text behind a state, for a summary request: the summary or result of a completed task,
     /// the latest update of a failed one, the blocker of one that needs help.
-    private static func outcomeDetail(task: AgentTask, trigger: TaskWatchTrigger) -> String? {
-        switch trigger {
+    private static func outcomeDetail(task: AgentTask, firing: TaskWatchFiring) -> String? {
+        switch firing.trigger {
         case .completed:
             if let summary = task.summary, !summary.isEmpty { return "Task summary:\n\(summary)" }
             if let result = task.result, !result.isEmpty { return "Task result:\n\(result)" }
@@ -114,7 +126,11 @@ public enum TaskWatchDelivery {
         case .needsHelp:
             return task.helpRequest.map { "The worker's request:\n\($0)" }
         case .needsReview:
-            return task.validationBlockedReason.map { "Why it is parked:\n\($0)" }
+            // A sign-off park delivers the result it waits on; a validator-error park has nothing
+            // more specific to say than the trigger already does.
+            guard case .review(let reason)? = firing.transition.cause.awaitingReviewPark, reason != .validatorError,
+                  let result = task.result, !result.isEmpty else { return nil }
+            return "Submitted result awaiting the user's sign-off:\n\(result)"
         case .started, .interrupted:
             return nil
         }

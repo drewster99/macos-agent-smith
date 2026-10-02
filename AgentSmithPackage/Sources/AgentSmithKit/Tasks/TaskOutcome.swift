@@ -17,6 +17,9 @@ public enum TaskOutcome: Sendable, Equatable {
     case incomplete(accepted: Int, total: Int)
     /// A validator errored and the task escalated — the machine couldn't judge it.
     case needsReview(accepted: Int, total: Int)
+    /// Parked for the user's own sign-off (`requiresUserAcceptance`). `settled` is nil when
+    /// acceptance validation was switched off and nothing was judged.
+    case awaitingSignOff(settled: Int?, total: Int)
 }
 
 public extension TaskOutcome {
@@ -27,6 +30,7 @@ public extension TaskOutcome {
         case .pass: return "Pass"
         case .incomplete: return "Incomplete"
         case .needsReview: return "Review"
+        case .awaitingSignOff: return "Sign-off"
         }
     }
 
@@ -40,6 +44,11 @@ public extension TaskOutcome {
              .incomplete(let accepted, let total),
              .needsReview(let accepted, let total):
             return "\(accepted)/\(total)"
+        case .awaitingSignOff(let settled?, let total) where settled < total:
+            // Only when a criterion was added after the park and is still unjudged.
+            return "\(settled)/\(total)"
+        case .awaitingSignOff:
+            return nil
         }
     }
 
@@ -54,6 +63,12 @@ public extension TaskOutcome {
             return "\(accepted) of \(total) accepted — progress stalled"
         case .needsReview:
             return "validator error — needs your review"
+        case .awaitingSignOff(nil, _):
+            return "validation switched off — criteria not judged; awaiting your sign-off"
+        case .awaitingSignOff(let settled?, let total) where settled == total:
+            return "all \(total) criteria passed — awaiting your sign-off"
+        case .awaitingSignOff(let settled?, let total):
+            return "\(settled) of \(total) settled — awaiting your sign-off"
         }
     }
 }
@@ -64,6 +79,10 @@ public extension AgentTask {
     /// (running / validating / pending / scheduled …). Callers fall back to the lifecycle
     /// status chip when this is `nil`.
     var outcome: TaskOutcome? {
+        // A validation-skipped sign-off park has no ledger to grade — it still has an outcome.
+        if isParkedForUserAcceptance, awaitingReviewReason == .userAcceptanceRequestedValidationSkipped {
+            return .awaitingSignOff(settled: nil, total: acceptanceCriteria.count)
+        }
         guard let validation, !acceptanceCriteria.isEmpty else { return nil }
 
         var accepted = 0
@@ -101,7 +120,9 @@ public extension AgentTask {
             }
             return .incomplete(accepted: accepted, total: total)
         case .awaitingReview:
-            return .needsReview(accepted: accepted, total: total)
+            return isParkedForUserAcceptance
+                ? .awaitingSignOff(settled: accepted + waived, total: total)
+                : .needsReview(accepted: accepted, total: total)
         default:
             return nil
         }

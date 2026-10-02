@@ -44,8 +44,16 @@ struct UpdateTaskTool: AgentTool {
         guard let taskID = UUID(uuidString: taskIDString) else {
             return .failure("Invalid `task_id` format: \(taskIDString)")
         }
-        guard await context.taskStore.taskOrLibraryTemplate(id: taskID) != nil else {
+        guard let existing = await context.taskStore.taskOrLibraryTemplate(id: taskID) else {
             return .failure("Task not found: \(taskIDString)")
+        }
+        // Refused BEFORE the template toggle below is applied, so the call cannot half-land.
+        let requestedStatus = ToolArguments.optionalString(arguments, "status").flatMap(AgentTask.Status.init(rawValue:))
+        if requestedStatus == .completed, existing.requiresUserAcceptance {
+            return .failure("Task \(taskIDString) requires the user's own acceptance, so update_task cannot complete it. It completes only when the user accepts it — from the task row, or by telling you, after which you relay it with `respond_to_user_acceptance` once it is waiting for their sign-off.")
+        }
+        if requestedStatus != nil, existing.status == .awaitingReview {
+            return .failure("Task \(taskIDString) is parked awaiting review. That park is resolved by the user from the task row (or, for a sign-off they gave you in chat, `respond_to_user_acceptance`) — update_task cannot move it.")
         }
 
         // Template toggle — independent of status. May be sent alone or with a status.
@@ -85,8 +93,16 @@ struct UpdateTaskTool: AgentTool {
         guard UpdateTaskStatusPolicy.settable.contains(status) else {
             return .failure("`\(statusString)` cannot be set with update_task. Valid values: \(UpdateTaskStatusPolicy.settable.map(\.rawValue).sorted().joined(separator: ", ")).")
         }
-        await context.taskStore.updateStatus(id: taskID, status: status, cause: .smithSetStatus)
         let templateNote = appliedTemplate.map { " (\($0 ? "now a template" : "no longer a template"))" } ?? ""
+        // Already there is success — including a template the toggle above just moved to the library,
+        // where the session store's status writer does not reach.
+        if await context.taskStore.taskOrLibraryTemplate(id: taskID)?.status == status {
+            return .success("Task \(taskIDString) updated to \(statusString)\(templateNote).")
+        }
+        guard await context.taskStore.updateStatus(id: taskID, status: status, cause: .smithSetStatus) else {
+            let current = await context.taskStore.task(id: taskID)?.status.rawValue ?? "not an active task"
+            return .failure("Task \(taskIDString) could not be set to \(statusString) from \(current) — that change is not permitted.\(templateNote)")
+        }
         return .success("Task \(taskIDString) updated to \(statusString)\(templateNote).")
     }
 }

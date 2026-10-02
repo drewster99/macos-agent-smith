@@ -148,7 +148,7 @@ struct ValidationMetricsLedgerTests {
             parentTaskID: nil,
             round: 8,
             contractVersion: 1,
-            outcome: "failed_no_progress",
+            outcome: .failedNoProgress,
             settledCriteria: 4,
             totalCriteria: 7,
             rejectedCriteria: 3,
@@ -167,9 +167,51 @@ struct ValidationMetricsLedgerTests {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let outcome = try decoder.decode(ValidationRoundOutcomeRow.self, from: Data(lines[1].utf8))
-        #expect(outcome.outcome == "failed_no_progress")
+        #expect(outcome.outcome == .failedNoProgress)
+        #expect(outcome.v == 2)
+        #expect(lines[1].contains(#""outcome":"failed_no_progress""#))
         #expect(outcome.settledCriteria == 4 && outcome.totalCriteria == 7)
         #expect(outcome.consecutiveRoundsWithoutNewApprovals == 8)
+    }
+
+    /// Raw values are the file format: renaming a case is free, changing a wire string is not.
+    @Test("Round-outcome wire strings are pinned")
+    func roundOutcomeWireStringsArePinned() {
+        let table: [(ValidationRoundOutcome, String)] = [
+            (.completed, "completed"),
+            (.userAcceptanceRequested, "user_acceptance_requested"),
+            (.escalatedOnValidatorError, "escalated"),
+            (.failedNoProgress, "failed_no_progress"),
+            (.rejectionsReturned, "rejections_returned")
+        ]
+        for (outcome, wire) in table {
+            #expect(outcome.rawValue == wire)
+        }
+        #expect(Set(ValidationRoundOutcome.allCases) == Set(table.map(\.0)))
+        #expect(ValidationRoundOutcome.allCases.count == table.count)
+    }
+
+    /// v1 rows (every outcome string ever written) still decode, with their own version.
+    @Test("v1 round-outcome rows still decode")
+    func v1RoundOutcomeRowsDecode() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let expected: [(String, ValidationRoundOutcome)] = [
+            ("completed", .completed), ("escalated", .escalatedOnValidatorError),
+            ("failed_no_progress", .failedNoProgress), ("rejections_returned", .rejectionsReturned)
+        ]
+        for (wire, outcome) in expected {
+            let line = #"{"contractVersion":1,"erroredCriteria":0,"outcome":"\#(wire)","recordedAt":"2026-10-01T12:00:00Z","rejectedCriteria":0,"round":1,"rowKind":"roundOutcome","settledCriteria":1,"taskID":"\#(UUID().uuidString)","taskTitle":"t","totalCriteria":1,"v":1}"#
+            let row = try decoder.decode(ValidationRoundOutcomeRow.self, from: Data(line.utf8))
+            #expect(row.v == 1)
+            #expect(row.outcome == outcome)
+        }
+    }
+
+    @Test("A park's outcome is derived from its reason")
+    func parkReasonMapsToOutcome() {
+        #expect(ValidationRoundOutcome(parkingFor: .validatorError) == .escalatedOnValidatorError)
+        #expect(ValidationRoundOutcome(parkingFor: .userAcceptanceRequested) == .userAcceptanceRequested)
     }
 
     @Test("An errored judgment row carries the typed kind alongside the prose")

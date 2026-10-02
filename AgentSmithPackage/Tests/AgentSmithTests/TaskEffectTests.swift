@@ -175,6 +175,29 @@ struct SmithTaskBriefingTests {
         #expect(accepted.contains("the user accepted it"))
     }
 
+    @Test("A sign-off park tells Smith to tell the user, and how to relay their decision")
+    func signOffParkIsBriefed() throws {
+        let passed = try #require(SmithTaskBriefing.note(for: transition(.userAcceptanceRequested(validationWasRun: true), to: .awaitingReview), task: task))
+        #expect(passed.contains("WAITING FOR THE USER'S SIGN-OFF"))
+        #expect(passed.contains("every acceptance criterion passed validation"))
+        #expect(passed.contains("respond_to_user_acceptance"))
+        #expect(!passed.contains("is COMPLETE"))
+        let skipped = try #require(SmithTaskBriefing.note(for: transition(.userAcceptanceRequested(validationWasRun: false), to: .awaitingReview), task: task))
+        #expect(skipped.contains("NOT judged"))
+        #expect(!skipped.contains("passed validation"))
+    }
+
+    @Test("A granted sign-off is reported as what it was — not as an override of a validator that could not judge")
+    func grantedSignOffIsHonest() throws {
+        let granted = try #require(SmithTaskBriefing.note(for: transition(.userAcceptanceGranted(validationWasRun: true), to: .completed), task: task))
+        #expect(granted.contains("signed off"))
+        #expect(granted.contains("passed validation"))
+        #expect(!granted.contains("could not judge"))
+        let skipped = try #require(SmithTaskBriefing.note(for: transition(.userAcceptanceGranted(validationWasRun: false), to: .completed), task: task))
+        #expect(skipped.contains("NOT judged"))
+        #expect(!skipped.contains("could not judge"))
+    }
+
     @Test("Starts and failures while the runtime itself starts are left to Smith's initial instruction")
     func runtimeStartCausesAreSilent() {
         #expect(SmithTaskBriefing.note(for: transition(.workerStartedAtRuntimeStart), task: task) == nil)

@@ -155,24 +155,48 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// see `occupiesWorkerSlot` and the escalation row actions.)
     public var validationBlockedReason: String?
 
-    /// Opt-in per-task gate, set via `set_acceptance_criteria`: when true, a task whose criteria
-    /// have ALL settled (ACCEPT/WAIVE) does not auto-complete — it parks in `.awaitingReview` with
-    /// `awaitingReviewReason == .userAcceptanceRequested` for the user's explicit sign-off, same as
-    /// a validator-error escalation. Default false preserves today's behavior for every task that
-    /// doesn't opt in.
+    /// Opt-in per-task gate: when true, a task never completes on its own — once every criterion
+    /// settles (ACCEPT/WAIVE), or as soon as it is submitted when acceptance validation is switched
+    /// off, it parks in `.awaitingReview` for the user's explicit sign-off. `TaskStore.changeStatus`
+    /// refuses `.completed` for a gated task by any cause but the user's acceptance. Default false
+    /// preserves the ordinary behavior for every task that doesn't opt in.
     public var requiresUserAcceptance: Bool
 
-    /// Distinguishes WHY a task sits in `.awaitingReview` — the machine couldn't render a verdict
-    /// (`.validatorError`), or the machine's verdict was fine but `requiresUserAcceptance` demands a
-    /// human sign-off before completion (`.userAcceptanceRequested`). Both are resolved through the
-    /// same four user actions (`isUserResolvableEscalation`); this only changes the banner copy and
-    /// which replies Smith may treat as a conversational resolution (only the latter — Smith must
-    /// never self-resolve a park the machine itself couldn't judge).
-    public enum AwaitingReviewReason: String, Codable, Sendable {
+    /// WHY a task sits in a REVIEW park in `.awaitingReview`: the machine couldn't render a verdict
+    /// (`.validatorError`), or `requiresUserAcceptance` holds it for the user's sign-off — after every
+    /// criterion settled, or with acceptance validation switched off. Nil on a config park (marked by
+    /// `validationBlockedReason`) and whenever the task is not in `.awaitingReview`.
+    public enum AwaitingReviewReason: String, Codable, Sendable, CaseIterable {
+        /// The machine could not render a verdict.
         case validatorError
+        /// Every criterion settled; the author required the user's own sign-off.
         case userAcceptanceRequested
+        /// Acceptance validation is switched off, so nothing was judged; the author required the
+        /// user's own sign-off.
+        case userAcceptanceRequestedValidationSkipped
+
+        /// An unknown raw value (written by a newer build) reads as `.validatorError`: that park offers
+        /// only the user's own row actions — the fail-closed reading — instead of failing the whole
+        /// task's decode.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Self(rawValue: raw) ?? .validatorError
+        }
+
+        /// The cause that enters a park for this reason — the inverse of
+        /// `TaskTransitionCause.awaitingReviewPark`.
+        public var parkingCause: TaskTransitionCause {
+            switch self {
+            case .validatorError: return .validationEscalated
+            case .userAcceptanceRequested: return .userAcceptanceRequested(validationWasRun: true)
+            case .userAcceptanceRequestedValidationSkipped: return .userAcceptanceRequested(validationWasRun: false)
+            }
+        }
     }
-    public var awaitingReviewReason: AwaitingReviewReason?
+    /// Written ONLY by `TaskStore.changeStatus`, derived from the cause that enters `.awaitingReview`,
+    /// in the same write as the status; cleared there on every exit. Written in a second mutation it
+    /// was stale in between, and never cleared it was inherited by the next park.
+    public internal(set) var awaitingReviewReason: AwaitingReviewReason?
 
     /// Messages addressed to this task's worker that arrived while no worker was alive.
     ///
@@ -202,6 +226,71 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         case .pending, .paused, .interrupted, .scheduled, .completed, .failed:
             return false
         }
+    }
+
+    /// Who resolves a review park.
+    public enum EscalationResolver: Sendable, Equatable {
+        /// The user's own task-row action. Admitted on every review park.
+        case user
+        /// Smith relaying the user's chat reply (`respond_to_user_acceptance`). Admitted only when the
+        /// user's sign-off is the ONLY open question (`isAwaitingOnlyUserSignOff`).
+        case smithRelayingUser
+    }
+
+    /// Parked for the user's own sign-off (`requiresUserAcceptance`), by the reason it parked for.
+    public var isParkedForUserAcceptance: Bool {
+        guard status == .awaitingReview, validationBlockedReason == nil else { return false }
+        switch awaitingReviewReason {
+        case .userAcceptanceRequested?, .userAcceptanceRequestedValidationSkipped?: return true
+        case .validatorError?, nil: return false
+        }
+    }
+
+    /// Parked for sign-off with nothing the machine was asked to judge left unjudged — the only park
+    /// Smith may resolve by relaying the user's words, and the only one whose Accept is a GRANT rather
+    /// than an override. False when the contract changed after the park (the contract stays editable
+    /// in `.awaitingReview`), because a criterion added since was never judged.
+    public var isAwaitingOnlyUserSignOff: Bool {
+        guard isParkedForUserAcceptance else { return false }
+        switch awaitingReviewReason {
+        case .userAcceptanceRequestedValidationSkipped?:
+            return true
+        case .userAcceptanceRequested?:
+            guard !acceptanceCriteria.isEmpty, let validation else { return false }
+            return validation.settledCriterionIDs(in: acceptanceCriteria).count == acceptanceCriteria.count
+        case .validatorError?, nil:
+            return false
+        }
+    }
+
+    /// Whether `resolver` may resolve this task's park as it stands. A config park admits nobody —
+    /// it releases itself when a validator model is assigned. Checked INSIDE the store's status CAS
+    /// (`ifResolvableBy:`), never only on a snapshot.
+    public func admitsEscalationResolution(by resolver: EscalationResolver) -> Bool {
+        guard status == .awaitingReview, validationBlockedReason == nil else { return false }
+        switch resolver {
+        case .user: return true
+        case .smithRelayingUser: return isAwaitingOnlyUserSignOff
+        }
+    }
+
+    /// The cause a user's Accept of this park records: a grant when the park waited only on the
+    /// sign-off, an override otherwise. Enforced by `TaskStore.changeStatus`.
+    public var acceptanceResolutionCause: TaskTransitionCause {
+        guard isAwaitingOnlyUserSignOff, let reason = awaitingReviewReason else { return .userAccepted }
+        switch reason {
+        case .userAcceptanceRequested: return .userAcceptanceGranted(validationWasRun: true)
+        case .userAcceptanceRequestedValidationSkipped: return .userAcceptanceGranted(validationWasRun: false)
+        case .validatorError: return .userAccepted
+        }
+    }
+
+    /// Whether the launch-time sweep re-runs validation on this park. A validator-error park does
+    /// (validation is idempotent, so the machine gets another pass). A sign-off park is the user's —
+    /// re-judging would re-park and re-announce it on every launch, or with the gate since turned
+    /// off complete it without the sign-off; a config park needs config; a help request needs an answer.
+    public var revalidatesAtLaunch: Bool {
+        admitsEscalationResolution(by: .user) && helpRequest == nil && !isParkedForUserAcceptance
     }
 
     /// Whether a step may be HARD-deleted from this task's plan (`manage_steps` `purge`),

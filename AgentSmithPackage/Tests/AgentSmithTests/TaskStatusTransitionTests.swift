@@ -167,7 +167,9 @@ struct TaskStatusTransitionTests {
     func smithSetStatusMatrix() {
         for from in AgentTask.Status.allCases {
             for to in AgentTask.Status.allCases {
-                #expect(TaskTransitionCause.smithSetStatus.permits(from: from, to: to) == UpdateTaskStatusPolicy.settable.contains(to))
+                // Never out of `.awaitingReview`: its resolvers (the user, configuration) own that park.
+                #expect(TaskTransitionCause.smithSetStatus.permits(from: from, to: to)
+                        == (from != .awaitingReview && UpdateTaskStatusPolicy.settable.contains(to)))
             }
         }
     }

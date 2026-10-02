@@ -225,13 +225,49 @@ public enum ValidationErrorKind {
     }
 }
 
+/// How a validation ROUND ended — the typed `outcome` of a `ValidationRoundOutcomeRow`.
+/// Raw values are the on-disk wire strings; `escalatedOnValidatorError` keeps v1's "escalated"
+/// spelling for continuity. Renaming a case is free; changing a raw value changes the file format
+/// (pinned by `ValidationMetricsLedgerTests`). When retiring a case, keep it — the file outlives the
+/// code that wrote it.
+public enum ValidationRoundOutcome: String, Codable, Sendable, CaseIterable {
+    /// Every criterion settled and the task completed.
+    case completed = "completed"
+    /// Every criterion settled, but the task requires the user's explicit sign-off, so it parked in
+    /// `.awaitingReview`. A PASSING round — deliberately not an escalation.
+    case userAcceptanceRequested = "user_acceptance_requested"
+    /// A validator could not render a verdict; the task parked for the user.
+    case escalatedOnValidatorError = "escalated"
+    /// Consecutive rounds without a new approval hit the limit; the task failed.
+    case failedNoProgress = "failed_no_progress"
+    /// Rejections went back to the worker with rounds remaining.
+    case rejectionsReturned = "rejections_returned"
+
+    /// The outcome a round records when it parks the task — derived from the same reason the park is
+    /// written with, so the row and the park cannot disagree. Exhaustive: a new reason forces a
+    /// telemetry decision at compile time.
+    public init(parkingFor reason: AgentTask.AwaitingReviewReason) {
+        switch reason {
+        case .validatorError:
+            self = .escalatedOnValidatorError
+        case .userAcceptanceRequested, .userAcceptanceRequestedValidationSkipped:
+            // The validation-disabled park begins no round and so mirrors no row; mapped for
+            // completeness, it is the same "waiting on the user's sign-off" outcome.
+            self = .userAcceptanceRequested
+        }
+    }
+}
+
 /// One validation ROUND's decision, flattened — the task-level "how did this round end"
 /// that judgment rows cannot express (a round outcome like "no progress, budget burned"
 /// is a fact about the round, not any single criterion). Same file as judgment rows,
 /// discriminated by `rowKind`.
 public struct ValidationRoundOutcomeRow: Codable, Sendable, Equatable {
     public var rowKind: String = "roundOutcome"
-    public var v: Int = 1
+    /// Schema version. v2 (2026-10-02): `outcome` is typed, and a fully passing round on a
+    /// `requiresUserAcceptance` task records `user_acceptance_requested`. In v1 rows such a round was
+    /// written as "escalated" — distinguishable there only by `erroredCriteria == 0`.
+    public var v: Int = 2
     public var recordedAt: Date
     public var sessionID: UUID?
     public var taskID: UUID
@@ -239,14 +275,13 @@ public struct ValidationRoundOutcomeRow: Codable, Sendable, Equatable {
     public var parentTaskID: UUID?
     public var round: Int
     public var contractVersion: Int
-    /// "completed" | "escalated" | "failed_no_progress" | "rejections_returned".
-    public var outcome: String
+    public var outcome: ValidationRoundOutcome
     public var settledCriteria: Int
     public var totalCriteria: Int
     public var rejectedCriteria: Int
     public var erroredCriteria: Int
     /// The convergence counter as of this outcome; nil on paths that never read it
-    /// (completion, escalation).
+    /// (completion, user-acceptance park, validator-error escalation).
     public var consecutiveRoundsWithoutNewApprovals: Int?
     /// Escalation reason / failure message, capped like judgment `detail`.
     public var detail: String?
@@ -259,7 +294,7 @@ public struct ValidationRoundOutcomeRow: Codable, Sendable, Equatable {
         parentTaskID: UUID?,
         round: Int,
         contractVersion: Int,
-        outcome: String,
+        outcome: ValidationRoundOutcome,
         settledCriteria: Int,
         totalCriteria: Int,
         rejectedCriteria: Int,

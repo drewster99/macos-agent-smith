@@ -120,8 +120,11 @@ public enum TaskWatchTrigger: String, Codable, Sendable, CaseIterable, Hashable 
         case .pending, .starting, .running, .paused, .scheduled, .validating: return nil
         }
         // A missing-validator park is a configuration gap, not a review (the plan's matrix gives it
-        // no watch trigger): only a validator escalation "needs review".
-        if self == .needsReview, transition.cause != .validationEscalated { return nil }
+        // no watch trigger): only a REVIEW park "needs review" — a validator error, or the user's
+        // own sign-off.
+        if self == .needsReview {
+            guard case .review? = transition.cause.awaitingReviewPark else { return nil }
+        }
     }
 
     public var displayName: String {

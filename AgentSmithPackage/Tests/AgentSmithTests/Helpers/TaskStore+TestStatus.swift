@@ -9,6 +9,19 @@ extension TaskStore {
     func driveStatus(id: UUID, to target: AgentTask.Status) -> Bool {
         guard let current = task(id: id)?.status else { return false }
         if current == target { return true }
+        // `update_task` cannot move a review park — its resolvers own it — so leave one the way they do.
+        if current == .awaitingReview, let parked = task(id: id) {
+            switch target {
+            case .completed: return updateStatus(id: id, status: .completed, cause: parked.acceptanceResolutionCause)
+            case .failed: return updateStatus(id: id, status: .failed, cause: .userFailed)
+            case .pending: return updateStatus(id: id, status: .pending, cause: .userSentBack)
+            case .interrupted: return updateStatus(id: id, status: .interrupted, cause: .capacityShed)
+            case .paused:
+                guard updateStatus(id: id, status: .validating, cause: .userRevalidated) else { return false }
+                return updateStatus(id: id, status: .paused, cause: .userPaused)
+            default: break
+            }
+        }
         switch target {
         case .pending, .paused, .interrupted, .completed, .failed:
             return updateStatus(id: id, status: target, cause: .smithSetStatus)

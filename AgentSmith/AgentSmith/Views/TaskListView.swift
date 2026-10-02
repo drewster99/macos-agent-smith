@@ -664,12 +664,13 @@ struct TaskRowButton: View {
     /// nothing here.
     @ViewBuilder
     private func escalationMenu(task: AgentTask, viewModel: AppViewModel) -> some View {
-        if task.validationBlockedReason == nil {
+        // The same predicate the store re-checks inside every resolution's CAS.
+        if task.admitsEscalationResolution(by: .user) {
             // Same four resolutions either way — only the Accept label changes. For a validator-error
             // park ("As-Is") the user is overriding a verdict the machine never reached; for a
             // `requiresUserAcceptance` park the machine already judged every criterion fine and this
             // is simply the sign-off the user asked for.
-            let isUserAcceptancePark = task.awaitingReviewReason == .userAcceptanceRequested
+            let isUserAcceptancePark = task.isParkedForUserAcceptance
             Button(action: { Task { await viewModel.revalidateEscalatedTask(id: task.id) } }, label: {
                 Label("Re-validate", systemImage: "arrow.clockwise")
             })

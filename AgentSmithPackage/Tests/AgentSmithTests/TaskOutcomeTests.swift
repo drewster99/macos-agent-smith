@@ -104,3 +104,24 @@ struct TaskOutcomeTests {
         #expect(task.outcome == nil)
     }
 }
+
+extension TaskOutcomeTests {
+    @Test("A sign-off park reads as Sign-off, not Review")
+    func signOffParkOutcome() {
+        var task = makeTask(status: .awaitingReview, criteria: [(false, .accepted), (true, .waived(reason: "n/a"))])
+        task.awaitingReviewReason = .userAcceptanceRequested
+        #expect(task.outcome == .awaitingSignOff(settled: 2, total: 2))
+        #expect(task.outcome?.label == "Sign-off")
+        #expect(task.outcome?.fraction == nil)
+        task.awaitingReviewReason = .validatorError
+        #expect(task.outcome == .needsReview(accepted: 1, total: 2))
+    }
+
+    @Test("An unjudged sign-off park still has an outcome, with no ledger behind it")
+    func unjudgedSignOffParkOutcome() {
+        var task = makeTask(status: .awaitingReview, criteria: [(false, nil)], withLedger: false)
+        task.awaitingReviewReason = .userAcceptanceRequestedValidationSkipped
+        #expect(task.outcome == .awaitingSignOff(settled: nil, total: 1))
+        #expect(task.outcome?.detailText.contains("not judged") == true)
+    }
+}

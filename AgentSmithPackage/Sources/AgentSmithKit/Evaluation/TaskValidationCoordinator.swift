@@ -235,12 +235,13 @@ extension OrchestrationRuntime {
         guard !aborted, !stopRequested, !Task.isCancelled else { return }
         guard var task = await taskStore.task(id: taskID), task.status == .validating else { return }
 
-        // Validation disabled: complete the task WITHOUT judging its criteria (flagged so the banner
-        // and Smith's notice say so honestly). The call graph is unchanged — task_complete still routes
-        // here; validation simply doesn't run. Checked BEFORE the missing-model park: if the user turned
-        // validation off, a missing validator model is moot.
+        // Validation disabled: conclude WITHOUT judging its criteria (flagged so the banner and
+        // Smith's notice say so honestly) — completed, or parked for the user's sign-off when the task
+        // requires it. The call graph is unchanged — task_complete still routes here; validation simply
+        // doesn't run. Checked BEFORE the missing-model park: if the user turned validation off, a
+        // missing validator model is moot. No round begins, so no round-outcome row is mirrored.
         guard orchestrationSettings.enableTaskCompletionValidators else {
-            _ = await completeValidatedTask(taskID: taskID, validationWasRun: false, cause: .validationPassed(validationWasRun: false))
+            await concludeSubmission(taskID: taskID, basis: .validationDisabled)
             return
         }
 
@@ -274,16 +275,16 @@ extension OrchestrationRuntime {
         let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
         let pending = task.acceptanceCriteria.filter { !settled.contains($0.id) }
         guard !pending.isEmpty else {
-            if task.requiresUserAcceptance {
-                await escalateValidation(
-                    taskID: taskID,
-                    reason: "All acceptance criteria passed.",
-                    judgedInRound: token,
-                    awaitingReviewReason: .userAcceptanceRequested
-                )
-            } else {
-                await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
-            }
+            // Every criterion was already settled when this round began (a Re-validate of a sign-off
+            // park, a resubmission after a send-back) — the round decides without judging anything,
+            // and that decision is mirrored like any other. The gate cannot change while `.validating`.
+            let settledCount = task.acceptanceCriteria.count
+            appendValidationRoundOutcome(
+                task.requiresUserAcceptance ? ValidationRoundOutcome(parkingFor: .userAcceptanceRequested) : .completed,
+                task: task, token: token,
+                settledCriteria: settledCount, rejectedCriteria: 0, erroredCriteria: 0
+            )
+            await concludeSubmission(taskID: taskID, basis: .allCriteriaSettled(token))
             return
         }
 
@@ -369,56 +370,35 @@ extension OrchestrationRuntime {
         let rejected = latestByCriterion.filter { if case .rejected = $0.verdict { return true }; return false }
         let settledAfterRound = latestByCriterion.filter { $0.verdict.isFinal }.count
 
-        // The outcome the round DECIDED, mirrored to the metrics file. Emitted alongside the
-        // (CAS-guarded) transition rather than after confirming it — a superseded transition is
-        // the rare zombie-round case, acceptable for telemetry and never worth a second store
-        // round-trip. Continuation via the mid-round-criteria-added re-run emits nothing: that
-        // round hasn't ended.
-        func mirrorRoundOutcome(_ outcome: String, noProgressRounds: Int? = nil, detail: String? = nil) {
-            guard let ledger = validationMetricsLedger else { return }
-            ledger.append(outcome: ValidationRoundOutcomeRow(
-                sessionID: currentSessionID,
-                taskID: taskID,
-                taskTitle: judged.title,
-                parentTaskID: judged.parentTaskID,
-                round: token.round,
-                contractVersion: token.contractVersion,
-                outcome: outcome,
+        // The outcome the round DECIDED, mirrored to the metrics file (see
+        // `appendValidationRoundOutcome`). Continuation via the mid-round-criteria-added re-run emits
+        // nothing: that round hasn't ended.
+        func mirrorRoundOutcome(_ outcome: ValidationRoundOutcome, noProgressRounds: Int? = nil, detail: String? = nil) {
+            appendValidationRoundOutcome(
+                outcome, task: judged, token: token,
                 settledCriteria: settledAfterRound,
-                totalCriteria: judged.acceptanceCriteria.count,
                 rejectedCriteria: rejected.count,
                 erroredCriteria: errored.count,
                 consecutiveRoundsWithoutNewApprovals: noProgressRounds,
                 detail: detail
-            ))
+            )
         }
 
         if unjudged == 0 && errored.isEmpty && rejected.isEmpty {
             // All criteria settled — the machine says the result is correct. A task marked
-            // `requiresUserAcceptance` still doesn't auto-complete: it parks for the user's
-            // explicit sign-off, exactly like a validator-error escalation, so Brown is torn
-            // down (the worker's job here is done either way) and the four resolution actions
-            // (plus, uniquely for this reason, a plain chat reply) apply identically.
-            if judged.requiresUserAcceptance {
-                mirrorRoundOutcome("escalated", detail: "all criteria settled; awaiting the user's acceptance")
-                await escalateValidation(
-                    taskID: taskID,
-                    reason: "All acceptance criteria passed.",
-                    judgedInRound: token,
-                    awaitingReviewReason: .userAcceptanceRequested
-                )
-            } else {
-                mirrorRoundOutcome("completed")
-                await completeValidatedTask(taskID: taskID, judgedInRound: token, cause: .validationPassed(validationWasRun: true))
-            }
+            // `requiresUserAcceptance` still doesn't complete: `concludeSubmission` parks it for the
+            // user's explicit sign-off (the gate cannot change while `.validating`).
+            mirrorRoundOutcome(judged.requiresUserAcceptance ? ValidationRoundOutcome(parkingFor: .userAcceptanceRequested) : .completed)
+            await concludeSubmission(taskID: taskID, basis: .allCriteriaSettled(token))
         } else if !errored.isEmpty {
             let messages = errored.map { record -> String in
                 if case .error(let message) = record.verdict { return message }
                 return "unknown"
             }
             let reason = "Validation could not be completed: \(errored.count) criterion(s) errored (\(messages.joined(separator: "; "))). The result needs manual review."
-            mirrorRoundOutcome("escalated", detail: reason)
-            await escalateValidation(taskID: taskID, reason: reason, judgedInRound: token)
+            let parkReason: AgentTask.AwaitingReviewReason = .validatorError
+            mirrorRoundOutcome(ValidationRoundOutcome(parkingFor: parkReason), detail: reason)
+            await escalateValidation(taskID: taskID, reason: reason, judgedInRound: token, awaitingReviewReason: parkReason)
         } else if unjudged > 0 && rejected.isEmpty {
             // Smith added criteria mid-round (set_acceptance_criteria) — never-judged
             // criteria aren't errors OR rejections; they just need the next round.
@@ -444,7 +424,7 @@ extension OrchestrationRuntime {
             }
             if withoutNewApprovals >= maxConsecutiveValidationsWithoutNewApprovals {
                 mirrorRoundOutcome(
-                    "failed_no_progress",
+                    .failedNoProgress,
                     noProgressRounds: withoutNewApprovals,
                     detail: "\(rejected.count) criterion(s) still rejected after \(withoutNewApprovals) round(s) without a new approval"
                 )
@@ -455,7 +435,7 @@ extension OrchestrationRuntime {
                     judgedInRound: token
                 )
             } else {
-                mirrorRoundOutcome("rejections_returned", noProgressRounds: withoutNewApprovals)
+                mirrorRoundOutcome(.rejectionsReturned, noProgressRounds: withoutNewApprovals)
                 await returnRejectionsToWorker(taskID: taskID, rejected: rejected, judgedInRound: token)
             }
         }
@@ -500,6 +480,38 @@ extension OrchestrationRuntime {
             ]
         ))
         await taskStore.releaseEffects(effects)
+    }
+
+    /// Telemetry mirror of the outcome a validation round DECIDED — one `ValidationRoundOutcomeRow`
+    /// per round, in the same global file as the judgment rows. Emitted alongside the (CAS-guarded)
+    /// transition rather than after confirming it: a superseded transition is the rare zombie-round
+    /// case, acceptable for telemetry and never worth a second store round-trip. Fire-and-forget.
+    private func appendValidationRoundOutcome(
+        _ outcome: ValidationRoundOutcome,
+        task: AgentTask,
+        token: ValidationRoundToken,
+        settledCriteria: Int,
+        rejectedCriteria: Int,
+        erroredCriteria: Int,
+        consecutiveRoundsWithoutNewApprovals: Int? = nil,
+        detail: String? = nil
+    ) {
+        guard let ledger = validationMetricsLedger else { return }
+        ledger.append(outcome: ValidationRoundOutcomeRow(
+            sessionID: currentSessionID,
+            taskID: task.id,
+            taskTitle: task.title,
+            parentTaskID: task.parentTaskID,
+            round: token.round,
+            contractVersion: token.contractVersion,
+            outcome: outcome,
+            settledCriteria: settledCriteria,
+            totalCriteria: task.acceptanceCriteria.count,
+            rejectedCriteria: rejectedCriteria,
+            erroredCriteria: erroredCriteria,
+            consecutiveRoundsWithoutNewApprovals: consecutiveRoundsWithoutNewApprovals,
+            detail: detail
+        ))
     }
 
     /// Hard ceiling on items a prepare function may emit for one criterion. Exceeding it
@@ -1281,37 +1293,78 @@ extension OrchestrationRuntime {
         ))
     }
 
-    /// All criteria settled: complete the task (status, worker teardown, completion banner,
-    /// summarization). The terminated hook then drives auto-advance and Smith's context compaction.
-    /// `from` is the CAS gate: the machine path completes only from `.validating`; a USER accept
-    /// passes `[.awaitingReview]` so it can NEVER complete a task a concurrent Re-validate moved to
-    /// `.validating`. Returns whether it CLAIMED the transition — `acceptEscalatedTask` records its
-    /// override verdicts only after this succeeds, so a lost race never orphans them.
-    ///
-    /// `judgedInRound` is the machine path's second gate and is nil for the user accept, which
-    /// belongs to no round. Without it, a criteria edit adding an unjudged criterion mid-round
-    /// leaves the task `.validating` — so the status CAS passes and an "all settled" decision
-    /// completes a task carrying a criterion no validator has ever seen.
+    /// Why a submission may conclude with nothing left to reject.
+    enum SubmissionConclusionBasis: Sendable {
+        /// Every criterion settled, in this round.
+        case allCriteriaSettled(ValidationRoundToken)
+        /// Task-completion validation is switched off. Nothing was judged and no round exists.
+        case validationDisabled
+    }
+
+    /// THE automatic exit for a submission with nothing left to reject: completes it, or — when its
+    /// author required the user's own acceptance — parks it for their sign-off. Every machine path
+    /// that would complete a submission comes here, never to `completeValidatedTask` directly, so the
+    /// gate is decided in one place; `TaskStore.changeStatus` refuses a gated completion by any other
+    /// cause, so a path that skips this fails closed. The gate is read from a snapshot without a CAS
+    /// of its own because it is part of the acceptance contract, which cannot be edited while the
+    /// task is `.validating` (`isValidationContractEditable`).
+    private func concludeSubmission(taskID: UUID, basis: SubmissionConclusionBasis) async {
+        guard let task = await taskStore.task(id: taskID), task.status == .validating else { return }
+        let token: ValidationRoundToken?
+        let validationWasRun: Bool
+        switch basis {
+        case .allCriteriaSettled(let roundToken):
+            token = roundToken
+            validationWasRun = true
+        case .validationDisabled:
+            token = nil
+            validationWasRun = false
+        }
+        guard task.requiresUserAcceptance else {
+            _ = await completeValidatedTask(taskID: taskID, judgedInRound: token, validationWasRun: validationWasRun,
+                                            cause: .validationPassed(validationWasRun: validationWasRun))
+            return
+        }
+        await escalateValidation(
+            taskID: taskID,
+            reason: validationWasRun
+                ? "Every acceptance criterion passed validation."
+                : "Acceptance validation is switched off, so this submission was NOT judged against its acceptance criteria — review the result yourself.",
+            judgedInRound: token,
+            awaitingReviewReason: validationWasRun ? .userAcceptanceRequested : .userAcceptanceRequestedValidationSkipped
+        )
+    }
+
+    /// All criteria settled (or validation is off) on a task that does not require the user's
+    /// acceptance: complete it. The CAS completes only from `.validating`, under the contract judged
+    /// (`judgedInRound`, nil only when validation is off and no round exists) — a pause/stop or a
+    /// criteria edit that landed after the caller's snapshot must not be overwritten. Without the
+    /// round gate, a criteria edit adding an unjudged criterion mid-round leaves the task
+    /// `.validating`, so the status CAS passes and an "all settled" decision completes a task
+    /// carrying a criterion no validator has ever seen. Returns whether it CLAIMED the transition.
     @discardableResult
     private func completeValidatedTask(
         taskID: UUID,
-        from allowedStatuses: Set<AgentTask.Status> = [.validating],
         judgedInRound token: ValidationRoundToken? = nil,
         validationWasRun: Bool = true,
         cause: TaskTransitionCause
     ) async -> Bool {
-        // CAS: only complete from an allowed state under the contract we judged — a pause/stop/
-        // re-validate or a criteria edit that landed after the caller's snapshot must not be
-        // overwritten by this completion.
-        //
         // Smith's briefing is written with the status but HELD until the worker is torn down and the
         // Task Completed banner (which it says already delivered the result) exists.
         guard let effects = await taskStore.updateStatusHoldingEffects(
-            id: taskID, to: .completed, ifCurrentlyIn: allowedStatuses, ifValidationRoundIs: token, cause: cause
+            id: taskID, to: .completed, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: cause
         ) else { return false }
+        await finishCompletion(taskID: taskID, effects: effects, validationWasRun: validationWasRun)
+        return true
+    }
+
+    /// Everything after a claimed completion — machine or user: worker teardown, scratch cleanup, the
+    /// Task Completed banner, releasing the held effects, summarization. The terminated hook then
+    /// drives auto-advance and Smith's context compaction.
+    private func finishCompletion(taskID: UUID, effects: TransitionEffectTicket, validationWasRun: Bool) async {
         guard let completed = await taskStore.task(id: taskID) else {
             await taskStore.releaseEffects(effects)
-            return false
+            return
         }
         for agentID in completed.assigneeIDs {
             _ = await terminateAgent(id: agentID)
@@ -1337,7 +1390,6 @@ extension OrchestrationRuntime {
         // and Smith's note hostage, and trip the held-effect watchdog.
         await taskStore.releaseEffects(effects)
         await summarizeAndEmbedTask(taskID: taskID)
-        return true
     }
 
     /// Rejections with rounds remaining: the punch list goes DIRECTLY to the worker —
@@ -1430,61 +1482,75 @@ extension OrchestrationRuntime {
         ))
     }
 
-    // MARK: - User resolution of a validator-error escalation (replaces Smith's retired review_work)
+    // MARK: - User resolution of a review park (replaces Smith's retired review_work)
     //
-    // A validator-error park is nobody's to judge automatically — Smith no longer reviews. These are
-    // the USER's four resolutions, invoked from the task row. All gate on `.awaitingReview` with NO
-    // `validationBlockedReason` (a missing-validator config park is not a judgment call — it releases
-    // itself when a validator model is assigned).
+    // A validator-error park is nobody's to judge automatically — Smith no longer reviews — and a
+    // sign-off park waits on the user by design. These are the USER's four resolutions, invoked from
+    // the task row. Who may resolve a park is checked INSIDE the store's status CAS (`ifResolvableBy:`):
+    // never on a config park (a missing-validator park releases itself when a model is assigned).
 
-    private func isUserResolvableEscalation(_ task: AgentTask?) -> Bool {
-        task?.status == .awaitingReview && task?.validationBlockedReason == nil
-    }
-
-    /// Re-run acceptance validation on an escalated task — the machine gets another go (fresh budget).
+    /// Re-run acceptance validation on a parked task — the machine gets another go (fresh budget).
     public func revalidateEscalatedTask(taskID: UUID) async {
-        guard isUserResolvableEscalation(await taskStore.task(id: taskID)) else { return }
         // Claim the transition BEFORE zeroing the convergence budget, so a lost race can't leave a
         // task the winner moved elsewhere with a reset counter. Nothing consumes the counter between
         // here and `startTaskValidation` below.
-        guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview], cause: .userRevalidated) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .validating, ifCurrentlyIn: [.awaitingReview],
+                                           ifResolvableBy: .user, cause: .userRevalidated) else { return }
         await taskStore.resetValidationRound(id: taskID)
         await taskStore.addUpdate(id: taskID, message: "Re-running acceptance validation at the user's request.")
         startTaskValidation(taskID: taskID)
     }
 
-    /// User accepts the escalated result as-is, overriding any criterion the machine never settled.
-    /// Reuses the shared completion path (`completeValidatedTask`).
+    /// The user accepts the parked result: their sign-off on a sign-off park, or an override of any
+    /// criterion the machine never settled.
     public func acceptEscalatedTask(taskID: UUID) async {
-        guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
-        let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
-        let unsettled = task.acceptanceCriteria.filter { !settled.contains($0.id) }
-        // The user's override is not a validation round, so it does not own a round token — it
-        // borrows the ledger's current one, which is exactly what "record this against the contract
-        // as it stands right now" means. A criteria edit racing the click supersedes it, as it should.
-        let ledgerToken = task.validation?.currentRoundToken ?? TaskValidationState().currentRoundToken
-        // Claim the completion (CAS from `.awaitingReview` ONLY) BEFORE writing any override verdict.
-        // A lost race — a double-click, or a concurrent re-validate/send-back/fail that already moved
-        // the task off `.awaitingReview` — returns false, so a sticky ACCEPT override can never land on
-        // a task this call didn't complete (which a later re-validation would then wrongly skip), and
-        // we never complete a task that a concurrent Re-validate put back into `.validating`.
-        guard await completeValidatedTask(taskID: taskID, from: [.awaitingReview], cause: .userAccepted) else { return }
-        if !unsettled.isEmpty {
-            _ = await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
-                CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
-                                       validatorName: "user override", validatorHash: "-", round: ledgerToken.round)
-            }, judgedAgainst: task.acceptanceCriteria, judgedInRound: ledgerToken)
-            await taskStore.addUpdate(id: taskID, message: "Accepted by the user, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).")
-        }
+        _ = await performAcceptEscalatedTask(taskID: taskID, by: .user)
     }
 
-    /// User fails the escalated task outright.
+    /// Returns whether THIS call claimed the completion. The store admits `resolver`, chooses the
+    /// accept cause (grant or override), and completes in one actor turn; the override verdicts are
+    /// computed from the parked snapshot it hands back, so they describe exactly the park completed.
+    private func performAcceptEscalatedTask(taskID: UUID, by resolver: AgentTask.EscalationResolver) async -> Bool {
+        guard let acceptance = await taskStore.acceptAwaitingReviewHoldingEffects(id: taskID, resolvedBy: resolver) else { return false }
+        let parked = acceptance.parkedTask
+        let validationWasRun: Bool
+        if case .userAcceptanceGranted(let wasRun) = acceptance.cause {
+            validationWasRun = wasRun
+            await taskStore.addUpdate(id: taskID, message: wasRun
+                ? "Accepted by the user — every acceptance criterion had passed validation."
+                : "Accepted by the user — acceptance validation is switched off, so the criteria were not judged.")
+        } else {
+            validationWasRun = true
+            let settled = parked.validation?.settledCriterionIDs(in: parked.acceptanceCriteria) ?? []
+            let unsettled = parked.acceptanceCriteria.filter { !settled.contains($0.id) }
+            if unsettled.isEmpty {
+                await taskStore.addUpdate(id: taskID, message: "Accepted by the user from review.")
+            } else {
+                // The user's override is not a validation round, so it does not own a round token — it
+                // borrows the parked ledger's current one: "record this against the contract as it
+                // stood when the user accepted it".
+                let ledgerToken = parked.validation?.currentRoundToken ?? TaskValidationState().currentRoundToken
+                _ = await taskStore.recordCriterionVerdicts(id: taskID, records: unsettled.map {
+                    CriterionVerdictRecord(criterionID: $0.id, verdict: .accepted,
+                                           validatorName: "user override", validatorHash: "-", round: ledgerToken.round)
+                }, judgedAgainst: parked.acceptanceCriteria, judgedInRound: ledgerToken)
+                await taskStore.addUpdate(id: taskID, message: "Accepted by the user, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).")
+            }
+        }
+        // The overrides and the note land BEFORE the banner, the effect release, and the summary, so
+        // all three see them.
+        await finishCompletion(taskID: taskID, effects: acceptance.ticket, validationWasRun: validationWasRun)
+        return true
+    }
+
+    /// User fails the parked task outright.
     public func failEscalatedTask(taskID: UUID) async {
-        guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
-        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.awaitingReview], cause: .userFailed) else { return }
+        guard let task = await taskStore.task(id: taskID), task.admitsEscalationResolution(by: .user) else { return }
+        guard await taskStore.updateStatus(id: taskID, to: .failed, ifCurrentlyIn: [.awaitingReview],
+                                           ifResolvableBy: .user, cause: .userFailed) else { return }
         for agentID in task.assigneeIDs { _ = await terminateAgent(id: agentID) }
         taskWorkspace(for: taskID).cleanupTemporary()
-        await taskStore.addUpdate(id: taskID, message: "Failed by the user from a validation escalation.")
+        await taskStore.addUpdate(id: taskID, message: "Failed by the user from review.")
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Task \"\(task.title)\" was failed by the user.",
@@ -1492,11 +1558,17 @@ extension OrchestrationRuntime {
         ))
     }
 
-    /// User sends the escalated task back to Brown with free-text feedback. Mirrors the old
-    /// review_work reject: secure a worker (respawning from saved context — the escalation park tore
-    /// the old one down), then flip to running with the result cleared and the feedback delivered.
+    /// User sends the parked task back to Brown with free-text feedback.
     public func sendEscalatedTaskBackToBrown(taskID: UUID, feedback: String) async {
-        guard let task = await taskStore.task(id: taskID), isUserResolvableEscalation(task) else { return }
+        _ = await performSendEscalatedTaskBack(taskID: taskID, feedback: feedback, by: .user)
+    }
+
+    /// Mirrors the old review_work reject: secure a worker (respawning from saved context — the park
+    /// tore the old one down), then flip to running with the result cleared and the feedback
+    /// delivered. Returns whether THIS call moved the task off the park.
+    private func performSendEscalatedTaskBack(taskID: UUID, feedback: String, by resolver: AgentTask.EscalationResolver) async -> Bool {
+        // A snapshot pre-check skips a needless spawn; the CAS below is the one that makes it safe.
+        guard let task = await taskStore.task(id: taskID), task.admitsEscalationResolution(by: resolver) else { return false }
         // Secure the worker BEFORE mutating status (the ordering lesson from returnRejectionsToWorker).
         var brownID = task.assigneeIDs.first { supervisor.role(of: $0) == .brown }
         var brownWasSpawned = false
@@ -1507,15 +1579,17 @@ extension OrchestrationRuntime {
         }
         guard let brownID else {
             // No worker slot free: re-queue as pending; the fresh briefing carries the feedback.
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview], cause: .userSentBack) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.awaitingReview],
+                                               ifResolvableBy: resolver, cause: .userSentBack) else { return false }
             await taskStore.resetValidationRound(id: taskID)
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Sent back by the user (no worker slot free — re-queued):\n\(feedback)")
-            return
+            return true
         }
-        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.awaitingReview], cause: .userSentBack) else {
+        guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.awaitingReview],
+                                           ifResolvableBy: resolver, cause: .userSentBack) else {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
-            return
+            return false
         }
         await taskStore.resetValidationRound(id: taskID)
         await taskStore.clearResult(id: taskID)
@@ -1538,30 +1612,21 @@ extension OrchestrationRuntime {
                 metadata: ["messageKind": .kind(.changesRequested), "taskTitle": .string(refreshed.title), "taskID": .string(taskID.uuidString)]
             ))
         }
+        return true
     }
 
-    /// Smith's conversational counterpart to the task row's Accept / Send back buttons — but ONLY
-    /// for a `requiresUserAcceptance` park. Deliberately refuses a `.validatorError` escalation:
-    /// that park means the MACHINE couldn't judge the work, and letting Smith wave it through on
-    /// its own authority is exactly the human-free pass the escalation exists to force. This tool
-    /// exists so the user can reply "looks good" or "not ready, fix X" in chat instead of clicking a
-    /// button — Smith relays the user's own decision, it does not make one.
+    /// Smith's conversational counterpart to the task row's Accept / Send back — ONLY for a park that
+    /// waits on nothing but the user's sign-off. It can never resolve a validator-error park (the
+    /// MACHINE couldn't judge the work; only the user's own row action resolves it) — the store
+    /// re-checks that inside its CAS. Smith relays the user's own decision; it does not make one.
     public func respondToUserAcceptance(taskID: UUID, accept: Bool, feedback: String?) async -> ToolExecutionResult {
         guard let task = await taskStore.task(id: taskID) else {
             return .failure("No task with id \(taskID.uuidString).")
         }
-        guard task.status == .awaitingReview, task.awaitingReviewReason == .userAcceptanceRequested else {
-            return .failure("""
-                Task '\(task.title)' is not parked for user-acceptance resolution (status: \
-                \(task.status.rawValue)). This tool only resolves a task that required the user's \
-                explicit acceptance after all criteria settled — it cannot be used to resolve a \
-                validator-error escalation; that one needs the user's own choice from the task row.
-                """)
-        }
+        if let refusal = Self.userAcceptanceRelayRefusal(for: task) { return .failure(refusal) }
         if accept {
-            await acceptEscalatedTask(taskID: taskID)
-            guard let after = await taskStore.task(id: taskID), after.status == .completed else {
-                return .failure("Could not accept '\(task.title)' — another action may have resolved it first.")
+            guard await performAcceptEscalatedTask(taskID: taskID, by: .smithRelayingUser) else {
+                return .failure("Could not accept '\(task.title)' — it is no longer parked only for the user's sign-off (another action resolved it, or its criteria changed).")
             }
             return .success("Accepted '\(task.title)' on the user's behalf. The task is now completed.")
         }
@@ -1569,11 +1634,20 @@ extension OrchestrationRuntime {
         guard !trimmed.isEmpty else {
             return .failure("A rejection needs 'feedback' — say what the user wants changed so Brown has something to act on.")
         }
-        await sendEscalatedTaskBackToBrown(taskID: taskID, feedback: trimmed)
-        guard let after = await taskStore.task(id: taskID), after.status != .awaitingReview else {
-            return .failure("Could not send '\(task.title)' back to Brown — another action may have resolved it first.")
+        guard await performSendEscalatedTaskBack(taskID: taskID, feedback: trimmed, by: .smithRelayingUser) else {
+            return .failure("Could not send '\(task.title)' back to Brown — it is no longer parked only for the user's sign-off.")
         }
         return .success("Sent '\(task.title)' back to Brown with the user's requested changes.")
+    }
+
+    /// Why Smith may not relay a decision on `task`, or nil when it may. For Smith only; no control
+    /// flow reads the text.
+    static func userAcceptanceRelayRefusal(for task: AgentTask) -> String? {
+        guard !task.admitsEscalationResolution(by: .smithRelayingUser) else { return nil }
+        if task.isParkedForUserAcceptance {
+            return "Task '\(task.title)' is waiting for the user's sign-off, but its acceptance criteria changed after it parked and not every criterion has been judged. Don't relay a decision on it — tell the user; they can Re-validate or decide from the task row."
+        }
+        return "Task '\(task.title)' is not parked for user-acceptance resolution (status: \(task.status.rawValue)). This tool only resolves a task waiting for the user's own sign-off — it cannot resolve a validator-error escalation; that one needs the user's own choice from the task row."
     }
 
     /// Renders the rejected criteria as a numbered punch list: one block per rejection,
@@ -1653,26 +1727,30 @@ extension OrchestrationRuntime {
         }
     }
 
-    /// The machine could not render a verdict (validator errored past its retry). This is NOT handed
-    /// to Smith — Smith no longer judges validation. The task parks in `.awaitingReview` for the USER
-    /// to resolve (accept / send back / re-validate / fail), and its worker is torn down so it stops
-    /// holding a slot: a park can sit indefinitely, and re-validation doesn't need Brown (it judges
-    /// the persisted result). Brown's context is saved first so a user "send back" can respawn it.
+    /// Parks a submission in `.awaitingReview` for the USER. Two reasons:
+    /// - `.validatorError` — the machine could not render a verdict (validator errored past its
+    ///   retry). Not handed to Smith (Smith no longer judges validation); the user resolves it from
+    ///   the task row (accept / send back / re-validate / fail).
+    /// - a sign-off park (`.userAcceptanceRequested` / `...ValidationSkipped`) — the task requires the
+    ///   user's own acceptance. Smith IS briefed (its note says how to relay the user's decision).
+    /// Either way the worker is torn down so it stops holding a slot: a park can sit indefinitely, and
+    /// re-validation doesn't need Brown (it judges the persisted result). Brown's context is saved
+    /// first so a later Send back can respawn it. `judgedInRound` is nil only for the
+    /// validation-disabled sign-off park, which belongs to no round.
     private func escalateValidation(
         taskID: UUID,
         reason: String,
-        judgedInRound token: ValidationRoundToken,
-        awaitingReviewReason: AgentTask.AwaitingReviewReason = .validatorError
+        judgedInRound token: ValidationRoundToken?,
+        awaitingReviewReason: AgentTask.AwaitingReviewReason
     ) async {
         // Tear the worker down FIRST, while the task is still `.validating` — a state with NO user
         // row-actions — so the user can't fire a resolution (e.g. Send Back reusing the still-live
-        // Brown) during the teardown window and strand a running task with no worker. Save context
-        // first so a later Send Back can respawn from it.
+        // Brown) during the teardown window and strand a running task with no worker.
         // The round check comes FIRST here, before the teardown: escalating destroys the worker, so a
         // superseded round must find out while that is still cheap. The CAS below re-checks it
         // atomically, for an edit that lands during the teardown itself.
-        guard let task = await taskStore.task(id: taskID), task.status == .validating,
-              task.validation?.isCurrentRound(token) ?? false else { return }
+        guard let task = await taskStore.task(id: taskID), task.status == .validating else { return }
+        if let token, !(task.validation?.isCurrentRound(token) ?? false) { return }
         if let brownHandle = liveWorkerHandle(for: task) {
             await saveBrownContextToTask(brownID: brownHandle.id, brown: brownHandle.agent)
         }
@@ -1680,9 +1758,10 @@ extension OrchestrationRuntime {
             _ = await terminateAgent(id: agentID)
         }
         // Publish the park only after the worker is gone. CAS: a pause/stop that landed during
-        // teardown must not be overwritten (such a transition tears Brown down anyway).
-        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .validationEscalated) else { return }
-        await taskStore.setAwaitingReviewReason(id: taskID, reason: awaitingReviewReason)
+        // teardown must not be overwritten (such a transition tears Brown down anyway). The store
+        // writes the park's reason in this same write, derived from the cause.
+        guard await taskStore.updateStatus(id: taskID, to: .awaitingReview, ifCurrentlyIn: [.validating],
+                                           ifValidationRoundIs: token, cause: awaitingReviewReason.parkingCause) else { return }
         // The freed slot isn't a terminal event, so `onTaskTerminated` won't fire the usual
         // auto-advance — kick it here so a pending task can take the slot.
         // Redundant since `terminateAgent` kicks the drain itself, and kept deliberately: this
@@ -1700,12 +1779,12 @@ extension OrchestrationRuntime {
                     "severity": .severity(.warning)
                 ]
             ))
-        case .userAcceptanceRequested:
-            // Not a problem — every criterion already settled. `.info` severity, same as any other
+        case .userAcceptanceRequested, .userAcceptanceRequestedValidationSkipped:
+            // Not a problem — the user asked for this sign-off. `.info` severity, same as any other
             // routine milestone; a `.warning` here would wrongly paint the happy path as trouble.
             await channel.post(ChannelMessage(
                 sender: .system,
-                content: "\"\(task.title)\" is ready for your acceptance: \(reason) Accept it, send it back with changes, re-validate, or fail it. You can also just reply in chat — Smith will relay your decision.",
+                content: "\"\(task.title)\" is ready for your acceptance. \(reason) Accept it, send it back with changes, re-validate, or fail it. You can also just reply in chat — Smith will relay your decision.",
                 metadata: [
                     "messageKind": .kind(.userAcceptanceRequested),
                     "taskID": .string(taskID.uuidString)

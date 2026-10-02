@@ -542,6 +542,36 @@ struct AgentActorTests {
         #expect(stored?.status == .pending)
     }
 
+    @Test("UpdateTaskTool cannot complete a task gated on the user's acceptance")
+    func updateTaskRefusesGatedCompletion() async throws {
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "T", description: "d")
+        #expect(await taskStore.setRequiresUserAcceptance(id: task.id, value: true) == nil)
+        let result = try await UpdateTaskTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "status": .string("completed")],
+            context: makeContext(taskStore: taskStore)
+        )
+        #expect(!result.succeeded)
+        #expect(result.output.contains("respond_to_user_acceptance"))
+        #expect(await taskStore.task(id: task.id)?.status == .pending)
+    }
+
+    @Test("UpdateTaskTool cannot move a review park, and says so instead of reporting success")
+    func updateTaskRefusesToLeaveAReviewPark() async throws {
+        let taskStore = TaskStore()
+        let task = await taskStore.addTask(title: "T", description: "d")
+        await taskStore.setResult(id: task.id, result: "r", commentary: nil, attachments: [])
+        #expect(await taskStore.driveStatus(id: task.id, to: .awaitingReview))
+        for status in ["failed", "completed", "pending"] {
+            let result = try await UpdateTaskTool().execute(
+                arguments: ["task_id": .string(task.id.uuidString), "status": .string(status)],
+                context: makeContext(taskStore: taskStore)
+            )
+            #expect(!result.succeeded, "\(status)")
+        }
+        #expect(await taskStore.task(id: task.id)?.status == .awaitingReview)
+    }
+
     @Test("UpdateTaskTool accepts paused and interrupted, still rejects running")
     func updateTaskAcceptsPausedAndInterrupted() async throws {
         let tool = UpdateTaskTool()

@@ -60,6 +60,10 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     case validationFailedNoProgress(roundsWithoutNewApprovals: Int, stillRejected: Int)
     /// A validator error parked the task for the user.
     case validationEscalated
+    /// The task's author required the user's own acceptance (`AgentTask.requiresUserAcceptance`), so
+    /// instead of completing it parked for the user's sign-off: every criterion settled
+    /// (`validationWasRun`), or acceptance validation is switched off and nothing was judged.
+    case userAcceptanceRequested(validationWasRun: Bool)
     /// No validator model is assigned; the task is parked until one is.
     case validationBlocked
     /// A validator model appeared; the parked task resumes validation.
@@ -75,7 +79,12 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     // MARK: User actions
     case userPaused
     case userStopped
+    /// The user accepted a review park, overriding acceptance validation: a validator-error park, or a
+    /// sign-off park whose contract changed after it parked (`AgentTask.acceptanceResolutionCause`).
     case userAccepted
+    /// The user signed off on a task parked ONLY for their sign-off
+    /// (`AgentTask.isAwaitingOnlyUserSignOff`) — not an override.
+    case userAcceptanceGranted(validationWasRun: Bool)
     case userFailed
     case userRevalidated
     case userSentBack
@@ -129,10 +138,12 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
         case .submittedForValidation:
             return from == .running && to == .validating
         case .validationPassed:
-            return [.validating, .awaitingReview].contains(from) && to == .completed
+            // Only from `.validating`: no machine cause may complete a parked task — a park is
+            // resolved by the user (`.userAccepted` / `.userAcceptanceGranted`).
+            return from == .validating && to == .completed
         case .validationFailedNoProgress:
             return from == .validating && to == .failed
-        case .validationEscalated, .validationBlocked:
+        case .validationEscalated, .validationBlocked, .userAcceptanceRequested:
             return from == .validating && to == .awaitingReview
         case .validationReleased:
             return from == .awaitingReview && to == .validating
@@ -146,7 +157,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return [.running, .validating].contains(from) && to == .paused
         case .userStopped:
             return [.running, .validating].contains(from) && to == .interrupted
-        case .userAccepted:
+        case .userAccepted, .userAcceptanceGranted:
             return from == .awaitingReview && to == .completed
         case .userFailed:
             return from == .awaitingReview && to == .failed
@@ -169,7 +180,9 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
         case .smithTerminatedWorker:
             return [.running, .awaitingHelp].contains(from) && to == .failed
         case .smithSetStatus:
-            return UpdateTaskStatusPolicy.settable.contains(to)
+            // `.awaitingReview` belongs to the user (and to validator configuration): `update_task`
+            // must not be a side door out of a park its resolvers own.
+            return from != .awaitingReview && UpdateTaskStatusPolicy.settable.contains(to)
         case .orphanRecovered:
             return from == .running && to == .interrupted
         case .resetForRun:
@@ -190,6 +203,55 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return from.isInProgress && to == .interrupted
         }
     }
+
+    /// Which `.awaitingReview` park this cause enters; nil when it enters none. The ONLY source of
+    /// `AgentTask.awaitingReviewReason` (`TaskStore.changeStatus`). Exhaustive on purpose: a new
+    /// cause must decide whether it parks.
+    public var awaitingReviewPark: AwaitingReviewPark? {
+        switch self {
+        case .validationEscalated:
+            return .review(.validatorError)
+        case .userAcceptanceRequested(let validationWasRun):
+            return .review(validationWasRun ? .userAcceptanceRequested : .userAcceptanceRequestedValidationSkipped)
+        case .validationBlocked:
+            return .validationBlocked
+        case .startClaimed, .startAbandoned, .spawnFailed, .spawnFailedAtRuntimeStart, .workerStarted,
+             .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
+             .validationFailedNoProgress, .validationReleased, .rejectionsReturned, .helpRequested,
+             .helpProvided, .userPaused, .userStopped, .userAccepted, .userAcceptanceGranted, .userFailed,
+             .userRevalidated, .userSentBack, .capacityShed, .scheduledAction, .scheduledTimeReached,
+             .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus, .orphanRecovered, .resetForRun,
+             .reopenedForRun, .templateLauncherNormalized, .coldBootRecovery, .coldBootSpawnAbandoned,
+             .coldBootRevalidate, .sessionShutdown, .sessionDeletion:
+            return nil
+        }
+    }
+
+    /// The user's acceptance of a submitted result: the only causes that may complete a task gated on
+    /// `requiresUserAcceptance` (enforced by `TaskStore.changeStatus`).
+    public var isUsersAcceptanceOfResult: Bool {
+        switch self {
+        case .userAccepted, .userAcceptanceGranted:
+            return true
+        case .startClaimed, .startAbandoned, .spawnFailed, .spawnFailedAtRuntimeStart, .workerStarted,
+             .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
+             .validationFailedNoProgress, .validationEscalated, .userAcceptanceRequested, .validationBlocked,
+             .validationReleased, .rejectionsReturned, .helpRequested, .helpProvided, .userPaused,
+             .userStopped, .userFailed, .userRevalidated, .userSentBack, .capacityShed, .scheduledAction,
+             .scheduledTimeReached, .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus,
+             .orphanRecovered, .resetForRun, .reopenedForRun, .templateLauncherNormalized,
+             .coldBootRecovery, .coldBootSpawnAbandoned, .coldBootRevalidate, .sessionShutdown, .sessionDeletion:
+            return false
+        }
+    }
+}
+
+/// The two kinds of `.awaitingReview` park.
+public enum AwaitingReviewPark: Equatable, Sendable {
+    /// A submission for a person to resolve; the reason says why.
+    case review(AgentTask.AwaitingReviewReason)
+    /// No validator model is assigned (`AgentTask.validationBlockedReason`); nobody's to resolve.
+    case validationBlocked
 }
 
 /// The statuses Smith may set directly with `update_task`. Everything else has a dedicated path
