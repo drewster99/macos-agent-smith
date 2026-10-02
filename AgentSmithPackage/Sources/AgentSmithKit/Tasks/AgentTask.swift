@@ -197,6 +197,13 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// in the same write as the status; cleared there on every exit. Written in a second mutation it
     /// was stale in between, and never cleared it was inherited by the next park.
     public internal(set) var awaitingReviewReason: AwaitingReviewReason?
+    /// When the task entered its CURRENT `.awaitingReview` park. Written ONLY by
+    /// `TaskStore.changeStatus` in the same write as the status, nil whenever the task is not parked.
+    /// A relayed sign-off must cite a user message authored AFTER this instant
+    /// (`userAcceptanceRelayAuthorization`) — a reply written before the park cannot be about the
+    /// result the park presents. Nil on a park entered by a build that didn't stamp it: such a park
+    /// is resolvable only from the task row.
+    public internal(set) var awaitingReviewParkedAt: Date?
 
     /// Messages addressed to this task's worker that arrived while no worker was alive.
     ///
@@ -232,9 +239,59 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     public enum EscalationResolver: Sendable, Equatable {
         /// The user's own task-row action. Admitted on every review park.
         case user
-        /// Smith relaying the user's chat reply (`respond_to_user_acceptance`). Admitted only when the
-        /// user's sign-off is the ONLY open question (`isAwaitingOnlyUserSignOff`).
-        case smithRelayingUser
+        /// Smith relaying the user's in-app reply (`respond_to_user_acceptance`), authorized for ONE
+        /// specific park. Admitted only while that same park still waits on nothing but the user's
+        /// sign-off — a park that ended and re-entered is a different park, and the reply that
+        /// authorized the relay was not about it.
+        case smithRelayingUser(park: SignOffPark)
+    }
+
+    /// Identifies one sign-off park: the status write that entered it and when. `statusRevision` alone
+    /// would do for the store's CAS; `parkedAt` is what the authorizing message is compared against.
+    public struct SignOffPark: Sendable, Equatable {
+        public let statusRevision: Int
+        public let parkedAt: Date
+    }
+
+    /// The current park, when Smith may relay a decision on it: waiting only on the user's sign-off,
+    /// with a known start. Nil otherwise — including an unstamped park from an earlier build.
+    public var relayableSignOffPark: SignOffPark? {
+        guard isAwaitingOnlyUserSignOff, let awaitingReviewParkedAt else { return nil }
+        return SignOffPark(statusRevision: statusRevision, parkedAt: awaitingReviewParkedAt)
+    }
+
+    /// Why Smith may not relay a decision on this task's park.
+    public enum UserAcceptanceRelayRefusal: Error, Equatable {
+        /// Not parked only for the user's sign-off (wrong status, a validator-error or config park, or a
+        /// criterion changed since it parked and is unjudged).
+        case notAwaitingUserSignOff
+        /// Parked for sign-off by a build that did not record when, so no message can be shown to
+        /// postdate it.
+        case parkStartUnknown
+        /// Smith has incorporated no in-app message from the user since it last went idle.
+        case noInAppUserMessageThisStretch
+        /// The user's latest in-app message was written before the task parked.
+        case messagePredatesPark(message: InAppUserMessageRecord, parkedAt: Date)
+    }
+
+    /// What authorizes a relay: the park it resolves and the user's message that decided it.
+    public struct UserAcceptanceRelayGrant: Sendable, Equatable {
+        public let park: SignOffPark
+        public let message: InAppUserMessageRecord
+    }
+
+    /// Whether `message` — the latest in-app user message Smith has incorporated in its current
+    /// stretch of activity — authorizes Smith to relay a decision on this park. It must postdate the
+    /// park: the user can only have decided on a result they had been asked about. Typed facts only;
+    /// what the message SAYS is Smith's to interpret, and the audit trail cites it.
+    public func userAcceptanceRelayAuthorization(by message: InAppUserMessageRecord?) -> Result<UserAcceptanceRelayGrant, UserAcceptanceRelayRefusal> {
+        guard isAwaitingOnlyUserSignOff else { return .failure(.notAwaitingUserSignOff) }
+        guard let park = relayableSignOffPark else { return .failure(.parkStartUnknown) }
+        guard let message else { return .failure(.noInAppUserMessageThisStretch) }
+        guard message.authoredAt > park.parkedAt else {
+            return .failure(.messagePredatesPark(message: message, parkedAt: park.parkedAt))
+        }
+        return .success(UserAcceptanceRelayGrant(park: park, message: message))
     }
 
     /// Parked for the user's own sign-off (`requiresUserAcceptance`), by the reason it parked for.
@@ -270,7 +327,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         guard status == .awaitingReview, validationBlockedReason == nil else { return false }
         switch resolver {
         case .user: return true
-        case .smithRelayingUser: return isAwaitingOnlyUserSignOff
+        case .smithRelayingUser(let park): return relayableSignOffPark == park
         }
     }
 
@@ -556,6 +613,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         validationBlockedReason: String? = nil,
         requiresUserAcceptance: Bool = false,
         awaitingReviewReason: AwaitingReviewReason? = nil,
+        awaitingReviewParkedAt: Date? = nil,
         acceptanceCriteria: [AcceptanceCriterion] = [],
         steps: [TaskStep] = [],
         validation: TaskValidationState? = nil,
@@ -596,6 +654,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.validationBlockedReason = validationBlockedReason
         self.requiresUserAcceptance = requiresUserAcceptance
         self.awaitingReviewReason = awaitingReviewReason
+        self.awaitingReviewParkedAt = awaitingReviewParkedAt
         self.acceptanceCriteria = acceptanceCriteria
         self.steps = steps
         self.validation = validation
@@ -613,7 +672,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
     }
 
     public init(from decoder: Decoder) throws {
@@ -652,6 +711,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         validationBlockedReason = try c.decodeIfPresent(String.self, forKey: .validationBlockedReason)
         requiresUserAcceptance = try c.decodeIfPresent(Bool.self, forKey: .requiresUserAcceptance) ?? false
         awaitingReviewReason = try c.decodeIfPresent(AwaitingReviewReason.self, forKey: .awaitingReviewReason)
+        awaitingReviewParkedAt = try c.decodeIfPresent(Date.self, forKey: .awaitingReviewParkedAt)
         acceptanceCriteria = try c.decodeIfPresent([AcceptanceCriterion].self, forKey: .acceptanceCriteria) ?? []
         steps = try c.decodeIfPresent([TaskStep].self, forKey: .steps) ?? []
         validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
@@ -717,6 +777,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(validationBlockedReason, forKey: .validationBlockedReason)
         if requiresUserAcceptance { try c.encode(true, forKey: .requiresUserAcceptance) }
         try c.encodeIfPresent(awaitingReviewReason, forKey: .awaitingReviewReason)
+        try c.encodeIfPresent(awaitingReviewParkedAt, forKey: .awaitingReviewParkedAt)
         if !acceptanceCriteria.isEmpty {
             try c.encode(acceptanceCriteria, forKey: .acceptanceCriteria)
         }

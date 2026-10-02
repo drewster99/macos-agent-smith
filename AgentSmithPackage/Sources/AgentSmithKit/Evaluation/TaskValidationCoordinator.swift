@@ -1510,7 +1510,8 @@ extension OrchestrationRuntime {
     /// Returns whether THIS call claimed the completion. The store admits `resolver`, chooses the
     /// accept cause (grant or override), and completes in one actor turn; the override verdicts are
     /// computed from the parked snapshot it hands back, so they describe exactly the park completed.
-    private func performAcceptEscalatedTask(taskID: UUID, by resolver: AgentTask.EscalationResolver) async -> Bool {
+    /// `relayAuditNote` (a relayed decision only) lands with the acceptance note, before the banner.
+    private func performAcceptEscalatedTask(taskID: UUID, by resolver: AgentTask.EscalationResolver, relayAuditNote: String? = nil) async -> Bool {
         guard let acceptance = await taskStore.acceptAwaitingReviewHoldingEffects(id: taskID, resolvedBy: resolver) else { return false }
         let parked = acceptance.parkedTask
         let validationWasRun: Bool
@@ -1537,6 +1538,7 @@ extension OrchestrationRuntime {
                 await taskStore.addUpdate(id: taskID, message: "Accepted by the user, overriding acceptance validation (\(unsettled.count) criterion(s) had not settled).")
             }
         }
+        if let relayAuditNote { await taskStore.addUpdate(id: taskID, message: relayAuditNote) }
         // The overrides and the note land BEFORE the banner, the effect release, and the summary, so
         // all three see them.
         await finishCompletion(taskID: taskID, effects: acceptance.ticket, validationWasRun: validationWasRun)
@@ -1616,38 +1618,75 @@ extension OrchestrationRuntime {
     }
 
     /// Smith's conversational counterpart to the task row's Accept / Send back — ONLY for a park that
-    /// waits on nothing but the user's sign-off. It can never resolve a validator-error park (the
-    /// MACHINE couldn't judge the work; only the user's own row action resolves it) — the store
-    /// re-checks that inside its CAS. Smith relays the user's own decision; it does not make one.
-    public func respondToUserAcceptance(taskID: UUID, accept: Bool, feedback: String?) async -> ToolExecutionResult {
+    /// waits on nothing but the user's sign-off, and ONLY on the evidence of a message the user typed
+    /// into the app after the task parked, which the calling Smith has read in its current stretch of
+    /// activity. It can never resolve a validator-error park (the MACHINE couldn't judge the work; only
+    /// the user's own row action resolves it) — the store re-checks the park inside its CAS. Smith
+    /// relays the user's own decision; it does not make one.
+    ///
+    /// `callerAgentID` is bound by the runtime when it builds the caller's tool context, never taken
+    /// from the tool's arguments, so the evidence read is always the caller's own.
+    public func respondToUserAcceptance(taskID: UUID, accept: Bool, feedback: String?, callerAgentID: UUID) async -> ToolExecutionResult {
+        guard supervisor.role(of: callerAgentID) == .smith, let smithAgent = supervisor.agent(id: callerAgentID) else {
+            return .failure("Only Agent Smith can relay the user's sign-off.")
+        }
+        let evidence = await smithAgent.latestInAppUserMessageThisStretch()
+        return await resolveUserAcceptanceRelay(taskID: taskID, accept: accept, feedback: feedback, authorizedBy: evidence)
+    }
+
+    /// The relay itself, given the evidence the caller holds. Package-internal so tests can exercise
+    /// every authorization outcome without driving a live Smith's run loop.
+    func resolveUserAcceptanceRelay(
+        taskID: UUID,
+        accept: Bool,
+        feedback: String?,
+        authorizedBy evidence: InAppUserMessageRecord?
+    ) async -> ToolExecutionResult {
         guard let task = await taskStore.task(id: taskID) else {
             return .failure("No task with id \(taskID.uuidString).")
         }
-        if let refusal = Self.userAcceptanceRelayRefusal(for: task) { return .failure(refusal) }
+        let grant: AgentTask.UserAcceptanceRelayGrant
+        switch task.userAcceptanceRelayAuthorization(by: evidence) {
+        case .success(let authorized): grant = authorized
+        case .failure(let refusal): return .failure(Self.userAcceptanceRelayRefusal(refusal, task: task))
+        }
+        let trimmed = (feedback ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !accept, trimmed.isEmpty {
+            return .failure("A rejection needs 'feedback' — say what the user wants changed so Brown has something to act on.")
+        }
+        let audit = Self.userAcceptanceRelayAuditNote(grant.message)
         if accept {
-            guard await performAcceptEscalatedTask(taskID: taskID, by: .smithRelayingUser) else {
-                return .failure("Could not accept '\(task.title)' — it is no longer parked only for the user's sign-off (another action resolved it, or its criteria changed).")
+            guard await performAcceptEscalatedTask(taskID: taskID, by: .smithRelayingUser(park: grant.park), relayAuditNote: audit) else {
+                return .failure("Could not accept '\(task.title)' — it is no longer the park the user replied about (another action resolved it, it parked again, or its criteria changed).")
             }
             return .success("Accepted '\(task.title)' on the user's behalf. The task is now completed.")
         }
-        let trimmed = (feedback ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return .failure("A rejection needs 'feedback' — say what the user wants changed so Brown has something to act on.")
+        guard await performSendEscalatedTaskBack(taskID: taskID, feedback: trimmed, by: .smithRelayingUser(park: grant.park)) else {
+            return .failure("Could not send '\(task.title)' back to Brown — it is no longer the park the user replied about.")
         }
-        guard await performSendEscalatedTaskBack(taskID: taskID, feedback: trimmed, by: .smithRelayingUser) else {
-            return .failure("Could not send '\(task.title)' back to Brown — it is no longer parked only for the user's sign-off.")
-        }
+        await taskStore.addUpdate(id: taskID, message: audit)
         return .success("Sent '\(task.title)' back to Brown with the user's requested changes.")
     }
 
-    /// Why Smith may not relay a decision on `task`, or nil when it may. For Smith only; no control
-    /// flow reads the text.
-    static func userAcceptanceRelayRefusal(for task: AgentTask) -> String? {
-        guard !task.admitsEscalationResolution(by: .smithRelayingUser) else { return nil }
-        if task.isParkedForUserAcceptance {
+    /// The task-update line that ties a relayed decision to the message that authorized it.
+    static func userAcceptanceRelayAuditNote(_ message: InAppUserMessageRecord) -> String {
+        "Relayed by Smith from the user's in-app message \(message.messageID.uuidString) (sent \(message.authoredAt.formatted(.iso8601))): \"\(message.excerpt)\""
+    }
+
+    /// Explains a relay refusal to Smith. For Smith only; no control flow reads the text.
+    static func userAcceptanceRelayRefusal(_ refusal: AgentTask.UserAcceptanceRelayRefusal, task: AgentTask) -> String {
+        switch refusal {
+        case .notAwaitingUserSignOff where task.isParkedForUserAcceptance:
             return "Task '\(task.title)' is waiting for the user's sign-off, but its acceptance criteria changed after it parked and not every criterion has been judged. Don't relay a decision on it — tell the user; they can Re-validate or decide from the task row."
+        case .notAwaitingUserSignOff:
+            return "Task '\(task.title)' is not parked for user-acceptance resolution (status: \(task.status.rawValue)). This tool only resolves a task waiting for the user's own sign-off — it cannot resolve a validator-error escalation; that one needs the user's own choice from the task row."
+        case .parkStartUnknown:
+            return "Task '\(task.title)' started waiting for sign-off before this version of the app recorded when, so no reply can be shown to come after it. Ask the user to accept or send it back from the task row."
+        case .noInAppUserMessageThisStretch:
+            return "You have not read a message from the user in this app since you were last idle, so there is no decision of theirs to relay on '\(task.title)'. Ask the user whether they accept it."
+        case .messagePredatesPark:
+            return "The user's latest message was written before '\(task.title)' started waiting for their sign-off, so it is not a decision about this result. Ask the user whether they accept it."
         }
-        return "Task '\(task.title)' is not parked for user-acceptance resolution (status: \(task.status.rawValue)). This tool only resolves a task waiting for the user's own sign-off — it cannot resolve a validator-error escalation; that one needs the user's own choice from the task row."
     }
 
     /// Renders the rejected criteria as a numbered punch list: one block per rejection,

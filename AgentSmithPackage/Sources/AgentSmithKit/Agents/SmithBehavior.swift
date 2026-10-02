@@ -237,6 +237,8 @@ enum SmithBehavior {
         `respond_to_user_acceptance`. This is still not your own judgment call — call it only in direct
         response to what the user said, never because you independently think the work looks fine. The
         tool itself refuses to touch a validator-error park, so it can't be misused for the other case.
+        Only a reply the user typed into this app AFTER the task started waiting authorizes a relay;
+        if the tool refuses for want of one, ask the user rather than retrying.
 
         ## When a task changes state (watches)
 

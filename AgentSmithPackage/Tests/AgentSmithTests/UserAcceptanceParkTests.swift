@@ -173,9 +173,14 @@ struct UserAcceptanceParkTests {
         let store = TaskStore()
         let (task, _) = try await validatingTask(store, gated: false, settled: false)
         #expect(await park(store, task.id, .validatorError))
+        let parked = try #require(await store.task(id: task.id))
+        #expect(parked.relayableSignOffPark == nil)
+        // Even naming this exact park — revision and start — cannot make it Smith's to resolve.
+        let thisPark = AgentTask.SignOffPark(statusRevision: parked.statusRevision,
+                                             parkedAt: try #require(parked.awaitingReviewParkedAt))
         #expect(await store.updateStatus(id: task.id, to: .completed, ifCurrentlyIn: [.awaitingReview],
-                                         ifResolvableBy: .smithRelayingUser, cause: .userAccepted) == false)
-        #expect(await store.acceptAwaitingReviewHoldingEffects(id: task.id, resolvedBy: .smithRelayingUser) == nil)
+                                         ifResolvableBy: .smithRelayingUser(park: thisPark), cause: .userAccepted) == false)
+        #expect(await store.acceptAwaitingReviewHoldingEffects(id: task.id, resolvedBy: .smithRelayingUser(park: thisPark)) == nil)
         #expect(await store.task(id: task.id)?.status == .awaitingReview)
         let accepted = await store.acceptAwaitingReviewHoldingEffects(id: task.id, resolvedBy: .user)
         #expect(accepted?.cause == .userAccepted)
@@ -194,7 +199,10 @@ struct UserAcceptanceParkTests {
         #expect(changed.isParkedForUserAcceptance)
         #expect(!changed.isAwaitingOnlyUserSignOff)
         #expect(changed.acceptanceResolutionCause == .userAccepted)
-        #expect(!changed.admitsEscalationResolution(by: .smithRelayingUser))
+        #expect(changed.relayableSignOffPark == nil)
+        let thisPark = AgentTask.SignOffPark(statusRevision: changed.statusRevision,
+                                             parkedAt: try #require(changed.awaitingReviewParkedAt))
+        #expect(!changed.admitsEscalationResolution(by: .smithRelayingUser(park: thisPark)))
         #expect(changed.admitsEscalationResolution(by: .user))
     }
 
@@ -236,6 +244,11 @@ struct UserAcceptanceParkTests {
         #expect(note.contains("passed validation"))
         #expect(note.contains("NOT judged"))
         #expect(note.contains("respond_to_user_acceptance"))
+        #expect(!note.contains("from the task row"), "both parks recorded their start, so both are relayable")
+
+        var unstamped = try #require(tasks.first)
+        unstamped.awaitingReviewParkedAt = nil
+        #expect(OrchestrationRuntime.userAcceptanceParkInstruction(for: [unstamped]).contains("must decide this one from the task row"))
     }
 
     @Test("A sign-off park fires 'needs review', and its notification says what it is waiting for")

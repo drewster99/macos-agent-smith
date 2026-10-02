@@ -76,6 +76,12 @@ struct TaskValidationCoordinatorTests {
         return rows
     }
 
+    /// The user's in-app reply, written just after the task parked — what authorizes a relay.
+    private func userReplyAfterPark(on runtime: OrchestrationRuntime, taskID: UUID, _ text: String = "looks good") async -> InAppUserMessageRecord {
+        let parkedAt = await runtime.taskStore.task(id: taskID)?.awaitingReviewParkedAt ?? Date()
+        return InAppUserMessageRecord(messageID: UUID(), authoredAt: parkedAt.addingTimeInterval(1), excerpt: text)
+    }
+
     private func disableValidators(_ runtime: OrchestrationRuntime) async {
         await runtime.setOrchestrationSettings(
             OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(enableTaskCompletionValidators: false))
@@ -226,7 +232,7 @@ struct TaskValidationCoordinatorTests {
         await runtime.startTaskValidation(taskID: task.id)
         _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
 
-        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        let result = await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: await userReplyAfterPark(on: runtime, taskID: task.id))
         #expect(result.succeeded)
         #expect(await runtime.taskStore.task(id: task.id)?.status == .completed)
     }
@@ -242,7 +248,7 @@ struct TaskValidationCoordinatorTests {
         await runtime.startTaskValidation(taskID: task.id)
         _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
 
-        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: false, feedback: "not ready, fix the thing")
+        let result = await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: false, feedback: "not ready, fix the thing", authorizedBy: await userReplyAfterPark(on: runtime, taskID: task.id))
         #expect(result.succeeded)
         let final = await runtime.taskStore.task(id: task.id)
         #expect(final?.status == .running || final?.status == .pending)
@@ -260,7 +266,7 @@ struct TaskValidationCoordinatorTests {
         await runtime.startTaskValidation(taskID: task.id)
         _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
 
-        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: false, feedback: "   ")
+        let result = await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: false, feedback: "   ", authorizedBy: await userReplyAfterPark(on: runtime, taskID: task.id))
         #expect(!result.succeeded)
         #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "an empty-feedback rejection must not move the task")
     }
@@ -271,9 +277,79 @@ struct TaskValidationCoordinatorTests {
         let (task, _) = await makeEscalatedTask(on: runtime)
         #expect(task.awaitingReviewReason == .validatorError, "the fixture parks the way a validator error does")
 
-        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        let result = await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: await userReplyAfterPark(on: runtime, taskID: task.id))
         #expect(!result.succeeded)
         #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview, "Smith must never self-resolve a machine-can't-judge park")
+    }
+
+    @Test("Relay: an accept records which in-app message authorized it")
+    func relayAcceptCitesAuthorizingMessage() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(on: runtime, requiresUserAcceptance: true)
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let reply = await userReplyAfterPark(on: runtime, taskID: task.id, "yes, ship it")
+        #expect(await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: reply).succeeded)
+        let final = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(final.status == .completed)
+        #expect(final.updates.contains { $0.message == OrchestrationRuntime.userAcceptanceRelayAuditNote(reply) })
+    }
+
+    @Test("Relay: a send-back records which in-app message authorized it")
+    func relayRejectCitesAuthorizingMessage() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(on: runtime, requiresUserAcceptance: true)
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let reply = await userReplyAfterPark(on: runtime, taskID: task.id, "no, fix the header")
+        #expect(await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: false, feedback: "fix the header", authorizedBy: reply).succeeded)
+        let final = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(final.status == .running || final.status == .pending)
+        #expect(final.updates.contains { $0.message == OrchestrationRuntime.userAcceptanceRelayAuditNote(reply) })
+    }
+
+    @Test("Relay: refused with no in-app message, or one written before the park — the task stays parked")
+    func relayRefusedWithoutAPostParkReply() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(on: runtime, requiresUserAcceptance: true)
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let parkedAt = try #require(await runtime.taskStore.task(id: task.id)?.awaitingReviewParkedAt)
+
+        #expect(!(await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: nil)).succeeded)
+        let early = InAppUserMessageRecord(messageID: UUID(), authoredAt: parkedAt.addingTimeInterval(-5), excerpt: "accept it when it's done")
+        #expect(!(await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: early)).succeeded)
+        #expect(!(await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: false, feedback: "x", authorizedBy: early)).succeeded)
+        let final = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(final.status == .awaitingReview)
+        #expect(!final.updates.contains { $0.message.hasPrefix("Relayed by Smith") })
+    }
+
+    @Test("Relay: refused on a park whose start was never recorded (parked by an earlier build)")
+    func relayRefusedOnUnstampedPark() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        var legacy = AgentTask(title: "Legacy", description: "d", result: "done", requiresUserAcceptance: true)
+        legacy.status = .awaitingReview
+        legacy.awaitingReviewReason = .userAcceptanceRequestedValidationSkipped
+        await runtime.taskStore.restore([legacy])
+        let reply = InAppUserMessageRecord(messageID: UUID(), authoredAt: Date(), excerpt: "ship it")
+        #expect(!(await runtime.resolveUserAcceptanceRelay(taskID: legacy.id, accept: true, feedback: nil, authorizedBy: reply)).succeeded)
+        #expect(await runtime.taskStore.task(id: legacy.id)?.status == .awaitingReview)
+    }
+
+    @Test("Relay: only a live Smith can relay — any other caller is refused before evidence is read")
+    func relayRefusesNonSmithCaller() async throws {
+        let runtime = makeRuntime(verdictScript: [])
+        await disableValidators(runtime)
+        let task = await makeSubmittedTask(on: runtime, requiresUserAcceptance: true)
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil, callerAgentID: UUID())
+        #expect(!result.succeeded)
+        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview)
     }
 
     // MARK: - The gate holds when validation is off; grants vs overrides
@@ -330,7 +406,7 @@ struct TaskValidationCoordinatorTests {
         let task = await makeSubmittedTask(on: runtime, requiresUserAcceptance: true)
         await runtime.startTaskValidation(taskID: task.id)
         _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
-        let result = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        let result = await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: await userReplyAfterPark(on: runtime, taskID: task.id))
         #expect(result.succeeded)
         #expect(await runtime.taskStore.task(id: task.id)?.status == .completed)
     }
@@ -365,7 +441,7 @@ struct TaskValidationCoordinatorTests {
         #expect(await runtime.taskStore.applyCriterionActions(taskID: task.id, actions: [
             .add(name: "and this", validationPrompt: "check", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
         ]) == nil)
-        let relay = await runtime.respondToUserAcceptance(taskID: task.id, accept: true, feedback: nil)
+        let relay = await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: await userReplyAfterPark(on: runtime, taskID: task.id))
         #expect(!relay.succeeded)
         #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview)
         await runtime.acceptEscalatedTask(taskID: task.id)

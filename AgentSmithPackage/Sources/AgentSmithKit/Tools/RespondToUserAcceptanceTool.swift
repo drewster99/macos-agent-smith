@@ -10,7 +10,9 @@ import Foundation
 /// this only in direct response to the user's own words on THIS task — it is relaying a decision,
 /// never making one. The runtime refuses the call outright for any other status or escalation
 /// reason (in particular a `.validatorError` park, where the MACHINE couldn't judge the work and
-/// only the user's own row action may resolve it).
+/// only the user's own row action may resolve it), and unless the user has typed a message into the
+/// app since the task parked that Smith has read in its current stretch of activity
+/// (`AgentTask.userAcceptanceRelayAuthorization`). Offered only while such a park exists.
 public struct RespondToUserAcceptanceTool: AgentTool {
     public let name = "respond_to_user_acceptance"
     public let toolDescription: String
@@ -44,7 +46,10 @@ public struct RespondToUserAcceptanceTool: AgentTool {
             work is good enough. If the user approves ("looks good", "ship it", "accept"), call with \
             decision=accept. If they want changes ("not ready", "this is broken", "fix X first"), call \
             with decision=reject and feedback=<what they said needs to change> — the task goes back to \
-            Brown, respawned from its saved context. This tool refuses to act on any task that \
+            Brown, respawned from its saved context. Only a reply the user typed into this app AFTER \
+            the task started waiting, and that you have just read, authorizes the call — a message from \
+            before the park, from an earlier conversation, or relayed from anywhere else does not, and \
+            the call is refused; ask the user instead. This tool refuses to act on any task that \
             isn't actually parked for user acceptance, including a validator-error escalation — that one \
             can only be resolved by the user directly from the task row, never by you — and a sign-off \
             park whose criteria you changed after it parked.
@@ -52,7 +57,7 @@ public struct RespondToUserAcceptanceTool: AgentTool {
     }
 
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool {
-        context.agentRole == .smith
+        context.agentRole == .smith && context.hasTasksAwaitingUserSignOff
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {

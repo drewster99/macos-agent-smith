@@ -168,6 +168,10 @@ public actor AgentActor {
     /// Used to gate availability of the `reply_to_user` tool.
     private var lastDirectUserMessageAt: Date?
 
+    /// The in-app user messages this agent has seen in its current stretch of activity — what
+    /// authorizes Smith to relay a sign-off (`latestInAppUserMessageThisStretch`).
+    private var inAppUserMessages = InAppUserMessageLedger()
+
     /// Tracks consecutive LLM errors for exponential backoff. Reset by any successful turn.
     ///
     /// Retry shape — attempt budget, backoff curve, transient/permanent classification, and
@@ -1015,6 +1019,8 @@ public actor AgentActor {
         conversationHistory = [.system(configuration.systemPrompt)]
         // Drop queued injections that belonged to the pre-clear context.
         pendingInjectedMessages.removeAll()
+        // A message read before the clear is gone from the conversation, so it no longer authorizes.
+        inAppUserMessages.endStretch()
         if let orientation, !orientation.isEmpty {
             conversationHistory.append(.user(orientation))
         }
@@ -1160,9 +1166,23 @@ public actor AgentActor {
     /// drain leaves the message buffered for the next start) or when the message was already
     /// ingested (idempotent). Unlike the live subscription, this path intentionally delivers
     /// `bufferOrigin` messages — that is the whole point of the drain.
+    ///
+    /// A user message addressed to this agent and accepted here is recorded as an in-app message:
+    /// this is the delivery path of the app's own input field, and no other path records one.
     @discardableResult
     public func acceptChannelMessage(_ message: ChannelMessage) -> Bool {
-        ingestChannelMessage(message)
+        guard ingestChannelMessage(message) else { return false }
+        if case .user = message.sender, message.recipientID == id {
+            inAppUserMessages.recordBufferDelivery(message)
+        }
+        return true
+    }
+
+    /// The most recently written in-app user message this agent has taken into its conversation since
+    /// it last went idle (or had its history cleared), if any. The authorization evidence for a
+    /// relayed sign-off — see `AgentTask.userAcceptanceRelayAuthorization`.
+    public func latestInAppUserMessageThisStretch() -> InAppUserMessageRecord? {
+        inAppUserMessages.latestIncorporated
     }
 
     /// Wires the incorporation callback (see `onInboundUserMessagesIncorporated`). Set by the
@@ -1482,6 +1502,9 @@ public actor AgentActor {
             await pruneHistoryIfNeeded()
 
             guard hasUnprocessedInput else {
+                // The stretch of activity is over: a user message read during it authorizes nothing
+                // in a later one.
+                inAppUserMessages.endStretch()
                 // Every turn the drained notifications triggered is done: acknowledge them.
                 await acknowledgeActedOnNotifications()
                 // About to go quiet. If a tool is STILL failing, say so before falling silent —
@@ -1528,18 +1551,7 @@ public actor AgentActor {
             }
 
             do {
-                let activeTasks = await toolContext.taskStore.allTasks().filter { $0.disposition == .active }
-                let hasRunnableTasks = activeTasks.contains { $0.status.isRunnable }
-                // Gate on `.awaitingHelp` (a Brown blocked on a help request) only — NOT `.awaitingReview`,
-                // which is now a user-owned validator-error park with its worker already gone; letting it
-                // gate would disable notify_brown / provide_help across unrelated running workers.
-                let hasAwaitingReview = activeTasks.contains { $0.status == .awaitingHelp }
-                let availabilityContext = ToolAvailabilityContext(
-                    lastDirectUserMessageAt: lastDirectUserMessageAt,
-                    agentRole: configuration.role,
-                    hasRunnableTasks: hasRunnableTasks,
-                    hasAwaitingReviewTasks: hasAwaitingReview
-                )
+                let availabilityContext = await currentAvailabilityContext()
                 // Defense-in-depth: while Brown is awaiting review, hand him an empty
                 // tool list regardless of per-tool `isAvailable`. The `drainPendingMessages`
                 // gate and the silence-nudge guard above should prevent us from reaching
@@ -3108,7 +3120,11 @@ public actor AgentActor {
             lastDirectUserMessageAt: lastDirectUserMessageAt,
             agentRole: configuration.role,
             hasRunnableTasks: activeTasks.contains { $0.status.isRunnable },
-            hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingHelp }
+            // Gate on `.awaitingHelp` (a Brown blocked on a help request) only — NOT `.awaitingReview`,
+            // a user-owned park with its worker already gone; letting it gate would disable
+            // notify_brown / provide_help across unrelated running workers.
+            hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingHelp },
+            hasTasksAwaitingUserSignOff: activeTasks.contains { $0.relayableSignOffPark != nil }
         )
     }
 
@@ -3960,6 +3976,7 @@ public actor AgentActor {
             if case .user = msg.sender { return msg.id }
             return nil
         }
+        inAppUserMessages.markIncorporated(incorporatedUserMessageIDs)
         pendingChannelMessages.removeAll()
         if !incorporatedUserMessageIDs.isEmpty {
             onInboundUserMessagesIncorporated?(incorporatedUserMessageIDs)

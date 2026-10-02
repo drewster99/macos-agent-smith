@@ -1522,11 +1522,13 @@ public actor TaskStore {
         task.updatedAt = now
         if newStatus == .awaitingReview {
             task.awaitingReviewReason = enteringReviewReason
+            task.awaitingReviewParkedAt = now
             // A review park is never a config park: heal a marker a previous park left behind.
             if enteringReviewReason != nil { task.validationBlockedReason = nil }
         } else if from == .awaitingReview {
-            // Leaving a park ends it: its reason and its config marker describe nothing any more.
+            // Leaving a park ends it: its reason, start, and config marker describe nothing any more.
             task.awaitingReviewReason = nil
+            task.awaitingReviewParkedAt = nil
             task.validationBlockedReason = nil
         }
         if newStatus == .running && task.startedAt == nil {
@@ -2935,9 +2937,11 @@ public actor TaskStore {
                 task.status = .awaitingHelp
             }
             // Park markers describe only the CURRENT park. Builds before the status writer owned
-            // them could leave one behind on a task that had already moved on.
+            // them could leave one behind on a task that had already moved on — including the help
+            // park just migrated out above.
             if task.status != .awaitingReview {
                 task.awaitingReviewReason = nil
+                task.awaitingReviewParkedAt = nil
                 task.validationBlockedReason = nil
             }
             tasks[task.id] = task

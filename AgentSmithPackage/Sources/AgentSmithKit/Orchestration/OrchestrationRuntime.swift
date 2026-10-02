@@ -4770,13 +4770,16 @@ public actor OrchestrationRuntime {
             case .userAcceptanceRequested?, .validatorError?, nil:
                 judgment = "its acceptance criteria passed validation"
             }
-            return "- \(task.title) (id: \(task.id.uuidString)) — \(judgment)"
+            // A park from a build that didn't record its start can't be relayed (no reply can be shown
+            // to postdate it); say so rather than let Smith offer a relay the tool will refuse.
+            let rowOnly = task.awaitingReviewParkedAt == nil ? "; the user must decide this one from the task row" : ""
+            return "- \(task.title) (id: \(task.id.uuidString)) — \(judgment)\(rowOnly)"
         }.joined(separator: "\n")
         return """
             The following task(s) are WAITING FOR THE USER'S SIGN-OFF (they require the user's own acceptance):
             \(list)
             Remind the user they are ready for review. Relay a decision with `respond_to_user_acceptance` only \
-            after the user tells you their decision on that task — never decide yourself.
+            after the user tells you their decision on that task in a NEW message — never decide yourself.
             """
     }
 
@@ -4946,7 +4949,7 @@ public actor OrchestrationRuntime {
             },
             respondToUserAcceptance: { [weak self] taskID, accept, feedback in
                 guard let self else { return .failure("Runtime is unavailable.") }
-                return await self.respondToUserAcceptance(taskID: taskID, accept: accept, feedback: feedback)
+                return await self.respondToUserAcceptance(taskID: taskID, accept: accept, feedback: feedback, callerAgentID: agentID)
             },
             restartForNewTask: { [weak self] taskID, amendment in
                 guard let self else { return }

@@ -3235,6 +3235,12 @@ A /stupid sweep of the gate found it leaky and silent. Fixed:
 - **Gate inheritance and visibility (#5).** Library templates can be gated (the old setter only
   looked in the session store), instances inherit it, `create_task` and the task editor set it at
   creation, Task Detail toggles it, `get_task_details` shows it, Retry / Run Again carry it over.
+- **Relay authorization (#6).** `respond_to_user_acceptance` used to resolve a sign-off park on
+  Smith's word alone. It now needs a message the user typed into the app after the task parked
+  (`awaitingReviewParkedAt`) that the calling Smith has read since it was last idle
+  (`InAppUserMessageLedger`, fed only by the user-message buffer — inspector direct messages don't
+  count). The store's CAS names the exact park (`SignOffPark`), the audit update cites the message,
+  and the tool is offered only while such a park exists. Pre-upgrade parks are row-only.
 
 ## Blockers
 

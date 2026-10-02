@@ -145,16 +145,21 @@ public struct ToolAvailabilityContext: Sendable {
     /// longer keys on `.awaitingReview`: that is now a user-owned validator-error park with no live
     /// worker, and must not gate Smith's messaging of unrelated running workers.
     public let hasAwaitingReviewTasks: Bool
+    /// Whether any active task is parked waiting only on the user's sign-off, with a known park start
+    /// (`AgentTask.relayableSignOffPark`) — gates `respond_to_user_acceptance`.
+    public let hasTasksAwaitingUserSignOff: Bool
     public init(
         lastDirectUserMessageAt: Date? = nil,
         agentRole: AgentRole,
         hasRunnableTasks: Bool = false,
-        hasAwaitingReviewTasks: Bool = false
+        hasAwaitingReviewTasks: Bool = false,
+        hasTasksAwaitingUserSignOff: Bool = false
     ) {
         self.lastDirectUserMessageAt = lastDirectUserMessageAt
         self.agentRole = agentRole
         self.hasRunnableTasks = hasRunnableTasks
         self.hasAwaitingReviewTasks = hasAwaitingReviewTasks
+        self.hasTasksAwaitingUserSignOff = hasTasksAwaitingUserSignOff
     }
 }
 
@@ -320,9 +325,13 @@ public struct ToolContext: Sendable {
     /// Resolves a task parked in `.awaitingReview` waiting ONLY on the user's sign-off
     /// (`AgentTask.isAwaitingOnlyUserSignOff` — every criterion passed, or validation is switched off)
     /// — Smith relays the ACTUAL user's own accept/reject decision, conveyed conversationally rather
-    /// than through the task-row buttons. Refuses (`ToolExecutionResult.failure`) anything else, and
-    /// the store re-checks that inside its CAS, so this can never self-resolve a validator-error park.
-    /// `feedback` is required when `accept == false` and becomes the "send back" message to Brown.
+    /// than through the task-row buttons. Authorized only by a user message typed into the app AFTER
+    /// the task parked and read by the calling Smith in its current stretch of activity
+    /// (`AgentTask.userAcceptanceRelayAuthorization`); the runtime binds the caller's agent id, so the
+    /// tool cannot name someone else's evidence. Refuses (`ToolExecutionResult.failure`) anything
+    /// else, and the store re-checks the park inside its CAS, so this can never self-resolve a
+    /// validator-error park. `feedback` is required when `accept == false` and becomes the "send back"
+    /// message to Brown.
     public let respondToUserAcceptance: @Sendable (_ taskID: UUID, _ accept: Bool, _ feedback: String?) async -> ToolExecutionResult
     /// Signals a full system restart for a new task. Called by create_task and run_task. The
     /// optional `amendment` is applied to the *started* task — for a template start that means the

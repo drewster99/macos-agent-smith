@@ -334,6 +334,11 @@ actor SecurityEvaluator {
 
                 "notify_brown",
                 "provide_help",
+                // Pre-cleared because its authority is STRUCTURAL, not a reviewer's judgment: the
+                // runtime admits it only for a park waiting solely on the user's sign-off, and only on
+                // a user message typed into the app after that park which this Smith has read
+                // (`AgentTask.userAcceptanceRelayAuthorization`), re-checked inside the store's CAS.
+                // A security verdict could add nothing to that, and could only delay the user's decision.
                 "respond_to_user_acceptance",
                 "terminate_agent",
                 "abort",
