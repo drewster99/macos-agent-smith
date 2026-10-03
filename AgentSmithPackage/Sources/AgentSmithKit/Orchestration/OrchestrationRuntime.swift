@@ -944,11 +944,9 @@ public actor OrchestrationRuntime {
 
         let entry = PendingScheduledRun(taskID: taskID, amendment: amendment, origin: .scheduled)
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
-        let inFlight = activeTasks.first {
-            $0.id != taskID
-                && ($0.status == .starting || $0.status == .running || $0.status == .awaitingReview
-                    || $0.status == .awaitingHelp || $0.status == .validating)
-        }
+        // The task named as the blocker must be one actually holding a worker slot: a park waiting
+        // on the user (or on a Re-validate) holds none, so naming it said the wrong thing was in the way.
+        let inFlight = activeTasks.first { $0.id != taskID && $0.occupiesWorkerSlot }
 
         // A free worker slot means the scheduled task can start right now, no interrupt
         // arbitration needed — other in-flight tasks keep running beside it. Route it through the

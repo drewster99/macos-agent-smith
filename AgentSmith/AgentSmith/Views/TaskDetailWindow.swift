@@ -1590,7 +1590,7 @@ private struct TaskDetailStepsSection: View {
                     title: "Steps",
                     subtitle: completedSubtitle,
                     copyText: task.steps.isEmpty ? nil : Self.formattedSteps(task.steps),
-                    canEdit: task.status.isValidationContractEditable && !isEditing,
+                    canEdit: task.disposition == .active && task.status.isValidationContractEditable && !isEditing,
                     editHelp: "Edit steps",
                     onEdit: beginEditing
                 )
@@ -1766,7 +1766,9 @@ private struct TaskDetailDescriptionSection: View {
     /// Whether the task's description can be edited. Mirrors `AgentTask.Status.isDescriptionEditable`
     /// so completed/failed/scheduled tasks accept late corrections; only `running` and
     /// `awaitingReview` are read-only.
-    private var isEditable: Bool { task.status.isDescriptionEditable }
+    /// An archived or recently-deleted task is outside the store's writable sets, so an edit would
+    /// only be refused ("Task not found").
+    private var isEditable: Bool { task.disposition == .active && task.status.isDescriptionEditable }
 
     /// The composition every agent sees — `## Template inputs` above the prose.
     ///
